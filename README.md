@@ -59,4 +59,4 @@ This repo is shaped as a pi package (see `package.json` → `pi` field). To try 
 
 ## License
 
-Not yet specified. Consider this code all-rights-reserved until a license is added.
+[MIT](./LICENSE) © unstableneutron.

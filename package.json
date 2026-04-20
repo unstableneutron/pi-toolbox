@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "My own pi-toolbox of extensions, skills, prompts, and subagent templates.",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "check": "oxlint -c .oxlintrc.json --type-aware --type-check --fix --fix-suggestions --fix-dangerously --deny-warnings . && oxfmt -c .oxfmtrc.json .",
