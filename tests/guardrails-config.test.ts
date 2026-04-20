@@ -13,7 +13,10 @@ interface GuardrailsConfig {
 }
 
 function loadGuardrailsConfig(): GuardrailsConfig {
-  const source = readFileSync(new URL('../extensions/guardrails.json', import.meta.url), 'utf8');
+  const source = readFileSync(
+    new URL('../extensions-config/guardrails.json', import.meta.url),
+    'utf8',
+  );
   return JSON.parse(source) as GuardrailsConfig;
 }
 
