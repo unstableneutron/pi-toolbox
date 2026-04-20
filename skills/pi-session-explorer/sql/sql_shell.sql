@@ -1,0 +1,1 @@
+-- Bootstrap placeholder for SQL shell helper query snippets.

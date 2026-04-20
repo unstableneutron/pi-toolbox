@@ -1,0 +1,2 @@
+-- Bootstrap placeholder for core schema DDL.
+-- Task 1 intentionally leaves full DuckDB schema unimplemented.

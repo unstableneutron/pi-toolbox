@@ -1,0 +1,21 @@
+{
+  "$schema": "https://raw.githubusercontent.com/oxc-project/oxc/refs/heads/main/npm/oxfmt/configuration_schema.json",
+  "singleQuote": true,
+  "ignorePatterns": [
+    "settings.json",
+    "models.json",
+    "**/node_modules/**",
+    "**/dist/**",
+    ".git/**",
+    ".pi/**",
+    "agents/**",
+    "disabled/**",
+    "docs/**",
+    "git/**",
+    "prompts/**",
+    "scratch/**",
+    "sessions/**",
+    "skills/**",
+    "themes/**"
+  ]
+}

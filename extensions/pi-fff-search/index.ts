@@ -1,0 +1,1644 @@
+import { homedir } from 'node:os';
+import path from 'node:path';
+import { Text, type Component } from '@mariozechner/pi-tui';
+import { Type, type TSchema } from '@sinclair/typebox';
+import {
+  createFindToolDefinition,
+  createGrepToolDefinition,
+  createReadToolDefinition,
+  defineTool,
+  type ExtensionAPI,
+} from '@mariozechner/pi-coding-agent';
+import {
+  PUBLIC_TOOL_DEFINITIONS,
+  callPublicToolOverHttp as defaultCallPublicToolOverHttp,
+  ensureDaemonRunning as defaultEnsureDaemonRunning,
+  ENABLE_SEARCH_TERMS,
+  findFilesInputSchema,
+  grepInputSchema,
+  normalizePublicToolInput,
+  resolveWithinFromCaller,
+  type PublicCompactFindFilesResult,
+  type PublicCompactGrepResult,
+  type PublicCompactSearchTermsResult,
+  type PublicToolDefinition,
+  type PublicToolName,
+  type PublicToolRequest,
+  type PublicToolResult,
+  type SearchCoordinatorResult,
+} from 'fff-router';
+import { clampMatchText } from './match-heuristics';
+import {
+  type FallbackSpillInfo,
+  type LocalFallbackEngine,
+  type RunLocalFallbackResult,
+  runLocalFallback,
+} from './fallback';
+import {
+  formatCollapsedResultText,
+  formatExpandedResultText,
+  formatToolCallText,
+  shortenDisplayPath,
+} from './rendering';
+
+const SEARCH_TOOL_PROMPT = `For repository search, prefer \`fff_*\` tools first:
+
+- \`fff_find_files\` — fuzzy file/path search; keep queries short and let \`glob\`, \`extensions\`, and \`exclude_paths\` do the narrowing
+- \`fff_grep\` — default content search; pass one or more entries in \`patterns\` (OR-matched) plus a required \`literal\` boolean. Use \`literal: true\` for code search (quotes, braces, punctuation, whitespace all safe); use \`literal: false\` only when you genuinely need regex alternation or metacharacters. \`glob\` / \`extensions\` / \`exclude_paths\` prefilter files.
+
+Examples:
+
+- \`fff_find_files\`: {"query":"openssl header","within":"/opt/homebrew/lib","glob":"**/*.h","exclude_paths":["pkgconfig"]}
+- \`fff_grep\`: {"patterns":["ActorAuth","actor_auth","PopulatedActorAuth"],"literal":true,"within":"src","extensions":["rs"],"exclude_paths":["tests"]}
+- \`fff_grep\`: {"patterns":["plan(Request)?","build(Request)?"],"literal":false,"within":"~/src","glob":"src/**/*.ts","exclude_paths":["dist"]}
+
+These tools return compact text with a \`base_path:\` header. \`fff_find_files\` returns one relative path per line. \`fff_grep\` returns \`path:line: text\` lines.
+
+Fall back to builtin or shell tools only when \`fff_*\` is unavailable, failing, awkward for the query, or outside the active workspace or scope. Briefly say why when falling back.`;
+
+const HIDE_SEARCH_TERMS = !ENABLE_SEARCH_TERMS;
+const GLOB_META_PATTERN = /[*?[\]{}!]/;
+const GLOB_META_SEQUENCE_PATTERN = /[*?[\]{}!]+/g;
+const FIND_QUERY_GENERIC_TOKENS = new Set([
+  'd',
+  'test',
+  'tests',
+  'spec',
+  'specs',
+  'ts',
+  'tsx',
+  'js',
+  'jsx',
+  'mjs',
+  'cjs',
+  'mts',
+  'cts',
+  'json',
+  'md',
+  'mdx',
+  'txt',
+  'yaml',
+  'yml',
+  'lock',
+]);
+const OVERRIDE_BUILTIN_READ = true;
+const OVERRIDE_BUILTIN_GREP = true;
+const OVERRIDE_BUILTIN_FIND = true;
+const BUILTIN_TOOL_TIMEOUT_MS = 10_000;
+
+const ALLOWLIST_HINTS = ['~/.pi', '~/.pi/agent', '~/.codex', '~/.claude', '~/.amp'];
+const DAEMON_RESTART_NOTICE =
+  'Notice: FFF daemon config changed; restarted the daemon and retried the search once.';
+
+function stripSchemaFields(schema: TSchema, hiddenFields: string[]): TSchema {
+  const properties = (schema as { properties?: Record<string, TSchema> }).properties ?? {};
+  const filteredProperties = Object.fromEntries(
+    Object.entries(properties).filter(([field]) => !hiddenFields.includes(field)),
+  );
+  return Type.Object(filteredProperties, { additionalProperties: false });
+}
+
+export const PI_TOOL_DEFINITIONS: Array<PublicToolDefinition<TSchema>> =
+  PUBLIC_TOOL_DEFINITIONS.filter(
+    (tool) => !(HIDE_SEARCH_TERMS && tool.name === 'fff_search_terms'),
+  ).map((tool) => ({
+    ...tool,
+    inputSchema:
+      tool.name === 'fff_find_files'
+        ? stripSchemaFields(findFilesInputSchema, ['cursor', 'output_mode'])
+        : stripSchemaFields(grepInputSchema, ['context_lines', 'cursor', 'output_mode']),
+  }));
+
+export interface CreatePiFffSearchExtensionOptions {
+  ensureDaemonRunning?: () => Promise<void>;
+  callPublicToolOverHttp?: (request: PublicToolRequest) => Promise<SearchCoordinatorResult>;
+  runRipgrepFallback?: (args: {
+    toolName: PublicToolName;
+    resolvedWithin: string;
+    publicRequest: PublicToolRequest;
+  }) => Promise<RunLocalFallbackResult>;
+  overrideBuiltinRead?: boolean;
+  overrideBuiltinGrep?: boolean;
+  overrideBuiltinFind?: boolean;
+  createBuiltInReadTool?: typeof createReadToolDefinition;
+  createBuiltInGrepTool?: typeof createGrepToolDefinition;
+  createBuiltInFindTool?: typeof createFindToolDefinition;
+}
+
+export default createPiFffSearchExtension();
+
+type RenderedTextMatch = {
+  path: string;
+  line: number;
+  text: string;
+};
+
+function formatFindFilesResult(result: PublicCompactFindFilesResult): string {
+  const body =
+    result.items.length > 0 ? result.items.map((item) => item.path).join('\n') : '(no files found)';
+  return `base_path: ${result.base_path}\n\n${body}`;
+}
+
+function isRenderedTextResult(
+  result: PublicToolResult,
+): result is PublicToolResult & { mode: 'compact'; text: string; base_path: string } {
+  return 'text' in result && typeof result.text === 'string';
+}
+
+function parseRenderedTextMatches(text: string): RenderedTextMatch[] {
+  const matches: RenderedTextMatch[] = [];
+  let currentPath: string | null = null;
+
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trimEnd();
+    if (!line) {
+      continue;
+    }
+
+    if (
+      line.startsWith('→') ||
+      line === '--' ||
+      line.startsWith('cursor:') ||
+      /^\d+\/\d+\s+matches\s+shown$/i.test(line) ||
+      /^0\s+(matches|exact\s+matches|results)/i.test(line)
+    ) {
+      continue;
+    }
+
+    const numbered = line.match(/^\s+(\d+)([:\-|])\s?(.*)$/);
+    if (numbered) {
+      const [, lineNumberRaw, kind, contentRaw] = numbered;
+      if (kind === ':' && currentPath) {
+        matches.push({
+          path: currentPath,
+          line: Number(lineNumberRaw),
+          text: (contentRaw ?? '').trim(),
+        });
+      }
+      continue;
+    }
+
+    currentPath = line.replace(/\s+\[[^\]]+\]$/, '');
+  }
+
+  return matches;
+}
+
+function formatTextMatchResult(
+  result: PublicCompactSearchTermsResult | PublicCompactGrepResult,
+): string {
+  const body =
+    result.items.length > 0
+      ? result.items
+          .map((item) => `${item.path}:${item.line}: ${clampMatchText(item.text, item.path)}`)
+          .join('\n')
+      : '(no matches)';
+  return `base_path: ${result.base_path}\n\n${body}`;
+}
+
+function formatRenderedTextMatchResult(result: { base_path: string; text: string }): string {
+  const items = parseRenderedTextMatches(result.text);
+  const body =
+    items.length > 0
+      ? items
+          .map((item) => `${item.path}:${item.line}: ${clampMatchText(item.text, item.path)}`)
+          .join('\n')
+      : '(no matches)';
+  return `base_path: ${result.base_path}\n\n${body}`;
+}
+
+function formatToolText(toolName: PublicToolName, result: PublicToolResult): string {
+  if (result.mode === 'json') {
+    return JSON.stringify(result);
+  }
+
+  switch (toolName) {
+    case 'fff_find_files':
+      return formatFindFilesResult(result as PublicCompactFindFilesResult);
+    case 'fff_search_terms':
+    case 'fff_grep':
+      return isRenderedTextResult(result)
+        ? formatRenderedTextMatchResult(result)
+        : formatTextMatchResult(result as PublicCompactSearchTermsResult | PublicCompactGrepResult);
+  }
+}
+
+function formatPartialResultText(
+  toolName: PublicToolName,
+  details?: Record<string, unknown>,
+): string {
+  const request = (details?.publicRequest as Record<string, unknown> | undefined) ?? {};
+  const scope = typeof details?.resolvedWithin === 'string' ? details.resolvedWithin : null;
+
+  if (toolName === 'fff_find_files') {
+    return 'Finding files…';
+  }
+
+  if (toolName === 'fff_search_terms') {
+    const termCount = Array.isArray(request.terms) ? request.terms.length : 0;
+    return termCount > 0 ? `Searching… ${termCount} terms` : 'Searching… terms';
+  }
+
+  const pattern =
+    Array.isArray(request.patterns) && typeof request.patterns[0] === 'string'
+      ? request.patterns.join(' | ')
+      : typeof request.pattern === 'string'
+        ? request.pattern
+        : 'pattern';
+  return scope ? `Searching… ${pattern} in ${shortenDisplayPath(scope)}` : `Searching… ${pattern}`;
+}
+
+function formatScopeWarningText(args: { resolvedWithin: string; fallbackFailed?: string }): string {
+  const lines = [
+    'Warning: FFF unavailable for this within path only; auto-retried with a local search fallback.',
+    `within: ${shortenDisplayPath(args.resolvedWithin)}`,
+    'FFF still works for other within paths that are inside git repos or allowlisted prefixes.',
+    `To enable FFF here too, add a parent prefix such as ${ALLOWLIST_HINTS.join(', ')} to the allowlist in ~/.config/fff-routerd/config.json or config.jsonc.`,
+    'The daemon reloads this file automatically; no Pi restart is required.',
+  ];
+
+  if (args.fallbackFailed) {
+    lines.push(`fallback failed: ${args.fallbackFailed}`);
+    lines.push('Use builtin search tools for this path until FFF is enabled here.');
+  }
+
+  return lines.join('\n');
+}
+
+// Paths that are effectively "your entire machine" or "every user" and
+// would make the fallback walk an unbounded tree even with the 10s
+// timeout and 500-match cap. Rejecting them up front gives the caller a
+// clear "narrow your scope" error instead of a silently truncated walk.
+//
+// Notes on specific entries:
+//   - `/` and `homedir()`: the original checks.
+//   - `/Users`: macOS multi-user root. Rejecting it prevents accidental
+//     cross-user searches; individual `~` is already covered by
+//     `homedir()`.
+//   - `/home`: the Linux analogue of `/Users`. No-op on macOS so it's
+//     cheap to include for cross-platform safety.
+//   - `/opt`: parent of Homebrew / zerobrew / nanobrew. Individual
+//     allowlisted roots like `/opt/homebrew/Cellar` still resolve and
+//     route to fff-mcp normally; only the bare parent is rejected.
+//
+// `homedir()` is resolved per call so `HOME` env stubs in tests take
+// effect. The cost is negligible (a single env read).
+const BROAD_WITHIN_STATIC_SCOPES: ReadonlySet<string> = new Set(['/', '/Users', '/home', '/opt']);
+
+function isBroadWithinScope(resolvedWithin: string): boolean {
+  // Canonicalize trailing slashes so `/opt` and `/opt/` both match.
+  const normalized =
+    resolvedWithin.length > 1 ? resolvedWithin.replace(/\/+$/, '') : resolvedWithin;
+  return BROAD_WITHIN_STATIC_SCOPES.has(normalized) || normalized === homedir();
+}
+
+function rewriteBroadWithinFromGlob(args: {
+  resolvedWithin: string;
+  params: Record<string, unknown>;
+}): { resolvedWithin: string; params: Record<string, unknown> } | null {
+  const rawGlob = typeof args.params.glob === 'string' ? args.params.glob.trim() : '';
+  if (!rawGlob) {
+    return null;
+  }
+
+  const normalizedGlob = rawGlob.replace(/\\/g, '/');
+  if (normalizedGlob.startsWith('!') || normalizedGlob.startsWith('/')) {
+    return null;
+  }
+
+  const segments = normalizedGlob.split('/');
+  if (
+    segments.length === 0 ||
+    segments.some((segment) => segment.length === 0 || segment === '.' || segment === '..')
+  ) {
+    return null;
+  }
+
+  let liftedCount = 0;
+  while (liftedCount < segments.length && !GLOB_META_PATTERN.test(segments[liftedCount]!)) {
+    liftedCount += 1;
+  }
+
+  if (liftedCount === 0) {
+    return null;
+  }
+
+  const liftedSegments = segments.slice(0, liftedCount);
+  const remainingSegments = segments.slice(liftedCount);
+  const rewrittenParams = { ...args.params };
+
+  if (remainingSegments.length > 0) {
+    rewrittenParams.glob = remainingSegments.join('/');
+  } else {
+    delete rewrittenParams.glob;
+  }
+
+  return {
+    resolvedWithin: path.join(args.resolvedWithin, ...liftedSegments),
+    params: rewrittenParams,
+  };
+}
+
+function formatBroadWithinFailureText(resolvedWithin: string): string {
+  return [
+    'Error: WITHIN_SCOPE_TOO_BROAD: the requested `within` is too broad for automatic fallback.',
+    `within: ${shortenDisplayPath(resolvedWithin)}`,
+    'Use a more specific `within` path before retrying.',
+    'Example: use `~/.config` instead of `~`.',
+  ].join('\n');
+}
+
+function parseErrorCodeAndMessage(error: unknown): { code: string; message: string } | null {
+  if (!(error instanceof Error)) {
+    return null;
+  }
+
+  const match = error.message.match(/^([A-Z_]+):\s*(.*)$/s);
+  if (!match) {
+    return null;
+  }
+
+  return { code: match[1] ?? 'INTERNAL_ERROR', message: match[2] ?? error.message };
+}
+
+function isDaemonMismatchError(error: unknown): boolean {
+  return error instanceof Error && /daemon (config|protocol) mismatch/i.test(error.message);
+}
+
+function hasZeroStructuredResults(result: PublicToolResult): boolean {
+  if ('items' in result && Array.isArray(result.items)) {
+    return result.items.length === 0;
+  }
+
+  if (isRenderedTextResult(result)) {
+    return parseRenderedTextMatches(result.text).length === 0;
+  }
+
+  return false;
+}
+
+function fallbackHasHits(fallback: Partial<RunLocalFallbackResult>): boolean {
+  if (typeof fallback.hasHits === 'boolean') {
+    return fallback.hasHits;
+  }
+
+  return !/\n\n\(no (files found|matches)\)\s*$/i.test(fallback.text ?? '');
+}
+
+function formatZeroResultFallbackNotice(
+  engine: LocalFallbackEngine,
+  toolName: PublicToolName,
+): string {
+  // The fallback delegates to the builtin grep / find tools. Those tools
+  // invoke `rg` / `fd` with `--hidden` (so dotfiles and dot-directories
+  // ARE searched) but leave `.gitignore` handling at the default (so
+  // gitignored paths are NOT surfaced). The notice needs to match both
+  // halves of that behaviour — calling out the hidden-file coverage is
+  // what distinguishes the fallback from what FFF returned.
+  if (toolName === 'fff_find_files' && engine === 'fd') {
+    return 'Note: FFF returned 0 results; local filename fallback found matches. Paths may include hidden files or be outside the tracked project / daemon-allowed scope.';
+  }
+  return 'Note: FFF returned 0 results; local text fallback found matches. Paths may include hidden files outside the tracked project / daemon-allowed scope.';
+}
+
+function formatFallbackSpillNotice(spill: FallbackSpillInfo): string {
+  return `Note: Full raw fallback output was spilled to ${spill.path} (${spill.bytes} bytes across ${spill.lines} lines).`;
+}
+
+function formatFallbackSummaryNotice(args: { total: number; omitted: number }): string | null {
+  if (args.omitted <= 0) {
+    return null;
+  }
+
+  const included = Math.max(0, args.total - args.omitted);
+  return `Note: Showing the top ${included} fallback matches after ranking and truncation; omitted ${args.omitted} lower-priority matches.`;
+}
+
+function renderInfoBlock(notice: string, theme: { fg: (...args: any[]) => string }): string {
+  return notice
+    .split('\n')
+    .map((line, index) => (index === 0 ? theme.fg('muted', line) : theme.fg('dim', line)))
+    .join('\n');
+}
+
+function renderNoticeBlock(notice: string, theme: { fg: (...args: any[]) => string }): string {
+  return notice
+    .split('\n')
+    .map((line, index) => (index === 0 ? theme.fg('warning', line) : theme.fg('dim', line)))
+    .join('\n');
+}
+
+function styleResultText(text: string, theme: { fg: (...args: any[]) => string }): string {
+  const lines = text.split('\n');
+  return lines
+    .map((line, index) => {
+      if (index === 0) {
+        if (line.startsWith('0 files') || line.startsWith('No matches')) {
+          return theme.fg('dim', line);
+        }
+        return theme.fg('success', line);
+      }
+
+      if (line === '  Files' || line === '  Top file') {
+        return theme.fg('muted', line);
+      }
+
+      if (line.startsWith('  · ')) {
+        return theme.fg('muted', '  · ') + theme.fg('accent', line.slice(4));
+      }
+
+      if (line.startsWith('  within:') || line.startsWith('    ')) {
+        return theme.fg('dim', line);
+      }
+
+      return theme.fg('text', line);
+    })
+    .join('\n');
+}
+
+function createWidthAwareText(renderForWidth: (width: number) => string): Component {
+  return {
+    render(width: number): string[] {
+      return new Text(renderForWidth(width), 0, 0).render(width);
+    },
+    invalidate() {},
+  };
+}
+
+function parseBasePathPayload(text: string): { basePath: string; bodyLines: string[] } | null {
+  const lines = text.split(/\r?\n/);
+  if (!lines[0]?.startsWith('base_path: ') || lines[1] !== '') {
+    return null;
+  }
+
+  return {
+    basePath: lines[0].slice('base_path: '.length),
+    bodyLines: lines.slice(2).filter((line) => line.length > 0),
+  };
+}
+
+function convertFffTextToBuiltinSearchText(
+  toolName: 'fff_find_files' | 'fff_grep',
+  text: string,
+): string | null {
+  const parsed = parseBasePathPayload(text);
+  if (!parsed) {
+    return null;
+  }
+
+  const noMatchLine = toolName === 'fff_find_files' ? '(no files found)' : '(no matches)';
+  const emptyMessage =
+    toolName === 'fff_find_files' ? 'No files found matching pattern' : 'No matches found';
+  const bodyLines = parsed.bodyLines.filter((line) => line !== noMatchLine);
+
+  return bodyLines.length > 0 ? bodyLines.join('\n') : emptyMessage;
+}
+
+function isEmptyBuiltinSearchText(toolName: 'fff_find_files' | 'fff_grep', text: string): boolean {
+  return (
+    text ===
+    (toolName === 'fff_find_files' ? 'No files found matching pattern' : 'No matches found')
+  );
+}
+
+function shouldUseBuiltinSearchFallback(details?: Record<string, unknown>): boolean {
+  return details?.resultKind === 'broad_scope_rejected' || details?.resultKind === 'scope_warning';
+}
+
+function hasUnbalancedRegexSyntax(pattern: string): boolean {
+  let escaped = false;
+  const stack: string[] = [];
+  const matchingOpeners: Record<string, string> = {
+    ')': '(',
+    ']': '[',
+    '}': '{',
+  };
+
+  for (const char of pattern) {
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (char === '\\') {
+      escaped = true;
+      continue;
+    }
+
+    if (char === '(' || char === '[' || char === '{') {
+      stack.push(char);
+      continue;
+    }
+
+    if (char === ')' || char === ']' || char === '}') {
+      const expected = matchingOpeners[char];
+      if (stack.at(-1) === expected) {
+        stack.pop();
+        continue;
+      }
+      return true;
+    }
+  }
+
+  return escaped || stack.length > 0;
+}
+
+function repairSuspiciousGrepPatterns(request: PublicToolRequest): {
+  request: PublicToolRequest;
+  repairs: Array<{ original: string }>;
+} | null {
+  if (request.tool !== 'fff_grep') {
+    return null;
+  }
+
+  // Only repair when the caller asked for regex-mode (`literal: false`). If
+  // they explicitly asked for literal matching, unbalanced brackets are by
+  // definition fine (they're treated as bytes) and a zero-result means the
+  // text just isn't there.
+  if (request.literal === true) {
+    return null;
+  }
+
+  const repairs = request.patterns.flatMap((pattern) => {
+    if (!hasUnbalancedRegexSyntax(pattern)) {
+      return [];
+    }
+    return [{ original: pattern }];
+  });
+
+  if (repairs.length === 0) {
+    return null;
+  }
+
+  // Retry the same patterns as literals rather than regex-escaping each one
+  // locally. fff-router's literal path handles the metacharacters correctly.
+  return {
+    request: {
+      ...request,
+      literal: true,
+    },
+    repairs,
+  };
+}
+
+function formatRegexRepairNotice(repairs: Array<{ original: string }>): string {
+  const rendered = repairs.map((repair) => repair.original).join(', ');
+  return `Note: FFF returned 0 results; retried as a literal search after detecting suspicious regex syntax in: ${rendered}`;
+}
+
+function splitLeadingLiteralGlobSegments(rawPattern: string): {
+  normalizedPattern: string;
+  literalSegments: string[];
+  remainingSegments: string[];
+} | null {
+  const normalizedPattern = rawPattern.replace(/\\/g, '/').trim();
+  if (
+    !normalizedPattern ||
+    normalizedPattern.startsWith('!') ||
+    normalizedPattern.startsWith('/')
+  ) {
+    return null;
+  }
+
+  const segments = normalizedPattern.split('/');
+  if (
+    segments.length === 0 ||
+    segments.some((segment) => segment.length === 0 || segment === '.' || segment === '..')
+  ) {
+    return null;
+  }
+
+  let literalCount = 0;
+  while (literalCount < segments.length && !GLOB_META_PATTERN.test(segments[literalCount]!)) {
+    literalCount += 1;
+  }
+
+  let literalSegments = segments.slice(0, literalCount);
+  let remainingSegments = segments.slice(literalCount);
+
+  if (remainingSegments.length === 0 && literalSegments.length > 0) {
+    remainingSegments = [literalSegments[literalSegments.length - 1]!];
+    literalSegments = literalSegments.slice(0, -1);
+  }
+
+  return {
+    normalizedPattern,
+    literalSegments,
+    remainingSegments,
+  };
+}
+
+function tokenizeFindQuery(value: string): string[] {
+  return value
+    .replace(GLOB_META_SEQUENCE_PATTERN, ' ')
+    .replace(/[^A-Za-z0-9]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+function buildFffGrepParamsFromBuiltin(
+  args: Record<string, unknown>,
+): Record<string, unknown> | null {
+  const pattern = typeof args.pattern === 'string' && args.pattern.trim() ? args.pattern : null;
+  if (!pattern) {
+    return null;
+  }
+
+  const params: Record<string, unknown> = {
+    patterns: [pattern],
+    // Forward the caller's literal-vs-regex intent verbatim. fff-router routes
+    // `literal: true` to fff-mcp's multi_grep tool (regex metacharacters are
+    // matched as literal bytes) and `literal: false` to its grep tool (regex
+    // with whitespace auto-encoded to `\s`). No local escaping required.
+    literal: args.literal === true,
+    case_sensitive: args.ignoreCase === true ? false : true,
+  };
+
+  if (typeof args.path === 'string' && args.path.trim()) {
+    params.within = args.path;
+  }
+  if (typeof args.glob === 'string' && args.glob.trim()) {
+    params.glob = args.glob;
+  }
+  if (typeof args.context === 'number') {
+    params.context_lines = args.context;
+  }
+  if (typeof args.limit === 'number') {
+    params.limit = args.limit;
+  }
+
+  return params;
+}
+
+function deriveFindQueryFromPattern(pattern: string): string | null {
+  const normalizedPattern = pattern.replace(/\\/g, '/').trim();
+  const basename = normalizedPattern.split('/').filter(Boolean).pop();
+  if (!basename) {
+    return null;
+  }
+
+  if (!GLOB_META_PATTERN.test(normalizedPattern)) {
+    return basename;
+  }
+
+  const tokens = tokenizeFindQuery(basename);
+  if (tokens.length === 0) {
+    return null;
+  }
+
+  const specificTokens = tokens.filter(
+    (token) => !FIND_QUERY_GENERIC_TOKENS.has(token.toLowerCase()),
+  );
+  if (specificTokens.length === 0) {
+    return null;
+  }
+
+  return specificTokens.join(' ');
+}
+
+function buildFffFindParamsFromBuiltin(
+  args: Record<string, unknown>,
+): Record<string, unknown> | null {
+  const pattern = typeof args.pattern === 'string' && args.pattern.trim() ? args.pattern : null;
+  if (!pattern) {
+    return null;
+  }
+
+  const splitPattern = splitLeadingLiteralGlobSegments(pattern);
+  const effectivePattern = splitPattern?.remainingSegments.join('/') || pattern;
+  const query = deriveFindQueryFromPattern(effectivePattern);
+  if (!query) {
+    return null;
+  }
+
+  const params: Record<string, unknown> = {
+    query,
+    glob: effectivePattern,
+  };
+
+  const explicitPath = typeof args.path === 'string' && args.path.trim() ? args.path.trim() : null;
+  const liftedWithin = splitPattern?.literalSegments.length
+    ? splitPattern.literalSegments.join('/')
+    : null;
+
+  if (explicitPath && liftedWithin) {
+    params.within = path.join(explicitPath, liftedWithin);
+  } else if (explicitPath) {
+    params.within = explicitPath;
+  } else if (liftedWithin) {
+    params.within = liftedWithin;
+  }
+  if (typeof args.limit === 'number') {
+    params.limit = args.limit;
+  }
+
+  return params;
+}
+
+function normalizeRequestedPath(value: string): string {
+  return value.replace(/^@/, '').replace(/\\/g, '/').replace(/^\.\//, '');
+}
+
+function isReadResolutionError(error: unknown): boolean {
+  return error instanceof Error && /(ENOENT|no such file|not found)/i.test(error.message);
+}
+
+function buildReadResolutionParams(readPath: string): Record<string, unknown> | null {
+  const normalized = normalizeRequestedPath(readPath);
+  if (!normalized || path.isAbsolute(normalized) || normalized.startsWith('~')) {
+    return null;
+  }
+
+  const basename = path.posix.basename(normalized);
+  if (!basename || GLOB_META_PATTERN.test(basename)) {
+    return null;
+  }
+
+  const dirname = path.posix.dirname(normalized);
+  const params: Record<string, unknown> = {
+    query: basename,
+    limit: 10,
+  };
+
+  if (dirname !== '.' && dirname !== '') {
+    params.within = dirname;
+    params.glob = basename;
+  } else {
+    params.glob = `**/${basename}`;
+  }
+
+  return params;
+}
+
+function pickResolvedReadPath(requestedPath: string, text: string): string | null {
+  const parsed = parseBasePathPayload(text);
+  if (!parsed) {
+    return null;
+  }
+
+  const candidates = parsed.bodyLines.filter((line) => line !== '(no files found)');
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  const normalizedRequested = normalizeRequestedPath(requestedPath);
+  const requestedBasename = path.posix.basename(normalizedRequested);
+  const suffixMatches = candidates.filter(
+    (candidate) =>
+      candidate === normalizedRequested || candidate.endsWith(`/${normalizedRequested}`),
+  );
+  if (suffixMatches.length === 1) {
+    return path.join(parsed.basePath, suffixMatches[0]!);
+  }
+
+  const basenameMatches = candidates.filter(
+    (candidate) => path.posix.basename(candidate) === requestedBasename,
+  );
+  if (basenameMatches.length === 1) {
+    return path.join(parsed.basePath, basenameMatches[0]!);
+  }
+
+  if (candidates.length === 1) {
+    return path.join(parsed.basePath, candidates[0]!);
+  }
+
+  return null;
+}
+
+function formatFixedReadPath(resolvedPath: string, cwd: string): string {
+  const relativePath = path.relative(cwd, resolvedPath).replace(/\\/g, '/');
+  if (relativePath && !relativePath.startsWith('..') && !path.isAbsolute(relativePath)) {
+    return relativePath;
+  }
+
+  return resolvedPath;
+}
+
+function withBuiltinToolTimeout(
+  signal: AbortSignal | undefined,
+  timeoutMs = BUILTIN_TOOL_TIMEOUT_MS,
+) {
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  return signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+}
+
+function quoteRewriteValue(value: string): string {
+  return /[\s"]/.test(value) ? JSON.stringify(value) : value;
+}
+
+function formatRewriteWithin(value: unknown, cwd?: string): string | null {
+  if (typeof value !== 'string' || !value) {
+    return null;
+  }
+
+  if (value === '.') {
+    return '.';
+  }
+
+  return shortenDisplayPath(value, cwd);
+}
+
+function formatOriginalSearchPath(value: string, cwd?: string): string {
+  if (value === '.') {
+    return '.';
+  }
+
+  if (path.isAbsolute(value)) {
+    return shortenDisplayPath(value, cwd);
+  }
+
+  return value;
+}
+
+function formatFffRewriteSummary(
+  toolName: 'grep' | 'find',
+  params: Record<string, unknown>,
+  cwd?: string,
+): string | null {
+  const parts: string[] = [];
+
+  if (toolName === 'grep') {
+    const patterns = Array.isArray(params.patterns)
+      ? params.patterns.filter(
+          (item): item is string => typeof item === 'string' && item.length > 0,
+        )
+      : [];
+    if (patterns.length === 1) {
+      parts.push(`pattern=${patterns[0]}`);
+    } else if (patterns.length > 1) {
+      parts.push(`patterns[${patterns.length}]=${patterns.join('; ')}`);
+    }
+    // Only annotate literal mode; regex is the common case and gets left
+    // implicit, matching the "show non-default modes" convention used for
+    // case-sensitive and limit.
+    if (params.literal === true) {
+      parts.push('literal');
+    }
+  } else {
+    const query =
+      typeof params.query === 'string' && params.query.trim() ? params.query.trim() : null;
+    if (query) {
+      parts.push(`query=${quoteRewriteValue(query)}`);
+    }
+  }
+
+  const within = formatRewriteWithin(params.within, cwd);
+  if (within) {
+    parts.push(`within=${quoteRewriteValue(within)}`);
+  }
+
+  const glob = typeof params.glob === 'string' && params.glob.trim() ? params.glob.trim() : null;
+  if (glob) {
+    parts.push(`glob=${quoteRewriteValue(glob)}`);
+  }
+
+  if (typeof params.context_lines === 'number') {
+    parts.push(`context=${params.context_lines}`);
+  }
+
+  if (typeof params.limit === 'number') {
+    parts.push(`limit=${params.limit}`);
+  }
+
+  return parts.length > 0 ? parts.join(' · ') : null;
+}
+
+function formatBuiltinSearchCallSummary(
+  toolName: 'grep' | 'find',
+  args: Record<string, unknown>,
+  cwd?: string,
+): string {
+  if (toolName === 'grep') {
+    const pattern = typeof args.pattern === 'string' ? args.pattern : '';
+    const renderedPattern = args.literal === true ? pattern : `/${pattern}/`;
+    const parts = [`grep ${renderedPattern}`];
+
+    const searchPath = typeof args.path === 'string' && args.path.trim() ? args.path.trim() : null;
+    if (searchPath) {
+      parts.push(`in ${formatOriginalSearchPath(searchPath, cwd)}`);
+    }
+
+    const glob = typeof args.glob === 'string' && args.glob.trim() ? args.glob.trim() : null;
+    if (glob) {
+      parts.push(`(${glob})`);
+    }
+
+    if (args.ignoreCase === true) {
+      parts.push('ignoreCase');
+    }
+    if (args.literal === true) {
+      parts.push('literal');
+    }
+    if (typeof args.context === 'number') {
+      parts.push(`context ${args.context}`);
+    }
+    if (typeof args.limit === 'number') {
+      parts.push(`limit ${args.limit}`);
+    }
+
+    return parts.join(' ');
+  }
+
+  const pattern = typeof args.pattern === 'string' ? args.pattern : '';
+  const parts = [`find ${pattern}`];
+  const searchPath = typeof args.path === 'string' && args.path.trim() ? args.path.trim() : null;
+  if (searchPath) {
+    parts.push(`in ${formatOriginalSearchPath(searchPath, cwd)}`);
+  }
+  if (typeof args.limit === 'number') {
+    parts.push(`limit ${args.limit}`);
+  }
+
+  return parts.join(' ');
+}
+
+function wrapBuiltinCallRenderer(args: {
+  toolName: 'grep' | 'find';
+  builtinRenderCall?: ((args: any, theme: any, context?: any) => Component) | undefined;
+  renderArgs: Record<string, unknown>;
+  theme: { fg: (...args: any[]) => string };
+  context?: { cwd?: string };
+  rewriteSummary: string | null;
+}): Component {
+  // Builtin renderCall implementations treat `context.lastComponent` as
+  // their own cached inner primitive (a `Text`) and call `.setText(...)` on
+  // it directly. We cannot forward the outer tool-render context through
+  // because its `lastComponent` is the wrapper `Box` / width-aware text we
+  // return from this function — calling `.setText(...)` on that would throw
+  // `TypeError: text.setText is not a function`. Instead we keep a private
+  // cache of whatever component the builtin returned last time and hand it
+  // that so pi-tui's component-reuse optimization still works.
+  let cachedBuiltinLastComponent: Component | undefined;
+  const cwd = args.context?.cwd;
+  return createWidthAwareText((width) => {
+    const builtinContext = { cwd, lastComponent: cachedBuiltinLastComponent };
+    const baseComponent = args.builtinRenderCall?.(args.renderArgs, args.theme, builtinContext);
+    cachedBuiltinLastComponent = baseComponent;
+    const baseText =
+      baseComponent?.render(width).join('\n') ??
+      formatBuiltinSearchCallSummary(args.toolName, args.renderArgs, cwd);
+    if (!args.rewriteSummary) {
+      return baseText;
+    }
+
+    return [baseText, args.theme.fg('dim', `  via FFF: ${args.rewriteSummary}`)].join('\n');
+  });
+}
+
+export function createPiFffSearchExtension(options: CreatePiFffSearchExtensionOptions = {}) {
+  const ensureDaemon = options.ensureDaemonRunning ?? defaultEnsureDaemonRunning;
+  const callTool = options.callPublicToolOverHttp ?? defaultCallPublicToolOverHttp;
+  const runFallback = options.runRipgrepFallback ?? runLocalFallback;
+  const overrideBuiltinRead = options.overrideBuiltinRead ?? OVERRIDE_BUILTIN_READ;
+  const overrideBuiltinGrep = options.overrideBuiltinGrep ?? OVERRIDE_BUILTIN_GREP;
+  const overrideBuiltinFind = options.overrideBuiltinFind ?? OVERRIDE_BUILTIN_FIND;
+  const createBuiltInRead = options.createBuiltInReadTool ?? createReadToolDefinition;
+  const createBuiltInGrep = options.createBuiltInGrepTool ?? createGrepToolDefinition;
+  const createBuiltInFind = options.createBuiltInFindTool ?? createFindToolDefinition;
+  const builtInTemplates =
+    overrideBuiltinRead || overrideBuiltinGrep || overrideBuiltinFind
+      ? {
+          read: createBuiltInRead(process.cwd()),
+          grep: createBuiltInGrep(process.cwd()),
+          find: createBuiltInFind(process.cwd()),
+        }
+      : null;
+
+  return function piFffSearchExtension(pi: ExtensionAPI) {
+    pi.on('before_agent_start', async (event) => ({
+      systemPrompt: `${event.systemPrompt}\n\n${SEARCH_TOOL_PROMPT}`,
+    }));
+
+    for (const tool of PI_TOOL_DEFINITIONS) {
+      pi.registerTool(
+        defineTool({
+          name: tool.name,
+          label: tool.name,
+          description: tool.description,
+          promptSnippet: tool.snippet,
+          parameters: tool.inputSchema,
+          async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+            const result = await forwardToolCall({
+              toolName: tool.name,
+              params: params as Record<string, unknown>,
+              cwd: ctx.cwd,
+              ensureDaemonRunning: ensureDaemon,
+              callPublicToolOverHttp: callTool,
+              runRipgrepFallback: runFallback,
+            });
+
+            const details = result.details as Record<string, unknown> | undefined;
+            const scopeWarningText =
+              details?.resultKind === 'scope_warning' &&
+              typeof details.scopeWarningText === 'string'
+                ? details.scopeWarningText
+                : null;
+            const content = [
+              typeof details?.daemonRestartMessage === 'string'
+                ? { type: 'text' as const, text: details.daemonRestartMessage }
+                : null,
+              scopeWarningText ? { type: 'text' as const, text: scopeWarningText } : null,
+              typeof details?.searchNoticeMessage === 'string'
+                ? { type: 'text' as const, text: details.searchNoticeMessage }
+                : null,
+              !scopeWarningText || result.text !== scopeWarningText
+                ? { type: 'text' as const, text: result.text }
+                : null,
+            ].filter((entry): entry is { type: 'text'; text: string } => entry !== null);
+
+            return {
+              content,
+              details: result.details,
+            };
+          },
+          renderCall(args, theme, context) {
+            return createWidthAwareText((width) => {
+              const lines = formatToolCallText(
+                tool.name,
+                args as Record<string, unknown>,
+                {
+                  cwd: context?.cwd,
+                },
+                width,
+              ).split('\n');
+              const [first = '', ...rest] = lines;
+              return [
+                theme.fg('toolTitle', theme.bold(first)),
+                ...rest.map((line) => theme.fg('dim', line)),
+              ].join('\n');
+            });
+          },
+          renderResult(result, { expanded, isPartial }, theme, context) {
+            const textBlocks = result.content
+              .filter((entry): entry is { type: 'text'; text: string } => entry.type === 'text')
+              .map((entry) => entry.text);
+            const contentText = textBlocks[textBlocks.length - 1] ?? '';
+            const details = result.details as Record<string, unknown> | undefined;
+            const daemonRestartBlock =
+              typeof details?.daemonRestartMessage === 'string'
+                ? renderNoticeBlock(details.daemonRestartMessage, theme)
+                : null;
+            const searchNoticeBlock =
+              typeof details?.searchNoticeMessage === 'string'
+                ? renderInfoBlock(details.searchNoticeMessage, theme)
+                : null;
+
+            if (isPartial) {
+              return new Text(
+                theme.fg('warning', formatPartialResultText(tool.name, details)),
+                0,
+                0,
+              );
+            }
+
+            if (details?.resultKind === 'scope_warning') {
+              const warningText =
+                typeof details.scopeWarningText === 'string'
+                  ? details.scopeWarningText
+                  : 'Warning: FFF unavailable for this within path only.';
+              const warningBlock = renderNoticeBlock(warningText, theme);
+              const structuredText =
+                typeof details.fallbackText === 'string' ? details.fallbackText : null;
+              if (!structuredText) {
+                return new Text(
+                  [daemonRestartBlock, warningBlock, searchNoticeBlock]
+                    .filter(Boolean)
+                    .join('\n\n'),
+                  0,
+                  0,
+                );
+              }
+              return createWidthAwareText((width) => {
+                const summary = expanded
+                  ? formatExpandedResultText(tool.name, {
+                      contentText: structuredText,
+                      details: details as any,
+                      cwd: context?.cwd,
+                      width,
+                    })
+                  : formatCollapsedResultText(tool.name, {
+                      contentText: structuredText,
+                      details: details as any,
+                      cwd: context?.cwd,
+                      width,
+                    });
+
+                return [
+                  daemonRestartBlock,
+                  warningBlock,
+                  searchNoticeBlock,
+                  styleResultText(summary, theme),
+                ]
+                  .filter(Boolean)
+                  .join('\n\n');
+              });
+            }
+
+            if (contentText.startsWith('Error:')) {
+              const firstLine = contentText.split('\n')[0] ?? 'Error:';
+              return new Text(
+                `${theme.fg('error', 'Search failed')}\n${theme.fg('dim', firstLine)}`,
+                0,
+                0,
+              );
+            }
+
+            return createWidthAwareText((width) => {
+              const text = expanded
+                ? formatExpandedResultText(tool.name, {
+                    contentText,
+                    details: details as any,
+                    cwd: context?.cwd,
+                    width,
+                  })
+                : formatCollapsedResultText(tool.name, {
+                    contentText,
+                    details: details as any,
+                    cwd: context?.cwd,
+                    width,
+                  });
+
+              return [daemonRestartBlock, searchNoticeBlock, styleResultText(text, theme)]
+                .filter(Boolean)
+                .join('\n\n');
+            });
+          },
+        }),
+      );
+    }
+
+    if (overrideBuiltinRead && builtInTemplates) {
+      pi.registerTool({
+        ...builtInTemplates.read,
+        async execute(toolCallId, params, signal, onUpdate, ctx) {
+          const builtInRead = createBuiltInRead(ctx.cwd);
+
+          try {
+            return await builtInRead.execute(
+              toolCallId,
+              params,
+              withBuiltinToolTimeout(signal),
+              onUpdate,
+              ctx,
+            );
+          } catch (error) {
+            const requestedPath =
+              typeof (params as Record<string, unknown>).path === 'string'
+                ? ((params as Record<string, unknown>).path as string)
+                : null;
+            if (!requestedPath || !isReadResolutionError(error)) {
+              throw error;
+            }
+
+            const resolutionParams = buildReadResolutionParams(requestedPath);
+            if (!resolutionParams) {
+              throw error;
+            }
+
+            try {
+              const resolution = await forwardToolCall({
+                toolName: 'fff_find_files',
+                params: resolutionParams,
+                cwd: ctx.cwd,
+                ensureDaemonRunning: ensureDaemon,
+                callPublicToolOverHttp: callTool,
+                runRipgrepFallback: runFallback,
+              });
+              const resolvedPath = pickResolvedReadPath(requestedPath, resolution.text);
+              if (!resolvedPath) {
+                throw error;
+              }
+
+              return await builtInRead
+                .execute(
+                  toolCallId,
+                  { ...(params as Record<string, unknown>), path: resolvedPath },
+                  withBuiltinToolTimeout(signal),
+                  onUpdate,
+                  ctx,
+                )
+                .then((resolvedResult) => {
+                  const firstTextBlock = resolvedResult.content.find(
+                    (entry): entry is { type: 'text'; text: string } =>
+                      entry.type === 'text' && typeof entry.text === 'string',
+                  );
+                  if (!firstTextBlock) {
+                    return resolvedResult;
+                  }
+
+                  const fixedPath = formatFixedReadPath(resolvedPath, ctx.cwd);
+                  const updatedContent = resolvedResult.content.map((entry, index) =>
+                    index === resolvedResult.content.indexOf(firstTextBlock)
+                      ? entry.type === 'text'
+                        ? { ...entry, text: `Path (fixed): ${fixedPath}\n\n${entry.text}` }
+                        : entry
+                      : entry,
+                  );
+
+                  return {
+                    ...resolvedResult,
+                    content: updatedContent,
+                    details:
+                      resolvedResult.details && typeof resolvedResult.details === 'object'
+                        ? {
+                            ...resolvedResult.details,
+                            routedVia: 'fff-then-builtin',
+                            resolvedFromPath: requestedPath,
+                            resolvedToPath: fixedPath,
+                          }
+                        : {
+                            routedVia: 'fff-then-builtin',
+                            resolvedFromPath: requestedPath,
+                            resolvedToPath: fixedPath,
+                          },
+                  };
+                });
+            } catch (resolutionError) {
+              if (resolutionError === error) {
+                throw resolutionError;
+              }
+              throw error;
+            }
+          }
+        },
+      });
+    }
+
+    if (overrideBuiltinGrep && builtInTemplates) {
+      pi.registerTool({
+        ...builtInTemplates.grep,
+        renderCall(args, theme, context) {
+          const fffParams = buildFffGrepParamsFromBuiltin(args as Record<string, unknown>);
+          return wrapBuiltinCallRenderer({
+            toolName: 'grep',
+            builtinRenderCall: builtInTemplates.grep.renderCall,
+            renderArgs: args as Record<string, unknown>,
+            theme,
+            context,
+            rewriteSummary: fffParams
+              ? formatFffRewriteSummary('grep', fffParams, context?.cwd)
+              : null,
+          });
+        },
+        async execute(toolCallId, params, signal, onUpdate, ctx) {
+          const builtInGrep = createBuiltInGrep(ctx.cwd);
+          const fffParams = buildFffGrepParamsFromBuiltin(params as Record<string, unknown>);
+          if (!fffParams) {
+            return builtInGrep.execute(
+              toolCallId,
+              params,
+              withBuiltinToolTimeout(signal),
+              onUpdate,
+              ctx,
+            );
+          }
+
+          try {
+            const result = await forwardToolCall({
+              toolName: 'fff_grep',
+              params: fffParams,
+              cwd: ctx.cwd,
+              ensureDaemonRunning: ensureDaemon,
+              callPublicToolOverHttp: callTool,
+              runRipgrepFallback: runFallback,
+            });
+            if (shouldUseBuiltinSearchFallback(result.details)) {
+              return builtInGrep.execute(
+                toolCallId,
+                params,
+                withBuiltinToolTimeout(signal),
+                onUpdate,
+                ctx,
+              );
+            }
+
+            const contentText = convertFffTextToBuiltinSearchText('fff_grep', result.text);
+            if (contentText === null) {
+              return builtInGrep.execute(
+                toolCallId,
+                params,
+                withBuiltinToolTimeout(signal),
+                onUpdate,
+                ctx,
+              );
+            }
+            if (isEmptyBuiltinSearchText('fff_grep', contentText)) {
+              return builtInGrep.execute(
+                toolCallId,
+                params,
+                withBuiltinToolTimeout(signal),
+                onUpdate,
+                ctx,
+              );
+            }
+
+            return {
+              content: [{ type: 'text' as const, text: contentText }],
+              details: undefined,
+            };
+          } catch {
+            return builtInGrep.execute(
+              toolCallId,
+              params,
+              withBuiltinToolTimeout(signal),
+              onUpdate,
+              ctx,
+            );
+          }
+        },
+      });
+    }
+
+    if (overrideBuiltinFind && builtInTemplates) {
+      pi.registerTool({
+        ...builtInTemplates.find,
+        renderCall(args, theme, context) {
+          const fffParams = buildFffFindParamsFromBuiltin(args as Record<string, unknown>);
+          return wrapBuiltinCallRenderer({
+            toolName: 'find',
+            builtinRenderCall: builtInTemplates.find.renderCall,
+            renderArgs: args as Record<string, unknown>,
+            theme,
+            context,
+            rewriteSummary: fffParams
+              ? formatFffRewriteSummary('find', fffParams, context?.cwd)
+              : null,
+          });
+        },
+        async execute(toolCallId, params, signal, onUpdate, ctx) {
+          const builtInFind = createBuiltInFind(ctx.cwd);
+          const fffParams = buildFffFindParamsFromBuiltin(params as Record<string, unknown>);
+          if (!fffParams) {
+            return builtInFind.execute(
+              toolCallId,
+              params,
+              withBuiltinToolTimeout(signal),
+              onUpdate,
+              ctx,
+            );
+          }
+
+          try {
+            const result = await forwardToolCall({
+              toolName: 'fff_find_files',
+              params: fffParams,
+              cwd: ctx.cwd,
+              ensureDaemonRunning: ensureDaemon,
+              callPublicToolOverHttp: callTool,
+              runRipgrepFallback: runFallback,
+            });
+            if (shouldUseBuiltinSearchFallback(result.details)) {
+              return builtInFind.execute(
+                toolCallId,
+                params,
+                withBuiltinToolTimeout(signal),
+                onUpdate,
+                ctx,
+              );
+            }
+
+            const contentText = convertFffTextToBuiltinSearchText('fff_find_files', result.text);
+            if (contentText === null) {
+              return builtInFind.execute(
+                toolCallId,
+                params,
+                withBuiltinToolTimeout(signal),
+                onUpdate,
+                ctx,
+              );
+            }
+            if (isEmptyBuiltinSearchText('fff_find_files', contentText)) {
+              return builtInFind.execute(
+                toolCallId,
+                params,
+                withBuiltinToolTimeout(signal),
+                onUpdate,
+                ctx,
+              );
+            }
+
+            return {
+              content: [{ type: 'text' as const, text: contentText }],
+              details: undefined,
+            };
+          } catch {
+            return builtInFind.execute(
+              toolCallId,
+              params,
+              withBuiltinToolTimeout(signal),
+              onUpdate,
+              ctx,
+            );
+          }
+        },
+      });
+    }
+  };
+}
+
+export async function forwardToolCall(args: {
+  toolName: PublicToolName;
+  params: Record<string, unknown>;
+  cwd: string;
+  ensureDaemonRunning: () => Promise<void>;
+  callPublicToolOverHttp: (request: PublicToolRequest) => Promise<SearchCoordinatorResult>;
+  runRipgrepFallback?: (args: {
+    toolName: PublicToolName;
+    resolvedWithin: string;
+    publicRequest: PublicToolRequest;
+  }) => Promise<RunLocalFallbackResult>;
+}): Promise<{ text: string; details: Record<string, unknown> }> {
+  const resolvedWithin = await resolveWithinFromCaller({
+    callerCwd: args.cwd,
+    within: typeof args.params.within === 'string' ? args.params.within : null,
+  });
+  if (!resolvedWithin.ok) {
+    throw new Error(resolvedWithin.error.message);
+  }
+
+  const rewrittenBroadWithin = isBroadWithinScope(resolvedWithin.value.resolvedWithin)
+    ? rewriteBroadWithinFromGlob({
+        resolvedWithin: resolvedWithin.value.resolvedWithin,
+        params: args.params,
+      })
+    : null;
+  const effectiveResolvedWithin =
+    rewrittenBroadWithin?.resolvedWithin ?? resolvedWithin.value.resolvedWithin;
+  const effectiveParams = rewrittenBroadWithin?.params ?? args.params;
+
+  const normalized = normalizePublicToolInput(args.toolName, {
+    ...effectiveParams,
+    within: effectiveResolvedWithin,
+  });
+  if (!normalized.ok) {
+    throw new Error(normalized.error.message);
+  }
+
+  const baseDetails = {
+    toolName: args.toolName,
+    publicRequest: normalized.value,
+    resolvedWithin: effectiveResolvedWithin,
+  };
+
+  if (isBroadWithinScope(effectiveResolvedWithin)) {
+    return {
+      text: formatBroadWithinFailureText(effectiveResolvedWithin),
+      details: {
+        ...baseDetails,
+        resultKind: 'broad_scope_rejected',
+      },
+    };
+  }
+
+  const runFallback = args.runRipgrepFallback ?? runLocalFallback;
+  const executeSearch = async (request: PublicToolRequest): Promise<PublicToolResult> => {
+    await args.ensureDaemonRunning();
+    const result = await args.callPublicToolOverHttp(request);
+    if (!result.ok) {
+      throw new Error(`${result.error.code}: ${result.error.message}`);
+    }
+    return result.value;
+  };
+
+  const executeSearchWithDaemonRetry = async (
+    request: PublicToolRequest,
+  ): Promise<PublicToolResult> => {
+    try {
+      return await executeSearch(request);
+    } catch (error) {
+      if (!isDaemonMismatchError(error)) {
+        throw error;
+      }
+
+      daemonRestartMessage = DAEMON_RESTART_NOTICE;
+      return executeSearch(request);
+    }
+  };
+
+  let daemonRestartMessage: string | null = null;
+
+  try {
+    let resultValue = await executeSearchWithDaemonRetry(normalized.value);
+    let regexRepairNotice: string | null = null;
+
+    if (hasZeroStructuredResults(resultValue)) {
+      const repairedRequest = repairSuspiciousGrepPatterns(normalized.value);
+      if (repairedRequest) {
+        try {
+          const repairedResult = await executeSearchWithDaemonRetry(repairedRequest.request);
+          if (!hasZeroStructuredResults(repairedResult)) {
+            resultValue = repairedResult;
+            regexRepairNotice = formatRegexRepairNotice(repairedRequest.repairs);
+          }
+        } catch {
+          // Preserve the original empty result so the normal local fallback can still run.
+        }
+      }
+    }
+
+    let finalText = formatToolText(args.toolName, resultValue);
+    let searchNoticeMessage: string | null = null;
+    let zeroResultFallbackEngine: LocalFallbackEngine | null = null;
+    let fallbackSpill: FallbackSpillInfo | null = null;
+
+    if (hasZeroStructuredResults(resultValue)) {
+      try {
+        const fallback = await runFallback({
+          toolName: args.toolName,
+          resolvedWithin: effectiveResolvedWithin,
+          publicRequest: normalized.value,
+        });
+        if (fallbackHasHits(fallback)) {
+          finalText = fallback.text;
+          const notices = [formatZeroResultFallbackNotice(fallback.engine, args.toolName)];
+          const summaryNotice = formatFallbackSummaryNotice({
+            total: fallback.totalMatches ?? 0,
+            omitted: fallback.omittedMatches ?? 0,
+          });
+          if (summaryNotice) {
+            notices.push(summaryNotice);
+          }
+          if (fallback.spill) {
+            notices.push(formatFallbackSpillNotice(fallback.spill));
+            fallbackSpill = fallback.spill;
+          }
+          searchNoticeMessage = notices.join('\n');
+          zeroResultFallbackEngine = fallback.engine;
+        }
+      } catch {
+        // Keep the original successful-but-empty FFF result when the fallback fails.
+      }
+    }
+
+    if (regexRepairNotice) {
+      searchNoticeMessage = searchNoticeMessage
+        ? `${regexRepairNotice}\n${searchNoticeMessage}`
+        : regexRepairNotice;
+    }
+
+    return {
+      text: finalText,
+      details: {
+        ...baseDetails,
+        ...(daemonRestartMessage ? { daemonRestarted: true, daemonRestartMessage } : {}),
+        ...(searchNoticeMessage ? { searchNoticeMessage } : {}),
+        ...(zeroResultFallbackEngine ? { zeroResultFallbackEngine } : {}),
+        ...(fallbackSpill ? { fallbackSpill } : {}),
+      },
+    };
+  } catch (error) {
+    const parsed = parseErrorCodeAndMessage(error);
+    if (parsed?.code !== 'OUTSIDE_ALLOWED_SCOPE') {
+      throw error;
+    }
+
+    const warningTextBase = formatScopeWarningText({
+      resolvedWithin: effectiveResolvedWithin,
+    });
+
+    try {
+      const fallback = await runFallback({
+        toolName: args.toolName,
+        resolvedWithin: effectiveResolvedWithin,
+        publicRequest: normalized.value,
+      });
+      const notices = [
+        formatFallbackSummaryNotice({
+          total: fallback.totalMatches ?? 0,
+          omitted: fallback.omittedMatches ?? 0,
+        }),
+        fallback.spill ? formatFallbackSpillNotice(fallback.spill) : null,
+      ].filter((value): value is string => Boolean(value));
+      return {
+        text: fallback.text,
+        details: {
+          ...baseDetails,
+          resultKind: 'scope_warning',
+          scopeWarningText: warningTextBase,
+          fallbackText: fallback.text,
+          fallbackEngine: fallback.engine,
+          ...(notices.length > 0 ? { searchNoticeMessage: notices.join('\n') } : {}),
+          ...(fallback.spill ? { fallbackSpill: fallback.spill } : {}),
+          ...(daemonRestartMessage ? { daemonRestarted: true, daemonRestartMessage } : {}),
+        },
+      };
+    } catch (fallbackError) {
+      const fallbackMessage =
+        fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+      const warningText = formatScopeWarningText({
+        resolvedWithin: effectiveResolvedWithin,
+        fallbackFailed: fallbackMessage,
+      });
+      return {
+        text: warningText,
+        details: {
+          ...baseDetails,
+          resultKind: 'scope_warning',
+          scopeWarningText: warningText,
+          ...(daemonRestartMessage ? { daemonRestarted: true, daemonRestartMessage } : {}),
+        },
+      };
+    }
+  }
+}

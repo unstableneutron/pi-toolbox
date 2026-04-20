@@ -1,0 +1,2 @@
+-- Bootstrap placeholder for indexing SQL.
+-- Task 1 intentionally leaves full indexing SQL unimplemented.

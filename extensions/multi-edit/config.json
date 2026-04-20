@@ -1,0 +1,20 @@
+{
+  "registerToolOverrides": {
+    "edit": true
+  },
+  "modelToolPolicies": [
+    {
+      "match": ["gpt-5.3", "gpt-5.4", "claude-opus-4-7"],
+      "disable": ["edit", "write"]
+    }
+  ],
+  "enableNativeUserMessageBox": false,
+  "previewLines": 8,
+  "expandedPreviewMaxLines": 4000,
+  "diffViewMode": "auto",
+  "diffSplitMinWidth": 120,
+  "diffCollapsedLines": 24,
+  "diffWordWrap": true,
+  "showTruncationHints": false,
+  "showRtkCompactionHints": false
+}

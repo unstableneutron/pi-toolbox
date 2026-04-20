@@ -1,0 +1,12 @@
+node_modules/
+node_modules/**
+disabled/
+disabled/**
+
+sessions/
+themes/
+.worktrees/
+
+.DS_Store
+**/.DS_Store
+*.bak

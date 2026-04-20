@@ -1,0 +1,1 @@
+-- Bootstrap placeholder for search query.

@@ -1,0 +1,19 @@
+[tasks.check]
+description = "Auto-fix lint and formatting in place; fail loudly on anything that can't be fixed."
+run = "pnpm run check"
+
+[tasks.test]
+description = "Run the vitest suite."
+run = "pnpm run test"
+
+[tasks.knip]
+description = "Audit unused exports, types, and dependencies. Advisory only — does not auto-fix."
+run = "pnpm run knip"
+
+[tasks.pi-update]
+description = "Keep the workspace in lockstep with the globally installed pi: run `pi update`, pin pi-* sibling packages to the CLI's exact versions, patch pi-coding-agent's extension resolver, and refresh gitchamber sources."
+run = "bun run scripts/pi-update-extensions.ts"
+
+[tasks.pi-update-dry-run]
+description = "Preview what `mise run pi-update` would do without making changes."
+run = "bun run scripts/pi-update-extensions.ts --dry-run"

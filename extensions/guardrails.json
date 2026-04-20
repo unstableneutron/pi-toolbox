@@ -1,0 +1,146 @@
+{
+  "permissionGate": {
+    "patterns": [
+      {
+        "pattern": "terraform apply",
+        "description": "Terraform infrastructure changes",
+        "regex": true
+      },
+      {
+        "pattern": "terraform destroy",
+        "description": "Terraform infrastructure destruction",
+        "regex": true
+      },
+      {
+        "pattern": "DROP DATABASE",
+        "description": "SQL database drop",
+        "regex": true
+      },
+      {
+        "pattern": "kubectl delete",
+        "description": "Kubernetes resource deletion",
+        "regex": true
+      },
+      {
+        "pattern": "git push --force",
+        "description": "Git force push",
+        "regex": true
+      },
+      {
+        "pattern": "DROP TABLE",
+        "description": "SQL table drop",
+        "regex": true
+      },
+      {
+        "pattern": "^\\s*chezmoi\\s+apply(?:\\s+--?[A-Za-z0-9][A-Za-z0-9-]*(?:=(?:\"[^\"]*\"|'[^']*'|[^\\s]+))?)*\\s*$|^\\s*chezmoi\\s+apply(?=.*(?:^|\\s)(?:\"(?:~|\\$HOME)(?:/|/\\.config/?)?\"|'(?:~|\\$HOME)(?:/|/\\.config/?)?'|(?:~|\\$HOME)(?:/|/\\.config/?)?)(?:\\s|$)).*$",
+        "description": "chezmoi-apply should be scoped to specific files or directories, not system wide",
+        "regex": true
+      },
+      {
+        "pattern": "chezmoi status 2>/dev/null",
+        "description": "chezmoi status should be scoped to specific files or directories, not system wide"
+      }
+    ],
+    "allowedPatterns": [
+      {
+        "pattern": "^(?=[\\s\\S]*(?:^|\\n|;|&&|\\|\\|)\\s*rm\\s+-(?:[A-Za-z]*r[A-Za-z]*f[A-Za-z]*|[A-Za-z]*f[A-Za-z]*r[A-Za-z]*)\\b\\s+(?:\"(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*\"|'(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*'|(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)(?:\\s+(?:\"(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*\"|'(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*'|(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*))*(?=\\s*(?:$|\\n|;|&&|\\|\\|)))(?![\\s\\S]*\\brm\\s+-(?:[A-Za-z]*r[A-Za-z]*f[A-Za-z]*|[A-Za-z]*f[A-Za-z]*r[A-Za-z]*)\\b(?!\\s+(?:\"(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*\"|'(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*'|(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)(?:\\s+(?:\"(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*\"|'(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*'|(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*))*(?=\\s*(?:$|\\n|;|&&|\\|\\|))))(?![\\s\\S]*terraform apply)(?![\\s\\S]*terraform destroy)(?![\\s\\S]*DROP DATABASE)(?![\\s\\S]*kubectl delete)(?![\\s\\S]*git push --force)(?![\\s\\S]*DROP TABLE)(?![\\s\\S]*\\bchezmoi\\s+apply\\b)(?![\\s\\S]*\\bsudo\\b)(?![\\s\\S]*\\bdd\\s+if=)(?![\\s\\S]*\\bmkfs\\.)(?![\\s\\S]*\\bchmod\\s+-R\\s+777\\b)(?![\\s\\S]*\\bchown\\s+-R\\b)(?![\\s\\S]*<<)[\\s\\S]*$",
+        "regex": true
+      },
+      {
+        "pattern": "^(?=(?:(?:\\\"(?:(?:/private)?/tmp(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)?|(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*|(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)\\\"|'(?:(?:/private)?/tmp(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)?|(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*|(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)'|[^'\\\"]))*$)(?![\\s\\S]*(?:^|\\n|;|&&|\\|\\|)\\s*cd\\s+(?!(?:\"(?:/private)?/tmp(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)?\"|'(?:/private)?/tmp(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)?'|(?:/private)?/tmp(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)?)(?=\\s*(?:$|\\n|;|&&|\\|\\|))))(?=[\\s\\S]*(?:^|\\n|;|&&|\\|\\|)\\s*cd\\s+(?:\"(?:/private)?/tmp(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)?\"|'(?:/private)?/tmp(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)?'|(?:/private)?/tmp(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)?)(?=\\s*(?:$|\\n|;|&&|\\|\\|)))(?=[\\s\\S]*(?:^|\\n|;|&&|\\|\\|)\\s*rm\\s+-(?:[A-Za-z]*r[A-Za-z]*f[A-Za-z]*|[A-Za-z]*f[A-Za-z]*r[A-Za-z]*)\\b\\s+(?:\"(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*\"|'(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*'|(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)(?:\\s+(?:\"(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*\"|'(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*'|(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*))*(?=\\s*(?:$|\\n|;|&&|\\|\\|)))(?![\\s\\S]*(?:^|\\n|;|&&|\\|\\|)\\s*rm\\s+-(?:[A-Za-z]*r[A-Za-z]*f[A-Za-z]*|[A-Za-z]*f[A-Za-z]*r[A-Za-z]*)\\b(?!(?:\\s+(?:\"(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*\"|'(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*'|(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)(?:\\s+(?:\"(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*\"|'(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*'|(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*))*(?=\\s*(?:$|\\n|;|&&|\\|\\|))|\\s+(?:\"(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*\"|'(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*'|(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)(?:\\s+(?:\"(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*\"|'(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*'|(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*))*(?=\\s*(?:$|\\n|;|&&|\\|\\|)))))(?![\\s\\S]*terraform apply)(?![\\s\\S]*terraform destroy)(?![\\s\\S]*DROP DATABASE)(?![\\s\\S]*kubectl delete)(?![\\s\\S]*git push --force)(?![\\s\\S]*DROP TABLE)(?![\\s\\S]*\\bchezmoi\\s+apply\\b)(?![\\s\\S]*\\bsudo\\b)(?![\\s\\S]*\\bdd\\s+if=)(?![\\s\\S]*\\bmkfs\\.)(?![\\s\\S]*\\bchmod\\s+-R\\s+777\\b)(?![\\s\\S]*\\bchown\\s+-R\\b)(?![\\s\\S]*<<)[\\s\\S]*$",
+        "regex": true
+      },
+      {
+        "pattern": "^\\s*(?:env\\s+(?:[A-Za-z_][A-Za-z0-9_]*=(?:\\\"[^\\\"]*\\\"|'[^']*'|[^\\s]+)\\s+)*)?ssh\\b[^'\\n]*'(?![^']*(?:|\\n|;|&&|\\|\\|)\\s*#[^\\n]*\\brm\\b)(?![^']*\\brm\\s+-(?:[A-Za-z]*r[A-Za-z]*f[A-Za-z]*|[A-Za-z]*f[A-Za-z]*r[A-Za-z]*)\\b(?!\\s+(?:\"(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*\"|'(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*'|(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)(?:\\s+(?:\"(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*\"|'(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*'|(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*))*(?=\\s*(?:'|\\n|;|&&|\\|\\|))))[^']*(?:|\\n|;|&&|\\|\\|)\\s*rm\\s+-(?:[A-Za-z]*r[A-Za-z]*f[A-Za-z]*|[A-Za-z]*f[A-Za-z]*r[A-Za-z]*)\\b\\s+(?:\"(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*\"|'(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*'|(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)(?:\\s+(?:\"(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*\"|'(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*'|(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*))*(?=\\s*(?:'|\\n|;|&&|\\|\\|))[^']*'\\s*$",
+        "regex": true
+      },
+      {
+        "pattern": "^\\s*(?:env\\s+(?:[A-Za-z_][A-Za-z0-9_]*=(?:\\\"[^\\\"]*\\\"|'[^']*'|[^\\s]+)\\s+)*)?ssh\\b[^'\\n]*'(?=(?:(?:\\\"(?:(?:/private)?/tmp(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)?|(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*|(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)\\\"|[^\\\"]))*$)(?![^']*(?:|\\n|;|&&|\\|\\|)\\s*cd\\s+(?!(?:\\\"(?:/private)?/tmp(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)?\\\"|(?:/private)?/tmp(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)?)(?=\\s*(?:'|\\n|;|&&|\\|\\|))))(?=[^']*(?:|\\n|;|&&|\\|\\|)\\s*cd\\s+(?:\\\"(?:/private)?/tmp(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)?\\\"|(?:/private)?/tmp(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)?)(?=\\s*(?:'|\\n|;|&&|\\|\\|)))(?=[^']*(?:|\\n|;|&&|\\|\\|)\\s*rm\\s+-(?:[A-Za-z]*r[A-Za-z]*f[A-Za-z]*|[A-Za-z]*f[A-Za-z]*r[A-Za-z]*)\\b\\s+(?:\"(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*\"|'(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*'|(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)(?:\\s+(?:\"(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*\"|'(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*'|(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*))*(?=\\s*(?:'|\\n|;|&&|\\|\\|)))(?![^']*(?:|\\n|;|&&|\\|\\|)\\s*rm\\s+-(?:[A-Za-z]*r[A-Za-z]*f[A-Za-z]*|[A-Za-z]*f[A-Za-z]*r[A-Za-z]*)\\b(?!(?:\\s+(?:\"(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*\"|'(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*'|(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)(?:\\s+(?:\"(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*\"|'(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*'|(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*))*(?=\\s*(?:'|\\n|;|&&|\\|\\|))|\\s+(?:\"(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*\"|'(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*'|(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)(?:\\s+(?:\"(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*\"|'(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*'|(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*))*(?=\\s*(?:'|\\n|;|&&|\\|\\|)))))[^']*'\\s*$",
+        "regex": true
+      },
+      {
+        "pattern": "^\\s*(?:(?:command|exec)\\s+)?(?:(?:/usr/bin/)?time\\s+-l\\s+)?(?:env\\s+(?:[A-Za-z_][A-Za-z0-9_]*=(?:\\\"[^\\\"]*\\\"|'[^']*'|[^\\s]+)\\s+)*)?(?:(?:/bin/)?sh\\s+-(?:c|lc)|(?:/bin/)?bash\\s+-l(?:c|i))\\s+'(?![^']*(?:|\\n|;|&&|\\|\\|)\\s*#[^\\n]*\\brm\\b)(?![^']*\\brm\\s+-(?:[A-Za-z]*r[A-Za-z]*f[A-Za-z]*|[A-Za-z]*f[A-Za-z]*r[A-Za-z]*)\\b(?!\\s+(?:\"(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*\"|'(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*'|(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)(?:\\s+(?:\"(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*\"|'(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*'|(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*))*(?=\\s*(?:'|\\n|;|&&|\\|\\|))))[^']*(?:|\\n|;|&&|\\|\\|)\\s*rm\\s+-(?:[A-Za-z]*r[A-Za-z]*f[A-Za-z]*|[A-Za-z]*f[A-Za-z]*r[A-Za-z]*)\\b\\s+(?:\"(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*\"|'(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*'|(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)(?:\\s+(?:\"(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*\"|'(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*'|(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*))*(?=\\s*(?:'|\\n|;|&&|\\|\\|))[^']*'\\s*$",
+        "regex": true
+      },
+      {
+        "pattern": "^\\s*(?:(?:command|exec)\\s+)?(?:(?:/usr/bin/)?time\\s+-l\\s+)?(?:env\\s+(?:[A-Za-z_][A-Za-z0-9_]*=(?:\\\"[^\\\"]*\\\"|'[^']*'|[^\\s]+)\\s+)*)?(?:(?:/bin/)?sh\\s+-(?:c|lc)|(?:/bin/)?bash\\s+-l(?:c|i))\\s+'(?=(?:(?:\\\"(?:(?:/private)?/tmp(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)?|(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*|(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)\\\"|[^\\\"]))*$)(?![^']*(?:|\\n|;|&&|\\|\\|)\\s*cd\\s+(?!(?:\\\"(?:/private)?/tmp(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)?\\\"|(?:/private)?/tmp(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)?)(?=\\s*(?:'|\\n|;|&&|\\|\\|))))(?=[^']*(?:|\\n|;|&&|\\|\\|)\\s*cd\\s+(?:\\\"(?:/private)?/tmp(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)?\\\"|(?:/private)?/tmp(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)?)(?=\\s*(?:'|\\n|;|&&|\\|\\|)))(?=[^']*(?:|\\n|;|&&|\\|\\|)\\s*rm\\s+-(?:[A-Za-z]*r[A-Za-z]*f[A-Za-z]*|[A-Za-z]*f[A-Za-z]*r[A-Za-z]*)\\b\\s+(?:\"(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*\"|'(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*'|(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)(?:\\s+(?:\"(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*\"|'(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*'|(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*))*(?=\\s*(?:'|\\n|;|&&|\\|\\|)))(?![^']*(?:|\\n|;|&&|\\|\\|)\\s*rm\\s+-(?:[A-Za-z]*r[A-Za-z]*f[A-Za-z]*|[A-Za-z]*f[A-Za-z]*r[A-Za-z]*)\\b(?!(?:\\s+(?:\"(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*\"|'(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*'|(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)(?:\\s+(?:\"(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*\"|'(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*'|(?:\\./)?[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*))*(?=\\s*(?:'|\\n|;|&&|\\|\\|))|\\s+(?:\"(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*\"|'(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*'|(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*)(?:\\s+(?:\"(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*\"|'(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*'|(?:/private)?/tmp/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*(?:/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)*))*(?=\\s*(?:'|\\n|;|&&|\\|\\|)))))[^']*'\\s*$",
+        "regex": true
+      },
+      {
+        "pattern": "^set -euo pipefail\\n([A-Za-z_][A-Za-z0-9_]*)=\\$\\(mktemp -d\\)\\nmkdir -p \"\\$\\1/home/project/node_modules/\\.gitchamber/repo\" \"\\$\\1/home/project/node_modules/pkg\"\\n: > \"\\$\\1/home/project/node_modules/\\.gitchamber/repo/file\\.txt\"\\n: > \"\\$\\1/home/project/node_modules/pkg/file\\.txt\"\\ncat > \"\\$\\1/home/project/\\.gitignore\" <<'EOF'\\nnode_modules/\\nEOF\\ncat > \"\\$\\1/home/\\.config_git_ignore\" <<'EOF'\\n!\\*\\*/node_modules/\\.gitchamber/\\n!\\*\\*/node_modules/\\.gitchamber/\\*\\*\\nEOF\\ncd \"\\$\\1/home/project\"\\necho 'rg with project \\.gitignore \\+ external global-like ignore-file:'\\nrg --files \\. --ignore-file \"\\$\\1/home/\\.config_git_ignore\" \\| sort\\nrm -rf \"\\$\\1\"\\s*$",
+        "regex": true
+      },
+      {
+        "pattern": "^rm -rf dist/?$",
+        "regex": true
+      }
+    ],
+    "explainModel": "openai/gpt-5.3-codex",
+    "explainTimeout": 10000,
+    "explainCommands": true,
+    "requireConfirmation": true
+  },
+  "policies": {
+    "rules": [
+      {
+        "id": "example-k8s-secrets",
+        "name": "Kubernetes secrets",
+        "description": "Block kubectl config and secrets",
+        "patterns": [
+          {
+            "pattern": ".kube/config"
+          },
+          {
+            "pattern": "*kubeconfig*"
+          }
+        ],
+        "protection": "noAccess",
+        "onlyIfExists": true,
+        "enabled": true
+      },
+      {
+        "id": "broad-search-roots",
+        "name": "Broad search roots",
+        "description": "Block exact broad filesystem roots to prevent speculative home/root scans",
+        "patterns": [
+          {
+            "pattern": "/"
+          },
+          {
+            "pattern": "/Users/*"
+          },
+          {
+            "pattern": "/Users/*/"
+          },
+          {
+            "pattern": "/home/*"
+          },
+          {
+            "pattern": "/home/*/"
+          },
+          {
+            "pattern": "~"
+          },
+          {
+            "pattern": "$HOME"
+          }
+        ],
+        "protection": "noAccess",
+        "onlyIfExists": true,
+        "blockMessage": "Access to broad search root {file} is blocked. Use a specific subdirectory instead.",
+        "enabled": true
+      }
+    ]
+  },
+  "version": "0.9.0-20260327",
+  "features": {
+    "permissionGate": true,
+    "policies": true
+  },
+  "applyBuiltinDefaults": true,
+  "onboarding": {
+    "completed": true,
+    "completedAt": "2026-04-13T15:58:25.597Z",
+    "version": "0.9.0-20260327"
+  }
+}

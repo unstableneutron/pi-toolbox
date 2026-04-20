@@ -1,0 +1,11 @@
+# ripgrep prioritizes this above .gitignore, so we use this to allowlist certain directories for searching purposes
+!.pi/
+!.pi/**
+!scratch/
+!scratch/**
+!node_modules/
+!node_modules/**
+
+!mcp.json
+
+# foo bar
