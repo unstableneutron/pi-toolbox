@@ -1,6 +1,5 @@
 import {
   buildSessionContext,
-  codingTools,
   createAgentSession,
   createExtensionRuntime,
   getMarkdownTheme,
@@ -598,7 +597,9 @@ export default function (pi: ExtensionAPI) {
       model: ctx.model,
       modelRegistry: ctx.modelRegistry as AgentSession['modelRegistry'],
       thinkingLevel: pi.getThinkingLevel() as SessionThinkingLevel,
-      tools: codingTools,
+      // 0.68.0+: createAgentSession expects tool-name allowlist, not Tool[].
+      // This mirrors the previous `codingTools` export: [read, bash, edit, write].
+      tools: ['read', 'bash', 'edit', 'write'],
       resourceLoader: createBtwResourceLoader(ctx),
     });
 
