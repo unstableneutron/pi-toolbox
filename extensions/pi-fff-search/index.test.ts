@@ -11,6 +11,8 @@ import createPiFffSearchExtensionDefault, {
   bashCommandContainsExpensiveTool,
   createPiFffSearchExtension,
   forwardToolCall,
+  renderBashRewritePreview,
+  renderBashRewriteResult,
 } from './index';
 import { runLocalFallback } from './fallback';
 import {
@@ -3346,6 +3348,119 @@ describe('pi-fff-search extension', () => {
 // traversal. These tests exercise the detection predicate only —
 // signal-combining behavior relies on the platform's native
 // AbortSignal.timeout + AbortSignal.any and is not mocked.
+describe('bash-rewrite pretty rendering', () => {
+  const theme = createTheme();
+
+  test('renderBashRewritePreview shows a "bash → fff_grep:" chip for grep commands', () => {
+    const rendered = renderBashRewritePreview(
+      { command: 'grep -rn "createLsToolDefinition" src/' },
+      theme,
+      '/repo',
+    );
+    expect(rendered).not.toBeNull();
+    const text = renderText(rendered);
+    expect(text).toContain('bash →');
+    expect(text).toContain('FFF Grep');
+    expect(text).toContain('createLsToolDefinition');
+  });
+
+  test('renderBashRewritePreview shows "bash → read(...)" for sed range', () => {
+    const rendered = renderBashRewritePreview(
+      { command: "sed -n '10,20p' src/foo.ts" },
+      theme,
+      '/repo',
+    );
+    expect(rendered).not.toBeNull();
+    const text = renderText(rendered);
+    expect(text).toContain('bash →');
+    expect(text).toContain('read(');
+    expect(text).toContain('offset=10');
+    expect(text).toContain('limit=11');
+  });
+
+  test('renderBashRewritePreview shows "bash → ls(...)" for ls', () => {
+    const rendered = renderBashRewritePreview({ command: 'ls src/' }, theme, '/repo');
+    expect(rendered).not.toBeNull();
+    const text = renderText(rendered);
+    expect(text).toContain('bash →');
+    expect(text).toContain('ls(');
+    expect(text).toContain('src/');
+  });
+
+  test('renderBashRewritePreview returns null for non-rewriteable commands', () => {
+    expect(renderBashRewritePreview({ command: 'pnpm install' }, theme, '/repo')).toBeNull();
+    expect(renderBashRewritePreview({ command: 'git status' }, theme, '/repo')).toBeNull();
+    // Missing command (e.g. malformed params) also yields null, never a throw.
+    expect(renderBashRewritePreview({}, theme, '/repo')).toBeNull();
+    expect(renderBashRewritePreview(null, theme, '/repo')).toBeNull();
+  });
+
+  test('renderBashRewritePreview returns null for notice-only shapes (cat -A)', () => {
+    // Notice-only classifier hits don't produce a decision; preview
+    // should fall through (agent sees the builtin bash render plus
+    // the prepended notice from execute()).
+    expect(renderBashRewritePreview({ command: 'cat -A foo.ts' }, theme, '/repo')).toBeNull();
+  });
+
+  test('renderBashRewriteResult delegates to fff rendering for routedVia=bash-to-fff_grep', () => {
+    const result = {
+      content: [
+        {
+          type: 'text',
+          text:
+            'Note: rewrote `grep -rn foo src/` → fff_grep(...)\n\n' +
+            'base_path: /repo\n\nsrc/router.ts:12: found foo here',
+        },
+      ],
+      details: { routedVia: 'bash-to-fff_grep' },
+    };
+    const rendered = renderBashRewriteResult(result, { expanded: false, isPartial: false }, theme, {
+      cwd: '/repo',
+    });
+    expect(rendered).not.toBeNull();
+    const text = renderText(rendered);
+    // fff rendering produces a structured summary — file path should
+    // appear in the rendered output.
+    expect(text).toContain('router.ts');
+  });
+
+  test('renderBashRewriteResult returns null for routedVia=bash-to-read (falls through)', () => {
+    const result = {
+      content: [{ type: 'text', text: 'file contents here' }],
+      details: { routedVia: 'bash-to-read' },
+    };
+    expect(
+      renderBashRewriteResult(result, { expanded: false, isPartial: false }, theme, {
+        cwd: '/repo',
+      }),
+    ).toBeNull();
+  });
+
+  test('renderBashRewriteResult returns null for routedVia=bash-to-ls (falls through)', () => {
+    const result = {
+      content: [{ type: 'text', text: 'src/\ntests/\n' }],
+      details: { routedVia: 'bash-to-ls' },
+    };
+    expect(
+      renderBashRewriteResult(result, { expanded: false, isPartial: false }, theme, {
+        cwd: '/repo',
+      }),
+    ).toBeNull();
+  });
+
+  test('renderBashRewriteResult returns null when details has no routedVia', () => {
+    const result = {
+      content: [{ type: 'text', text: 'plain bash output' }],
+      details: { foo: 'bar' },
+    };
+    expect(
+      renderBashRewriteResult(result, { expanded: false, isPartial: false }, theme, {
+        cwd: '/repo',
+      }),
+    ).toBeNull();
+  });
+});
+
 describe('bashCommandContainsExpensiveTool — pass-through timeout-cap predicate', () => {
   test.each([
     ['grep -r foo .', true],
