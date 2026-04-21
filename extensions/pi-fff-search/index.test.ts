@@ -3475,6 +3475,11 @@ describe('bashCommandContainsExpensiveTool — pass-through timeout-cap predicat
     ['git grep --heading foo', true],
     ['cat foo.ts | grep bar', true],
     ['ls -la | rg "foo bar"', true],
+    // `tree` is unstructured but can dump thousands of lines on a
+    // monorepo; capped to protect the context window.
+    ['tree .', true],
+    ['tree -L 3 src', true],
+    ['cd packages && tree', true],
     ['echo "grepper" | cat', false],
     ['node --inspect findfile.ts', false],
     ['pnpm install', false],
@@ -3482,6 +3487,13 @@ describe('bashCommandContainsExpensiveTool — pass-through timeout-cap predicat
     ['echo hello', false],
     ['cat foo.ts', false],
     ['sed -n "1,20p" foo.ts', false],
+    // Word-boundary sanity: identifiers with "tree" as a substring
+    // (no separator) must not trip the cap. `tree-sitter` DOES trip
+    // the cap because `\btree\b` treats `-` as a word boundary —
+    // consistent with how we handle `grep-helper` / `find-me.sh`.
+    // The 60s ceiling is harmless for those rare false positives.
+    ['cat treeeee.txt', false],
+    ['node treetraversal.ts', false],
   ])('contains expensive token in %j -> %s', (command, expected) => {
     expect(bashCommandContainsExpensiveTool(command)).toBe(expected);
   });

@@ -111,6 +111,10 @@ const EXPENSIVE_BASH_TOKENS: ReadonlySet<string> = new Set([
   'fdfind',
   'ag',
   'ack',
+  // `tree` has no structured rewrite yet and tends to dump thousands
+  // of lines at a monorepo root. Capping at 60s keeps an incidental
+  // `tree .` from flooding the agent's context window.
+  'tree',
 ]);
 const PASS_THROUGH_EXPENSIVE_TIMEOUT_MS = 60_000;
 // Word-boundary regex built once at module load. Matches e.g. `grep`,
