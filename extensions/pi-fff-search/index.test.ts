@@ -2,6 +2,7 @@ import { describe, expect, test, vi } from 'vitest';
 import {
   createFindToolDefinition,
   createGrepToolDefinition,
+  createLsToolDefinition,
   createReadToolDefinition,
 } from '@mariozechner/pi-coding-agent';
 
@@ -1498,6 +1499,88 @@ describe('pi-fff-search extension', () => {
     ).rejects.toThrow('ENOENT');
 
     expect(builtinExecute).toHaveBeenCalledTimes(1);
+  });
+
+  test('builtin read override auto-rewrites EISDIR to ls for directory paths', async () => {
+    const ensureDaemonRunning = vi.fn(async () => {});
+    const callPublicToolOverHttp = vi.fn();
+    const eisdirError = Object.assign(new Error('EISDIR: illegal operation on a directory, read'), {
+      code: 'EISDIR',
+    });
+    const readExecute = vi.fn().mockRejectedValueOnce(eisdirError);
+    const lsExecute = vi.fn().mockResolvedValueOnce({
+      content: [{ type: 'text' as const, text: 'file-a.md\nfile-b.ts\nsub/' }],
+      details: undefined,
+    });
+    const { tools } = createHarness({
+      ensureDaemonRunning,
+      callPublicToolOverHttp,
+      overrideBuiltinRead: true,
+      createBuiltInReadTool: ((cwd: string) => ({
+        ...createReadToolDefinition(cwd),
+        execute: readExecute,
+      })) as any,
+      createBuiltInLsTool: ((cwd: string) => ({
+        ...createLsToolDefinition(cwd),
+        execute: lsExecute,
+      })) as any,
+    });
+
+    const result = await tools
+      .find((tool) => tool.name === 'read')!
+      .execute('tool-call', { path: 'scratch' }, undefined, undefined, { cwd: '/repo' });
+
+    expect(readExecute).toHaveBeenCalledTimes(1);
+    expect(lsExecute).toHaveBeenCalledTimes(1);
+    expect(lsExecute).toHaveBeenCalledWith(
+      'tool-call',
+      { path: 'scratch' },
+      expect.objectContaining({ aborted: false }),
+      undefined,
+      { cwd: '/repo' },
+    );
+    expect(callPublicToolOverHttp).not.toHaveBeenCalled();
+    expect(result.content).toEqual([
+      {
+        type: 'text',
+        text: 'Path (directory): scratch\nAuto-rewrote read → ls because the path is a directory.\n\nfile-a.md\nfile-b.ts\nsub/',
+      },
+    ]);
+    expect(result.details).toMatchObject({
+      routedVia: 'read-to-ls',
+      rewrittenFromPath: 'scratch',
+      rewrittenToTool: 'ls',
+    });
+  });
+
+  test('builtin read override rethrows EISDIR when ls rewrite itself fails', async () => {
+    const ensureDaemonRunning = vi.fn(async () => {});
+    const callPublicToolOverHttp = vi.fn();
+    const eisdirError = Object.assign(new Error('EISDIR: illegal operation on a directory, read'), {
+      code: 'EISDIR',
+    });
+    const readExecute = vi.fn().mockRejectedValueOnce(eisdirError);
+    const lsExecute = vi.fn().mockRejectedValueOnce(new Error('ls blew up'));
+    const { tools } = createHarness({
+      ensureDaemonRunning,
+      callPublicToolOverHttp,
+      overrideBuiltinRead: true,
+      createBuiltInReadTool: ((cwd: string) => ({
+        ...createReadToolDefinition(cwd),
+        execute: readExecute,
+      })) as any,
+      createBuiltInLsTool: ((cwd: string) => ({
+        ...createLsToolDefinition(cwd),
+        execute: lsExecute,
+      })) as any,
+    });
+
+    await expect(
+      tools
+        .find((tool) => tool.name === 'read')!
+        .execute('tool-call', { path: 'scratch' }, undefined, undefined, { cwd: '/repo' }),
+    ).rejects.toThrow('EISDIR');
+    expect(lsExecute).toHaveBeenCalledTimes(1);
   });
 
   test('rejects broad home within scopes without calling fff or fallback', async () => {

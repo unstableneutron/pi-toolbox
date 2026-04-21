@@ -5,6 +5,7 @@ import { Type, type TSchema } from '@sinclair/typebox';
 import {
   createFindToolDefinition,
   createGrepToolDefinition,
+  createLsToolDefinition,
   createReadToolDefinition,
   defineTool,
   type ExtensionAPI,
@@ -123,6 +124,7 @@ export interface CreatePiFffSearchExtensionOptions {
   createBuiltInReadTool?: typeof createReadToolDefinition;
   createBuiltInGrepTool?: typeof createGrepToolDefinition;
   createBuiltInFindTool?: typeof createFindToolDefinition;
+  createBuiltInLsTool?: typeof createLsToolDefinition;
 }
 
 export default createPiFffSearchExtension();
@@ -744,6 +746,28 @@ function isReadResolutionError(error: unknown): boolean {
   return error instanceof Error && /(ENOENT|no such file|not found)/i.test(error.message);
 }
 
+function isReadIsDirectoryError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (/^EISDIR\b/.test(error.message) ||
+      /illegal operation on a directory/i.test(error.message) ||
+      (error as NodeJS.ErrnoException).code === 'EISDIR')
+  );
+}
+
+function formatRewrittenLsPath(requestedPath: string, cwd: string): string {
+  const resolvedBase = requestedPath.startsWith('~')
+    ? path.join(homedir(), requestedPath.slice(1).replace(/^\/+/, ''))
+    : path.isAbsolute(requestedPath)
+      ? requestedPath
+      : path.resolve(cwd, requestedPath);
+  const relative = path.relative(cwd, resolvedBase).replace(/\\/g, '/');
+  if (relative && !relative.startsWith('..') && !path.isAbsolute(relative)) {
+    return relative;
+  }
+  return shortenDisplayPath(resolvedBase, cwd);
+}
+
 function buildReadResolutionParams(readPath: string): Record<string, unknown> | null {
   const normalized = normalizeRequestedPath(readPath);
   if (!normalized || path.isAbsolute(normalized) || normalized.startsWith('~')) {
@@ -813,6 +837,55 @@ function formatFixedReadPath(resolvedPath: string, cwd: string): string {
   }
 
   return resolvedPath;
+}
+
+async function rewriteReadToLs(args: {
+  requestedPath: string;
+  toolCallId: string;
+  signal: AbortSignal | undefined;
+  onUpdate: Parameters<ReturnType<typeof createReadToolDefinition>['execute']>[3];
+  ctx: Parameters<ReturnType<typeof createReadToolDefinition>['execute']>[4];
+  createBuiltInLs: typeof createLsToolDefinition;
+}): Promise<{
+  content: Awaited<ReturnType<ReturnType<typeof createLsToolDefinition>['execute']>>['content'];
+  details: Record<string, unknown>;
+} | null> {
+  const builtInLs = args.createBuiltInLs(args.ctx.cwd);
+  let lsResult: Awaited<ReturnType<typeof builtInLs.execute>>;
+  try {
+    lsResult = await builtInLs.execute(
+      args.toolCallId,
+      { path: args.requestedPath },
+      withBuiltinToolTimeout(args.signal),
+      args.onUpdate,
+      args.ctx,
+    );
+  } catch {
+    return null;
+  }
+
+  const displayPath = formatRewrittenLsPath(args.requestedPath, args.ctx.cwd);
+  const header = `Path (directory): ${displayPath}\nAuto-rewrote read → ls because the path is a directory.`;
+
+  const updatedContent = lsResult.content.map((entry, index) =>
+    index === 0 && entry.type === 'text' ? { ...entry, text: `${header}\n\n${entry.text}` } : entry,
+  );
+  const firstText = updatedContent.find(
+    (entry): entry is { type: 'text'; text: string } => entry.type === 'text',
+  );
+  const content = firstText
+    ? updatedContent
+    : [{ type: 'text' as const, text: header }, ...updatedContent];
+
+  return {
+    content,
+    details: {
+      ...(lsResult.details && typeof lsResult.details === 'object' ? lsResult.details : {}),
+      routedVia: 'read-to-ls',
+      rewrittenFromPath: args.requestedPath,
+      rewrittenToTool: 'ls',
+    },
+  };
 }
 
 function withBuiltinToolTimeout(
@@ -996,6 +1069,7 @@ export function createPiFffSearchExtension(options: CreatePiFffSearchExtensionOp
   const createBuiltInRead = options.createBuiltInReadTool ?? createReadToolDefinition;
   const createBuiltInGrep = options.createBuiltInGrepTool ?? createGrepToolDefinition;
   const createBuiltInFind = options.createBuiltInFindTool ?? createFindToolDefinition;
+  const createBuiltInLs = options.createBuiltInLsTool ?? createLsToolDefinition;
   const builtInTemplates =
     overrideBuiltinRead || overrideBuiltinGrep || overrideBuiltinFind
       ? {
@@ -1187,6 +1261,20 @@ export function createPiFffSearchExtension(options: CreatePiFffSearchExtensionOp
               typeof (params as Record<string, unknown>).path === 'string'
                 ? ((params as Record<string, unknown>).path as string)
                 : null;
+            if (requestedPath && isReadIsDirectoryError(error)) {
+              const rewritten = await rewriteReadToLs({
+                requestedPath,
+                toolCallId,
+                signal,
+                onUpdate,
+                ctx,
+                createBuiltInLs,
+              });
+              if (rewritten) {
+                return rewritten;
+              }
+              throw error;
+            }
             if (!requestedPath || !isReadResolutionError(error)) {
               throw error;
             }
