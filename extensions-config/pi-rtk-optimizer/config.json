@@ -4,7 +4,7 @@
   "guardWhenRtkMissing": true,
   "showRewriteNotifications": true,
   "rewriteGitGithub": true,
-  "rewriteFilesystem": true,
+  "rewriteFilesystem": false,
   "rewriteRust": true,
   "rewriteJavaScript": true,
   "rewritePython": true,
