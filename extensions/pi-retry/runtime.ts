@@ -517,6 +517,10 @@ export function getPendingRecovery(sessionId: string): PendingRecovery | undefin
   };
 }
 
+/**
+ * Accessed dynamically from tests via `(runtime as any).setPendingRecovery?.()`.
+ * @lintignore
+ */
 export function setPendingRecovery(sessionId: string, recovery: PendingRecovery): void {
   const messageKind = getRecoveryMessageKind(recovery.message);
   setActiveRecovery(sessionId, {

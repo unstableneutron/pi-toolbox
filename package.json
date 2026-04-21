@@ -8,7 +8,9 @@
   "scripts": {
     "check": "oxlint -c .oxlintrc.json --type-aware --type-check --fix --fix-suggestions --fix-dangerously --deny-warnings . && oxfmt -c .oxfmtrc.json .",
     "test": "vitest run",
-    "knip": "knip"
+    "knip": "knip",
+    "knip:fix": "knip --fix && oxfmt -c .oxfmtrc.json .",
+    "knip:fix:files": "knip --fix --allow-remove-files && oxfmt -c .oxfmtrc.json ."
   },
   "dependencies": {
     "parallel-web": "^0.3.2"

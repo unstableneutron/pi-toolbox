@@ -1,12 +1,15 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "tags": ["-lintignore"],
+  "ignoreDependencies": ["@mariozechner/pi-agent-core", "@aws-sdk/client-bedrock-runtime", "tsx"],
   "workspaces": {
     ".": {
-      "entry": ["*.ts", "extensions/*.ts", "extensions/**/index.ts"],
-      "project": ["*.ts", "extensions/**/*.ts"],
-      "ignore": ["**/scratch/**", "disabled/**", "git/**", "node_modules/**", "sessions/**"],
-      "includeEntryExports": true
+      "entry": ["extensions/**/index.ts", "scripts/*.ts"],
+      "project": ["extensions/**/*.ts", "scripts/**/*.ts", "tests/**/*.ts"]
+    },
+    "extensions/*": {
+      "entry": ["index.ts"],
+      "project": ["**/*.ts"]
     }
   }
 }
