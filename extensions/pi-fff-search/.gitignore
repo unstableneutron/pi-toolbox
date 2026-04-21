@@ -1,0 +1,3 @@
+# Developer-local validation corpus (see test-fixtures/README.md).
+# Built from your own ~/.pi/agent/sessions; never committed.
+test-fixtures/*.local.jsonl

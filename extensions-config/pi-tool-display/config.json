@@ -4,7 +4,7 @@
     "grep": false,
     "find": false,
     "ls": true,
-    "bash": true,
+    "bash": false,
     "edit": false,
     "write": true
   },
