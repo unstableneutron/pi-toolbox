@@ -18,6 +18,10 @@ run = "bun run scripts/sync-extension-configs.ts"
 description = "Diff subagent definitions in agents/ against ~/.pi/agent/agents/; pass --apply for interactive per-file sync."
 run = "bun run scripts/sync-agents.ts"
 
+[tasks.sync-prompts]
+description = "Diff prompt templates in prompts/ against ~/.pi/agent/prompts/; pass --apply for interactive per-file sync."
+run = "bun run scripts/sync-prompts.ts"
+
 [tasks.pi-update]
 description = "Keep the workspace in lockstep with the globally installed pi: run `pi update`, pin pi-* sibling packages to the CLI's exact versions, patch pi-coding-agent's extension resolver, and refresh gitchamber sources."
 run = "bun run scripts/pi-update-extensions.ts"
