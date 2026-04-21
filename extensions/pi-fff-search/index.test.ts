@@ -5,6 +5,7 @@ import {
   createLsToolDefinition,
   createReadToolDefinition,
 } from '@mariozechner/pi-coding-agent';
+import { createBashToolDefinition } from '@mariozechner/pi-coding-agent';
 
 import createPiFffSearchExtensionDefault, {
   createPiFffSearchExtension,
@@ -402,6 +403,7 @@ describe('pi-fff-search extension', () => {
       overrideBuiltinRead: false,
       overrideBuiltinGrep: false,
       overrideBuiltinFind: false,
+      rewriteBuiltinBash: false,
     });
 
     expect(tools.map((tool) => tool.name)).toEqual(['fff_find_files', 'fff_grep']);
@@ -421,6 +423,7 @@ describe('pi-fff-search extension', () => {
       overrideBuiltinRead: true,
       overrideBuiltinGrep: true,
       overrideBuiltinFind: true,
+      rewriteBuiltinBash: false,
     });
 
     expect(tools.map((tool) => tool.name)).toEqual([
@@ -430,6 +433,17 @@ describe('pi-fff-search extension', () => {
       'grep',
       'find',
     ]);
+  });
+
+  test('also registers the builtin bash rewrite by default', () => {
+    const { tools } = createHarness({
+      overrideBuiltinRead: false,
+      overrideBuiltinGrep: false,
+      overrideBuiltinFind: false,
+      // rewriteBuiltinBash left unset → defaults to true (REWRITE_BUILTIN_BASH).
+    });
+
+    expect(tools.map((tool) => tool.name)).toEqual(['fff_find_files', 'fff_grep', 'bash']);
   });
 
   test('injects repository search preference guidance into the system prompt', async () => {
@@ -453,6 +467,7 @@ describe('pi-fff-search extension', () => {
       overrideBuiltinRead: false,
       overrideBuiltinGrep: false,
       overrideBuiltinFind: false,
+      rewriteBuiltinBash: false,
     });
 
     for (const tool of tools) {
@@ -1581,6 +1596,235 @@ describe('pi-fff-search extension', () => {
         .execute('tool-call', { path: 'scratch' }, undefined, undefined, { cwd: '/repo' }),
     ).rejects.toThrow('EISDIR');
     expect(lsExecute).toHaveBeenCalledTimes(1);
+  });
+
+  test('builtin bash rewrite can be disabled via rewriteBuiltinBash: false', async () => {
+    const ensureDaemonRunning = vi.fn(async () => {});
+    const callPublicToolOverHttp = vi.fn();
+    const bashExecute = vi.fn().mockResolvedValueOnce({
+      content: [{ type: 'text' as const, text: 'raw bash output' }],
+      details: undefined,
+    });
+    const { tools } = createHarness({
+      ensureDaemonRunning,
+      callPublicToolOverHttp,
+      // Explicitly turn off the bash rewrite. The default is now `true`
+      // (REWRITE_BUILTIN_BASH); this test pins the opt-out path.
+      rewriteBuiltinBash: false,
+      createBuiltInBashTool: ((cwd: string) => ({
+        ...createBashToolDefinition(cwd),
+        execute: bashExecute,
+      })) as any,
+    });
+
+    const bashTool = tools.find((tool) => tool.name === 'bash');
+    expect(bashTool).toBeUndefined();
+  });
+
+  test('builtin bash override rewrites `cat FILE` → read and prepends notice', async () => {
+    const ensureDaemonRunning = vi.fn(async () => {});
+    const callPublicToolOverHttp = vi.fn();
+    const bashExecute = vi.fn();
+    const readExecute = vi.fn().mockResolvedValueOnce({
+      content: [{ type: 'text' as const, text: 'export const x = 1;' }],
+      details: undefined,
+    });
+    const { tools } = createHarness({
+      ensureDaemonRunning,
+      callPublicToolOverHttp,
+      rewriteBuiltinBash: true,
+      createBuiltInReadTool: ((cwd: string) => ({
+        ...createReadToolDefinition(cwd),
+        execute: readExecute,
+      })) as any,
+      createBuiltInBashTool: ((cwd: string) => ({
+        ...createBashToolDefinition(cwd),
+        execute: bashExecute,
+      })) as any,
+    });
+
+    const result = await tools
+      .find((tool) => tool.name === 'bash')!
+      .execute('tool-call', { command: 'cat src/foo.ts' }, undefined, undefined, {
+        cwd: '/repo',
+      });
+
+    expect(bashExecute).not.toHaveBeenCalled();
+    expect(readExecute).toHaveBeenCalledWith(
+      'tool-call',
+      { path: 'src/foo.ts' },
+      expect.objectContaining({ aborted: false }),
+      undefined,
+      { cwd: '/repo' },
+    );
+    expect(result.content).toEqual([
+      {
+        type: 'text',
+        text: expect.stringMatching(
+          /^Note: rewrote `cat src\/foo\.ts` → read\(path="src\/foo\.ts"\)[\s\S]*export const x = 1;$/,
+        ),
+      },
+    ]);
+    expect(result.details).toMatchObject({
+      routedVia: 'bash-to-read',
+      rewriteRecognizer: 'cat-file',
+      rewriteFromCommand: 'cat src/foo.ts',
+    });
+  });
+
+  test('builtin bash override rewrites `grep -rn PAT src/ | head -20` → fff_grep with limit', async () => {
+    const ensureDaemonRunning = vi.fn(async () => {});
+    const callPublicToolOverHttp = vi.fn(async () => ({
+      ok: true as const,
+      value: {
+        mode: 'compact' as const,
+        base_path: '/repo/src',
+        next_cursor: null,
+        items: [{ path: 'router.ts', line: 12, text: 'foo' }],
+      },
+    }));
+    const bashExecute = vi.fn();
+    const { tools } = createHarness({
+      ensureDaemonRunning,
+      callPublicToolOverHttp,
+      rewriteBuiltinBash: true,
+      createBuiltInBashTool: ((cwd: string) => ({
+        ...createBashToolDefinition(cwd),
+        execute: bashExecute,
+      })) as any,
+    });
+
+    const result = await tools
+      .find((tool) => tool.name === 'bash')!
+      .execute('tool-call', { command: 'grep -rn "foo" src/ | head -20' }, undefined, undefined, {
+        cwd: '/repo',
+      });
+
+    expect(bashExecute).not.toHaveBeenCalled();
+    expect(callPublicToolOverHttp).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tool: 'fff_grep',
+        patterns: ['foo'],
+        within: '/repo/src',
+        limit: 20,
+      }),
+    );
+    expect(result.details).toMatchObject({
+      routedVia: 'bash-to-fff_grep',
+      rewriteRecognizer: 'grep-search+head',
+    });
+  });
+
+  test('builtin bash override passes through commands it does not recognize', async () => {
+    const ensureDaemonRunning = vi.fn(async () => {});
+    const callPublicToolOverHttp = vi.fn();
+    const bashExecute = vi.fn().mockResolvedValueOnce({
+      content: [{ type: 'text' as const, text: 'raw bash output' }],
+      details: { truncation: undefined },
+    });
+    const { tools } = createHarness({
+      ensureDaemonRunning,
+      callPublicToolOverHttp,
+      rewriteBuiltinBash: true,
+      createBuiltInBashTool: ((cwd: string) => ({
+        ...createBashToolDefinition(cwd),
+        execute: bashExecute,
+      })) as any,
+    });
+
+    const result = await tools
+      .find((tool) => tool.name === 'bash')!
+      .execute(
+        'tool-call',
+        { command: 'pnpm install --silent 2>&1 | tail -5' },
+        undefined,
+        undefined,
+        { cwd: '/repo' },
+      );
+
+    expect(bashExecute).toHaveBeenCalledTimes(1);
+    expect(callPublicToolOverHttp).not.toHaveBeenCalled();
+    expect(result.content).toEqual([{ type: 'text', text: 'raw bash output' }]);
+  });
+
+  test('builtin bash override falls back to real bash when dispatch throws', async () => {
+    const ensureDaemonRunning = vi.fn(async () => {});
+    const callPublicToolOverHttp = vi.fn();
+    const readExecute = vi.fn().mockRejectedValueOnce(new Error('read blew up'));
+    const bashExecute = vi.fn().mockResolvedValueOnce({
+      content: [{ type: 'text' as const, text: 'cat ran anyway' }],
+      details: undefined,
+    });
+    const { tools } = createHarness({
+      ensureDaemonRunning,
+      callPublicToolOverHttp,
+      rewriteBuiltinBash: true,
+      overrideBuiltinRead: false,
+      createBuiltInReadTool: ((cwd: string) => ({
+        ...createReadToolDefinition(cwd),
+        execute: readExecute,
+      })) as any,
+      createBuiltInBashTool: ((cwd: string) => ({
+        ...createBashToolDefinition(cwd),
+        execute: bashExecute,
+      })) as any,
+    });
+
+    const result = await tools
+      .find((tool) => tool.name === 'bash')!
+      .execute('tool-call', { command: 'cat /tmp/x.txt' }, undefined, undefined, {
+        cwd: '/repo',
+      });
+
+    expect(readExecute).toHaveBeenCalledTimes(1);
+    expect(bashExecute).toHaveBeenCalledTimes(1);
+    expect(result.content).toEqual([{ type: 'text', text: 'cat ran anyway' }]);
+  });
+
+  test('builtin bash override rewrites `find <path> -type f | head -1 | xargs cat | head -80` → read with limit', async () => {
+    const ensureDaemonRunning = vi.fn(async () => {});
+    const callPublicToolOverHttp = vi.fn();
+    const readExecute = vi.fn().mockResolvedValueOnce({
+      content: [{ type: 'text' as const, text: 'first 80 lines here' }],
+      details: undefined,
+    });
+    const bashExecute = vi.fn();
+    const { tools } = createHarness({
+      ensureDaemonRunning,
+      callPublicToolOverHttp,
+      rewriteBuiltinBash: true,
+      createBuiltInReadTool: ((cwd: string) => ({
+        ...createReadToolDefinition(cwd),
+        execute: readExecute,
+      })) as any,
+      createBuiltInBashTool: ((cwd: string) => ({
+        ...createBashToolDefinition(cwd),
+        execute: bashExecute,
+      })) as any,
+    });
+
+    const result = await tools
+      .find((tool) => tool.name === 'bash')!
+      .execute(
+        'tool-call',
+        { command: 'find /a/b.ts -type f | head -1 | xargs cat 2>/dev/null | head -80' },
+        undefined,
+        undefined,
+        { cwd: '/repo' },
+      );
+
+    expect(bashExecute).not.toHaveBeenCalled();
+    expect(readExecute).toHaveBeenCalledWith(
+      'tool-call',
+      { path: '/a/b.ts', limit: 80 },
+      expect.objectContaining({ aborted: false }),
+      undefined,
+      { cwd: '/repo' },
+    );
+    expect(result.details).toMatchObject({
+      routedVia: 'bash-to-read',
+      rewriteRecognizer: 'find-xargs-cat',
+    });
   });
 
   test('rejects broad home within scopes without calling fff or fallback', async () => {

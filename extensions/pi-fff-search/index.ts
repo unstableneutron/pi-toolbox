@@ -3,6 +3,7 @@ import path from 'node:path';
 import { Text, type Component } from '@mariozechner/pi-tui';
 import { Type, type TSchema } from '@sinclair/typebox';
 import {
+  createBashToolDefinition,
   createFindToolDefinition,
   createGrepToolDefinition,
   createLsToolDefinition,
@@ -29,6 +30,7 @@ import {
   type SearchCoordinatorResult,
 } from 'fff-router';
 import { clampMatchText } from './match-heuristics';
+import { tryRewriteBash, type RewriteDecision } from './bash-rewrite';
 import {
   type FallbackSpillInfo,
   type LocalFallbackEngine,
@@ -85,6 +87,10 @@ const FIND_QUERY_GENERIC_TOKENS = new Set([
 const OVERRIDE_BUILTIN_READ = true;
 const OVERRIDE_BUILTIN_GREP = true;
 const OVERRIDE_BUILTIN_FIND = true;
+// Re-writes grep / find / cat / ls / head-like commands inside a bash tool
+// call to a direct call to the structured read / ls / fff_grep / fff_find_files
+// tool. Unrecognized shapes pass through to the real bash tool unchanged.
+const REWRITE_BUILTIN_BASH = true;
 const BUILTIN_TOOL_TIMEOUT_MS = 10_000;
 
 const ALLOWLIST_HINTS = ['~/.pi', '~/.pi/agent', '~/.codex', '~/.claude', '~/.amp'];
@@ -121,10 +127,12 @@ export interface CreatePiFffSearchExtensionOptions {
   overrideBuiltinRead?: boolean;
   overrideBuiltinGrep?: boolean;
   overrideBuiltinFind?: boolean;
+  rewriteBuiltinBash?: boolean;
   createBuiltInReadTool?: typeof createReadToolDefinition;
   createBuiltInGrepTool?: typeof createGrepToolDefinition;
   createBuiltInFindTool?: typeof createFindToolDefinition;
   createBuiltInLsTool?: typeof createLsToolDefinition;
+  createBuiltInBashTool?: typeof createBashToolDefinition;
 }
 
 export default createPiFffSearchExtension();
@@ -888,6 +896,106 @@ async function rewriteReadToLs(args: {
   };
 }
 
+type BashExecuteParams = Parameters<ReturnType<typeof createBashToolDefinition>['execute']>;
+type BashExecuteResult = Awaited<
+  ReturnType<ReturnType<typeof createBashToolDefinition>['execute']>
+>;
+
+type ToolContentEntry = { type: 'text'; text: string } | { type: string; [key: string]: unknown };
+
+async function dispatchBashRewrite(args: {
+  decision: RewriteDecision;
+  notice: string;
+  originalCommand: string;
+  toolCallId: string;
+  signal: AbortSignal | undefined;
+  onUpdate: BashExecuteParams[3];
+  ctx: BashExecuteParams[4];
+  ensureDaemon: () => Promise<void>;
+  callTool: (request: PublicToolRequest) => Promise<SearchCoordinatorResult>;
+  runFallback: (args: {
+    toolName: PublicToolName;
+    resolvedWithin: string;
+    publicRequest: PublicToolRequest;
+  }) => Promise<RunLocalFallbackResult>;
+  createBuiltInRead: typeof createReadToolDefinition;
+  createBuiltInLs: typeof createLsToolDefinition;
+}): Promise<BashExecuteResult> {
+  const sharedDetails = {
+    routedVia: `bash-to-${args.decision.tool}` as const,
+    rewriteRecognizer: args.decision.recognizer,
+    rewriteFromCommand: args.originalCommand,
+    rewriteToParams: args.decision.params,
+  };
+
+  if (args.decision.tool === 'fff_grep' || args.decision.tool === 'fff_find_files') {
+    const forwarded = await forwardToolCall({
+      toolName: args.decision.tool,
+      params: args.decision.params,
+      cwd: args.ctx.cwd,
+      ensureDaemonRunning: args.ensureDaemon,
+      callPublicToolOverHttp: args.callTool,
+      runRipgrepFallback: args.runFallback,
+    });
+    return {
+      content: [{ type: 'text' as const, text: `${args.notice}\n\n${forwarded.text}` }],
+      details: {
+        ...forwarded.details,
+        ...sharedDetails,
+      } as BashExecuteResult['details'],
+    };
+  }
+
+  if (args.decision.tool === 'read') {
+    const builtInRead = args.createBuiltInRead(args.ctx.cwd);
+    const result = await builtInRead.execute(
+      args.toolCallId,
+      args.decision.params as { path: string; offset?: number; limit?: number },
+      withBuiltinToolTimeout(args.signal),
+      args.onUpdate,
+      args.ctx,
+    );
+    return prependNoticeToContent(result, args.notice, sharedDetails);
+  }
+
+  // ls
+  const builtInLs = args.createBuiltInLs(args.ctx.cwd);
+  const result = await builtInLs.execute(
+    args.toolCallId,
+    args.decision.params as { path?: string; limit?: number },
+    withBuiltinToolTimeout(args.signal),
+    args.onUpdate,
+    args.ctx,
+  );
+  return prependNoticeToContent(result, args.notice, sharedDetails);
+}
+
+function prependNoticeToContent(
+  result: { content: ReadonlyArray<unknown>; details?: unknown },
+  notice: string,
+  extraDetails: Record<string, unknown>,
+): BashExecuteResult {
+  const entries = result.content as ReadonlyArray<ToolContentEntry>;
+  const first = entries[0];
+  const updatedContent: ToolContentEntry[] =
+    first && first.type === 'text'
+      ? [
+          { type: 'text' as const, text: `${notice}\n\n${(first as { text: string }).text}` },
+          ...entries.slice(1),
+        ]
+      : [{ type: 'text' as const, text: notice }, ...entries];
+
+  const mergedDetails = {
+    ...(result.details && typeof result.details === 'object' ? result.details : {}),
+    ...extraDetails,
+  } as BashExecuteResult['details'];
+
+  return {
+    content: updatedContent as BashExecuteResult['content'],
+    details: mergedDetails,
+  };
+}
+
 function withBuiltinToolTimeout(
   signal: AbortSignal | undefined,
   timeoutMs = BUILTIN_TOOL_TIMEOUT_MS,
@@ -1066,16 +1174,19 @@ export function createPiFffSearchExtension(options: CreatePiFffSearchExtensionOp
   const overrideBuiltinRead = options.overrideBuiltinRead ?? OVERRIDE_BUILTIN_READ;
   const overrideBuiltinGrep = options.overrideBuiltinGrep ?? OVERRIDE_BUILTIN_GREP;
   const overrideBuiltinFind = options.overrideBuiltinFind ?? OVERRIDE_BUILTIN_FIND;
+  const rewriteBuiltinBash = options.rewriteBuiltinBash ?? REWRITE_BUILTIN_BASH;
   const createBuiltInRead = options.createBuiltInReadTool ?? createReadToolDefinition;
   const createBuiltInGrep = options.createBuiltInGrepTool ?? createGrepToolDefinition;
   const createBuiltInFind = options.createBuiltInFindTool ?? createFindToolDefinition;
   const createBuiltInLs = options.createBuiltInLsTool ?? createLsToolDefinition;
+  const createBuiltInBash = options.createBuiltInBashTool ?? createBashToolDefinition;
   const builtInTemplates =
-    overrideBuiltinRead || overrideBuiltinGrep || overrideBuiltinFind
+    overrideBuiltinRead || overrideBuiltinGrep || overrideBuiltinFind || rewriteBuiltinBash
       ? {
           read: createBuiltInRead(process.cwd()),
           grep: createBuiltInGrep(process.cwd()),
           find: createBuiltInFind(process.cwd()),
+          bash: createBuiltInBash(process.cwd()),
         }
       : null;
 
@@ -1518,6 +1629,46 @@ export function createPiFffSearchExtension(options: CreatePiFffSearchExtensionOp
               onUpdate,
               ctx,
             );
+          }
+        },
+      });
+    }
+
+    if (rewriteBuiltinBash && builtInTemplates) {
+      pi.registerTool({
+        ...builtInTemplates.bash,
+        async execute(toolCallId, params, signal, onUpdate, ctx) {
+          const builtInBash = createBuiltInBash(ctx.cwd);
+          const command =
+            typeof (params as Record<string, unknown>).command === 'string'
+              ? ((params as Record<string, unknown>).command as string)
+              : null;
+          const rewrite = command ? tryRewriteBash(command, ctx.cwd) : null;
+          if (!rewrite) {
+            return builtInBash.execute(toolCallId, params, signal, onUpdate, ctx);
+          }
+
+          try {
+            return await dispatchBashRewrite({
+              decision: rewrite.decision,
+              notice: rewrite.notice,
+              originalCommand: command!,
+              toolCallId,
+              signal,
+              onUpdate,
+              ctx,
+              ensureDaemon,
+              callTool,
+              runFallback,
+              createBuiltInRead,
+              createBuiltInLs,
+            });
+          } catch {
+            // Any failure in the structured path falls back to running the
+            // original bash command unchanged, so the agent still makes
+            // forward progress. Silent — the shell output itself is the
+            // feedback the agent needs.
+            return builtInBash.execute(toolCallId, params, signal, onUpdate, ctx);
           }
         },
       });
