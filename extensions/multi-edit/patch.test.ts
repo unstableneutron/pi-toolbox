@@ -881,6 +881,30 @@ describe('buildPatchPlan', () => {
     await expect(workspace.exists('/repo/source.txt')).resolves.toBe(false);
     await expect(workspace.readText('/repo/target.txt')).resolves.toBe('alpha\n');
   });
+
+  test('summaryText notes lenient-divider chunks so the agent can correct them', async () => {
+    const workspace = createVirtualWorkspace('/repo', {
+      '/repo/foo.ts': 'const a = 1;\n',
+    });
+    const ops = parsePatch(
+      [
+        '*** Begin Patch',
+        '*** Update File: foo.ts',
+        '*** FindReplaceOnce:',
+        '<<<<<<< SEARCH',
+        'const a = 1;',
+        '=======',
+        'const a = 42;',
+        '>>>>>>> REPLACE',
+        '*** End Patch',
+      ].join('\n'),
+    );
+
+    const plan = await buildPatchPlan(ops, workspace, '/repo');
+    expect(plan.summaryText).toContain("accepted bare '=======' as the SEARCH/REPLACE divider");
+    expect(plan.summaryText).toContain('foo.ts');
+    expect(plan.summaryText).toContain("Prefer '======= REPLACE'");
+  });
 });
 
 // Phase 0 baseline characterization tests. These lock in current
@@ -1622,6 +1646,101 @@ describe('FindReplaceOnce (phase 2)', () => {
     await expect(workspace.readText('/repo/foo.ts')).resolves.toBe(
       ['const a = 100;', 'const b = 2;', 'const c = 300;'].join('\n'),
     );
+  });
+
+  test("accepts bare '=======' as divider (lenient fallback) and flags the chunk", async () => {
+    // Frontier models often emit the aider / git-conflict middle
+    // marker (bare `=======`) instead of the canonical
+    // `======= REPLACE`. Accept it as a forgiveness fallback and
+    // flag the chunk so the tool surface can nudge the agent.
+    const workspace = createVirtualWorkspace('/repo', {
+      '/repo/foo.ts': ['const a = 1;', 'const b = 2;'].join('\n'),
+    });
+    const operations = parsePatch(
+      [
+        '*** Begin Patch',
+        '*** Update File: foo.ts',
+        '*** FindReplaceOnce:',
+        '<<<<<<< SEARCH',
+        'const a = 1;',
+        '=======',
+        'const a = 42;',
+        '>>>>>>> REPLACE',
+        '*** End Patch',
+      ].join('\n'),
+    );
+    expect(operations).toHaveLength(1);
+    const op = operations[0];
+    expect(op?.kind).toBe('update');
+    if (op?.kind === 'update') {
+      expect(op.chunks).toHaveLength(1);
+      expect(op.chunks[0]?.lenientDivider).toBe(true);
+    }
+    await applyPatchOperations(operations, workspace, '/repo');
+    await expect(workspace.readText('/repo/foo.ts')).resolves.toBe(
+      ['const a = 42;', 'const b = 2;'].join('\n'),
+    );
+  });
+
+  test("explicit '======= REPLACE' wins over an earlier bare '=======' in SEARCH content", async () => {
+    // Safety property: files with literal `=======` content (markdown
+    // HRs, RST underlines, committed conflict fixtures) stay
+    // unambiguous when the agent uses the explicit divider. The
+    // lenient fallback must only kick in when the strict form is
+    // absent.
+    const workspace = createVirtualWorkspace('/repo', {
+      '/repo/docs.md': ['# Title', '', '=======', '', 'body'].join('\n'),
+    });
+    const operations = parsePatch(
+      [
+        '*** Begin Patch',
+        '*** Update File: docs.md',
+        '*** FindReplaceOnce:',
+        '<<<<<<< SEARCH',
+        '# Title',
+        '',
+        '=======',
+        '',
+        'body',
+        '======= REPLACE',
+        '# Updated',
+        '',
+        '---',
+        '',
+        'new body',
+        '>>>>>>> REPLACE',
+        '*** End Patch',
+      ].join('\n'),
+    );
+    expect(operations).toHaveLength(1);
+    const op = operations[0];
+    if (op?.kind === 'update') {
+      expect(op.chunks[0]?.lenientDivider).toBeUndefined();
+    }
+    await applyPatchOperations(operations, workspace, '/repo');
+    await expect(workspace.readText('/repo/docs.md')).resolves.toBe(
+      ['# Updated', '', '---', '', 'new body'].join('\n'),
+    );
+  });
+
+  test("two bare '=======' lines with no strict divider fail with candidate line numbers", () => {
+    expect(() =>
+      parsePatch(
+        [
+          '*** Begin Patch',
+          '*** Update File: docs.md',
+          '*** FindReplaceOnce:',
+          '<<<<<<< SEARCH',
+          'one',
+          '=======',
+          'two',
+          '=======',
+          'three',
+          '>>>>>>> REPLACE',
+          '*** End Patch',
+        ].join('\n'),
+      ),
+    ).toThrow(/ambiguous bare '=======' lines at input lines 6, 8/);
   });
 });
 

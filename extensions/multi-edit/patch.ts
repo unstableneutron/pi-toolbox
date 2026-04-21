@@ -40,6 +40,12 @@ export interface UpdateChunk {
   // match in the winning tier is replaced. Only set for chunks
   // parsed from a `*** FindReplaceAll:` section.
   replaceAll?: boolean;
+  // Parser forgiveness flag. True when the chunk's SEARCH/REPLACE
+  // divider was accepted as bare `=======` (aider / git-conflict
+  // style) instead of the canonical `======= REPLACE`. Surfaced in
+  // the apply_patch summary so the agent learns to prefer the
+  // explicit form next time, without failing the call outright.
+  lenientDivider?: boolean;
 }
 
 export type PatchOperation =
@@ -394,6 +400,15 @@ const FIND_REPLACE_SEARCH_MARKER = '<<<<<<< SEARCH';
 // files. SEARCH or REPLACE blocks may contain literal `=======`
 // lines; only the full `======= REPLACE` form terminates the block.
 const FIND_REPLACE_DIVIDER = '======= REPLACE';
+// Aider / git-conflict style bare divider. Accepted as a fallback
+// only when the canonical `======= REPLACE` form is absent from the
+// chunk and exactly one bare `=======` line appears before the end
+// marker. Frontier models often emit the bare form because their
+// training data is saturated with aider SEARCH/REPLACE examples; the
+// fallback forgives that drift without losing the explicit form as
+// an escape hatch for files that genuinely contain `=======` content
+// (markdown HRs, RST underlines, committed conflict fixtures).
+const FIND_REPLACE_BARE_DIVIDER = '=======';
 const FIND_REPLACE_END_MARKER = '>>>>>>> REPLACE';
 
 function resolvePatchPath(cwd: string, filePath: string): string {
@@ -1019,29 +1034,64 @@ function parseFindReplaceChunk(
   }
   i++;
 
-  const searchLines: string[] = [];
-  while (i <= lastContentLine) {
-    const raw = lines[i] ?? '';
-    if (raw.trim() === FIND_REPLACE_DIVIDER) break;
-    searchLines.push(raw);
-    i++;
+  // Two-pass scan between SEARCH marker and END marker. The strict
+  // `======= REPLACE` divider always wins if present, so files that
+  // contain literal `=======` lines as content parse the same as
+  // before. If the strict divider is absent, fall back to a single
+  // bare `=======` as the divider (aider / git-conflict style) and
+  // flag the chunk with `lenientDivider` so the tool surface can
+  // nudge the agent toward the explicit form. Two or more bare
+  // `=======` lines with no strict divider is genuinely ambiguous
+  // and fails with a message listing the candidate lines.
+  const searchStart = i;
+  let strictDividerIdx = -1;
+  const bareDividerIdxs: number[] = [];
+  let endMarkerIdx = -1;
+  for (let j = searchStart; j <= lastContentLine; j++) {
+    const trimmed = (lines[j] ?? '').trim();
+    if (trimmed === FIND_REPLACE_END_MARKER) {
+      endMarkerIdx = j;
+      break;
+    }
+    if (trimmed === FIND_REPLACE_DIVIDER) {
+      if (strictDividerIdx === -1) strictDividerIdx = j;
+    } else if (trimmed === FIND_REPLACE_BARE_DIVIDER) {
+      bareDividerIdxs.push(j);
+    }
   }
-  if (i > lastContentLine) {
-    throw new Error(`${expectedHeader} missing '${FIND_REPLACE_DIVIDER}' divider`);
-  }
-  i++; // skip the divider itself
 
-  const replaceLines: string[] = [];
-  while (i <= lastContentLine) {
-    const raw = lines[i] ?? '';
-    if (raw.trim() === FIND_REPLACE_END_MARKER) break;
-    replaceLines.push(raw);
-    i++;
-  }
-  if (i > lastContentLine) {
+  if (endMarkerIdx === -1) {
+    // Preserve the previous error ordering: if there is no terminator
+    // at all, we never got far enough to know whether the divider was
+    // present. Report the divider-missing error first only when we
+    // actually reached EOF while still inside the SEARCH block with
+    // no divider candidates at all; otherwise the terminator is the
+    // immediate problem.
+    if (strictDividerIdx === -1 && bareDividerIdxs.length === 0) {
+      throw new Error(`${expectedHeader} missing '${FIND_REPLACE_DIVIDER}' divider`);
+    }
     throw new Error(`${expectedHeader} missing '${FIND_REPLACE_END_MARKER}' terminator`);
   }
-  i++; // skip the end marker
+
+  let dividerIdx: number;
+  let lenientDivider = false;
+  if (strictDividerIdx !== -1) {
+    dividerIdx = strictDividerIdx;
+  } else if (bareDividerIdxs.length === 1) {
+    dividerIdx = bareDividerIdxs[0]!;
+    lenientDivider = true;
+  } else if (bareDividerIdxs.length > 1) {
+    const humanLines = bareDividerIdxs.map((n) => n + 1).join(', ');
+    throw new Error(
+      `${expectedHeader} missing '${FIND_REPLACE_DIVIDER}' divider; found ${bareDividerIdxs.length} ambiguous bare '=======' lines at input lines ${humanLines}. Use '${FIND_REPLACE_DIVIDER}' to disambiguate, or shrink the SEARCH block so only one bare '=======' appears.`,
+    );
+  } else {
+    throw new Error(`${expectedHeader} missing '${FIND_REPLACE_DIVIDER}' divider`);
+  }
+
+  const searchLines = lines.slice(searchStart, dividerIdx);
+  const replaceLines = lines.slice(dividerIdx + 1, endMarkerIdx);
+  i = endMarkerIdx + 1;
 
   if (searchLines.length === 0) {
     throw new Error(`${expectedHeader} SEARCH block must not be empty`);
@@ -1067,6 +1117,7 @@ function parseFindReplaceChunk(
       modifiedBytes,
       mustBeUnique,
       replaceAll,
+      ...(lenientDivider ? { lenientDivider: true } : {}),
     },
     nextIndex: i,
   };
@@ -1860,6 +1911,11 @@ export async function buildPatchPlan(
   // Phase 2: collect per-op FindReplaceAll match counts so the final
   // summaryText can include an advisory when totals are high.
   const replaceAllTotals: Array<{ path: string; count: number }> = [];
+  // Per-op count of FindReplace chunks whose divider was accepted as
+  // bare `=======` (aider / git-conflict style) instead of the
+  // canonical `======= REPLACE`. Surfaced in the summary so the agent
+  // learns to prefer the explicit form, without failing the call.
+  const lenientDividerTotals: Array<{ path: string; count: number }> = [];
 
   for (const [index, op] of ops.entries()) {
     const row = rows[index]!;
@@ -1869,6 +1925,16 @@ export async function buildPatchPlan(
 
     await collectVersionToken(readSnapshot, sourceVersions, seenSourceVersionPaths, beforeKey);
     await collectVersionToken(readSnapshot, sourceVersions, seenSourceVersionPaths, targetKey);
+
+    if (op.kind === 'update') {
+      const lenientCount = op.chunks.reduce(
+        (total, chunk) => total + (chunk.lenientDivider ? 1 : 0),
+        0,
+      );
+      if (lenientCount > 0) {
+        lenientDividerTotals.push({ path: op.path, count: lenientCount });
+      }
+    }
 
     try {
       const results = await applyPatchOperations([op], virtual, cwd, undefined, {
@@ -1919,7 +1985,7 @@ export async function buildPatchPlan(
     rows,
     mutations,
     sourceVersions,
-    summaryText: buildSummaryText(rows.length, replaceAllTotals),
+    summaryText: buildSummaryText(rows.length, replaceAllTotals, lenientDividerTotals),
   };
 }
 
@@ -1933,9 +1999,10 @@ const FIND_REPLACE_ALL_ADVISORY_THRESHOLD = 20;
 function buildSummaryText(
   opCount: number,
   replaceAllTotals: Array<{ path: string; count: number }>,
+  lenientDividerTotals: Array<{ path: string; count: number }> = [],
 ): string {
   const base = `Applied patch with ${opCount} operation(s).`;
-  if (replaceAllTotals.length === 0) return base;
+  if (replaceAllTotals.length === 0 && lenientDividerTotals.length === 0) return base;
   const lines: string[] = [base];
   for (const { path, count } of replaceAllTotals) {
     if (count > FIND_REPLACE_ALL_ADVISORY_THRESHOLD) {
@@ -1947,6 +2014,11 @@ function buildSummaryText(
         `  Note: FindReplaceAll in ${path} replaced ${count} occurrence${count === 1 ? '' : 's'}.`,
       );
     }
+  }
+  for (const { path, count } of lenientDividerTotals) {
+    lines.push(
+      `  Note: accepted bare '=======' as the SEARCH/REPLACE divider in ${count} chunk${count === 1 ? '' : 's'} in ${path}. Prefer '======= REPLACE' (explicit form) so SEARCH blocks containing '=======' lines stay unambiguous.`,
+    );
   }
   return lines.join('\n');
 }
