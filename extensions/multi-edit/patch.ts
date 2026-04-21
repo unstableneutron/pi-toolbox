@@ -22,6 +22,12 @@ import {
   restoreLineEndings,
   stripBom,
 } from './classic';
+import {
+  isQuoteTierEligibleForFile,
+  normalizeForQuoteTier,
+  QUOTE_TIER_NAME,
+  validateAndTranslateQuoteTier,
+} from './quote-tier';
 
 export interface UpdateChunk {
   source?: 'hunk' | 'find-replace-once' | 'find-replace-all';
@@ -107,6 +113,11 @@ interface PatchOpResult {
   firstChangedLine?: number;
   operation: PatchPreviewRow;
   usedFuzzy?: boolean;
+  // True when any chunk matched via the `quoteStyle` tier and its
+  // REPLACE was re-quoted on apply. Orthogonal to `usedFuzzy` — the
+  // summary text surfaces a distinct advisory so the agent knows to
+  // mirror file quote style on future patches.
+  usedQuoteStyle?: boolean;
   // Phase 2: total occurrences replaced by FindReplaceAll chunks in
   // this op. Undefined when the op had no FindReplaceAll chunks.
   replaceAllCount?: number;
@@ -132,7 +143,7 @@ interface PatchOpResult {
 // The error's `.message` is a short one-liner; the rich rendering
 // happens at the result-formatting layer (Phase 1 commit 2).
 
-type MatchTier = 'exact' | 'rstrip' | 'trim' | 'fuzzy';
+type MatchTier = 'exact' | 'rstrip' | 'trim' | 'fuzzy' | 'quoteStyle';
 
 interface PerLineMatchSignal {
   patternIndex: number;
@@ -437,6 +448,7 @@ function seekSequence(
   pattern: string[],
   start: number,
   eof: boolean,
+  options?: { allowQuoteStyleTier?: boolean },
 ): SequenceMatch | undefined {
   if (pattern.length === 0) return { startIndex: start, tier: 'exact' };
   if (pattern.length > lines.length) return undefined;
@@ -448,12 +460,17 @@ function seekSequence(
   const trimEqual = (a: string, b: string) => a.trim() === b.trim();
   const fuzzyEqual = (a: string, b: string) =>
     normaliseLineForFuzzyMatch(a) === normaliseLineForFuzzyMatch(b);
+  const quoteStyleEqual = (a: string, b: string) =>
+    normalizeForQuoteTier(a) === normalizeForQuoteTier(b);
   const tiers: Array<{ eq: (a: string, b: string) => boolean; tier: MatchTier }> = [
     { eq: exactEqual, tier: 'exact' },
     { eq: rstripEqual, tier: 'rstrip' },
     { eq: trimEqual, tier: 'trim' },
     { eq: fuzzyEqual, tier: 'fuzzy' },
   ];
+  if (options?.allowQuoteStyleTier === true) {
+    tiers.push({ eq: quoteStyleEqual, tier: 'quoteStyle' });
+  }
 
   for (const { eq, tier } of tiers) {
     for (let i = searchStart; i <= searchEnd; i++) {
@@ -481,6 +498,13 @@ function applyReplacements(
   return next;
 }
 
+// `quoteStyle` is intentionally excluded from this list: it drives
+// whether a match succeeds at apply time, but near-miss rendering
+// (via `bestTierForPair` / `findNearestSequence`) should still treat
+// quote drift as a visible `-/+` in the diagnostic — otherwise the
+// agent sees "100% similar" with no rendered diff when a guardrail
+// rejects a quote-tier match, which is confusing. Keeping the order
+// at the four strict tiers makes quote drift show up line-by-line.
 const MATCH_TIER_ORDER: MatchTier[] = ['exact', 'rstrip', 'trim', 'fuzzy'];
 const LARGE_FILE_SAMPLING_THRESHOLD = 5000;
 const DEFAULT_MARGIN_SIZE = 3;
@@ -490,7 +514,15 @@ function compareLines(a: string, b: string, tier: MatchTier): boolean {
   if (tier === 'exact') return a === b;
   if (tier === 'rstrip') return a.trimEnd() === b.trimEnd();
   if (tier === 'trim') return a.trim() === b.trim();
-  return normaliseLineForFuzzyMatch(a) === normaliseLineForFuzzyMatch(b);
+  if (tier === 'fuzzy') {
+    return normaliseLineForFuzzyMatch(a) === normaliseLineForFuzzyMatch(b);
+  }
+  // quoteStyle: collapses `'` and `"` on top of trim+fuzzy
+  // normalization. Intentionally never matches lines containing a
+  // backtick against a non-backtick-equivalent form — the separate
+  // post-match validator enforces that no backtick survives the
+  // region, which is the stronger guarantee callers rely on.
+  return normalizeForQuoteTier(a) === normalizeForQuoteTier(b);
 }
 
 function bestTierForPair(actual: string, expected: string): MatchTier | undefined {
@@ -647,6 +679,10 @@ function findNearestAnchor(lines: string[], anchor: string): Array<{ line: numbe
 interface DeriveUpdatedResult {
   content: string;
   usedFuzzy: boolean;
+  // True when any chunk matched via the `quoteStyle` tier and its
+  // REPLACE was re-quoted on apply. Orthogonal to `usedFuzzy` so
+  // callers can surface a distinct advisory.
+  usedQuoteStyle?: boolean;
   // Per-chunk match counts for FindReplaceAll reporting. Other chunk
   // kinds (hunks, FindReplaceOnce) never produce a count > 1; the
   // map is keyed by chunk index in `chunks[]` so the caller can
@@ -662,6 +698,7 @@ function seekAllInWinningTier(
   lines: string[],
   pattern: string[],
   searchStart: number,
+  options?: { allowQuoteStyleTier?: boolean },
 ): { tier: MatchTier; positions: number[] } | undefined {
   if (pattern.length === 0) return { tier: 'exact', positions: [searchStart] };
   const searchEnd = lines.length - pattern.length;
@@ -675,6 +712,12 @@ function seekAllInWinningTier(
       tier: 'fuzzy',
     },
   ];
+  if (options?.allowQuoteStyleTier === true) {
+    comparators.push({
+      eq: (a, b) => normalizeForQuoteTier(a) === normalizeForQuoteTier(b),
+      tier: 'quoteStyle',
+    });
+  }
 
   for (const { eq, tier } of comparators) {
     const positions: number[] = [];
@@ -716,23 +759,51 @@ export class AmbiguousFindReplaceOnceError extends Error {
   }
 }
 
+// Post-match validation helper. When a chunk matched at the
+// `quoteStyle` tier, run the REPLACE guardrails (backticks, escaped
+// quotes, monomorphic quote style) and, on success, return the
+// re-quoted REPLACE lines. On failure, returns undefined; the caller
+// must treat the tier-match as if no match occurred, producing the
+// standard near-miss diagnostic.
+function validateQuoteStyleMatch(
+  searchLines: string[],
+  fileRegion: string[],
+  replaceLines: string[],
+): { newLines: string[] } | undefined {
+  const result = validateAndTranslateQuoteTier({
+    searchLines,
+    fileRegion,
+    replaceLines,
+  });
+  if (!result) return undefined;
+  return { newLines: result.replaceLines };
+}
+
 function deriveUpdatedNormalizedContent(
   filePath: string,
   normalizedContent: string,
   chunks: UpdateChunk[],
+  options?: { allowQuoteStyleTier?: boolean },
 ): DeriveUpdatedResult {
   const hadTrailingNewline = normalizedContent.endsWith('\n');
   const originalLines = normalizedContent.split('\n');
   if (originalLines[originalLines.length - 1] === '') originalLines.pop();
 
+  const allowQuoteStyleTier = options?.allowQuoteStyleTier === true;
   const replacements: Array<[number, number, string[]]> = [];
   let lineIndex = 0;
   let usedFuzzy = false;
+  let usedQuoteStyle = false;
   let replaceAllCounts: Map<number, number> | undefined;
 
   for (const [chunkIndex, chunk] of chunks.entries()) {
     if (chunk.changeContext && chunk.changeContext.length > 0) {
       for (const anchor of chunk.changeContext) {
+        // Anchors do not carry a REPLACE of their own; quote-tier
+        // anchor matching would only advance lineIndex. For the MVP
+        // we keep anchor matching conservative and do NOT enable the
+        // quote tier here — re-evaluate if real patches surface a
+        // pain point.
         const ctxMatch = seekSequence(originalLines, [anchor], lineIndex, false);
         if (ctxMatch === undefined) {
           throw new PatchContextMatchError({
@@ -753,7 +824,14 @@ function deriveUpdatedNormalizedContent(
     // file region starting at 0 (not cursor-advancing) in the first
     // tier that produces any matches, and require exactly one match.
     if (chunk.mustBeUnique) {
-      const result = seekAllInWinningTier(originalLines, chunk.oldLines, 0);
+      const result = seekAllInWinningTier(originalLines, chunk.oldLines, 0, {
+        allowQuoteStyleTier,
+      });
+
+      // Quote-tier ambiguity (2+ matches) is deliberately rejected
+      // via the same AmbiguousFindReplaceOnceError as lower tiers —
+      // a lenient tier with multiple candidates is exactly when we
+      // should refuse, not pick.
       if (!result || result.positions.length === 0) {
         const sampling = originalLines.length > LARGE_FILE_SAMPLING_THRESHOLD;
         throw new PatchContextMatchError({
@@ -772,8 +850,30 @@ function deriveUpdatedNormalizedContent(
         );
       }
       const pos = result.positions[0]!;
-      if (result.tier === 'trim' || result.tier === 'fuzzy') usedFuzzy = true;
-      replacements.push([pos, chunk.oldLines.length, [...chunk.newLines]]);
+      let newLines = chunk.newLines;
+      if (result.tier === 'quoteStyle') {
+        const fileRegion = originalLines.slice(pos, pos + chunk.oldLines.length);
+        const translated = validateQuoteStyleMatch(chunk.oldLines, fileRegion, chunk.newLines);
+        if (!translated) {
+          // Guardrails refused this match; surface the standard
+          // near-miss so the agent sees the actual bytes and can
+          // retry with a literal SEARCH.
+          const sampling = originalLines.length > LARGE_FILE_SAMPLING_THRESHOLD;
+          throw new PatchContextMatchError({
+            kind: 'context-not-found',
+            filePath,
+            searchedFrom: 0,
+            expectedLines: chunk.oldLines,
+            nearestMatch: findNearestSequence(originalLines, chunk.oldLines, 0),
+            scanTruncated: sampling,
+          });
+        }
+        newLines = translated.newLines;
+        usedQuoteStyle = true;
+      } else if (result.tier === 'trim' || result.tier === 'fuzzy') {
+        usedFuzzy = true;
+      }
+      replacements.push([pos, chunk.oldLines.length, [...newLines]]);
       // Do not advance lineIndex — FindReplace chunks match against
       // original state and do not cursor-advance between chunks.
       continue;
@@ -782,6 +882,10 @@ function deriveUpdatedNormalizedContent(
     // FindReplaceAll: scan in the first tier with any matches; apply
     // replacements at every position. Zero matches raises the same
     // P0 near-miss as FindReplaceOnce / hunk mismatches.
+    //
+    // The quote tier is deliberately NOT offered to FindReplaceAll:
+    // a lenient tier combined with whole-line mass substitution is
+    // the one combination we do not want. Mass-rewrites stay strict.
     if (chunk.replaceAll) {
       const result = seekAllInWinningTier(originalLines, chunk.oldLines, 0);
       if (!result || result.positions.length === 0) {
@@ -813,13 +917,17 @@ function deriveUpdatedNormalizedContent(
 
     let pattern = chunk.oldLines;
     let newSlice = chunk.newLines;
-    let found = seekSequence(originalLines, pattern, lineIndex, chunk.isEndOfFile);
+    let found = seekSequence(originalLines, pattern, lineIndex, chunk.isEndOfFile, {
+      allowQuoteStyleTier,
+    });
     if (found === undefined && pattern[pattern.length - 1] === '') {
       pattern = pattern.slice(0, -1);
       if (newSlice[newSlice.length - 1] === '') {
         newSlice = newSlice.slice(0, -1);
       }
-      found = seekSequence(originalLines, pattern, lineIndex, chunk.isEndOfFile);
+      found = seekSequence(originalLines, pattern, lineIndex, chunk.isEndOfFile, {
+        allowQuoteStyleTier,
+      });
     }
     if (found === undefined) {
       const sampling = originalLines.length > LARGE_FILE_SAMPLING_THRESHOLD;
@@ -832,7 +940,25 @@ function deriveUpdatedNormalizedContent(
         scanTruncated: sampling,
       });
     }
-    if (found.tier === 'trim' || found.tier === 'fuzzy') usedFuzzy = true;
+    if (found.tier === 'quoteStyle') {
+      const fileRegion = originalLines.slice(found.startIndex, found.startIndex + pattern.length);
+      const translated = validateQuoteStyleMatch(pattern, fileRegion, newSlice);
+      if (!translated) {
+        const sampling = originalLines.length > LARGE_FILE_SAMPLING_THRESHOLD;
+        throw new PatchContextMatchError({
+          kind: 'context-not-found',
+          filePath,
+          searchedFrom: lineIndex,
+          expectedLines: pattern,
+          nearestMatch: findNearestSequence(originalLines, pattern, 0),
+          scanTruncated: sampling,
+        });
+      }
+      newSlice = translated.newLines;
+      usedQuoteStyle = true;
+    } else if (found.tier === 'trim' || found.tier === 'fuzzy') {
+      usedFuzzy = true;
+    }
     replacements.push([found.startIndex, pattern.length, [...newSlice]]);
     lineIndex = found.startIndex + pattern.length;
   }
@@ -843,21 +969,28 @@ function deriveUpdatedNormalizedContent(
   } else if (newLines[newLines.length - 1] === '') {
     newLines.pop();
   }
-  return { content: newLines.join('\n'), usedFuzzy, replaceAllCounts };
+  return {
+    content: newLines.join('\n'),
+    usedFuzzy,
+    usedQuoteStyle: usedQuoteStyle || undefined,
+    replaceAllCounts,
+  };
 }
 
 function deriveUpdatedContent(
   filePath: string,
   currentContent: string,
   chunks: UpdateChunk[],
+  options?: { allowQuoteStyleTier?: boolean },
 ): DeriveUpdatedResult {
   const { bom, text } = stripBom(currentContent);
   const ending = detectLineEnding(text);
   const normalized = normalizeToLF(text);
-  const result = deriveUpdatedNormalizedContent(filePath, normalized, chunks);
+  const result = deriveUpdatedNormalizedContent(filePath, normalized, chunks, options);
   return {
     content: bom + restoreLineEndings(result.content, ending),
     usedFuzzy: result.usedFuzzy,
+    usedQuoteStyle: result.usedQuoteStyle,
     replaceAllCounts: result.replaceAllCounts,
   };
 }
@@ -1916,6 +2049,10 @@ export async function buildPatchPlan(
   // canonical `======= REPLACE`. Surfaced in the summary so the agent
   // learns to prefer the explicit form, without failing the call.
   const lenientDividerTotals: Array<{ path: string; count: number }> = [];
+  // Per-op flag set when the `quoteStyle` tier fired and REPLACE was
+  // re-quoted to match the file. Surfaced in the summary as a nudge
+  // for the agent to mirror the file's quote style on future patches.
+  const quoteStylePaths: string[] = [];
 
   for (const [index, op] of ops.entries()) {
     const row = rows[index]!;
@@ -1943,6 +2080,9 @@ export async function buildPatchPlan(
       const opResult = results[0];
       if (opResult?.replaceAllCount && opResult.replaceAllCount > 0) {
         replaceAllTotals.push({ path: op.path, count: opResult.replaceAllCount });
+      }
+      if (opResult?.usedQuoteStyle === true) {
+        quoteStylePaths.push(op.path);
       }
       const mutation = await materializeMutationForOperation(op, readSnapshot, virtual, cwd);
       mergePlannedMutation(mutationsByKey, mutation, { id: row.id!, rowIndex: index });
@@ -1985,7 +2125,12 @@ export async function buildPatchPlan(
     rows,
     mutations,
     sourceVersions,
-    summaryText: buildSummaryText(rows.length, replaceAllTotals, lenientDividerTotals),
+    summaryText: buildSummaryText(
+      rows.length,
+      replaceAllTotals,
+      lenientDividerTotals,
+      quoteStylePaths,
+    ),
   };
 }
 
@@ -2000,9 +2145,16 @@ function buildSummaryText(
   opCount: number,
   replaceAllTotals: Array<{ path: string; count: number }>,
   lenientDividerTotals: Array<{ path: string; count: number }> = [],
+  quoteStylePaths: string[] = [],
 ): string {
   const base = `Applied patch with ${opCount} operation(s).`;
-  if (replaceAllTotals.length === 0 && lenientDividerTotals.length === 0) return base;
+  if (
+    replaceAllTotals.length === 0 &&
+    lenientDividerTotals.length === 0 &&
+    quoteStylePaths.length === 0
+  ) {
+    return base;
+  }
   const lines: string[] = [base];
   for (const { path, count } of replaceAllTotals) {
     if (count > FIND_REPLACE_ALL_ADVISORY_THRESHOLD) {
@@ -2018,6 +2170,11 @@ function buildSummaryText(
   for (const { path, count } of lenientDividerTotals) {
     lines.push(
       `  Note: accepted bare '=======' as the SEARCH/REPLACE divider in ${count} chunk${count === 1 ? '' : 's'} in ${path}. Prefer '======= REPLACE' (explicit form) so SEARCH blocks containing '=======' lines stay unambiguous.`,
+    );
+  }
+  for (const path of quoteStylePaths) {
+    lines.push(
+      `  Note: fuzzy-applied (${QUOTE_TIER_NAME}) in ${path}: SEARCH used a different straight-quote style than the file; REPLACE was re-quoted to match. Mirror the file's quote style on future patches to avoid needing this fallback.`,
     );
   }
   return lines.join('\n');
@@ -2096,11 +2253,16 @@ export async function applyPatchOperations(
     const sourceText = await workspace.readText(sourceAbs);
     let updated = sourceText;
     let usedFuzzy = false;
+    let usedQuoteStyle = false;
     let replaceAllCount: number | undefined;
     if (op.chunks.length > 0) {
-      const result = deriveUpdatedContent(op.path, sourceText, op.chunks);
+      const allowQuoteStyleTier = isQuoteTierEligibleForFile(sourceAbs, cwd);
+      const result = deriveUpdatedContent(op.path, sourceText, op.chunks, {
+        allowQuoteStyleTier,
+      });
       updated = result.content;
       usedFuzzy = result.usedFuzzy;
+      usedQuoteStyle = result.usedQuoteStyle === true;
       if (result.replaceAllCounts) {
         let total = 0;
         for (const c of result.replaceAllCounts.values()) total += c;
@@ -2139,6 +2301,7 @@ export async function applyPatchOperations(
       operation: toPatchPreviewRows([baseOperation], 'applied')[0]!,
     };
     if (usedFuzzy) result.usedFuzzy = true;
+    if (usedQuoteStyle) result.usedQuoteStyle = true;
     if (replaceAllCount !== undefined) result.replaceAllCount = replaceAllCount;
     if (collectDiff) {
       const diffResult = generateDiffString(sourceText, updated);
