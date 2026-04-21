@@ -25,7 +25,14 @@ export interface RewriteDecision {
 }
 
 interface RewriteResult {
-  decision: RewriteDecision;
+  /**
+   * Structured tool call to dispatch. Omit for notice-only results:
+   * the original bash command still runs, but the notice is prepended
+   * to its output so the agent sees actionable advice without a hard
+   * rewrite. Used for shapes like BSD-incompatible `cat -A`, where we
+   * cannot cleanly map to a structured tool but still want to nudge.
+   */
+  decision?: RewriteDecision;
   notice: string;
 }
 
@@ -71,6 +78,7 @@ const FIRST_TOKEN_ALLOWLIST: ReadonlySet<string> = new Set([
   'rg',
   'find',
   'fd',
+  'sed',
   'cd',
 ]);
 
@@ -652,6 +660,41 @@ function classifyFd(tokens: Token[]): RewriteDecision | null {
   };
 }
 
+/**
+ * Classify `sed -n 'N,Mp' FILE` (and the single-line `sed -n 'Np' FILE`)
+ * as a line-range read. Intentionally strict: any other sed invocation
+ * (substitutions, regex ranges, multiple expressions via `;` or `-e`,
+ * `-i` in-place, etc.) passes through. The agent sees `sed` working
+ * as usual for everything we do not understand.
+ *
+ * The range maps to `read(path, offset=N, limit=M-N+1)`. Our `read`
+ * tool treats `offset` as 1-indexed line number, matching sed's
+ * semantics, so no off-by-one shuffle is needed.
+ *
+ * Composes with the existing `<stage> | head -K` pipeline handler,
+ * which overrides `limit` with K — so `sed -n '10,50p' FILE | head -5`
+ * correctly becomes `read(path=FILE, offset=10, limit=5)`.
+ */
+function classifySedRange(tokens: Token[]): RewriteDecision | null {
+  const strs = asStrings(tokens);
+  if (!strs || strs[0] !== 'sed') return null;
+  if (strs.length !== 4) return null; // sed -n EXPR FILE — exactly 4 tokens
+  if (strs[1] !== '-n') return null;
+  const expr = strs[2]!;
+  const m = /^(\d+)(?:,(\d+))?p$/.exec(expr);
+  if (!m) return null;
+  const start = Number(m[1]);
+  const end = m[2] !== undefined ? Number(m[2]) : start;
+  if (start < 1 || end < start) return null;
+  const path = strs[3]!;
+  if (path.startsWith('-')) return null;
+  return {
+    tool: 'read',
+    params: { path, offset: start, limit: end - start + 1 },
+    recognizer: 'sed-range-print',
+  };
+}
+
 const SINGLE_STAGE_CLASSIFIERS = [
   classifyCat,
   classifyLs,
@@ -659,10 +702,57 @@ const SINGLE_STAGE_CLASSIFIERS = [
   classifyGrep,
   classifyFind,
   classifyFd,
+  classifySedRange,
 ] as const;
 
 function classifySingleStage(tokens: Token[]): RewriteDecision | null {
   for (const fn of SINGLE_STAGE_CLASSIFIERS) {
+    const r = fn(tokens);
+    if (r) return r;
+  }
+  return null;
+}
+
+/**
+ * Notice-only classifier for `cat -A` (and the equivalent `-AET` / `-vET`
+ * bundled variants). macOS / BSD `cat` rejects `-A`, so the command
+ * fails with a cryptic "illegal option" error. We cannot cleanly route
+ * to `read` because our read tool does not visualize whitespace. Instead
+ * we emit an actionable notice so the agent sees the fix on the very
+ * next turn. The original command still runs (and still fails on BSD),
+ * but the notice turns a silent head-scratch into a one-shot correction.
+ *
+ * We accept only standalone `cat -A FILE` / `cat -vET FILE` forms.
+ * Bundled presentations like `-Aen` / `-nvA` are matched via the
+ * character-bundle check. Long-form `--show-all` is also caught.
+ */
+function classifyCatDashANotice(tokens: Token[]): { notice: string } | null {
+  const strs = asStrings(tokens);
+  if (!strs || strs[0] !== 'cat') return null;
+  // BSD `cat` rejects three short flags that GNU `cat` accepts:
+  //   -A (show-all), -E (show-ends), -T (show-tabs)
+  // plus their long-form equivalents. Plain `-v`, `-e`, `-t`, `-n`,
+  // `-s`, `-u` all work on BSD and should pass through silently.
+  const hasDashA = strs.slice(1).some((s) => {
+    if (/^--show-(all|ends|tabs|nonprinting)$/.test(s)) return true;
+    if (!s.startsWith('-') || s.startsWith('--') || s.length < 2) return false;
+    // Bundled short form: any of A/E/T (uppercase) triggers the notice.
+    return /[AET]/.test(s.slice(1));
+  });
+  if (!hasDashA) return null;
+  return {
+    notice:
+      'Note: BSD `cat` (macOS default) does not support `-A` / `-vET` / `--show-all`. ' +
+      'Workarounds that produce similar output on BSD: `cat -vet FILE` (close approximation, accepts `-v`, `-e`, `-t` individually), ' +
+      'or `awk \'{ gsub(/\\t/,"→"); gsub(/$/,"¶"); print }\' FILE` for a structured pass. ' +
+      'If you only need the content without whitespace markers, use `read(path=FILE)` directly.',
+  };
+}
+
+const NOTICE_ONLY_CLASSIFIERS = [classifyCatDashANotice] as const;
+
+function classifyNoticeOnly(tokens: Token[]): { notice: string } | null {
+  for (const fn of NOTICE_ONLY_CLASSIFIERS) {
     const r = fn(tokens);
     if (r) return r;
   }
@@ -825,15 +915,27 @@ export function tryRewriteBash(cmd: string, _cwd: string): RewriteResult | null 
 
   if (strippedStages.length === 1) {
     const d = classifySingleStage(strippedStages[0]!);
-    return d ? { decision: d, notice: formatNotice(cmd.trim(), d) } : null;
+    if (d) return { decision: d, notice: formatNotice(cmd.trim(), d) };
+    // No rewrite available — fall through to notice-only classifiers.
+    const notice = classifyNoticeOnly(strippedStages[0]!);
+    return notice ? { notice: notice.notice } : null;
   }
 
   // Two-stage: `<search> | head -N`
   if (strippedStages.length === 2) {
     const limit = extractHeadLimit(strippedStages[1]!);
-    if (limit === null) return null;
+    if (limit === null) {
+      // Even without a rewriteable pipeline shape, a notice on the
+      // first stage is still useful — e.g. `cat -A FILE | od -c`.
+      const notice = classifyNoticeOnly(strippedStages[0]!);
+      return notice ? { notice: notice.notice } : null;
+    }
     const d = classifySingleStage(strippedStages[0]!);
-    if (!d) return null;
+    if (!d) {
+      // `cat -A FILE | head -N` — no rewrite, but still surface the notice.
+      const notice = classifyNoticeOnly(strippedStages[0]!);
+      return notice ? { notice: notice.notice } : null;
+    }
     const withLimit: RewriteDecision = {
       tool: d.tool,
       params: { ...d.params, limit },

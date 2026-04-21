@@ -970,6 +970,16 @@ async function dispatchBashRewrite(args: {
   return prependNoticeToContent(result, args.notice, sharedDetails);
 }
 
+/**
+ * Prepend a bash-rewrite notice to a builtin-bash result without
+ * routing to a structured tool. Used for notice-only classifier hits
+ * (e.g. `cat -A` on BSD) and for timeout-capped pass-through commands
+ * where we still want the raw bash output to reach the agent.
+ */
+function prependBashNotice(result: BashExecuteResult, notice: string): BashExecuteResult {
+  return prependNoticeToContent(result, notice, { rewriteNoticeOnly: true });
+}
+
 function prependNoticeToContent(
   result: { content: ReadonlyArray<unknown>; details?: unknown },
   notice: string,
@@ -1646,6 +1656,14 @@ export function createPiFffSearchExtension(options: CreatePiFffSearchExtensionOp
           const rewrite = command ? tryRewriteBash(command, ctx.cwd) : null;
           if (!rewrite) {
             return builtInBash.execute(toolCallId, params, signal, onUpdate, ctx);
+          }
+
+          // Notice-only result: the classifier had no structured tool to
+          // offer but wants to nudge the agent (e.g. BSD `cat -A` on
+          // macOS). Run bash unchanged and prepend the notice to output.
+          if (!rewrite.decision) {
+            const result = await builtInBash.execute(toolCallId, params, signal, onUpdate, ctx);
+            return prependBashNotice(result, rewrite.notice);
           }
 
           try {

@@ -87,7 +87,7 @@ describe('tryRewriteBash — grep rewrites', () => {
 
   test('grep -n PAT PATH → ignored flag (fff already returns line numbers)', () => {
     const r = rewrite('grep -n "createLsToolDefinition" file.ts');
-    expect(r?.decision.params).toEqual({
+    expect(r?.decision?.params).toEqual({
       patterns: ['createLsToolDefinition'],
       within: 'file.ts',
       literal: false,
@@ -101,37 +101,37 @@ describe('tryRewriteBash — grep rewrites', () => {
 
   test('grep -i case-insensitive', () => {
     const r = rewrite('grep -i hello file.ts');
-    expect(r?.decision.params).toMatchObject({ case_sensitive: false });
+    expect(r?.decision?.params).toMatchObject({ case_sensitive: false });
   });
 
   test('grep -F literal', () => {
     const r = rewrite('grep -F "foo(bar)" file.ts');
-    expect(r?.decision.params).toMatchObject({ literal: true });
+    expect(r?.decision?.params).toMatchObject({ literal: true });
   });
 
   test('egrep treated as -E regex', () => {
     const r = rewrite('egrep "foo|bar" f.ts');
-    expect(r?.decision.params).toMatchObject({ literal: false });
+    expect(r?.decision?.params).toMatchObject({ literal: false });
   });
 
   test('grep -A 5 context', () => {
     const r = rewrite('grep -A 5 foo file.ts');
-    expect(r?.decision.params).toMatchObject({ context_lines: 5 });
+    expect(r?.decision?.params).toMatchObject({ context_lines: 5 });
   });
 
   test('grep -A5 bundled context', () => {
     const r = rewrite('grep -A5 foo file.ts');
-    expect(r?.decision.params).toMatchObject({ context_lines: 5 });
+    expect(r?.decision?.params).toMatchObject({ context_lines: 5 });
   });
 
   test('grep --include=*.ts', () => {
     const r = rewrite('grep --include="*.ts" pattern src/');
-    expect(r?.decision.params).toMatchObject({ glob: '*.ts' });
+    expect(r?.decision?.params).toMatchObject({ glob: '*.ts' });
   });
 
   test('grep --exclude-dir=node_modules', () => {
     const r = rewrite('grep --exclude-dir=node_modules foo src/');
-    expect(r?.decision.params).toMatchObject({ exclude_paths: ['node_modules'] });
+    expect(r?.decision?.params).toMatchObject({ exclude_paths: ['node_modules'] });
   });
 
   test('grep -v invert → pass through', () => {
@@ -148,7 +148,7 @@ describe('tryRewriteBash — grep rewrites', () => {
 
   test('grep -- PAT FILE with end-of-opts marker', () => {
     const r = rewrite('grep -- -x file.ts');
-    expect(r?.decision.params).toMatchObject({ patterns: ['-x'], literal: false });
+    expect(r?.decision?.params).toMatchObject({ patterns: ['-x'], literal: false });
   });
 });
 
@@ -382,6 +382,106 @@ describe('tryRewriteBash — cheap prefix gate', () => {
   test('still accepts commands just under the length cap', () => {
     const padded = 'grep foo ' + 'x'.repeat(1000);
     const r = rewrite(padded);
-    expect(r?.decision.tool).toBe('fff_grep');
+    expect(r?.decision?.tool).toBe('fff_grep');
+  });
+});
+
+describe('tryRewriteBash — sed line-range → read', () => {
+  test("sed -n '1,20p' FILE → read with offset/limit", () => {
+    const r = rewrite("sed -n '1,20p' src/router.ts");
+    expect(r?.decision).toMatchObject({
+      tool: 'read',
+      params: { path: 'src/router.ts', offset: 1, limit: 20 },
+      recognizer: 'sed-range-print',
+    });
+  });
+
+  test("sed -n '42p' FILE → read with single-line window", () => {
+    const r = rewrite("sed -n '42p' foo.ts");
+    expect(r?.decision).toMatchObject({
+      tool: 'read',
+      params: { path: 'foo.ts', offset: 42, limit: 1 },
+    });
+  });
+
+  test("sed -n '10,50p' FILE | head -5 → limit overridden to 5", () => {
+    const r = rewrite("sed -n '10,50p' foo.ts | head -5");
+    expect(r?.decision).toMatchObject({
+      tool: 'read',
+      params: { path: 'foo.ts', offset: 10, limit: 5 },
+    });
+    expect(r?.decision?.recognizer).toBe('sed-range-print+head');
+  });
+
+  test('rejects sed with regex range', () => {
+    expect(rewrite("sed -n '/foo/,/bar/p' f.ts")).toBeNull();
+  });
+
+  test('rejects sed with substitution', () => {
+    expect(rewrite("sed -n 's/foo/bar/p' f.ts")).toBeNull();
+  });
+
+  test('rejects sed with multiple expressions via semicolon', () => {
+    expect(rewrite("sed -n '1,5p;10,15p' f.ts")).toBeNull();
+  });
+
+  test('rejects sed without -n (not a pure range-print idiom)', () => {
+    expect(rewrite("sed '1,5p' f.ts")).toBeNull();
+  });
+
+  test('rejects sed -i (in-place edit — unsafe to reroute)', () => {
+    expect(rewrite("sed -i 's/foo/bar/g' f.ts")).toBeNull();
+  });
+
+  test('rejects reverse range N > M', () => {
+    expect(rewrite("sed -n '50,10p' f.ts")).toBeNull();
+  });
+});
+
+describe('tryRewriteBash — cat -A notice-only (BSD cat incompatibility)', () => {
+  test('cat -A FILE → notice-only, no decision', () => {
+    const r = rewrite('cat -A file.ts');
+    expect(r).not.toBeNull();
+    expect(r!.decision).toBeUndefined();
+    expect(r!.notice).toMatch(/BSD `cat`/);
+    expect(r!.notice).toMatch(/cat -vet/);
+  });
+
+  test('cat -vET FILE (GNU bundled) → notice', () => {
+    const r = rewrite('cat -vET file.ts');
+    expect(r).not.toBeNull();
+    expect(r!.decision).toBeUndefined();
+    expect(r!.notice).toMatch(/BSD `cat`/);
+  });
+
+  test('cat --show-all FILE → notice', () => {
+    const r = rewrite('cat --show-all file.ts');
+    expect(r).not.toBeNull();
+    expect(r!.decision).toBeUndefined();
+  });
+
+  test('cat -A FILE | head -12 (pipeline) → notice, no decision', () => {
+    const r = rewrite('cat -A file.ts | head -12');
+    expect(r).not.toBeNull();
+    expect(r!.decision).toBeUndefined();
+    expect(r!.notice).toMatch(/BSD `cat`/);
+  });
+
+  test('cat -A FILE | od -c (unsupported pipeline) → notice, no decision', () => {
+    // Two-stage pipeline where stage 2 is not `head -N` — we still
+    // surface the notice so the agent sees the BSD fix.
+    const r = rewrite('cat -A file.ts | od -c');
+    expect(r).not.toBeNull();
+    expect(r!.decision).toBeUndefined();
+  });
+
+  test('cat -n FILE stays a pass-through (no -A, no notice)', () => {
+    // -n (number lines) is harmless; existing behavior says pass through.
+    expect(rewrite('cat -n file.ts')).toBeNull();
+  });
+
+  test('cat FILE (no flags) still routes to read, not the notice path', () => {
+    const r = rewrite('cat file.ts');
+    expect(r?.decision).toMatchObject({ tool: 'read', params: { path: 'file.ts' } });
   });
 });

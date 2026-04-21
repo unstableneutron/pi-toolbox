@@ -79,7 +79,7 @@ function runCorpusSuite(label: string, filePath: string, opts: { required: boole
       const byTool = new Map<RewriteTool, number>();
       for (const { command } of corpus) {
         const r = tryRewriteBash(command, '/repo');
-        if (!r) continue;
+        if (!r || !r.decision) continue; // skip notice-only results
         hits += 1;
         byTool.set(r.decision.tool, (byTool.get(r.decision.tool) ?? 0) + 1);
       }
@@ -133,7 +133,8 @@ function runCorpusSuite(label: string, filePath: string, opts: { required: boole
         const head = command.trimStart().split(/\s+/, 1)[0] ?? '';
         if (!BUILD_TOOLS.includes(head)) continue;
         const r = tryRewriteBash(command, '/repo');
-        if (r) offenders.push({ command: command.slice(0, 160), target: r.decision.tool });
+        if (r?.decision)
+          offenders.push({ command: command.slice(0, 160), target: r.decision.tool });
       }
       expect(offenders).toEqual([]);
     });
