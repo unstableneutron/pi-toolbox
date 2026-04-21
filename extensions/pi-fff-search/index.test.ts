@@ -8,6 +8,7 @@ import {
 import { createBashToolDefinition } from '@mariozechner/pi-coding-agent';
 
 import createPiFffSearchExtensionDefault, {
+  bashCommandContainsExpensiveTool,
   createPiFffSearchExtension,
   forwardToolCall,
 } from './index';
@@ -3336,5 +3337,37 @@ describe('pi-fff-search extension', () => {
 
   test('default export creates the extension factory without throwing', () => {
     expect(typeof createPiFffSearchExtensionDefault).toBe('function');
+  });
+});
+
+// Pass-through bash commands that contain expensive search tools
+// (grep/rg/find/fd/…) get their AbortSignal capped at a conservative
+// timeout so the agent session cannot wedge on an unrewritten runaway
+// traversal. These tests exercise the detection predicate only —
+// signal-combining behavior relies on the platform's native
+// AbortSignal.timeout + AbortSignal.any and is not mocked.
+describe('bashCommandContainsExpensiveTool — pass-through timeout-cap predicate', () => {
+  test.each([
+    ['grep -r foo .', true],
+    ['rg --files', true],
+    ['find . -name foo', true],
+    ['fd -t f pattern', true],
+    ['fdfind pattern', true],
+    ['egrep -r foo .', true],
+    ['fgrep -r foo .', true],
+    ['ag foo', true],
+    ['ack foo', true],
+    ['git grep --heading foo', true],
+    ['cat foo.ts | grep bar', true],
+    ['ls -la | rg "foo bar"', true],
+    ['echo "grepper" | cat', false],
+    ['node --inspect findfile.ts', false],
+    ['pnpm install', false],
+    ['git status', false],
+    ['echo hello', false],
+    ['cat foo.ts', false],
+    ['sed -n "1,20p" foo.ts', false],
+  ])('contains expensive token in %j -> %s', (command, expected) => {
+    expect(bashCommandContainsExpensiveTool(command)).toBe(expected);
   });
 });

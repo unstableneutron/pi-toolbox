@@ -93,6 +93,32 @@ const OVERRIDE_BUILTIN_FIND = true;
 const REWRITE_BUILTIN_BASH = true;
 const BUILTIN_TOOL_TIMEOUT_MS = 10_000;
 
+// Bash commands that we did NOT rewrite and that contain one of these
+// tokens as a standalone word get capped at this timeout. Rationale: an
+// unrestricted `grep -r . .` or `find / -name …` on a large tree can hang
+// the agent session for minutes. If we failed to rewrite (unsupported
+// flag shape, chained `&& foo`, etc.), capping forward progress is
+// cheap insurance. The value is deliberately generous — short `--help`
+// / `--version` runs complete in milliseconds; capping at 60s only
+// matters for genuinely expensive invocations.
+const EXPENSIVE_BASH_TOKENS: ReadonlySet<string> = new Set([
+  'grep',
+  'rg',
+  'egrep',
+  'fgrep',
+  'find',
+  'fd',
+  'fdfind',
+  'ag',
+  'ack',
+]);
+const PASS_THROUGH_EXPENSIVE_TIMEOUT_MS = 60_000;
+// Word-boundary regex built once at module load. Matches e.g. `grep`,
+// `git grep`, `| rg`, but NOT `grepper` or `findfile`.
+const EXPENSIVE_BASH_TOKEN_PATTERN = new RegExp(
+  `\\b(?:${[...EXPENSIVE_BASH_TOKENS].join('|')})\\b`,
+);
+
 const ALLOWLIST_HINTS = ['~/.pi', '~/.pi/agent', '~/.codex', '~/.claude', '~/.amp'];
 const DAEMON_RESTART_NOTICE =
   'Notice: FFF daemon config changed; restarted the daemon and retried the search once.';
@@ -980,6 +1006,42 @@ function prependBashNotice(result: BashExecuteResult, notice: string): BashExecu
   return prependNoticeToContent(result, notice, { rewriteNoticeOnly: true });
 }
 
+/**
+ * True when `command` contains any of grep / rg / find / fd / ag / ack
+ * as a standalone word. Matches `git grep`, `| rg foo`, etc.; does NOT
+ * match identifiers like `grepper` or filenames like `findfile.ts`.
+ *
+ * Exported for tests.
+ */
+export function bashCommandContainsExpensiveTool(command: string): boolean {
+  return EXPENSIVE_BASH_TOKEN_PATTERN.test(command);
+}
+
+/**
+ * If a pass-through (non-rewritten) bash command contains a search
+ * tool known to run unbounded (grep/rg/find/…), wrap its AbortSignal
+ * with a timeout so the agent session cannot wedge on a runaway
+ * traversal. Returns null when no cap is needed, or a signal + warning
+ * text otherwise. The warning is prepended to the command's output so
+ * the agent sees why a long command may have been truncated.
+ */
+function capPassThroughBashSignal(
+  command: string,
+  signal: AbortSignal | undefined,
+  timeoutMs: number = PASS_THROUGH_EXPENSIVE_TIMEOUT_MS,
+): { signal: AbortSignal; warning: string } | null {
+  if (!bashCommandContainsExpensiveTool(command)) return null;
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  const combined = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+  const seconds = Math.round(timeoutMs / 1000);
+  const warning =
+    `Note: this bash command contains grep / rg / find (or similar) and was ` +
+    `capped at ${seconds}s to protect the session from runaway traversals. ` +
+    `Prefer fff_grep / fff_find_files / read / ls directly for large searches — ` +
+    `they skip shell parsing, are token-lighter, and enforce scope guardrails.`;
+  return { signal: combined, warning };
+}
+
 function prependNoticeToContent(
   result: { content: ReadonlyArray<unknown>; details?: unknown },
   notice: string,
@@ -1655,6 +1717,20 @@ export function createPiFffSearchExtension(options: CreatePiFffSearchExtensionOp
               : null;
           const rewrite = command ? tryRewriteBash(command, ctx.cwd) : null;
           if (!rewrite) {
+            // No rewrite matched. Still cap pass-through commands that
+            // contain grep/rg/find/etc. to protect against runaway
+            // traversals in shapes we couldn't structurally map.
+            const cap = command ? capPassThroughBashSignal(command, signal) : null;
+            if (cap) {
+              const result = await builtInBash.execute(
+                toolCallId,
+                params,
+                cap.signal,
+                onUpdate,
+                ctx,
+              );
+              return prependBashNotice(result, cap.warning);
+            }
             return builtInBash.execute(toolCallId, params, signal, onUpdate, ctx);
           }
 
@@ -1662,8 +1738,19 @@ export function createPiFffSearchExtension(options: CreatePiFffSearchExtensionOp
           // offer but wants to nudge the agent (e.g. BSD `cat -A` on
           // macOS). Run bash unchanged and prepend the notice to output.
           if (!rewrite.decision) {
-            const result = await builtInBash.execute(toolCallId, params, signal, onUpdate, ctx);
-            return prependBashNotice(result, rewrite.notice);
+            // Still cap expensive shapes even when a notice fires — a
+            // cat -A FILE | grep foo pipeline should be capped too.
+            const cap = command ? capPassThroughBashSignal(command, signal) : null;
+            const effectiveSignal = cap?.signal ?? signal;
+            const result = await builtInBash.execute(
+              toolCallId,
+              params,
+              effectiveSignal,
+              onUpdate,
+              ctx,
+            );
+            const noticed = prependBashNotice(result, rewrite.notice);
+            return cap ? prependBashNotice(noticed, cap.warning) : noticed;
           }
 
           try {
