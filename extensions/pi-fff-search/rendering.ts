@@ -1,13 +1,13 @@
 import type { PublicToolName, PublicToolRequest } from 'fff-router';
 import { clampMatchText } from './match-heuristics';
 
-export type RenderDetails = {
+type RenderDetails = {
   toolName: PublicToolName;
   resolvedWithin: string;
   publicRequest: PublicToolRequest;
 };
 
-export type RenderInput = {
+type RenderInput = {
   contentText: string;
   details?: RenderDetails;
   cwd?: string;

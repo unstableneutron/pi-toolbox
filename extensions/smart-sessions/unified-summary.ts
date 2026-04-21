@@ -77,7 +77,7 @@ function extractJsonObject(text: string): string {
   return trimmed;
 }
 
-export type ParsedRollingSummary = Omit<
+type ParsedRollingSummary = Omit<
   RollingSessionSummary,
   'rewriteCount' | 'checkpointEntryId' | 'conversationHash' | 'generatedAt'
 >;

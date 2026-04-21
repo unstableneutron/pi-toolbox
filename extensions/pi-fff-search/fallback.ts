@@ -57,7 +57,7 @@ type StatLike = typeof statCallback;
 // We model it as plain `(params) => { content }` so tests can stub it
 // without reproducing `ToolDefinition.execute`'s 5-arg signature.
 type BuiltinTextBlock = { type: string; text?: string };
-export type BuiltinToolResult = { content: BuiltinTextBlock[]; details?: unknown };
+type BuiltinToolResult = { content: BuiltinTextBlock[]; details?: unknown };
 
 type BuiltinGrepParams = {
   pattern: string;
@@ -74,8 +74,8 @@ type BuiltinFindParams = {
   limit?: number;
 };
 
-export type BuiltinGrepExecutor = (params: BuiltinGrepParams) => Promise<BuiltinToolResult>;
-export type BuiltinFindExecutor = (params: BuiltinFindParams) => Promise<BuiltinToolResult>;
+type BuiltinGrepExecutor = (params: BuiltinGrepParams) => Promise<BuiltinToolResult>;
+type BuiltinFindExecutor = (params: BuiltinFindParams) => Promise<BuiltinToolResult>;
 
 type FallbackTextMatch = {
   path: string;
@@ -106,7 +106,7 @@ export type RunLocalFallbackResult = {
   omittedMatches?: number;
 };
 
-export type RunLocalFallbackDeps = {
+type RunLocalFallbackDeps = {
   runBuiltinGrep?: BuiltinGrepExecutor;
   runBuiltinFind?: BuiltinFindExecutor;
   spillText?: (rawText: string) => Promise<string>;

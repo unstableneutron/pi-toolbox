@@ -10,18 +10,6 @@ export type McpOutputMode = (typeof MCP_OUTPUT_MODES)[number];
 export type BashOutputMode = (typeof BASH_OUTPUT_MODES)[number];
 export type DiffViewMode = (typeof DIFF_VIEW_MODES)[number];
 
-export const BUILT_IN_TOOL_OVERRIDE_NAMES = [
-  'read',
-  'grep',
-  'find',
-  'ls',
-  'bash',
-  'edit',
-  'write',
-] as const;
-
-export type BuiltInToolOverrideName = (typeof BUILT_IN_TOOL_OVERRIDE_NAMES)[number];
-
 export interface ToolOverrideOwnership {
   read: boolean;
   grep: boolean;
@@ -75,13 +63,3 @@ export const DEFAULT_TOOL_DISPLAY_CONFIG: ToolDisplayConfig = {
   showTruncationHints: false,
   showRtkCompactionHints: false,
 };
-
-export interface ConfigLoadResult {
-  config: ToolDisplayConfig;
-  error?: string;
-}
-
-export interface ConfigSaveResult {
-  success: boolean;
-  error?: string;
-}

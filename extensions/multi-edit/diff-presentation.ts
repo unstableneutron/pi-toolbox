@@ -2,7 +2,7 @@ import { truncateToWidth, visibleWidth } from '@mariozechner/pi-tui';
 import { pluralize } from './render-utils';
 import type { ToolDisplayConfig } from './display-types';
 
-export interface DiffSummaryStats {
+interface DiffSummaryStats {
   added: number;
   removed: number;
   hunks: number;

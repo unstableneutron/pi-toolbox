@@ -7,7 +7,7 @@ export const PROXIED_PROVIDER_ERROR_CODES = {
   UPSTREAM_MODEL_REJECTED: 'PROXIED_PROVIDER_UPSTREAM_MODEL_REJECTED',
 } as const;
 
-export type ProxiedProviderErrorCode =
+type ProxiedProviderErrorCode =
   (typeof PROXIED_PROVIDER_ERROR_CODES)[keyof typeof PROXIED_PROVIDER_ERROR_CODES];
 
 export class ProxiedProviderError extends Error {

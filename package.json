@@ -6,7 +6,7 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "check": "oxlint -c .oxlintrc.json --type-aware --type-check --fix --fix-suggestions --fix-dangerously --deny-warnings . && oxfmt -c .oxfmtrc.json .",
+    "check": "oxlint -c .oxlintrc.json --type-aware --type-check --fix --fix-suggestions --fix-dangerously --deny-warnings . && oxfmt -c .oxfmtrc.json . && knip",
     "test": "vitest run",
     "knip": "knip",
     "knip:fix": "knip --fix && oxfmt -c .oxfmtrc.json .",

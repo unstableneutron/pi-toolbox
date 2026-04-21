@@ -13,7 +13,7 @@ export interface ClassicEditResult {
   firstChangedLine?: number;
 }
 
-export type NormalizedParams =
+type NormalizedParams =
   | { mode: 'patch'; patch: string }
   | { mode: 'classic'; edits: ClassicEditItem[] };
 

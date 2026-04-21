@@ -1,9 +1,9 @@
 const DEFAULT_MATCH_TEXT_MAX_CHARS = 280;
 const RISKY_MATCH_TEXT_MAX_CHARS = 160;
 
-export const RISKY_MATCH_EXTENSIONS = new Set(['.json', '.jsonl', '.log', '.ndjson', '.min.js']);
+const RISKY_MATCH_EXTENSIONS = new Set(['.json', '.jsonl', '.log', '.ndjson', '.min.js']);
 
-export const RISKY_MATCH_PATH_SEGMENTS = [
+const RISKY_MATCH_PATH_SEGMENTS = [
   '/.local/share/',
   '/threads/',
   '/sessions/',
@@ -46,7 +46,7 @@ export function clampMatchText(text: string, path?: string): string {
   return `${compact.slice(0, limit).trimEnd()} … [truncated, ${compact.length} chars total]`;
 }
 
-export function normalizeExtensionFilter(extension: string): string {
+function normalizeExtensionFilter(extension: string): string {
   return extension.toLowerCase().replace(/^\./, '');
 }
 

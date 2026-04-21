@@ -11,7 +11,7 @@ import {
   type RollingSummarySidecar,
 } from './contracts';
 
-export function getRollingSummarySidecarPath(sessionId: string): string {
+function getRollingSummarySidecarPath(sessionId: string): string {
   return join(getAgentDir(), 'smart-sessions', 'rolling-summary', `${sessionId}.json`);
 }
 

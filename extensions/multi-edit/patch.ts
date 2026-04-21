@@ -94,7 +94,7 @@ type StreamingPatchOperation = PatchOperation & {
   state: 'streaming' | 'streamed';
 };
 
-export interface PatchOpResult {
+interface PatchOpResult {
   path: string;
   message: string;
   diff?: string;
@@ -126,9 +126,9 @@ export interface PatchOpResult {
 // The error's `.message` is a short one-liner; the rich rendering
 // happens at the result-formatting layer (Phase 1 commit 2).
 
-export type MatchTier = 'exact' | 'rstrip' | 'trim' | 'fuzzy';
+type MatchTier = 'exact' | 'rstrip' | 'trim' | 'fuzzy';
 
-export interface PerLineMatchSignal {
+interface PerLineMatchSignal {
   patternIndex: number;
   matched: boolean;
   tier?: MatchTier;
@@ -136,7 +136,7 @@ export interface PerLineMatchSignal {
   actual?: string;
 }
 
-export interface NearestMatch {
+interface NearestMatch {
   startLine: number; // 1-indexed line in file; first line of actualLines
   score: number; // 0.0-1.0 fraction of pattern lines that matched at any tier
   tierTried: MatchTier | 'none';
@@ -146,7 +146,7 @@ export interface NearestMatch {
   perLineSignals: PerLineMatchSignal[];
 }
 
-export interface ContextMatchFailure {
+interface ContextMatchFailure {
   kind: 'context-not-found' | 'anchor-not-found';
   filePath: string;
   searchedFrom: number;
@@ -172,7 +172,7 @@ export class PatchContextMatchError extends Error {
 // collected; if any occurred, the plan phase rejects with this error
 // carrying every failure so the agent can fix all of them in one
 // round-trip instead of discovering them one at a time.
-export interface PlanOpStatus {
+interface PlanOpStatus {
   opIndex: number;
   opId: string;
   path: string;
@@ -412,7 +412,7 @@ function normaliseLineForFuzzyMatch(s: string): string {
 
 // Phase 1.5: return tier information alongside the match index so
 // callers can surface `usedFuzzy` when a match required normalization.
-export interface SequenceMatch {
+interface SequenceMatch {
   startIndex: number;
   tier: MatchTier;
 }
@@ -629,7 +629,7 @@ function findNearestAnchor(lines: string[], anchor: string): Array<{ line: numbe
   return scored.slice(0, MAX_NEARBY_IDENTIFIERS).map(({ line, text }) => ({ line, text }));
 }
 
-export interface DeriveUpdatedResult {
+interface DeriveUpdatedResult {
   content: string;
   usedFuzzy: boolean;
   // Per-chunk match counts for FindReplaceAll reporting. Other chunk
@@ -1332,7 +1332,7 @@ function summarizeUpdateChunks(chunks: UpdateChunk[]): {
   );
 }
 
-export function toPatchPreviewRows(
+function toPatchPreviewRows(
   operations: PatchOperation[],
   state: PatchOperationState,
 ): PatchPreviewRow[] {
@@ -1416,14 +1416,14 @@ function assignStableOperationIds(operations: PatchOperation[]): string[] {
   });
 }
 
-export interface StreamingPatchParseResult {
+interface StreamingPatchParseResult {
   operations: PatchPreviewRow[];
   sealedOperations: PatchOperation[];
   patchComplete: boolean;
   trailingOpenOperation?: PatchPreviewRow;
 }
 
-export interface StreamingPatchParser {
+interface StreamingPatchParser {
   update(patchText: string): StreamingPatchParseResult;
 }
 

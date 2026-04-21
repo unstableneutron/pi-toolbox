@@ -12,13 +12,13 @@ import { verifySourceVersions } from './mutation-plan';
 import type { MutationPlan } from './mutation-plan';
 import type { OverlayWorkspace } from './workspace';
 
-export interface PatchSessionUpdate {
+interface PatchSessionUpdate {
   rows: PatchPreviewRow[];
   stagedPlan?: MutationPlan<PatchPreviewRow>;
   firstInvalidatedRowIndex?: number;
 }
 
-export interface PatchSessionFinalizeResult {
+interface PatchSessionFinalizeResult {
   plan: MutationPlan<PatchPreviewRow>;
   reusedStage: boolean;
   rows: PatchPreviewRow[];

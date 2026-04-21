@@ -32,7 +32,7 @@ export const STOCK_REFUSAL_CONTINUE_MESSAGES = [
   'Please proceed and provide the best helpful answer you can for the same task.',
 ] as const;
 
-export type RetryableProviderErrorReason =
+type RetryableProviderErrorReason =
   | 'deploymentMissing'
   | 'encryptedContentVerification'
   | 'nativeCompactionCreatedBy'
@@ -97,7 +97,7 @@ export interface PendingRecovery {
   details?: RetryRecoveryMessageDetails;
 }
 
-export interface RetryableTerminalLeaf {
+interface RetryableTerminalLeaf {
   kind: PendingRecovery['kind'];
   entryId?: string;
   parentEntryId?: string;
@@ -106,7 +106,7 @@ export interface RetryableTerminalLeaf {
 
 type RecoveryPhase = 'queued' | 'sent' | 'reviewing';
 
-export interface ActiveRecovery {
+interface ActiveRecovery {
   kind: PendingRecovery['kind'];
   phase: RecoveryPhase;
   attempt: number;
@@ -130,7 +130,7 @@ interface SessionRuntimeState {
   session?: PatchedSessionLike;
 }
 
-export type NotificationType = 'info' | 'warning' | 'error';
+type NotificationType = 'info' | 'warning' | 'error';
 
 interface RecoveryUi {
   setStatus(text: string): void;
@@ -563,12 +563,6 @@ function createRecoveryMessageDetails(input: {
   };
 }
 
-export function clearPendingRecovery(sessionId: string): void {
-  if (getQueuedRecovery(sessionId)) {
-    clearRecoveryState(sessionId);
-  }
-}
-
 export function getRefusalAttempt(sessionId: string): number {
   return getRefusalProgress(sessionId)?.rewriteAttempts ?? 0;
 }
@@ -600,7 +594,7 @@ function getEmptyResponseContinueAttempts(sessionId: string): number {
   return 'empty-stop' === recovery?.kind ? recovery.attempt : 0;
 }
 
-export function clearRecoveryState(sessionId: string): void {
+function clearRecoveryState(sessionId: string): void {
   const state = stateBySessionId.get(sessionId);
   cancelScheduledSuccessStatusClear(sessionId);
   if (!state) {
@@ -616,18 +610,11 @@ export function handleRecoveryAbort(sessionId: string): void {
   clearRecoveryState(sessionId);
 }
 
-export function clearRefusalAttempt(sessionId: string): void {
-  clearRecoveryState(sessionId);
-}
-
 export function clearRefusalStatus(sessionId: string): void {
   cancelScheduledSuccessStatusClear(sessionId);
 }
 
-export function appendDebugEntry(
-  _session: PatchedSessionLike,
-  _data: { [key: string]: unknown },
-): void {
+function appendDebugEntry(_session: PatchedSessionLike, _data: { [key: string]: unknown }): void {
   // Session-persisted debug logging intentionally disabled.
 }
 
@@ -744,9 +731,10 @@ function stripKeyFromStructuredValue(value: unknown, keyToStrip: string): [unkno
   return [value, false];
 }
 
-export function sanitizeNativeCompactionReplayMetadataOnCurrentBranch(
-  session: PatchedSessionLike,
-): { sanitizedCompactions: number; sanitizedItems: number } {
+function sanitizeNativeCompactionReplayMetadataOnCurrentBranch(session: PatchedSessionLike): {
+  sanitizedCompactions: number;
+  sanitizedItems: number;
+} {
   const sessionManager = session?.sessionManager;
   const leafId = sessionManager?.getLeafId?.();
   const entries = sessionManager?.getEntries?.() ?? [];
@@ -855,7 +843,7 @@ export function branchLatestAssistantErrorOutOfMainPath(
   });
 }
 
-export function branchLatestAssistantStopOutOfMainPath(
+function branchLatestAssistantStopOutOfMainPath(
   session: PatchedSessionLike,
   refusalText: string,
   attempt: number,

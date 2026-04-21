@@ -5,7 +5,7 @@ import {
   completeSimple,
 } from '@mariozechner/pi-ai';
 
-export type ModelFamily = 'openai' | 'claude' | 'gemini' | 'other';
+type ModelFamily = 'openai' | 'claude' | 'gemini' | 'other';
 
 const REFUSAL_PATTERNS = [
   /\bcannot assist\b/i,
@@ -32,7 +32,7 @@ REASON: <one sentence>
 REWRITE:
 <one rewritten user message>`;
 
-export interface ReviewCallInput {
+interface ReviewCallInput {
   model: Model<any>;
   apiKey: string;
   headers?: { [key: string]: string };
@@ -40,7 +40,7 @@ export interface ReviewCallInput {
   signal?: AbortSignal;
 }
 
-export interface ReviewCallResult {
+interface ReviewCallResult {
   reason: string;
   rewrite: string;
 }

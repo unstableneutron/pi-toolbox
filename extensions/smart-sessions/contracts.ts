@@ -53,7 +53,7 @@ export function isRollingSessionSummary(value: unknown): value is RollingSession
   );
 }
 
-export function normalizeWords(value: string): string[] {
+function normalizeWords(value: string): string[] {
   return value
     .replace(/[\n\r\t]+/g, ' ')
     .replace(/["'`\u201c\u201d\u2018\u2019]/g, ' ')

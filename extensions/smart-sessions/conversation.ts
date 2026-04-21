@@ -1,6 +1,6 @@
 import type { SessionEntry } from '@mariozechner/pi-coding-agent';
 
-export interface ConversationSnapshot {
+interface ConversationSnapshot {
   conversation: string;
   conversationHash: string;
   messageCount: number;
@@ -8,7 +8,7 @@ export interface ConversationSnapshot {
   lastMessageTimestamp: string | null;
 }
 
-export interface RollingSummaryInput {
+interface RollingSummaryInput {
   mode: 'incremental' | 'rebuild';
   freshConversation: string;
   freshMessageCount: number;
@@ -16,7 +16,7 @@ export interface RollingSummaryInput {
   snapshot?: ConversationSnapshot;
 }
 
-export function extractText(content: unknown): string {
+function extractText(content: unknown): string {
   if (typeof content === 'string') return content.trim();
   if (!Array.isArray(content)) return '';
 

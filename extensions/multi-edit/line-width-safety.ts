@@ -1,9 +1,9 @@
-export interface WidthMeasurementOps {
+interface WidthMeasurementOps {
   measure(text: string): number;
   truncate(text: string, maxWidth: number): string;
 }
 
-export interface CollapsedDiffHintOptions {
+interface CollapsedDiffHintOptions {
   remainingLines: number;
   hiddenHunks: number;
 }
