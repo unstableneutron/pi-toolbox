@@ -77,11 +77,13 @@ describe('tryRewriteBash — single-command rewrites', () => {
 });
 
 describe('tryRewriteBash — grep rewrites', () => {
-  test('plain grep PAT FILE → fff_grep literal: false', () => {
+  test('plain grep PAT FILE → fff_grep with dir+glob split (not within=<file>)', () => {
+    // Splitting avoids backend-specific file-as-within normalization bugs
+    // (e.g. BUILD.bazel silently searched in parent dir and filtered out).
     const r = rewrite('grep foo src/router.ts');
     expect(r?.decision).toMatchObject({
       tool: 'fff_grep',
-      params: { patterns: ['foo'], within: 'src/router.ts', literal: false },
+      params: { patterns: ['foo'], within: 'src', glob: 'router.ts', literal: true },
     });
   });
 
@@ -89,8 +91,9 @@ describe('tryRewriteBash — grep rewrites', () => {
     const r = rewrite('grep -n "createLsToolDefinition" file.ts');
     expect(r?.decision?.params).toEqual({
       patterns: ['createLsToolDefinition'],
-      within: 'file.ts',
-      literal: false,
+      within: '.',
+      glob: 'file.ts',
+      literal: true,
     });
   });
 
@@ -109,9 +112,20 @@ describe('tryRewriteBash — grep rewrites', () => {
     expect(r?.decision?.params).toMatchObject({ literal: true });
   });
 
-  test('egrep treated as -E regex', () => {
+  test('egrep treated as -E regex — alternation splits, literal upgrades for identifier set', () => {
     const r = rewrite('egrep "foo|bar" f.ts');
-    expect(r?.decision?.params).toMatchObject({ literal: false });
+    expect(r?.decision?.params).toMatchObject({
+      patterns: ['foo', 'bar'],
+      literal: true,
+    });
+  });
+
+  test('egrep with regex-meta alternatives keeps literal: false', () => {
+    const r = rewrite('egrep "foo.*|bar" f.ts');
+    expect(r?.decision?.params).toMatchObject({
+      patterns: ['foo.*', 'bar'],
+      literal: false,
+    });
   });
 
   test('grep -A 5 context', () => {
@@ -148,7 +162,266 @@ describe('tryRewriteBash — grep rewrites', () => {
 
   test('grep -- PAT FILE with end-of-opts marker', () => {
     const r = rewrite('grep -- -x file.ts');
-    expect(r?.decision?.params).toMatchObject({ patterns: ['-x'], literal: false });
+    // `-x` is a simple identifier → literal=true; `file.ts` splits into dir+glob.
+    expect(r?.decision?.params).toMatchObject({
+      patterns: ['-x'],
+      within: '.',
+      glob: 'file.ts',
+      literal: true,
+    });
+  });
+
+  // --- Alternation splitting -------------------------------------------------
+  //
+  // grep's BRE default treats `\|` as alternation but fff_grep's regex engine
+  // treats `\|` as a literal pipe. Pushing the whole pattern through with
+  // literal=false produces zero matches. Since fff_grep's `patterns` array is
+  // OR-matched, splitting into separate entries is the clean translation.
+
+  test('grep BRE alternation \\| → split into patterns array, literal=true for simple identifiers', () => {
+    const r = rewrite('grep -n "stubAuthInvoker\\|stubAuthOutcome" file.go');
+    expect(r?.decision).toMatchObject({
+      tool: 'fff_grep',
+      params: {
+        patterns: ['stubAuthInvoker', 'stubAuthOutcome'],
+        literal: true,
+        within: '.',
+        glob: 'file.go',
+      },
+    });
+  });
+
+  test('grep BRE alternation with 4 alternatives → all split', () => {
+    const r = rewrite(
+      'grep -n "stubAuthInvoker\\|type stubAuth\\|byServer\\|ManifestLoader" connect_test.go',
+    );
+    expect(r?.decision?.params).toMatchObject({
+      patterns: ['stubAuthInvoker', 'type stubAuth', 'byServer', 'ManifestLoader'],
+      literal: true,
+      within: '.',
+      glob: 'connect_test.go',
+    });
+  });
+
+  test('grep -rn BRE alternation with | head -N → split + limit', () => {
+    const r = rewrite('grep -rn "stubAuthInvoker\\|stubAuthOutcome" src/ | head -10');
+    expect(r?.decision?.params).toMatchObject({
+      patterns: ['stubAuthInvoker', 'stubAuthOutcome'],
+      literal: true,
+      within: 'src/',
+      limit: 10,
+    });
+  });
+
+  test('egrep ERE alternation → split on unescaped |', () => {
+    const r = rewrite('egrep "foo|bar|baz" file.ts');
+    expect(r?.decision?.params).toMatchObject({
+      patterns: ['foo', 'bar', 'baz'],
+      literal: true,
+    });
+  });
+
+  test('grep -E ERE alternation → split on unescaped |', () => {
+    const r = rewrite('grep -E "alpha|beta" file.ts');
+    expect(r?.decision?.params).toMatchObject({
+      patterns: ['alpha', 'beta'],
+      literal: true,
+    });
+  });
+
+  test('egrep ERE with escaped pipe → do NOT split, preserve literal pipe', () => {
+    const r = rewrite('egrep "foo\\|bar" file.ts');
+    // `\|` in ERE = literal pipe; there is no alternation to split on.
+    expect(r?.decision?.params.patterns).toEqual(['foo\\|bar']);
+  });
+
+  test('fgrep with literal | → do NOT split', () => {
+    const r = rewrite('fgrep "foo|bar" file.ts');
+    expect(r?.decision?.params).toMatchObject({
+      patterns: ['foo|bar'],
+      literal: true,
+    });
+  });
+
+  test('grep -F with literal | → do NOT split', () => {
+    const r = rewrite('grep -F "foo|bar" file.ts');
+    expect(r?.decision?.params).toMatchObject({
+      patterns: ['foo|bar'],
+      literal: true,
+    });
+  });
+
+  test('grep BRE alternation with regex meta → split, but keep literal=false', () => {
+    const r = rewrite('grep -n "foo.*\\|bar\\[0-9\\]" file.ts');
+    // One alternative has `.*`, so we cannot claim literal-safety for the set.
+    expect(r?.decision?.params.patterns).toEqual(['foo.*', 'bar\\[0-9\\]']);
+    expect(r?.decision?.params.literal).toBe(false);
+  });
+
+  test('grep BRE alternation with empty alternative → no split (pass the raw pattern)', () => {
+    // `a\|\|b` has an empty middle alternative — ambiguous, don't split.
+    const r = rewrite('grep -n "a\\|\\|b" file.ts');
+    expect(r?.decision?.params.patterns).toEqual(['a\\|\\|b']);
+  });
+
+  // --- BRE-only escapes beyond alternation ----------------------------------
+  //
+  // GNU BRE's `\(`, `\)`, `\{`, `\}`, `\+`, `\?`, `\<`, `\>`, `\b` mean
+  // different things in fff_grep's regex engine. The rewriter can't safely
+  // translate them, so it must pass through rather than emit a broken regex.
+
+  test('grep BRE with \\( \\) grouping → pass through', () => {
+    expect(rewrite('grep -n "\\(foo\\|bar\\)" file.ts')).toBeNull();
+  });
+
+  test('grep BRE with \\+ GNU quantifier → pass through', () => {
+    expect(rewrite('grep -n "foo\\+" file.ts')).toBeNull();
+  });
+
+  test('grep BRE with \\{1,3\\} counted repetition → pass through', () => {
+    expect(rewrite('grep -n "a\\{1,3\\}" file.ts')).toBeNull();
+  });
+
+  test('grep BRE with \\< word-start → pass through', () => {
+    expect(rewrite('grep -n "\\<foo\\>" file.ts')).toBeNull();
+  });
+
+  test('egrep with same metacharacters → rewrite unchanged (ERE semantics match fff_grep)', () => {
+    // In ERE, (), {}, +, ? have their PCRE meanings — fff_grep handles them.
+    const r = rewrite('egrep "(foo)+" file.ts');
+    expect(r?.decision?.params.patterns).toEqual(['(foo)+']);
+    expect(r?.decision?.params.literal).toBe(false);
+  });
+
+  // --- File-target splitting ------------------------------------------------
+  //
+  // `grep PAT FILE` must NOT become `fff_grep(within=FILE)` — some FFF router
+  // backends normalize a file-as-`within` to the parent directory with default
+  // ignore rules applied, producing spurious zero-match results (observed
+  // against BUILD.bazel). The translation must split file-like targets into
+  // `within=<dir>, glob=<basename>`.
+
+  test('grep PAT ABS_FILE_PATH with no -r → dir+glob split', () => {
+    const r = rewrite('grep curl_behavior_test /repo/projects/foo/BUILD.bazel');
+    expect(r?.decision?.params).toMatchObject({
+      patterns: ['curl_behavior_test'],
+      within: '/repo/projects/foo',
+      glob: 'BUILD.bazel',
+      literal: true,
+    });
+  });
+
+  test('grep PAT extensionless-known-file → dir+glob split', () => {
+    const r = rewrite('grep "foo" /proj/Makefile');
+    expect(r?.decision?.params).toMatchObject({ within: '/proj', glob: 'Makefile' });
+  });
+
+  test('grep PAT bare-filename-with-ext → dirname=. + glob', () => {
+    const r = rewrite('grep foo router.ts');
+    expect(r?.decision?.params).toMatchObject({ within: '.', glob: 'router.ts' });
+  });
+
+  test('grep PAT trailing-slash DIR → no split, kept as within', () => {
+    const r = rewrite('grep foo src/');
+    expect(r?.decision?.params).toMatchObject({ within: 'src/' });
+    expect(r?.decision?.params.glob).toBeUndefined();
+  });
+
+  test('grep -r PAT FILE-LIKE-PATH → recursive intent wins, no split', () => {
+    // `-r` signals directory intent even if the path happens to look file-like.
+    const r = rewrite('grep -r pi-update mise.toml');
+    expect(r?.decision?.params).toMatchObject({ within: 'mise.toml' });
+    expect(r?.decision?.params.glob).toBeUndefined();
+  });
+
+  test('grep PAT hidden-dotfile → no split (ripgrep default ignore would skip it)', () => {
+    const r = rewrite('grep foo .env');
+    expect(r?.decision?.params).toMatchObject({ within: '.env' });
+    expect(r?.decision?.params.glob).toBeUndefined();
+  });
+
+  test('grep PAT bare-name-no-extension → no split (ambiguous file/dir)', () => {
+    const r = rewrite('grep foo src');
+    expect(r?.decision?.params).toMatchObject({ within: 'src' });
+    expect(r?.decision?.params.glob).toBeUndefined();
+  });
+
+  test('grep --include=*.ts PAT FILE → honour explicit glob, do not overwrite with split', () => {
+    const r = rewrite('grep --include="*.ts" foo src/router.ts');
+    // User-supplied glob takes precedence; within stays as the file path.
+    expect(r?.decision?.params).toMatchObject({ within: 'src/router.ts', glob: '*.ts' });
+  });
+
+  // --- Full end-to-end field-report cases ----------------------------------
+  //
+  // These are real agent-traffic commands that previously returned
+  // `(no matches)`. They exercise the combination of:
+  //   - BRE alternation splitting (from the `\|` fix),
+  //   - file-target dir+glob splitting (from the BUILD.bazel fix),
+  //   - mixed literal and regex alternatives (keep literal=false).
+  // Any regression here corresponds to an agent session wasting a turn.
+
+  test('e2e: huh field_select — 4 alternatives, one with .*, file target, absolute path', () => {
+    const r = rewrite(
+      'grep -n "updateViewportHeight\\|defaultHeight\\|height ==\\|if.*height" ' +
+        '/Users/thinh_nguyen/go/pkg/mod/github.com/charmbracelet/huh@v0.8.0/field_select.go | head -15',
+    );
+    expect(r?.decision?.tool).toBe('fff_grep');
+    expect(r?.decision?.params.patterns).toEqual([
+      'updateViewportHeight',
+      'defaultHeight',
+      'height ==',
+      'if.*height',
+    ]);
+    // One alternative has `.*` → can't claim literal-safety; keep regex mode.
+    expect(r?.decision?.params.literal).toBe(false);
+    expect(r?.decision?.params.within).toBe(
+      '/Users/thinh_nguyen/go/pkg/mod/github.com/charmbracelet/huh@v0.8.0',
+    );
+    expect(r?.decision?.params.glob).toBe('field_select.go');
+    expect(r?.decision?.params.limit).toBe(15);
+  });
+
+  test('e2e: ergo connect.go — leading `cd`, 2 alternatives, unescaped . in one alternative', () => {
+    // Field report: user ran
+    //   cd /Users/thinh_nguyen/airlab/repos/ergo && grep -n "unknown server\|run .airchat-toolbox manifest" projects/.../connect.go
+    // and got `(no matches)` because the rewriter passed the whole BRE
+    // pattern through as a single regex string with `\|` as literal pipe.
+    // After the alternation-split fix, the rewrite must:
+    //   - strip the leading `cd <path> &&` navigation,
+    //   - split on `\|` into two alternatives,
+    //   - keep `literal: false` because the second alternative contains `.`
+    //     (a regex meta), so the set isn't literal-safe,
+    //   - split the file target into within=<dir> + glob=<basename>.
+    const r = rewrite(
+      'cd /Users/thinh_nguyen/airlab/repos/ergo && ' +
+        'grep -n "unknown server\\|run .airchat-toolbox manifest" ' +
+        'projects/airchat/cli/toolbox/cmd/connect.go',
+    );
+    expect(r?.decision?.tool).toBe('fff_grep');
+    expect(r?.decision?.params.patterns).toEqual([
+      'unknown server',
+      'run .airchat-toolbox manifest',
+    ]);
+    expect(r?.decision?.params.literal).toBe(false);
+    expect(r?.decision?.params.within).toBe('projects/airchat/cli/toolbox/cmd');
+    expect(r?.decision?.params.glob).toBe('connect.go');
+  });
+
+  test('e2e: huh field_select — 2 alternatives, one escaped dot (\\.), file target', () => {
+    const r = rewrite(
+      'grep -n "updateViewportHeight\\|s\\.height" ' +
+        '/Users/thinh_nguyen/go/pkg/mod/github.com/charmbracelet/huh@v0.8.0/field_select.go | head -15',
+    );
+    expect(r?.decision?.params.patterns).toEqual(['updateViewportHeight', 's\\.height']);
+    // `s\.height` contains backslash → keep regex mode; fff_grep's engine
+    // interprets `\.` as a literal dot, which matches the user's intent.
+    expect(r?.decision?.params.literal).toBe(false);
+    expect(r?.decision?.params.within).toBe(
+      '/Users/thinh_nguyen/go/pkg/mod/github.com/charmbracelet/huh@v0.8.0',
+    );
+    expect(r?.decision?.params.glob).toBe('field_select.go');
+    expect(r?.decision?.params.limit).toBe(15);
   });
 });
 
@@ -184,6 +457,37 @@ describe('tryRewriteBash — find rewrites', () => {
 
   test('find with generic glob only (no derivable query) → pass through', () => {
     expect(rewrite('find . -name "*.ts"')).toBeNull();
+  });
+
+  // Extension-only globs carry no fuzzy-search signal. Bail out regardless of
+  // whether the extension happens to be in our legacy generic-tokens list.
+  test('find PATH -name "*.go" → pass through (extension-only, not in generic tokens)', () => {
+    // Regression: prior to the structural check, `go` wasn't in
+    // FIND_QUERY_GENERIC_TOKENS so this rewrote to `query: "go"` and
+    // returned zero results against FFF-routed hidden dirs.
+    expect(rewrite('find /tmp/huhsrc/node_modules/.gitchamber -name "*.go"')).toBeNull();
+  });
+
+  test('find PATH -name "*.go" | head -5 → pass through even with head', () => {
+    expect(
+      rewrite('find /tmp/huhsrc/node_modules/.gitchamber -name "*.go" 2>&1 | head -5'),
+    ).toBeNull();
+  });
+
+  for (const ext of ['py', 'rs', 'rb', 'java', 'c', 'cpp', 'h', 'hpp', 'swift', 'kt', 'scala']) {
+    test(`find PATH -name "*.${ext}" → pass through (no fuzzy signal)`, () => {
+      expect(rewrite(`find /repo -name "*.${ext}"`)).toBeNull();
+    });
+  }
+
+  test('find PATH -name "**/*.go" → pass through (recursive extension-only)', () => {
+    expect(rewrite('find /repo -name "**/*.go"')).toBeNull();
+  });
+
+  test('find PATH -name "*router*.go" → rewrites (has a non-extension token)', () => {
+    const r = rewrite('find /repo -name "*router*.go"');
+    expect(r?.decision?.tool).toBe('fff_find_files');
+    expect(r?.decision?.params.query).toBe('router');
   });
 
   test('fd pattern → fff_find_files', () => {
@@ -325,17 +629,71 @@ describe('tryRewriteBash — trivial-redirect stripping', () => {
 });
 
 describe('tryRewriteBash — notice text', () => {
-  test('notice is present, references original command and target tool', () => {
+  // The notice is designed to be token-frugal: a single line of the form
+  //   `<source> → <target>(<params>)`
+  // with no original-command echo, no multi-line pedagogy, and no truncation.
+  // The source-tool prefix disambiguates the arrow direction, confirms
+  // which bash tool the rewriter recognized, and teaches the mapping by
+  // exposure. See formatNotice in bash-rewrite.ts.
+
+  test('notice starts with the source tool and target tool call', () => {
     const r = rewrite('grep -rn foo src/');
-    expect(r?.notice).toMatch(/grep -rn foo src\//);
-    expect(r?.notice).toMatch(/→ fff_grep\(/);
-    expect(r?.notice).toMatch(/Prefer fff_grep/);
+    expect(r?.notice).toMatch(/^grep → fff_grep\(/);
   });
 
-  test('long commands are truncated in notice', () => {
+  test('notice distinguishes source tool flavors (grep vs egrep vs fgrep vs rg)', () => {
+    expect(rewrite('egrep "a|b" f.ts')?.notice).toMatch(/^egrep → fff_grep\(/);
+    expect(rewrite('fgrep "foo" f.ts')?.notice).toMatch(/^fgrep → fff_grep\(/);
+    expect(rewrite('rg "foo" src/')?.notice).toMatch(/^rg → fff_grep\(/);
+  });
+
+  test('notice labels find, cat, ls, head, sed, fd correctly', () => {
+    expect(rewrite('cat src/foo.ts')?.notice).toMatch(/^cat → read\(/);
+    expect(rewrite('ls src/')?.notice).toMatch(/^ls → ls\(/);
+    expect(rewrite('head -5 src/foo.ts')?.notice).toMatch(/^head → read\(/);
+    expect(rewrite("sed -n '10,20p' src/foo.ts")?.notice).toMatch(/^sed → read\(/);
+    expect(rewrite('find src/ -name "*router*"')?.notice).toMatch(/^find → fff_find_files\(/);
+    expect(rewrite('fd router src/')?.notice).toMatch(/^fd → fff_find_files\(/);
+  });
+
+  test('notice keeps the source label even with `+head` pipeline suffix', () => {
+    // Pipeline recognizers append `+head`; the source segment must still
+    // be the first `-`- or `+`-separated token.
+    const r = rewrite('grep -rn foo src/ | head -10');
+    expect(r?.notice).toMatch(/^grep → fff_grep\(/);
+  });
+
+  test('notice is a single line', () => {
+    const r = rewrite('grep -rn foo src/');
+    expect(r?.notice?.includes('\n')).toBe(false);
+  });
+
+  test('notice contains the structured params', () => {
+    const r = rewrite('grep -rn foo src/');
+    expect(r?.notice).toMatch(/patterns=\["foo"\]/);
+    expect(r?.notice).toMatch(/within="src\/"/);
+  });
+
+  test('notice does NOT echo the original command', () => {
+    // The agent already knows what they ran; echoing costs tokens for no gain.
+    const r = rewrite('grep -rn foo src/');
+    expect(r?.notice).not.toMatch(/grep -rn foo/);
+  });
+
+  test('notice does NOT carry the old pedagogical tail', () => {
+    const r = rewrite('grep -rn foo src/');
+    expect(r?.notice).not.toMatch(/Prefer fff_grep/);
+    expect(r?.notice).not.toMatch(/skip shell parsing/);
+  });
+
+  test('notice stays short even for long commands (no truncation needed)', () => {
+    // With the command echo gone, there's nothing to truncate — the notice
+    // is bounded by the structured-tool param size, not the input.
     const longPath = 'a'.repeat(500);
     const r = rewrite(`cat ${longPath}`);
-    expect(r?.notice).toMatch(/\.\.\./);
+    expect(r?.notice).not.toMatch(/\.\.\./);
+    // Should stay well under the old ~280-char baseline.
+    expect(r?.notice?.length ?? 0).toBeLessThan(640);
   });
 });
 

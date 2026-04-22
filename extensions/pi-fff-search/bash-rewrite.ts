@@ -43,6 +43,7 @@ const FIND_QUERY_GENERIC_TOKENS = new Set([
   'tests',
   'spec',
   'specs',
+  // JavaScript / TypeScript family.
   'ts',
   'tsx',
   'js',
@@ -51,13 +52,73 @@ const FIND_QUERY_GENERIC_TOKENS = new Set([
   'cjs',
   'mts',
   'cts',
+  // Data / config formats.
   'json',
   'md',
   'mdx',
   'txt',
   'yaml',
   'yml',
+  'toml',
+  'ini',
+  'cfg',
+  'conf',
+  'xml',
+  'csv',
+  'tsv',
   'lock',
+  // Other widely used language extensions. Adding these ensures a glob
+  // like `*router*.go` reduces to the useful token (`router`) instead of
+  // `"router go"`, which pollutes fuzzy matching. The structural
+  // `isExtensionOnlyGlob` check handles the pure `*.EXT` case separately;
+  // this list handles composite patterns.
+  'go',
+  'py',
+  'rs',
+  'rb',
+  'java',
+  'kt',
+  'scala',
+  'swift',
+  'c',
+  'h',
+  'cc',
+  'hh',
+  'cpp',
+  'hpp',
+  'cxx',
+  'hxx',
+  'm',
+  'mm',
+  'sh',
+  'bash',
+  'zsh',
+  'fish',
+  'css',
+  'scss',
+  'sass',
+  'less',
+  'html',
+  'htm',
+  'vue',
+  'svelte',
+  'astro',
+  'sql',
+  'proto',
+  'graphql',
+  'gql',
+  'php',
+  'pl',
+  'pm',
+  'lua',
+  'ex',
+  'exs',
+  'erl',
+  'hs',
+  'clj',
+  'cljs',
+  'zig',
+  'dart',
 ]);
 
 /**
@@ -363,10 +424,151 @@ interface GrepFlags {
   contextLines?: number;
   glob?: string;
   excludePaths?: string[];
+  /** -r / -R seen — user intent is recursive over a directory. */
+  recursive?: boolean;
+}
+
+/**
+ * Extensionless filenames that are reliably files (not directories) in every
+ * common project. Used to classify a grep target as file-like when the path
+ * has no `.ext` component. Keep this conservative: false positives here
+ * convert a directory-scoped search into a bad glob filter.
+ */
+const KNOWN_FILE_BASENAMES: ReadonlySet<string> = new Set([
+  'BUILD',
+  'BUILD.bazel',
+  'WORKSPACE',
+  'WORKSPACE.bazel',
+  'MODULE',
+  'MODULE.bazel',
+  'Makefile',
+  'GNUmakefile',
+  'Dockerfile',
+  'Containerfile',
+  'Gemfile',
+  'Rakefile',
+  'Procfile',
+  'Justfile',
+  'Vagrantfile',
+  'README',
+  'LICENSE',
+  'CHANGELOG',
+  'NOTICE',
+  'AUTHORS',
+  'CODEOWNERS',
+]);
+
+/** Extract the final path segment (handles trailing slash → empty). */
+function pathBasename(p: string): string {
+  const trimmed = p.replace(/\/+$/, '');
+  const idx = trimmed.lastIndexOf('/');
+  return idx < 0 ? trimmed : trimmed.slice(idx + 1);
+}
+
+/** Extract everything up to the final `/`. Returns '.' for bare basenames. */
+function pathDirname(p: string): string {
+  const trimmed = p.replace(/\/+$/, '');
+  const idx = trimmed.lastIndexOf('/');
+  if (idx < 0) return '.';
+  if (idx === 0) return '/';
+  return trimmed.slice(0, idx);
+}
+
+/**
+ * Decide whether a grep target path is file-like purely from its syntax.
+ * Used to translate `grep PAT FILE` → `fff_grep(within=dirname, glob=basename)`
+ * instead of `within=FILE`, which some FFF router backends silently degrade
+ * to the parent directory with default ignore rules applied — producing
+ * spurious zero-match results (e.g. for `BUILD.bazel`).
+ *
+ * Strict rules, in order:
+ *   1. Trailing slash → definitely a directory. Not file-like.
+ *   2. Basename contains a glob metacharacter → not safe to use as a glob
+ *      filter without escaping; leave the path as-is.
+ *   3. Basename matches KNOWN_FILE_BASENAMES → file-like.
+ *   4. Basename has a dot with non-empty extension (e.g. `foo.ts`, `BUILD.bazel`,
+ *      but NOT `.`, `..`, `.env`) → file-like. Hidden dotfiles like `.env` are
+ *      intentionally excluded: ripgrep's default ignore rules skip them, so
+ *      translating to a glob filter would be a regression vs file-scope.
+ *   5. Anything else → ambiguous, not file-like.
+ */
+function looksLikeFileTarget(p: string): boolean {
+  if (p.endsWith('/')) return false;
+  const base = pathBasename(p);
+  if (base.length === 0) return false;
+  if (GLOB_META_PATTERN.test(base)) return false;
+  if (KNOWN_FILE_BASENAMES.has(base)) return true;
+  const dotIdx = base.lastIndexOf('.');
+  if (dotIdx <= 0) return false; // bare name, or leading-dot (e.g. `.env`)
+  const ext = base.slice(dotIdx + 1);
+  return ext.length > 0;
 }
 
 const GREP_SHORT_WHITELIST = new Set(['n', 'i', 'r', 'R', 'H', 'h', 'I', 'a', 'E', 'F', 'w']);
 const GREP_DISALLOWED_SHORT = new Set(['v', 'o', 'l', 'L', 'c', 'q', 'x', 'Z', 'z']);
+
+/**
+ * Regex metacharacters that are meaningful in fff_grep's regex engine. If a
+ * split alternative contains none of these, it is safe to emit as a literal
+ * pattern — which is both the documented fff_grep preference for code search
+ * and more robust to engine-flavor differences.
+ */
+const REGEX_META_PATTERN = /[.*+?^$[\](){}|\\]/;
+
+/**
+ * BRE-specific escape sequences whose meaning differs between GNU BRE grep
+ * and fff_grep's regex engine:
+ *   \( \)    — BRE grouping (vs literal parens in most ERE/PCRE)
+ *   \{ \}    — BRE counted repetition (vs literal braces)
+ *   \+ \?    — GNU BRE quantifiers (vs literal + / ? in POSIX BRE, quantifiers in ERE/PCRE)
+ *   \< \>    — word boundaries (vs literal < / > in PCRE)
+ *   \b       — word boundary in some engines, literal backspace elsewhere
+ *
+ * When default `grep` (BRE) input contains any of these, we can't safely
+ * translate the regex — bail out to pass-through rather than emit a
+ * broken fff_grep call. Alternation (`\|`) is handled separately above.
+ */
+const BRE_ONLY_ESCAPE_PATTERN = /\\[(){}+?<>b]/;
+
+/**
+ * Split a grep pattern on its alternation operator. Returns an array of
+ * alternatives, or null if the input doesn't use alternation (no split
+ * needed) or if the split would produce an empty alternative.
+ *
+ *   - mode='bre': split on the literal 2-char sequence `\|` (default grep)
+ *   - mode='ere': split on unescaped `|` (egrep / grep -E)
+ *   - mode='literal': no-op (fgrep / grep -F — pipe is literal)
+ */
+function splitGrepAlternation(pattern: string, mode: 'bre' | 'ere' | 'literal'): string[] | null {
+  if (mode === 'literal') return null;
+  if (mode === 'bre') {
+    if (pattern.indexOf('\\|') === -1) return null;
+    const parts = pattern.split('\\|');
+    if (parts.some((p) => p.length === 0)) return null;
+    return parts;
+  }
+  // ERE: split on unescaped `|`. Track backslash escapes so `\|` stays literal.
+  const parts: string[] = [];
+  let buf = '';
+  for (let i = 0; i < pattern.length; i += 1) {
+    const ch = pattern[i]!;
+    if (ch === '\\' && i + 1 < pattern.length) {
+      buf += ch + pattern[i + 1]!;
+      i += 1;
+      continue;
+    }
+    if (ch === '|') {
+      parts.push(buf);
+      buf = '';
+      continue;
+    }
+    buf += ch;
+  }
+  parts.push(buf);
+  if (parts.length < 2) return null;
+  if (parts.some((p) => p.length === 0)) return null;
+  return parts;
+}
 
 function parseGrepContext(flag: string, arg?: string): number | null {
   // -A5 / -B5 / -C5 bundled
@@ -447,8 +649,12 @@ function classifyGrep(tokens: Token[]): RewriteDecision | null {
           case 'F':
             flags.literal = true;
             break;
+          case 'r':
+          case 'R':
+            flags.recursive = true;
+            break;
           default:
-            // -n, -r, -R, -H, -h, -I, -a, -w: no structured effect (defaults match fff_grep).
+            // -n, -H, -h, -I, -a, -w: no structured effect (defaults match fff_grep).
             break;
         }
       }
@@ -461,22 +667,50 @@ function classifyGrep(tokens: Token[]): RewriteDecision | null {
 
   if (pattern === null) return null;
 
+  // Determine the grep regex flavor so we can (a) split alternation into
+  // fff_grep's OR-matched `patterns` array and (b) bail on BRE-only
+  // escapes that fff_grep's engine would mistranslate.
+  const mode: 'bre' | 'ere' | 'literal' =
+    flags.literal === true ? 'literal' : flags.literal === false ? 'ere' : 'bre';
+
+  // Default-`grep` (BRE) with BRE-only escapes (other than `\|`) can't be
+  // safely mapped to fff_grep's regex engine — pass through.
+  if (mode === 'bre' && BRE_ONLY_ESCAPE_PATTERN.test(pattern)) return null;
+
+  const alternatives = splitGrepAlternation(pattern, mode) ?? [pattern];
+
+  // If every alternative is free of regex metacharacters, prefer `literal: true`:
+  // it's fff_grep's documented code-search default and is robust to any
+  // remaining engine-flavor differences.
+  const allLiteralSafe = alternatives.every((p) => !REGEX_META_PATTERN.test(p));
+  const effectiveLiteral = mode === 'literal' ? true : allLiteralSafe ? true : false;
+
   const params: Record<string, unknown> = {
-    patterns: [pattern],
+    patterns: alternatives,
     // Default to regex mode, matching gnu-grep's default semantics. `-F` / `fgrep`
     // flip to literal; `-E` / `egrep` are explicit regex but the default already
     // matches them. fff_grep's public API requires an explicit literal value.
-    literal: flags.literal ?? false,
+    literal: effectiveLiteral,
   };
   if (paths.length === 1) {
-    params.within = paths[0]!;
+    const target = paths[0]!;
+    // Split a file-like target into within=<dir> + glob=<basename> so we don't
+    // depend on how any particular FFF backend normalizes a file-as-`within`.
+    // Skip if the caller already passed an explicit --include= glob (honour it).
+    // `-r` / `-R` implies directory intent — keep path as-is.
+    if (!flags.recursive && flags.glob === undefined && looksLikeFileTarget(target)) {
+      params.within = pathDirname(target);
+      params.glob = pathBasename(target);
+    } else {
+      params.within = target;
+    }
   } else if (paths.length > 1) {
     // fff_grep's `within` is a single path. Multiple paths cannot be mapped cleanly.
     return null;
   }
   if (flags.caseSensitive === false) params.case_sensitive = false;
   if (flags.contextLines !== undefined) params.context_lines = flags.contextLines;
-  if (flags.glob !== undefined) params.glob = flags.glob;
+  if (flags.glob !== undefined && params.glob === undefined) params.glob = flags.glob;
   if (flags.excludePaths && flags.excludePaths.length > 0) {
     params.exclude_paths = flags.excludePaths;
   }
@@ -591,11 +825,42 @@ function deriveFindQueryFromGlob(glob: string): string | null {
   return specific.join(' ');
 }
 
+/**
+ * True when the glob is structurally `*.EXT` / `**\/*.EXT` / `**.EXT` and
+ * encodes nothing but an extension filter. `find PATH -name "*.EXT"` is a
+ * pure filename-filter query; fff_find_files' `query` is a fuzzy filename
+ * match that can't meaningfully use just an extension (`"go"` matches every
+ * `.go` file identically — all signal, no selectivity). Worse, the FFF
+ * router's default ignore rules may filter hidden/gitignored subtrees on
+ * its own, producing zero-result false negatives where `find` would
+ * happily enumerate. In this shape, passing through to bash is strictly
+ * better than any fff_find_files call we could build.
+ *
+ * Note: FIND_QUERY_GENERIC_TOKENS already catches some extensions
+ * (`ts`, `tsx`, `json`, …) but is incomplete — `go`, `py`, `rs`, `rb`,
+ * `java`, etc. were missing and produced broken rewrites. This structural
+ * check supersedes that allowlist for the "just an extension" shape and
+ * is robust to any future language extension.
+ */
+function isExtensionOnlyGlob(glob: string): boolean {
+  const normalized = glob.replace(/\\/g, '/').trim();
+  if (normalized.length === 0) return false;
+  // Strip leading directory wildcards so `**/*.go` and `*.go` both reduce
+  // to the bare `*.ext` core.
+  const core = normalized.replace(/^(\*\*\/)+/, '').replace(/^\*\*\./, '*.');
+  return /^\*\.[A-Za-z0-9]+$/.test(core);
+}
+
 function classifyFind(tokens: Token[]): RewriteDecision | null {
   const a = analyzeFind(tokens);
   if (!a || !a.hasNameClause || !a.glob) return null;
   if (a.typeFilter === 'd') return null; // fff_find_files is file-oriented.
   if (a.paths.length > 1) return null;
+
+  // Pure extension filters (`*.go`, `**/*.rs`, …) carry no fuzzy-search
+  // signal and interact badly with FFF's default ignore rules — bail
+  // out to bash, which handles them correctly.
+  if (isExtensionOnlyGlob(a.glob)) return null;
 
   const query = deriveFindQueryFromGlob(a.glob);
   if (!query) return null;
@@ -840,13 +1105,32 @@ function tryFindXargsCatIdiom(stages: Token[][]): RewriteDecision | null {
 
 // --- Public entry point -----------------------------------------------------
 
-function formatNotice(originalCmd: string, decision: RewriteDecision): string {
-  const sampleCmd = originalCmd.length > 220 ? `${originalCmd.slice(0, 217)}...` : originalCmd;
+/**
+ * Format a single-line, token-frugal notice announcing a bash→structured-tool
+ * rewrite. Shape:
+ *
+ *   grep → fff_grep(patterns=["foo"], literal=true, within="src", limit=10)
+ *
+ * The source-tool prefix (`grep`, `find`, `cat`, …) is two tokens but earns
+ * its keep three ways: (1) it disambiguates the arrow direction so the line
+ * reads unambiguously as a transformation, not a label; (2) it confirms
+ * which bash tool the rewriter recognized (e.g. `egrep → …` vs `grep → …`
+ * tells the agent ERE mode was detected); (3) it teaches the source→target
+ * mapping implicitly over repeated exposure, without any prose.
+ *
+ * The source label is derived from the recognizer name, whose first `-`-
+ * or `+`-separated segment is always the originating tool (`cat-file`,
+ * `grep-search+head`, `find-name-glob`, `find-xargs-cat`, …). No extra
+ * parsing of the original command is needed.
+ *
+ * Anything beyond this one line (original-command echo, "prefer fff_*
+ * directly" nag, etc.) adds no per-call value after the agent's first
+ * exposure and was burning ~60 tokens per rewrite — dropped.
+ */
+function formatNotice(_originalCmd: string, decision: RewriteDecision): string {
   const paramStr = renderParamsForNotice(decision.params);
-  return (
-    `Note: rewrote \`${sampleCmd}\` → ${decision.tool}(${paramStr}).\n` +
-    `Prefer fff_grep / fff_find_files / read / ls directly — they skip shell parsing and are token-lighter.`
-  );
+  const sourceTool = decision.recognizer.split(/[-+]/)[0] ?? 'bash';
+  return `${sourceTool} → ${decision.tool}(${paramStr})`;
 }
 
 function renderParamsForNotice(params: Record<string, unknown>): string {

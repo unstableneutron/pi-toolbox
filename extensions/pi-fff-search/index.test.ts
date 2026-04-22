@@ -1660,18 +1660,20 @@ describe('pi-fff-search extension', () => {
       undefined,
       { cwd: '/repo' },
     );
+    // Body is the clean read-tool output — no prepended rewrite notice.
+    // The rewrite marker lives in `details.rewriteCall` where the TUI
+    // chip picks it up without double-printing into the visible body.
     expect(result.content).toEqual([
       {
         type: 'text',
-        text: expect.stringMatching(
-          /^Note: rewrote `cat src\/foo\.ts` → read\(path="src\/foo\.ts"\)[\s\S]*export const x = 1;$/,
-        ),
+        text: expect.stringMatching(/^export const x = 1;$/),
       },
     ]);
     expect(result.details).toMatchObject({
       routedVia: 'bash-to-read',
       rewriteRecognizer: 'cat-file',
       rewriteFromCommand: 'cat src/foo.ts',
+      rewriteCall: expect.stringMatching(/^cat → read\(/),
     });
   });
 
@@ -3351,7 +3353,7 @@ describe('pi-fff-search extension', () => {
 describe('bash-rewrite pretty rendering', () => {
   const theme = createTheme();
 
-  test('renderBashRewritePreview shows a "bash → fff_grep:" chip for grep commands', () => {
+  test('renderBashRewritePreview shows compact "bash → fff_grep(...)" chip for grep commands', () => {
     const rendered = renderBashRewritePreview(
       { command: 'grep -rn "createLsToolDefinition" src/' },
       theme,
@@ -3360,8 +3362,46 @@ describe('bash-rewrite pretty rendering', () => {
     expect(rendered).not.toBeNull();
     const text = renderText(rendered);
     expect(text).toContain('bash →');
-    expect(text).toContain('FFF Grep');
+    expect(text).toContain('fff_grep(');
     expect(text).toContain('createLsToolDefinition');
+    expect(text).toContain('within=src/');
+    // Compact chip is a single line — no newlines.
+    expect(text.includes('\n')).toBe(false);
+  });
+
+  test('renderBashRewritePreview shows compact "bash → fff_find_files(...)" chip for find commands', () => {
+    const rendered = renderBashRewritePreview(
+      { command: 'find src/ -name "*router*.ts"' },
+      theme,
+      '/repo',
+    );
+    expect(rendered).not.toBeNull();
+    const text = renderText(rendered);
+    expect(text).toContain('bash →');
+    expect(text).toContain('fff_find_files(');
+    expect(text).toContain('router');
+    expect(text).toContain('glob=*router*.ts');
+    expect(text.includes('\n')).toBe(false);
+  });
+
+  test('renderBashRewritePreview surfaces literal flag when set', () => {
+    const rendered = renderBashRewritePreview(
+      { command: 'grep -F "foo(bar)" src/' },
+      theme,
+      '/repo',
+    );
+    const text = renderText(rendered);
+    expect(text).toContain('literal');
+  });
+
+  test('renderBashRewritePreview joins multiple patterns with " | " in the chip', () => {
+    const rendered = renderBashRewritePreview(
+      { command: 'grep -n "foo\\|bar" src/router.ts' },
+      theme,
+      '/repo',
+    );
+    const text = renderText(rendered);
+    expect(text).toContain('foo | bar');
   });
 
   test('renderBashRewritePreview shows "bash → read(...)" for sed range', () => {
@@ -3403,16 +3443,19 @@ describe('bash-rewrite pretty rendering', () => {
   });
 
   test('renderBashRewriteResult delegates to fff rendering for routedVia=bash-to-fff_grep', () => {
+    // Content is the clean forwarded fff output — no rewrite notice prefix.
+    // The rewrite marker lives in `details.rewriteCall`.
     const result = {
       content: [
         {
           type: 'text',
-          text:
-            'Note: rewrote `grep -rn foo src/` → fff_grep(...)\n\n' +
-            'base_path: /repo\n\nsrc/router.ts:12: found foo here',
+          text: 'base_path: /repo\n\nsrc/router.ts:12: found foo here',
         },
       ],
-      details: { routedVia: 'bash-to-fff_grep' },
+      details: {
+        routedVia: 'bash-to-fff_grep',
+        rewriteCall: 'grep → fff_grep(patterns=["foo"], within="src/")',
+      },
     };
     const rendered = renderBashRewriteResult(result, { expanded: false, isPartial: false }, theme, {
       cwd: '/repo',
@@ -3424,22 +3467,50 @@ describe('bash-rewrite pretty rendering', () => {
     expect(text).toContain('router.ts');
   });
 
-  test('renderBashRewriteResult returns null for routedVia=bash-to-read (falls through)', () => {
+  test('renderBashRewriteResult delegates to read native renderer for routedVia=bash-to-read', () => {
+    // With rewriteToParams present, read's own renderResult is invoked so
+    // the TUI shows the same syntax-highlighted file view the user would
+    // see if they'd called read directly. The rendered output contains
+    // file contents (rather than a null passthrough to the bash renderer).
     const result = {
-      content: [{ type: 'text', text: 'file contents here' }],
-      details: { routedVia: 'bash-to-read' },
+      content: [{ type: 'text', text: 'export const x = 1;' }],
+      details: {
+        routedVia: 'bash-to-read',
+        rewriteToParams: { path: 'src/foo.ts' },
+      },
     };
-    expect(
-      renderBashRewriteResult(result, { expanded: false, isPartial: false }, theme, {
-        cwd: '/repo',
-      }),
-    ).toBeNull();
+    const rendered = renderBashRewriteResult(result, { expanded: false, isPartial: false }, theme, {
+      cwd: '/repo',
+    });
+    expect(rendered).not.toBeNull();
+    const text = renderText(rendered);
+    expect(text).toContain('export const x = 1;');
   });
 
-  test('renderBashRewriteResult returns null for routedVia=bash-to-ls (falls through)', () => {
+  test('renderBashRewriteResult delegates to ls native renderer for routedVia=bash-to-ls', () => {
     const result = {
       content: [{ type: 'text', text: 'src/\ntests/\n' }],
-      details: { routedVia: 'bash-to-ls' },
+      details: {
+        routedVia: 'bash-to-ls',
+        rewriteToParams: { path: '/repo' },
+      },
+    };
+    const rendered = renderBashRewriteResult(result, { expanded: false, isPartial: false }, theme, {
+      cwd: '/repo',
+    });
+    expect(rendered).not.toBeNull();
+    const text = renderText(rendered);
+    // The ls renderer surfaces directory entries somehow (exact format is
+    // an SDK implementation detail, so we only assert a non-empty render).
+    expect(text.length).toBeGreaterThan(0);
+  });
+
+  test('renderBashRewriteResult falls through for bash-to-read without rewriteToParams', () => {
+    // Missing rewriteToParams means we can't feed the read renderer the
+    // context it needs; return null so pi falls back to the bash render.
+    const result = {
+      content: [{ type: 'text', text: 'file contents' }],
+      details: { routedVia: 'bash-to-read' },
     };
     expect(
       renderBashRewriteResult(result, { expanded: false, isPartial: false }, theme, {
