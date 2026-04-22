@@ -658,6 +658,7 @@ function getApplyPatchSessionRows(
   args: unknown,
   context: { state?: unknown; cwd?: string; argsComplete?: boolean } | undefined,
 ): PatchPreviewRow[] | undefined {
+  logDeltaArrival(context, getPatchTextFromArgs(args));
   const patchText = getPatchTextFromArgs(args);
   if (!patchText) {
     return undefined;
@@ -674,6 +675,88 @@ function getApplyPatchSessionRows(
   const visibleRows = stabilizeApplyPatchPreviewRows(patchText, rows, context);
   cacheApplyPatchRows(context, visibleRows);
   return visibleRows;
+}
+
+/**
+ * Diagnostic: when PI_APPLY_PATCH_DELTA_LOG is set, append a JSONL record
+ * each time renderCall is invoked. The first invocation (even with no
+ * patch content yet) is tagged kind="header_visible" so we can measure
+ * the silent period between the apply_patch label appearing and the
+ * first content byte arriving. Subsequent invocations where the patch
+ * has grown are tagged kind="content". Unchanged-patch invocations
+ * are dropped so the file doesn't bloat from redraws.
+ *
+ * Enable: PI_APPLY_PATCH_DELTA_LOG=/tmp/apply-patch-deltas.jsonl pi
+ */
+function logDeltaArrival(
+  context: { state?: unknown } | undefined,
+  patchText: string | undefined,
+): void {
+  const logPath = process.env['PI_APPLY_PATCH_DELTA_LOG'];
+  if (!logPath) return;
+  if (!context?.state || typeof context.state !== 'object') return;
+
+  const diag = context.state as {
+    applyPatchDeltaLog?: {
+      lastLen: number;
+      firstAt: number;
+      lastAt: number;
+      eventIdx: number;
+      headerLogged: boolean;
+    };
+  };
+  const now = Date.now();
+  const len = patchText?.length ?? 0;
+  if (!diag.applyPatchDeltaLog) {
+    diag.applyPatchDeltaLog = {
+      lastLen: 0,
+      firstAt: now,
+      lastAt: now,
+      eventIdx: 0,
+      headerLogged: false,
+    };
+  }
+  const entry = diag.applyPatchDeltaLog;
+
+  // Classify this invocation:
+  // - First-ever invocation → "header_visible" (stamps t=0).
+  // - len > lastLen → "content" (new bytes landed).
+  // - len === lastLen → skip (would be a no-op redraw).
+  let kind: 'header_visible' | 'content';
+  if (!entry.headerLogged) {
+    kind = 'header_visible';
+    entry.headerLogged = true;
+    // Reset firstAt so the header-visible moment is t=0.
+    entry.firstAt = now;
+  } else if (len > entry.lastLen) {
+    kind = 'content';
+  } else {
+    return; // unchanged, skip
+  }
+
+  const sincePrev = now - entry.lastAt;
+  const sinceFirst = now - entry.firstAt;
+  const newBytes = Math.max(0, len - entry.lastLen);
+  const record = {
+    event: entry.eventIdx,
+    kind,
+    total_bytes: len,
+    delta_bytes: newBytes,
+    ms_since_prev: sincePrev,
+    ms_since_first: sinceFirst,
+    last_chunk_tail: (patchText ?? '').slice(-40).replace(/\n/g, '⏎'),
+  };
+  entry.lastLen = len;
+  entry.lastAt = now;
+  entry.eventIdx += 1;
+  try {
+    // Lazy import to keep the hot path clean in the zero-envvar case.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, unicorn/prefer-module
+    const fs = require('node:fs') as typeof import('node:fs');
+    fs.appendFileSync(logPath, `${JSON.stringify(record)}\n`);
+  } catch {
+    // ignore logging failures
+  }
 }
 
 function getResultOperationRows(result: unknown): PatchPreviewRow[] | undefined {
@@ -748,13 +831,79 @@ function renderApplyPatchHeader(
   );
 }
 
-function renderApplyPatchReceivingPlaceholder(theme: {
-  fg(color: string, text: string): string;
-}): Text {
-  // Shown between "tool call known" (byte 0) and "first op header
-  // recognized" (byte ~16). Without it the user stares at the bare
-  // `apply_patch` label and assumes something is buffered.
-  return new Text(`  ${theme.fg('muted', '… receiving patch')}`, 0, 0);
+// Frames for the streaming-placeholder pulse. Each frame is exactly
+// 5 cells wide so the trailing text doesn't jitter left/right. The
+// pulse pattern `·····` → `·····` shifted makes a soft left-to-right
+// bounce without feeling aggressive the way a classic spinner does.
+const PLACEHOLDER_PULSE_FRAMES = [
+  '·    ',
+  '·    ',
+  ' ·   ',
+  '  ·  ',
+  '   · ',
+  '    ·',
+  '   · ',
+  '  ·  ',
+  ' ·   ',
+];
+const PLACEHOLDER_FRAME_MS = 120;
+
+interface PlaceholderPulseState {
+  startedAt: number;
+  timer?: ReturnType<typeof setTimeout>;
+}
+
+function renderApplyPatchReceivingPlaceholder(
+  theme: { fg(color: string, text: string): string },
+  context?: { state?: unknown; invalidate?: () => void },
+): Text {
+  // Shown while the apply_patch header is visible but the streaming
+  // parser has no rows to render yet. On Anthropic this window can be
+  // 10-30s long because the provider generates the full tool_use
+  // content before emitting any SSE deltas. A static line would feel
+  // frozen; a gentle pulse conveys "still working".
+  const state = getPlaceholderPulseState(context);
+  if (!state) {
+    return new Text(`  ${theme.fg('muted', '… receiving patch')}`, 0, 0);
+  }
+
+  const now = Date.now();
+  const elapsed = now - state.startedAt;
+  const period = PLACEHOLDER_FRAME_MS;
+  const frameIdx = Math.floor(elapsed / period) % PLACEHOLDER_PULSE_FRAMES.length;
+  const pulse = PLACEHOLDER_PULSE_FRAMES[frameIdx] ?? '…    ';
+
+  // Schedule a self-redraw at the next frame boundary.
+  if (state.timer) clearTimeout(state.timer);
+  const msToNext = period - (elapsed % period);
+  state.timer = setTimeout(() => {
+    state.timer = undefined;
+    context?.invalidate?.();
+  }, msToNext);
+
+  return new Text(`  ${theme.fg('muted', `${pulse}  receiving patch`)}`, 0, 0);
+}
+
+function getPlaceholderPulseState(
+  context: { state?: unknown } | undefined,
+): PlaceholderPulseState | undefined {
+  if (!context?.state || typeof context.state !== 'object') return undefined;
+  const slot = context.state as { applyPatchPulse?: PlaceholderPulseState };
+  if (!slot.applyPatchPulse) {
+    slot.applyPatchPulse = { startedAt: Date.now() };
+  }
+  return slot.applyPatchPulse;
+}
+
+function clearPlaceholderPulse(context: { state?: unknown } | undefined): void {
+  if (!context?.state || typeof context.state !== 'object') return;
+  const slot = context.state as { applyPatchPulse?: PlaceholderPulseState };
+  if (slot.applyPatchPulse?.timer) {
+    clearTimeout(slot.applyPatchPulse.timer);
+    slot.applyPatchPulse.timer = undefined;
+  }
+  // Drop the whole slot so a fresh apply_patch call starts a new pulse.
+  slot.applyPatchPulse = undefined;
 }
 
 function renderApplyPatchPreview(
@@ -776,6 +925,7 @@ function renderApplyPatchPreview(
 
   if (!rows || rows.length === 0) {
     if (!isStreaming) {
+      clearPlaceholderPulse(context);
       return renderApplyPatchHeader(count, theme);
     }
     // Streaming window before the parser recognizes anything.
@@ -783,10 +933,12 @@ function renderApplyPatchPreview(
     // TUI shows continuous progress instead of a frozen header.
     const container = new Container();
     container.addChild(renderApplyPatchHeader(count, theme));
-    container.addChild(renderApplyPatchReceivingPlaceholder(theme));
+    container.addChild(renderApplyPatchReceivingPlaceholder(theme, context));
     return container;
   }
 
+  // Rows are visible — no more pulse needed.
+  clearPlaceholderPulse(context);
   const container = new Container();
   container.addChild(renderApplyPatchHeader(rows.length, theme));
   container.addChild(renderApplyPatchRows(rows, theme, context?.cwd));

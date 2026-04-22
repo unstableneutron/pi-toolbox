@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 
 import multiEditExtension from './index';
 import { renderApplyPatchRows, renderApplyPatchSummary } from './display/apply-patch-summary';
@@ -305,11 +305,98 @@ describe('multi-edit display renderer', () => {
       argsComplete: false,
       state: {},
       executionStarted: false,
+      invalidate: () => {},
     });
 
     const rendered = component.render(120).join('\n');
     expect(rendered).toContain('apply_patch');
-    expect(rendered).toMatch(/receiving|streaming|…/i);
+    expect(rendered).toMatch(/receiving/i);
+  });
+
+  test('apply_patch streaming placeholder animates the ellipsis across renders', () => {
+    const tools: any[] = [];
+    multiEditExtension({
+      registerTool(tool: any) {
+        tools.push(tool);
+      },
+    } as any);
+
+    const applyPatch = tools.find((t) => t.name === 'apply_patch');
+    const invalidated: number[] = [];
+    const state: Record<string, unknown> = {};
+
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2025-01-01T00:00:00Z'));
+
+      const capture = () => {
+        const component = applyPatch.renderCall({ patch: '*** B' }, createTheme(), {
+          cwd: '/repo',
+          isPartial: true,
+          argsComplete: false,
+          state,
+          executionStarted: false,
+          invalidate: () => invalidated.push(Date.now()),
+        });
+        return component.render(120).join('\n');
+      };
+
+      // Sample the placeholder at several distinct time offsets. If it's
+      // animating we expect the rendered pulse characters to differ.
+      const frames = new Set<string>();
+      for (let i = 0; i < 8; i++) {
+        vi.setSystemTime(new Date(Date.UTC(2025, 0, 1, 0, 0, 0, i * 250)));
+        frames.add(capture().match(/.{1,5} receiving patch/)?.[0] ?? '');
+      }
+      expect(frames.size).toBeGreaterThan(1);
+      // The placeholder should have scheduled a redraw timer while we were stopped.
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('apply_patch placeholder animation timer is cleared once rows arrive', () => {
+    const tools: any[] = [];
+    multiEditExtension({
+      registerTool(tool: any) {
+        tools.push(tool);
+      },
+    } as any);
+
+    const applyPatch = tools.find((t) => t.name === 'apply_patch');
+    const state: Record<string, unknown> = {};
+
+    vi.useFakeTimers();
+    try {
+      // First render with empty rows → schedules a pulse timer.
+      applyPatch.renderCall({ patch: '*** B' }, createTheme(), {
+        cwd: '/repo',
+        isPartial: true,
+        argsComplete: false,
+        state,
+        executionStarted: false,
+        invalidate: () => {},
+      });
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+      // Second render with rows visible → should cancel the pulse timer.
+      applyPatch.renderCall(
+        { patch: '*** Begin Patch\n*** Add File: a.txt\n+x\n' },
+        createTheme(),
+        {
+          cwd: '/repo',
+          isPartial: true,
+          argsComplete: false,
+          state,
+          executionStarted: false,
+          invalidate: () => {},
+        },
+      );
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test('apply_patch streaming preview shows a row with "…" placeholder once the colon arrives but the path has not', () => {
