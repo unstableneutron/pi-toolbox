@@ -58,10 +58,6 @@ vi.mock('./settings', async () => {
   };
 });
 
-vi.mock('./bedrock', () => ({
-  createStreamSimpleProxiedBedrock: vi.fn(() => vi.fn((model: any) => createDoneStream(model))),
-}));
-
 describe('buildDelegatingStream', () => {
   test('routes proxied providers to proxied stream', () => {
     const original = vi.fn(() => createAssistantMessageEventStream());
@@ -496,8 +492,7 @@ describe('extension registration', () => {
             api === 'anthropic-messages' ||
             api === 'openai-responses' ||
             api === 'openai-completions' ||
-            api === 'google-generative-ai' ||
-            api === 'bedrock-converse-stream'
+            api === 'google-generative-ai'
           ) {
             return provider;
           }
@@ -511,12 +506,11 @@ describe('extension registration', () => {
 
     ext({ on: vi.fn() } as unknown as ExtensionAPI);
 
-    expect(registerApiProvider).toHaveBeenCalledTimes(5);
+    expect(registerApiProvider).toHaveBeenCalledTimes(4);
     expect(
       registerApiProvider.mock.calls.map((c) => c[0].api).sort((a, b) => a.localeCompare(b)),
     ).toEqual([
       'anthropic-messages',
-      'bedrock-converse-stream',
       'google-generative-ai',
       'openai-completions',
       'openai-responses',
@@ -717,94 +711,6 @@ describe('extension registration', () => {
         },
       },
     ]);
-  });
-
-  test('provider routes rewrite source → target before invoking the registered streamSimple', async () => {
-    const registeredProviders = new Map<string, any>();
-
-    vi.doMock('@mariozechner/pi-ai', async () => {
-      const actual =
-        await vi.importActual<typeof import('@mariozechner/pi-ai')>('@mariozechner/pi-ai');
-      const originalProvider = {
-        stream: vi.fn((model: any) => createDoneStream(model)),
-        streamSimple: vi.fn((model: any) => createDoneStream(model)),
-      };
-      return {
-        ...actual,
-        registerApiProvider: vi.fn((provider: any) =>
-          registeredProviders.set(provider.api, provider),
-        ),
-        getApiProvider: vi.fn(() => originalProvider),
-        streamSimple: vi.fn((model: any, context: any, options: any) =>
-          registeredProviders.get(model.api).streamSimple(model, context, options),
-        ),
-        stream: vi.fn((model: any, context: any, options: any) =>
-          registeredProviders.get(model.api).stream(model, context, options),
-        ),
-      };
-    });
-
-    const settingsMod = await import('./settings');
-    vi.mocked(settingsMod.loadProxiedProviders).mockReturnValue({
-      'source-facade': true,
-      'target-facade': true,
-    });
-    vi.mocked(settingsMod.loadProxiedProviderRewrites).mockReturnValue({
-      'source-facade/*': { kind: 'rewrite', targetProvider: 'target-facade' },
-    });
-
-    const bedrockMod = await import('./bedrock');
-    const extMod = await import('./index');
-    const ext: typeof extMod.default = extMod.default;
-    const handlers = new Map<string, any>();
-    ext({ on: vi.fn((event: string, handler: any) => handlers.set(event, handler)) } as any);
-
-    const modelRegistry = {
-      find: vi.fn(() => undefined),
-      getAll: vi.fn(() => [
-        {
-          provider: 'target-facade',
-          id: 'global.anthropic.claude-opus-4-7',
-          name: 'claude-opus-4-7',
-          api: 'bedrock-converse-stream',
-        },
-      ]),
-      getApiKeyAndHeaders: vi.fn(async () => ({ ok: true, apiKey: 'bedrock-key', headers: {} })),
-    };
-
-    handlers.get('session_start')({}, { cwd: '/tmp/project', modelRegistry });
-
-    const wrappedBedrock = registeredProviders.get('bedrock-converse-stream');
-    await collectEvents(
-      wrappedBedrock.streamSimple(
-        {
-          provider: 'source-facade',
-          id: 'global.anthropic.claude-opus-4-7',
-          name: 'claude-opus-4-7',
-          api: 'bedrock-converse-stream',
-        },
-        { messages: [] },
-        {},
-      ),
-    );
-    // The bedrock factory wraps the ORIGINAL streamSimple in a closure that
-    // sets env vars and delegates. Retrieve the inner factory mock from the
-    // most recent factory call (mocks accumulate across tests in this describe
-    // block; the LAST result belongs to this test's `ext(...)` invocation) and
-    // verify it was invoked with the rewritten (target) model.
-    const factoryResults = vi.mocked(bedrockMod.createStreamSimpleProxiedBedrock).mock.results;
-    const innerStream = factoryResults.at(-1)?.value as ReturnType<
-      typeof vi.fn<(model: any) => ReturnType<typeof createDoneStream>>
-    >;
-    expect(innerStream).toHaveBeenCalledTimes(1);
-    expect(innerStream).toHaveBeenCalledWith(
-      expect.objectContaining({
-        provider: 'target-facade',
-        id: 'global.anthropic.claude-opus-4-7',
-      }),
-      expect.anything(),
-      expect.objectContaining({ apiKey: 'bedrock-key' }),
-    );
   });
 
   test('treats a self route as a no-op and falls through to the original provider', async () => {

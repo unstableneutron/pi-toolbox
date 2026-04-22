@@ -15,7 +15,6 @@ import {
 } from '@mariozechner/pi-ai';
 import type { ExtensionAPI, ExtensionContext } from '@mariozechner/pi-coding-agent';
 
-import { createStreamSimpleProxiedBedrock } from './bedrock';
 import {
   findProxiedProviderRewrite,
   isProviderProxied,
@@ -564,11 +563,6 @@ function registerAllWrappedApis(): void {
   registerWrappedApi({
     api: 'google-generative-ai',
     sourceId: 'google-generative-ai',
-  });
-  registerWrappedApi({
-    api: 'bedrock-converse-stream',
-    sourceId: 'bedrock',
-    proxiedSimpleFactory: createStreamSimpleProxiedBedrock,
   });
 }
 

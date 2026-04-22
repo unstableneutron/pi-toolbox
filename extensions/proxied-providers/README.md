@@ -122,36 +122,40 @@ then we cannot swap only step 3 without reimplementing some of the surrounding l
 
 ## Provider by provider
 
-### Bedrock
+### Bedrock _(removed)_
 
-**Why the wrapper is large**
+This extension used to carry a Bedrock transport wrapper
+(`createStreamSimpleProxiedBedrock`) that translated
+`options.headers.Authorization` into `AWS_BEARER_TOKEN_BEDROCK` and
+pinned a handful of AWS env vars before delegating to pi-ai's
+`streamSimpleBedrock`.
 
-Bedrock was the hardest case because the built-in path is fundamentally structured around the AWS SDK request lifecycle.
+pi-ai 0.68.1 made the wrapper unnecessary for our use case:
 
-For proxied Bedrock we needed to change all of these:
+- `model.baseUrl` is read natively and pinned to `config.endpoint` via
+  the internal `shouldUseExplicitBedrockEndpoint` check.
+- Bearer auth is selected via the SDK-native `httpBearerAuth` scheme
+  (`config.token` + `authSchemePreference`), so HTTP/2 works and the
+  old duplicate-`Authorization`-header workaround is gone.
+- `AWS_BEARER_TOKEN_BEDROCK` can be set once by the user's shell
+  (typically by an external command such as `iap-auth`), so no
+  per-request env translation is required inside pi.
 
-- use `model.baseUrl`
-- preserve resolved headers as authoritative
-- use bearer/header auth rather than the normal AWS credential / SigV4 path
-- target the proxied Bedrock-style request path
+For the author's current setup — `facade/*` models consumed directly,
+with the bearer supplied by the shell — the wrapper was never invoked
+(no entry in `proxiedProviders`) and rewriting-into-bedrock wasn't
+used either, so the file was deleted outright. Rewrites that target a
+different API on the same provider (for example
+`anthropic/* → devai`) still work through the generic routing in
+`index.ts`.
 
-At the same time, we needed to preserve:
-
-- ConverseStream request shape
-- message conversion behavior
-- tool-call handling
-- reasoning/thinking options
-- stream event semantics
-
-The problem is that the public surface does **not** expose small reusable helpers like:
-
-- `buildBedrockCommandInput(...)`
-- `forwardBedrockEvents(...)`
-- `createBedrockClientWithCustomTransport(...)`
-
-So Bedrock ended up needing the largest local parity copy.
-
-**Summary:** transport and semantics were tightly welded together.
+If a future setup needs a bedrock-specific transport override again,
+reinstate this extension's prior approach from git history:
+re-add `bedrock.ts` with a `createStreamSimpleProxiedBedrock` factory
+and register it via `registerWrappedApi({ api: 'bedrock-converse-stream',
+proxiedSimpleFactory })`. The last working version of that file is the
+cleanest starting point — it's a ~15-line body with a minimal env-var
+neutralization list.
 
 ---
 
@@ -465,14 +469,6 @@ The cleanest long-term solution is not more clever patching. It is better upstre
 
 For example:
 
-### Bedrock
-
-```ts
-export function buildBedrockCommandInput(...) { ... }
-export function forwardBedrockEvents(...) { ... }
-export function streamBedrockWithHooks(..., hooks?: { createClient?: ... }) { ... }
-```
-
 ### Gemini CLI
 
 ```ts
@@ -526,8 +522,8 @@ That is much safer than trying to monkey-patch already-evaluated ESM modules.
 The amount of code we had to port is mostly a measure of **how entangled the upstream implementation is**, not of how complicated proxied mode itself is.
 
 - **Gemini CLI** needed the least help because it already exposed `buildRequest(...)`.
-- **Bedrock** needed the most because the AWS transport path and semantic behavior were deeply coupled.
 - **Vertex** needed local request + parser parity because the useful seams were not public.
 - **Codex** needed local transport policy + parser parity because transport and semantics were bundled together.
+- **Bedrock** used to be the worst offender, but pi-ai 0.68.1 fixed the relevant seams upstream (`model.baseUrl` → `config.endpoint`, SDK-native `httpBearerAuth`) and the local wrapper was deleted.
 
-That is why some wrappers are thin and some are large.
+That is why some wrappers are thin, some are large, and one is gone.
