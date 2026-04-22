@@ -405,10 +405,16 @@ interface PreparedPatchLines {
 
 const BEGIN_PATCH_LINE = '*** Begin Patch';
 const END_PATCH_LINE = '*** End Patch';
-const ADD_FILE_PREFIX = '*** Add File: ';
-const DELETE_FILE_PREFIX = '*** Delete File: ';
-const UPDATE_FILE_PREFIX = '*** Update File: ';
-const MOVE_TO_PREFIX = '*** Move to: ';
+// Op-header prefixes. We match on the colon (no required trailing
+// space) so the streaming parser can surface an in-progress op row
+// the moment the model commits to a kind, not when it later emits the
+// first path character. Parsers that need the path extract it with
+// `line.slice(PREFIX.length).trim()`, which tolerates either `': '`
+// or `':'` styles.
+const ADD_FILE_PREFIX = '*** Add File:';
+const DELETE_FILE_PREFIX = '*** Delete File:';
+const UPDATE_FILE_PREFIX = '*** Update File:';
+const MOVE_TO_PREFIX = '*** Move to:';
 // Phase 2 FindReplace markers. FindReplace blocks are continuations
 // inside a `*** Update File:` section, not top-level operations.
 const FIND_REPLACE_ONCE_PREFIX = '*** FindReplaceOnce:';
@@ -1126,10 +1132,20 @@ function parseUpdateChunk(
   };
 }
 
-function parsePathFromHeader(line: string, prefix: string): string {
+function parsePathFromHeader(
+  line: string,
+  prefix: string,
+  mode: 'strict' | 'streaming' = 'strict',
+): string {
   const path = line.slice(prefix.length).trim();
   if (!path) {
-    throw new Error(`Patch header '${prefix.trim()}' must include a path`);
+    if (mode === 'strict') {
+      throw new Error(`Patch header '${prefix.trim()}' must include a path`);
+    }
+    // Streaming: the path hasn't arrived yet. Return empty so the
+    // caller can emit a placeholder row; the `formatPath` renderer
+    // substitutes a muted ellipsis on the way to the TUI.
+    return '';
   }
   return path;
 }
@@ -1306,22 +1322,16 @@ function isRecognizedStreamingTrailingLine(line: string): boolean {
   if (!line) return false;
   if (line === BEGIN_PATCH_LINE || line === END_PATCH_LINE || line === '@@') return true;
   if (line.startsWith('@@ ')) return true;
-  if (line.startsWith(ADD_FILE_PREFIX) && line.slice(ADD_FILE_PREFIX.length).trim().length > 0) {
-    return true;
-  }
+  // Accept op-header fragments the moment the colon arrives, even
+  // without a path yet. The streaming parser surfaces an in-progress
+  // row immediately so the TUI doesn't sit on a blank "apply_patch"
+  // label while the model types the first path character.
   if (
-    line.startsWith(DELETE_FILE_PREFIX) &&
-    line.slice(DELETE_FILE_PREFIX.length).trim().length > 0
+    line.startsWith(ADD_FILE_PREFIX) ||
+    line.startsWith(DELETE_FILE_PREFIX) ||
+    line.startsWith(UPDATE_FILE_PREFIX) ||
+    line.startsWith(MOVE_TO_PREFIX)
   ) {
-    return true;
-  }
-  if (
-    line.startsWith(UPDATE_FILE_PREFIX) &&
-    line.slice(UPDATE_FILE_PREFIX.length).trim().length > 0
-  ) {
-    return true;
-  }
-  if (line.startsWith(MOVE_TO_PREFIX) && line.slice(MOVE_TO_PREFIX.length).trim().length > 0) {
     return true;
   }
   return false;
@@ -1450,7 +1460,7 @@ function parsePatchOperationsFromLines(
     }
 
     if (trimmed.startsWith(ADD_FILE_PREFIX)) {
-      const path = parsePathFromHeader(trimmed, ADD_FILE_PREFIX);
+      const path = parsePathFromHeader(trimmed, ADD_FILE_PREFIX, mode);
       i++;
       const contentLines: string[] = [];
       let terminated = false;
@@ -1480,18 +1490,28 @@ function parsePatchOperationsFromLines(
     }
 
     if (trimmed.startsWith(DELETE_FILE_PREFIX)) {
-      const path = parsePathFromHeader(trimmed, DELETE_FILE_PREFIX);
-      operations.push({ kind: 'delete', path, state: 'streamed' });
+      const path = parsePathFromHeader(trimmed, DELETE_FILE_PREFIX, mode);
+      // Delete has no body, so its "terminator" is simply whether
+      // anything else (a blank line, the next op, an End Patch) has
+      // landed after it. If this is the last line of a streaming
+      // chunk and the patch isn't complete, the path could still be
+      // growing — keep it in 'streaming' so the TUI icon matches.
+      const isTrailingFragment = mode === 'streaming' && i === lines.length - 1 && !patchComplete;
+      operations.push({
+        kind: 'delete',
+        path,
+        state: isTrailingFragment ? 'streaming' : 'streamed',
+      });
       i++;
       continue;
     }
 
     if (trimmed.startsWith(UPDATE_FILE_PREFIX)) {
-      const path = parsePathFromHeader(trimmed, UPDATE_FILE_PREFIX);
+      const path = parsePathFromHeader(trimmed, UPDATE_FILE_PREFIX, mode);
       i++;
       let moveTo: string | undefined;
       if (i < lines.length && lines[i]?.trim().startsWith(MOVE_TO_PREFIX)) {
-        moveTo = parsePathFromHeader(lines[i]!.trim(), MOVE_TO_PREFIX);
+        moveTo = parsePathFromHeader(lines[i]!.trim(), MOVE_TO_PREFIX, mode);
         i++;
       }
       const chunks: UpdateChunk[] = [];

@@ -51,11 +51,18 @@ function formatAction(row: PatchPreviewRow): string {
   }
 }
 
+// Shown while a streaming op row exists but the path hasn't been
+// typed yet. Keeps the row anchored so the user sees structure even
+// before the model commits to a filename.
+const STREAMING_PATH_PLACEHOLDER = '…';
+
 function formatPath(row: PatchPreviewRow, cwd?: string): string {
   if (row.kind === 'move') {
-    return `${shortenDisplayPath(row.path, cwd)} → ${shortenDisplayPath(row.targetPath, cwd)}`;
+    const source = shortenDisplayPath(row.path, cwd) || STREAMING_PATH_PLACEHOLDER;
+    const target = shortenDisplayPath(row.targetPath, cwd) || STREAMING_PATH_PLACEHOLDER;
+    return `${source} → ${target}`;
   }
-  return shortenDisplayPath(row.path, cwd);
+  return shortenDisplayPath(row.path, cwd) || STREAMING_PATH_PLACEHOLDER;
 }
 
 function takeSuffixToWidth(text: string, maxWidth: number): string {

@@ -748,6 +748,15 @@ function renderApplyPatchHeader(
   );
 }
 
+function renderApplyPatchReceivingPlaceholder(theme: {
+  fg(color: string, text: string): string;
+}): Text {
+  // Shown between "tool call known" (byte 0) and "first op header
+  // recognized" (byte ~16). Without it the user stares at the bare
+  // `apply_patch` label and assumes something is buffered.
+  return new Text(`  ${theme.fg('muted', '… receiving patch')}`, 0, 0);
+}
+
 function renderApplyPatchPreview(
   args: unknown,
   theme: {
@@ -761,13 +770,21 @@ function renderApplyPatchPreview(
     cwd?: string;
   },
 ) {
-  const rows =
-    context?.isPartial && !context?.argsComplete
-      ? getApplyPatchSessionRows(args, context)
-      : undefined;
+  const isStreaming = context?.isPartial === true && context?.argsComplete !== true;
+  const rows = isStreaming ? getApplyPatchSessionRows(args, context) : undefined;
   const count = rows?.length ?? getApplyPatchOperationCount(args);
+
   if (!rows || rows.length === 0) {
-    return renderApplyPatchHeader(count, theme);
+    if (!isStreaming) {
+      return renderApplyPatchHeader(count, theme);
+    }
+    // Streaming window before the parser recognizes anything.
+    // Stack a muted "receiving patch" line under the label so the
+    // TUI shows continuous progress instead of a frozen header.
+    const container = new Container();
+    container.addChild(renderApplyPatchHeader(count, theme));
+    container.addChild(renderApplyPatchReceivingPlaceholder(theme));
+    return container;
   }
 
   const container = new Container();

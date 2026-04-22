@@ -283,4 +283,63 @@ describe('multi-edit display renderer', () => {
     expect(rendered).toContain('diff');
     expect(rendered).toContain('ALPHA');
   });
+
+  test('apply_patch streaming preview shows a placeholder while rows are empty', () => {
+    const tools: any[] = [];
+    multiEditExtension({
+      registerTool(tool: any) {
+        tools.push(tool);
+      },
+    } as any);
+
+    const applyPatch = tools.find((t) => t.name === 'apply_patch');
+    expect(applyPatch).toBeDefined();
+
+    // Bytes 0-14 window: tool call started, but not even "*** Begin Patch"
+    // is fully received. Parser returns no rows. The renderer should
+    // still reassure the user that something is arriving.
+    const renderCallArgs = { patch: '*** B' };
+    const component = applyPatch.renderCall(renderCallArgs, createTheme(), {
+      cwd: '/repo',
+      isPartial: true,
+      argsComplete: false,
+      state: {},
+      executionStarted: false,
+    });
+
+    const rendered = component.render(120).join('\n');
+    expect(rendered).toContain('apply_patch');
+    expect(rendered).toMatch(/receiving|streaming|…/i);
+  });
+
+  test('apply_patch streaming preview shows a row with "…" placeholder once the colon arrives but the path has not', () => {
+    const tools: any[] = [];
+    multiEditExtension({
+      registerTool(tool: any) {
+        tools.push(tool);
+      },
+    } as any);
+
+    const applyPatch = tools.find((t) => t.name === 'apply_patch');
+    expect(applyPatch).toBeDefined();
+
+    // Bytes 16-30 window: op kind committed ("*** Add File:"), path not
+    // yet. After Fix A, the streaming parser emits a row with an empty
+    // path; formatPath renders it as a muted "…" so the user sees
+    // immediate structure.
+    const renderCallArgs = {
+      patch: '*** Begin Patch\n*** Add File:',
+    };
+    const component = applyPatch.renderCall(renderCallArgs, createTheme(), {
+      cwd: '/repo',
+      isPartial: true,
+      argsComplete: false,
+      state: {},
+      executionStarted: false,
+    });
+
+    const rendered = component.render(120).join('\n');
+    expect(rendered).toContain('create');
+    expect(rendered).toContain('…');
+  });
 });

@@ -359,6 +359,63 @@ describe('parsePatchStreaming', () => {
     expect(streaming.trailingOpenOperation?.path).toBe('notes.md');
   });
 
+  // Perceived-latency fix: surface an in-progress op row the moment
+  // the model commits to a kind (first colon arrives), not when the
+  // first path char arrives. Cuts ~16 bytes of "staring at the label"
+  // per op at typical streaming speeds.
+  describe('early op-header visibility (pre-path-char)', () => {
+    test('surfaces a streaming add-file row as soon as the colon arrives (no path yet)', () => {
+      const result = parsePatchStreaming(['*** Begin Patch', '*** Add File:'].join('\n'));
+
+      expect(result.operations).toHaveLength(1);
+      expect(result.operations[0]?.kind).toBe('create');
+      expect(result.operations[0]?.path).toBe('');
+      expect(result.operations[0]?.state).toBe('streaming');
+    });
+
+    test('surfaces a streaming update-file row as soon as the colon arrives', () => {
+      const result = parsePatchStreaming(['*** Begin Patch', '*** Update File:'].join('\n'));
+
+      expect(result.operations).toHaveLength(1);
+      expect(result.operations[0]?.kind).toBe('edit');
+      expect(result.operations[0]?.path).toBe('');
+      expect(result.operations[0]?.state).toBe('streaming');
+    });
+
+    test('surfaces a streaming delete-file row as soon as the colon arrives', () => {
+      const result = parsePatchStreaming(['*** Begin Patch', '*** Delete File:'].join('\n'));
+
+      expect(result.operations).toHaveLength(1);
+      expect(result.operations[0]?.kind).toBe('delete');
+      expect(result.operations[0]?.path).toBe('');
+      expect(result.operations[0]?.state).toBe('streaming');
+    });
+
+    test('upgrades the row as path characters arrive', () => {
+      const stages = [
+        '*** Begin Patch\n*** Add File:',
+        '*** Begin Patch\n*** Add File: s',
+        '*** Begin Patch\n*** Add File: src/app.ts',
+      ];
+      const paths = stages.map((stage) => parsePatchStreaming(stage).operations[0]?.path ?? '∅');
+      expect(paths).toEqual(['', 's', 'src/app.ts']);
+    });
+
+    test('still refuses to emit a row without the colon (ambiguous prefix)', () => {
+      // '*** Add File' alone could be a typo or a different keyword the
+      // model hasn't finished; don't speculate a row until the colon
+      // commits it.
+      const result = parsePatchStreaming('*** Begin Patch\n*** Add File');
+      expect(result.operations).toHaveLength(0);
+    });
+
+    test('strict parse still rejects empty-path op headers', () => {
+      expect(() =>
+        parsePatch(['*** Begin Patch', '*** Add File:', '*** End Patch'].join('\n')),
+      ).toThrow(/must include a path/);
+    });
+  });
+
   test('streaming preview walks past stray End Patch markers to show every op', () => {
     const result = parsePatchStreaming(
       [
