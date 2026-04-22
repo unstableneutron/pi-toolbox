@@ -818,8 +818,10 @@ function renderApplyPatchHeader(
     fg(color: string, text: string): string;
     bold(text: string): string;
   },
+  spinnerFrame?: string,
 ): Text {
-  const title = theme.fg('toolTitle', theme.bold('apply_patch'));
+  const prefix = spinnerFrame ? `${theme.fg('muted', spinnerFrame)} ` : '';
+  const title = `${prefix}${theme.fg('toolTitle', theme.bold('apply_patch'))}`;
   if (!count) {
     return new Text(title, 0, 0);
   }
@@ -843,19 +845,17 @@ interface PlaceholderPulseState {
   timer?: ReturnType<typeof setTimeout>;
 }
 
-function renderApplyPatchReceivingPlaceholder(
-  theme: { fg(color: string, text: string): string },
+function tickPlaceholderSpinnerFrame(
   context?: { state?: unknown; invalidate?: () => void },
-): Text {
-  // Shown while the apply_patch header is visible but the streaming
-  // parser has no rows to render yet. On Anthropic this window can be
-  // 10-30s long because the provider generates the full tool_use
-  // content before emitting any SSE deltas. A static line would feel
-  // frozen; a gentle pulse conveys "still working".
+): string {
+  // Called once per render while the apply_patch header is visible but
+  // the streaming parser has no rows yet. On Anthropic this window can
+  // be 10-30s long because the provider generates the full tool_use
+  // content before emitting any SSE deltas. Returning the next braille
+  // frame (and scheduling a self-redraw) keeps the header visibly
+  // alive without adding a second status line.
   const state = getPlaceholderPulseState(context);
-  if (!state) {
-    return new Text(`  ${theme.fg('muted', '… receiving patch')}`, 0, 0);
-  }
+  if (!state) return '⠋';
 
   const now = Date.now();
   const elapsed = now - state.startedAt;
@@ -871,7 +871,7 @@ function renderApplyPatchReceivingPlaceholder(
     context?.invalidate?.();
   }, msToNext);
 
-  return new Text(`  ${theme.fg('muted', `${frame} receiving patch`)}`, 0, 0);
+  return frame;
 }
 
 function getPlaceholderPulseState(
@@ -918,13 +918,12 @@ function renderApplyPatchPreview(
       clearPlaceholderPulse(context);
       return renderApplyPatchHeader(count, theme);
     }
-    // Streaming window before the parser recognizes anything.
-    // Stack a muted "receiving patch" line under the label so the
-    // TUI shows continuous progress instead of a frozen header.
-    const container = new Container();
-    container.addChild(renderApplyPatchHeader(count, theme));
-    container.addChild(renderApplyPatchReceivingPlaceholder(theme, context));
-    return container;
+    // Streaming window before the parser recognizes anything. Prefix
+    // the header with a muted braille spinner so the label visibly
+    // ticks instead of appearing frozen, and drop it the moment any
+    // row materializes (handled by the branch below).
+    const spinner = tickPlaceholderSpinnerFrame(context);
+    return renderApplyPatchHeader(count, theme, spinner);
   }
 
   // Rows are visible — no more pulse needed.

@@ -284,7 +284,7 @@ describe('multi-edit display renderer', () => {
     expect(rendered).toContain('ALPHA');
   });
 
-  test('apply_patch streaming preview shows a placeholder while rows are empty', () => {
+  test('apply_patch streaming preview prepends a spinner to the header while rows are empty', () => {
     const tools: any[] = [];
     multiEditExtension({
       registerTool(tool: any) {
@@ -297,7 +297,8 @@ describe('multi-edit display renderer', () => {
 
     // Bytes 0-14 window: tool call started, but not even "*** Begin Patch"
     // is fully received. Parser returns no rows. The renderer should
-    // still reassure the user that something is arriving.
+    // show a muted braille spinner right before the apply_patch label
+    // on the same line — no secondary "receiving patch" status line.
     const renderCallArgs = { patch: '*** B' };
     const component = applyPatch.renderCall(renderCallArgs, createTheme(), {
       cwd: '/repo',
@@ -310,7 +311,10 @@ describe('multi-edit display renderer', () => {
 
     const rendered = component.render(120).join('\n');
     expect(rendered).toContain('apply_patch');
-    expect(rendered).toMatch(/receiving/i);
+    // A single line: "<spinner> apply_patch". No "receiving" text.
+    expect(rendered.split('\n').filter((line) => line.trim().length > 0)).toHaveLength(1);
+    expect(rendered).toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s+.*apply_patch/);
+    expect(rendered).not.toMatch(/receiving/i);
   });
 
   test('apply_patch streaming placeholder animates the ellipsis across renders', () => {
@@ -342,11 +346,11 @@ describe('multi-edit display renderer', () => {
       };
 
       // Sample the placeholder at several distinct time offsets. If it's
-      // animating we expect the rendered pulse characters to differ.
+      // animating we expect the rendered braille frame to differ.
       const frames = new Set<string>();
       for (let i = 0; i < 8; i++) {
         vi.setSystemTime(new Date(Date.UTC(2025, 0, 1, 0, 0, 0, i * 250)));
-        frames.add(capture().match(/.{1,5} receiving patch/)?.[0] ?? '');
+        frames.add(capture().match(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/)?.[0] ?? '');
       }
       expect(frames.size).toBeGreaterThan(1);
       // The placeholder should have scheduled a redraw timer while we were stopped.
