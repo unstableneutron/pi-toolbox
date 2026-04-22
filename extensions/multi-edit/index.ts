@@ -28,8 +28,8 @@ import {
   buildPatchPlan,
   createRealWorkspace,
   createVirtualWorkspace,
-  parsePatch,
   parsePatchStreaming,
+  parsePatchWithDiagnostics,
   PatchContextMatchError,
   PatchPlanFailedError,
   renderContextMatchFailure,
@@ -417,7 +417,7 @@ async function executePatch(
   }) => void,
   context?: { state?: unknown },
 ) {
-  const ops = parsePatch(patch);
+  const { ops, mergedEnvelopes } = parsePatchWithDiagnostics(patch);
   const files = ops.flatMap((op) => {
     if (op.kind === 'update' && op.moveTo) {
       return [resolveToCwd(op.path, cwd), resolveToCwd(op.moveTo, cwd)];
@@ -440,6 +440,7 @@ async function executePatch(
               createVirtualWorkspace(cwd),
               cwd,
               createRealWorkspace(),
+              { mergedEnvelopes },
             ),
             reusedStage: false,
             rows: undefined,

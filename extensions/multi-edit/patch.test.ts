@@ -12,6 +12,7 @@ import {
   createVirtualWorkspace,
   parsePatch,
   parsePatchStreaming,
+  parsePatchWithDiagnostics,
 } from './patch';
 import { PatchContextMatchError, PatchPlanFailedError } from './patch';
 import { AmbiguousFindReplaceOnceError } from './patch';
@@ -125,6 +126,71 @@ describe('parsePatch', () => {
         ],
       },
     ]);
+  });
+
+  // Regression: real-world session
+  // .../2026-04-21T16-52-19-062Z_019db0f4-fdf6-77e9-be63-b7facdd44ef9.jsonl
+  // emitted 5 operations wrapped in 5 concatenated envelopes (one
+  // '*** Begin Patch' + 5 '*** End Patch'). The parser silently
+  // stopped after op 1 and 4 operations were lost. Recover by
+  // treating an intermediate '*** End Patch' (optionally followed
+  // by another '*** Begin Patch') as a benign separator when it
+  // sits between operations.
+  describe('concatenated Begin/End Patch envelopes', () => {
+    test('accepts multiple operations across a single Begin + multiple End Patch markers', () => {
+      const operations = parsePatch(
+        [
+          '*** Begin Patch',
+          '*** Add File: a.txt',
+          '+alpha',
+          '*** End Patch',
+          '*** Add File: b.txt',
+          '+beta',
+          '*** End Patch',
+          '*** Update File: c.txt',
+          '@@',
+          '-old',
+          '+new',
+          '*** End Patch',
+        ].join('\n'),
+      );
+
+      expect(operations.map((op) => op.kind)).toEqual(['add', 'add', 'update']);
+      expect(operations.map((op) => op.path)).toEqual(['a.txt', 'b.txt', 'c.txt']);
+    });
+
+    test('accepts fully separate envelopes (End Patch followed by Begin Patch)', () => {
+      const operations = parsePatch(
+        [
+          '*** Begin Patch',
+          '*** Add File: a.txt',
+          '+alpha',
+          '*** End Patch',
+          '*** Begin Patch',
+          '*** Add File: b.txt',
+          '+beta',
+          '*** End Patch',
+        ].join('\n'),
+      );
+
+      expect(operations.map((op) => op.path)).toEqual(['a.txt', 'b.txt']);
+    });
+
+    test('still requires a final End Patch in strict mode', () => {
+      expect(() =>
+        parsePatch(
+          [
+            '*** Begin Patch',
+            '*** Add File: a.txt',
+            '+alpha',
+            '*** End Patch',
+            '*** Add File: b.txt',
+            '+beta',
+            // No trailing '*** End Patch'
+          ].join('\n'),
+        ),
+      ).toThrow(/last line of the patch must be '\*\*\* End Patch'/);
+    });
   });
 });
 
@@ -291,6 +357,29 @@ describe('parsePatchStreaming', () => {
     expect(streaming.operations[0]?.state).toBe('streamed');
     expect(streaming.operations[1]?.state).toBe('streaming');
     expect(streaming.trailingOpenOperation?.path).toBe('notes.md');
+  });
+
+  test('streaming preview walks past stray End Patch markers to show every op', () => {
+    const result = parsePatchStreaming(
+      [
+        '*** Begin Patch',
+        '*** Add File: a.txt',
+        '+alpha',
+        '*** End Patch',
+        '*** Add File: b.txt',
+        '+beta',
+        '*** End Patch',
+        '*** Update File: c.txt',
+        '@@',
+        '-old',
+        '+new',
+        '*** End Patch',
+      ].join('\n'),
+    );
+
+    expect(result.patchComplete).toBe(true);
+    expect(result.operations.map((row) => row.path)).toEqual(['a.txt', 'b.txt', 'c.txt']);
+    expect(result.operations.every((row) => row.state === 'streamed')).toBe(true);
   });
 
   test('parsePatchStreaming preserves stable op ids across incremental updates', () => {
@@ -904,6 +993,39 @@ describe('buildPatchPlan', () => {
     expect(plan.summaryText).toContain("accepted bare '=======' as the SEARCH/REPLACE divider");
     expect(plan.summaryText).toContain('foo.ts');
     expect(plan.summaryText).toContain("Prefer '======= REPLACE'");
+  });
+
+  test('summaryText advises when concatenated envelopes were merged', async () => {
+    const workspace = createVirtualWorkspace('/repo', {});
+    const { ops, mergedEnvelopes } = parsePatchWithDiagnostics(
+      [
+        '*** Begin Patch',
+        '*** Add File: a.txt',
+        '+alpha',
+        '*** End Patch',
+        '*** Add File: b.txt',
+        '+beta',
+        '*** End Patch',
+        '*** Add File: c.txt',
+        '+gamma',
+        '*** End Patch',
+      ].join('\n'),
+    );
+
+    const plan = await buildPatchPlan(ops, workspace, '/repo', workspace, { mergedEnvelopes });
+    expect(plan.summaryText).toMatch(/Applied patch with 3 operation\(s\)/);
+    expect(plan.summaryText).toMatch(
+      /Note: merged 2 concatenated .*Begin Patch.*End Patch.* envelopes into a single patch/,
+    );
+    expect(plan.summaryText).toMatch(/exactly one/i);
+  });
+
+  test('parsePatchWithDiagnostics reports merged envelope count for clean patches', () => {
+    const result = parsePatchWithDiagnostics(
+      ['*** Begin Patch', '*** Add File: a.txt', '+alpha', '*** End Patch'].join('\n'),
+    );
+    expect(result.ops.map((op) => op.kind)).toEqual(['add']);
+    expect(result.mergedEnvelopes).toBe(0);
   });
 });
 

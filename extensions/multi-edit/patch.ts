@@ -393,6 +393,14 @@ export function renderPlanFailure(
 interface PreparedPatchLines {
   lines: string[];
   patchComplete: boolean;
+  /**
+   * How many stray `*** End Patch` markers were merged away because
+   * they sat between operations rather than terminating the payload.
+   * Surfaced in the final `summaryText` as an advisory so the agent
+   * learns to emit exactly one `*** Begin Patch` / `*** End Patch`
+   * pair per `apply_patch` call.
+   */
+  mergedEnvelopes: number;
 }
 
 const BEGIN_PATCH_LINE = '*** Begin Patch';
@@ -1336,8 +1344,77 @@ function preparePatchLines(patchText: string, mode: 'strict' | 'streaming'): Pre
     lines.push(trailingFragment);
   }
 
+  // Recover concatenated envelopes. Some models emit multiple
+  // `*** Begin Patch` ... `*** End Patch` envelopes back-to-back (or
+  // a single Begin plus several stray Ends between ops). Left alone,
+  // the parser would stop at the first `*** End Patch` and silently
+  // drop every operation after it. Strip the stray markers so the
+  // parser sees one flat sequence of operations, and count how many
+  // we merged so the summary can nudge the agent.
+  const mergedEnvelopes = mergeConcatenatedEnvelopes(lines);
+
   const patchComplete = lines[lines.length - 1]?.trim() === END_PATCH_LINE;
-  return { lines, patchComplete };
+  return { lines, patchComplete, mergedEnvelopes };
+}
+
+function isOperationHeaderLine(line: string | undefined): boolean {
+  if (!line) return false;
+  const trimmed = line.trim();
+  return (
+    trimmed.startsWith(ADD_FILE_PREFIX) ||
+    trimmed.startsWith(DELETE_FILE_PREFIX) ||
+    trimmed.startsWith(UPDATE_FILE_PREFIX)
+  );
+}
+
+function nextNonBlankIndex(lines: string[], fromIndex: number): number {
+  let i = fromIndex;
+  while (i < lines.length && (lines[i] ?? '').trim().length === 0) {
+    i++;
+  }
+  return i;
+}
+
+/**
+ * Mutates `lines` in place, removing stray `*** End Patch` (and any
+ * immediately following `*** Begin Patch`) when they separate two
+ * operations. The final `*** End Patch` at the tail of the payload is
+ * always preserved. Returns the count of stray End Patch markers that
+ * were removed.
+ */
+function mergeConcatenatedEnvelopes(lines: string[]): number {
+  let mergedEnvelopes = 0;
+  let i = 0;
+  while (i < lines.length) {
+    if ((lines[i] ?? '').trim() !== END_PATCH_LINE) {
+      i++;
+      continue;
+    }
+
+    // Peek past trailing blank lines. If there's another operation
+    // (or another `*** Begin Patch` re-opener) ahead, the End Patch
+    // is stray — strip it. Otherwise it's the genuine terminator.
+    let peek = nextNonBlankIndex(lines, i + 1);
+    const sawBeginPatch = peek < lines.length && (lines[peek] ?? '').trim() === BEGIN_PATCH_LINE;
+    if (sawBeginPatch) {
+      peek = nextNonBlankIndex(lines, peek + 1);
+    }
+
+    if (peek >= lines.length || !isOperationHeaderLine(lines[peek])) {
+      // Genuine terminator (or trailing noise we shouldn't touch).
+      i++;
+      continue;
+    }
+
+    // Remove the stray End Patch (plus a trailing Begin Patch and
+    // any blank lines in between) so the parser sees one flat stream.
+    const removeUpTo = sawBeginPatch ? peek : peek; // `peek` already points at the next op header
+    lines.splice(i, removeUpTo - i);
+    mergedEnvelopes++;
+    // Don't advance `i`; re-evaluate the current position in case
+    // another stray End Patch follows immediately.
+  }
+  return mergedEnvelopes;
 }
 
 function parsePatchOperationsFromLines(
@@ -1571,13 +1648,32 @@ function toPatchPreviewRows(
 }
 
 export function parsePatch(patchText: string): PatchOperation[] {
+  return parsePatchWithDiagnostics(patchText).ops;
+}
+
+interface PatchParseDiagnostics {
+  ops: PatchOperation[];
+  /**
+   * Count of stray `*** End Patch` markers merged away by
+   * `preparePatchLines`. Non-zero when the model emitted multiple
+   * concatenated envelopes instead of one. Callers should surface
+   * this as an advisory so the agent learns to emit a single
+   * envelope per call.
+   */
+  mergedEnvelopes: number;
+}
+
+export function parsePatchWithDiagnostics(patchText: string): PatchParseDiagnostics {
   const prepared = preparePatchLines(patchText, 'strict');
   const operations = parsePatchOperationsFromLines(
     prepared.lines,
     'strict',
     prepared.patchComplete,
   );
-  return operations.map(({ state: _state, ...operation }) => operation);
+  return {
+    ops: operations.map(({ state: _state, ...operation }) => operation),
+    mergedEnvelopes: prepared.mergedEnvelopes,
+  };
 }
 
 function operationIdentityKey(operation: PatchOperation): string {
@@ -2025,11 +2121,21 @@ async function materializeMutationForOperation(
   };
 }
 
+interface BuildPatchPlanDiagnostics {
+  /**
+   * Count of stray `*** End Patch` markers merged away during parse.
+   * See `parsePatchWithDiagnostics`. Plumbs through into the final
+   * `summaryText` advisory; unset/0 means no advisory is emitted.
+   */
+  mergedEnvelopes?: number;
+}
+
 export async function buildPatchPlan(
   ops: PatchOperation[],
   workspace: OverlayWorkspace,
   cwd: string,
   snapshotWorkspace: Workspace = workspace,
+  diagnostics: BuildPatchPlanDiagnostics = {},
 ): Promise<MutationPlan<PatchPreviewRow>> {
   const virtual = workspace.fork();
   const readSnapshot = createSnapshotReader(snapshotWorkspace);
@@ -2130,6 +2236,7 @@ export async function buildPatchPlan(
       replaceAllTotals,
       lenientDividerTotals,
       quoteStylePaths,
+      diagnostics.mergedEnvelopes ?? 0,
     ),
   };
 }
@@ -2146,16 +2253,23 @@ function buildSummaryText(
   replaceAllTotals: Array<{ path: string; count: number }>,
   lenientDividerTotals: Array<{ path: string; count: number }> = [],
   quoteStylePaths: string[] = [],
+  mergedEnvelopes = 0,
 ): string {
   const base = `Applied patch with ${opCount} operation(s).`;
   if (
     replaceAllTotals.length === 0 &&
     lenientDividerTotals.length === 0 &&
-    quoteStylePaths.length === 0
+    quoteStylePaths.length === 0 &&
+    mergedEnvelopes === 0
   ) {
     return base;
   }
   const lines: string[] = [base];
+  if (mergedEnvelopes > 0) {
+    lines.push(
+      `  Note: merged ${mergedEnvelopes} concatenated '*** Begin Patch'/'*** End Patch' envelope${mergedEnvelopes === 1 ? '' : 's'} into a single patch. Emit exactly one '*** Begin Patch' ... '*** End Patch' pair per apply_patch call.`,
+    );
+  }
   for (const { path, count } of replaceAllTotals) {
     if (count > FIND_REPLACE_ALL_ADVISORY_THRESHOLD) {
       lines.push(
