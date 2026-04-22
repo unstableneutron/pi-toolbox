@@ -831,22 +831,12 @@ function renderApplyPatchHeader(
   );
 }
 
-// Frames for the streaming-placeholder pulse. Each frame is exactly
-// 5 cells wide so the trailing text doesn't jitter left/right. The
-// pulse pattern `·····` → `·····` shifted makes a soft left-to-right
-// bounce without feeling aggressive the way a classic spinner does.
-const PLACEHOLDER_PULSE_FRAMES = [
-  '·    ',
-  '·    ',
-  ' ·   ',
-  '  ·  ',
-  '   · ',
-  '    ·',
-  '   · ',
-  '  ·  ',
-  ' ·   ',
-];
-const PLACEHOLDER_FRAME_MS = 120;
+// Same braille spinner frames and cadence as the pi-tui Loader
+// component (@mariozechner/pi-tui/components/loader). Using the
+// canonical pi indicator keeps apply_patch visually consistent with
+// other tool loaders (bash-execution, thinking loader, retry loader).
+const PLACEHOLDER_PULSE_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+const PLACEHOLDER_FRAME_MS = 80;
 
 interface PlaceholderPulseState {
   startedAt: number;
@@ -871,7 +861,7 @@ function renderApplyPatchReceivingPlaceholder(
   const elapsed = now - state.startedAt;
   const period = PLACEHOLDER_FRAME_MS;
   const frameIdx = Math.floor(elapsed / period) % PLACEHOLDER_PULSE_FRAMES.length;
-  const pulse = PLACEHOLDER_PULSE_FRAMES[frameIdx] ?? '…    ';
+  const frame = PLACEHOLDER_PULSE_FRAMES[frameIdx] ?? '⠋';
 
   // Schedule a self-redraw at the next frame boundary.
   if (state.timer) clearTimeout(state.timer);
@@ -881,7 +871,7 @@ function renderApplyPatchReceivingPlaceholder(
     context?.invalidate?.();
   }, msToNext);
 
-  return new Text(`  ${theme.fg('muted', `${pulse}  receiving patch`)}`, 0, 0);
+  return new Text(`  ${theme.fg('muted', `${frame} receiving patch`)}`, 0, 0);
 }
 
 function getPlaceholderPulseState(
