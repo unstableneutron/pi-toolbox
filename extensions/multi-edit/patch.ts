@@ -29,6 +29,8 @@ import {
   validateAndTranslateQuoteTier,
 } from './quote-tier';
 
+export type AutoFixKind = 'prefix-leak';
+
 export interface UpdateChunk {
   source?: 'hunk' | 'find-replace-once' | 'find-replace-all';
   changeContext?: string[];
@@ -52,6 +54,12 @@ export interface UpdateChunk {
   // the apply_patch summary so the agent learns to prefer the
   // explicit form next time, without failing the call outright.
   lenientDivider?: boolean;
+  // Names of any auto-fixes applied to this chunk's newLines post-parse.
+  // The chunk's oldLines are never mutated by autofix. Surfaced in the
+  // summary so the agent learns what was changed and why.
+  //   'prefix-leak' — stripped leading "+" from every non-blank REPLACE
+  //                    line (likely unified-diff syntax leak).
+  autoFixed?: AutoFixKind[];
 }
 
 export type PatchOperation =
@@ -172,6 +180,15 @@ interface ContextMatchFailure {
   nearestMatch?: NearestMatch;
   nearbyIdentifiers?: Array<{ line: number; text: string }>;
   scanTruncated?: boolean;
+  // When the failing chunk is a hunk (`source: 'hunk'`), these
+  // carry the chunk's newLines so the renderer can emit a
+  // FindReplaceOnce-shaped suggestion for the agent. Hunks fail
+  // 3× more often than FindReplace in practice (session-log
+  // analysis, 7-day window); the suggestion converts the error
+  // from "no match" into "here's the FindReplace rewrite that
+  // does the same edit."
+  chunkSource?: 'hunk' | 'find-replace-once' | 'find-replace-all';
+  chunkNewLines?: string[];
 }
 
 export class PatchContextMatchError extends Error {
@@ -280,6 +297,12 @@ function renderContextNotFound(failure: ContextMatchFailure): string {
     }
     parts.push('');
     parts.push('Tip: pattern may have moved or been removed — consider grep or re-read.');
+
+    const suggestion = maybeRenderHunkRewriteSuggestion(failure);
+    if (suggestion) {
+      parts.push('');
+      parts.push(suggestion);
+    }
     return parts.join('\n');
   }
 
@@ -324,7 +347,43 @@ function renderContextNotFound(failure: ContextMatchFailure): string {
   parts.push(
     'Tip: rebuild using the actual text above; no re-read needed unless you suspect broader drift.',
   );
+
+  const suggestion = maybeRenderHunkRewriteSuggestion(failure);
+  if (suggestion) {
+    parts.push('');
+    parts.push(suggestion);
+  }
   return parts.join('\n');
+}
+
+// When the failing chunk is a hunk with both SEARCH and REPLACE
+// content, emit a FindReplaceOnce-shaped rewrite suggestion that the
+// agent can copy-paste. Hunks fail 3× more often than FindReplace in
+// practice (session-log analysis, 7-day window); this suggestion
+// converts the error from "no match" into "here's a rewrite that
+// does the same edit in a more reliable shape."
+function maybeRenderHunkRewriteSuggestion(failure: ContextMatchFailure): string | undefined {
+  if (failure.chunkSource !== 'hunk') return undefined;
+  const search = failure.expectedLines;
+  const replace = failure.chunkNewLines;
+  // Need both SEARCH and REPLACE content to emit a non-degenerate
+  // FindReplaceOnce rewrite.
+  if (!search || search.length === 0) return undefined;
+  if (!replace || replace.length === 0) return undefined;
+  if (search.every((l) => l.trim().length === 0)) return undefined;
+  if (replace.every((l) => l.trim().length === 0)) return undefined;
+  const lines = [
+    'This was an @@ hunk. Hunks fail ~3× more often than FindReplaceOnce in practice.',
+    'Consider rewriting as:',
+    '',
+    '*** FindReplaceOnce:',
+    '<<<<<<< SEARCH',
+    ...search,
+    '======= REPLACE',
+    ...replace,
+    '>>>>>>> REPLACE',
+  ];
+  return lines.join('\n');
 }
 
 function renderAnchorFailure(failure: ContextMatchFailure): string {
@@ -401,6 +460,15 @@ interface PreparedPatchLines {
    * pair per `apply_patch` call.
    */
   mergedEnvelopes: number;
+  /**
+   * True when the payload was missing `*** Begin Patch` and
+   * `*** End Patch` but started with a valid operation header
+   * (`*** Add File:`, `*** Update File:`, `*** Delete File:`).
+   * The preparer synthesized a wrapping envelope so the rest of
+   * the parser works unchanged. Surfaced as an advisory so the
+   * agent learns to always emit the full envelope.
+   */
+  autoWrappedEnvelope: boolean;
 }
 
 const BEGIN_PATCH_LINE = '*** Begin Patch';
@@ -425,6 +493,16 @@ const FIND_REPLACE_SEARCH_MARKER = '<<<<<<< SEARCH';
 // files. SEARCH or REPLACE blocks may contain literal `=======`
 // lines; only the full `======= REPLACE` form terminates the block.
 const FIND_REPLACE_DIVIDER = '======= REPLACE';
+// Whitespace-tolerant form of the canonical divider. Accepts the
+// exact `======= REPLACE` plus any variant where `=======` and
+// `REPLACE` are separated by one or more whitespace characters
+// (tabs, multiple spaces). Observed in session-log analysis where
+// agents occasionally emit `=======  REPLACE` (two spaces) or
+// `=======\tREPLACE` (tab). These are semantically identical to
+// the canonical form — the whitespace is normalized silently,
+// without setting `lenientDivider` (which is reserved for the
+// genuinely non-canonical bare `=======` aider form).
+const FIND_REPLACE_DIVIDER_RE = /^=======[ \t]+REPLACE[ \t]*$/;
 // Aider / git-conflict style bare divider. Accepted as a fallback
 // only when the canonical `======= REPLACE` form is absent from the
 // chunk and exactly one bare `=======` line appears before the end
@@ -773,6 +851,111 @@ export class AmbiguousFindReplaceOnceError extends Error {
   }
 }
 
+// Indent-aware replacement. When a hunk matched at a
+// whitespace-tolerant tier (rstrip/trim/fuzzy), the PATCH's SEARCH
+// lines had different leading whitespace than the FILE region they
+// matched against. Inserting REPLACE verbatim would produce
+// structurally wrong indentation. Detect the indent delta between
+// the first non-blank line of pattern and the first non-blank line
+// of the file region, then strip the patch indent prefix from each
+// REPLACE line and replace with the file indent. Blank lines in
+// REPLACE stay blank.
+function reindentReplaceLines(
+  patchPattern: string[],
+  fileRegion: string[],
+  replaceLines: string[],
+): string[] {
+  const { patchIndent, fileIndent } = detectIndentDelta(patchPattern, fileRegion);
+  // No delta → no rewrite. Preserves byte-identical behavior for
+  // cases where the tier mismatch was caused by something other than
+  // indent (e.g., trailing whitespace, unicode quotes).
+  if (patchIndent === fileIndent) return replaceLines;
+  return replaceLines.map((line) => reindentLine(line, patchIndent, fileIndent));
+}
+
+function detectIndentDelta(
+  patchPattern: string[],
+  fileRegion: string[],
+): { patchIndent: string; fileIndent: string } {
+  // Walk the paired lines and keep the first pair where both have
+  // non-blank content AND the leading whitespace differs. That's
+  // the load-bearing delta the REPLACE lines should be rewritten
+  // against. Ignoring lines that are zero-indent on both sides
+  // (e.g., function-signature context lines) avoids emitting a
+  // zero-delta result when the true indent drift was on the body.
+  for (let i = 0; i < Math.min(patchPattern.length, fileRegion.length); i++) {
+    const p = patchPattern[i] ?? '';
+    const f = fileRegion[i] ?? '';
+    if (p.trim().length === 0 || f.trim().length === 0) continue;
+    const patchIndent = leadingWhitespace(p);
+    const fileIndent = leadingWhitespace(f);
+    if (patchIndent === fileIndent) continue;
+    return { patchIndent, fileIndent };
+  }
+  return { patchIndent: '', fileIndent: '' };
+}
+
+function leadingWhitespace(line: string): string {
+  const match = /^[\t ]*/.exec(line);
+  return match ? match[0] : '';
+}
+
+function reindentLine(line: string, patchIndent: string, fileIndent: string): string {
+  // Blank / whitespace-only lines stay unchanged.
+  if (line.trim().length === 0) return line;
+  // If the line's leading whitespace starts with `patchIndent`, swap
+  // that prefix for `fileIndent` and leave any extra indentation
+  // beyond the prefix alone. That way a line indented deeper than
+  // `patchIndent` (e.g. nested body) still shifts by the same delta.
+  if (patchIndent.length > 0 && line.startsWith(patchIndent)) {
+    return fileIndent + line.slice(patchIndent.length);
+  }
+  // Line's leading whitespace doesn't start with `patchIndent`
+  // (e.g., the line has less indent than the anchor). Leave it
+  // alone — we can't infer a safe rewrite.
+  return line;
+}
+
+// Soft-anchor fallback. Used only by `@@ <label>` context-anchor
+// resolution, never by SEARCH-block matching (where whole-line
+// semantics are load-bearing). Tries two successively-looser match
+// tiers:
+//
+//   'prefix'    — file line starts with the anchor (after trimStart)
+//   'substring' — anchor appears anywhere in the file line (after trim)
+//
+// Each tier accepts only when exactly one remaining file line
+// matches. Zero matches or 2+ matches cause the tier to reject;
+// `undefined` propagates up so the caller emits the standard
+// anchor-not-found error.
+function resolveSoftAnchor(
+  lines: string[],
+  anchor: string,
+  start: number,
+): SequenceMatch | undefined {
+  const trimmedAnchor = anchor.trim();
+  if (trimmedAnchor.length === 0) return undefined;
+
+  type Predicate = (line: string) => boolean;
+  const tiers: Predicate[] = [
+    (line) => line.trimStart().startsWith(trimmedAnchor),
+    (line) => line.trim().includes(trimmedAnchor),
+  ];
+  for (const pred of tiers) {
+    const matches: number[] = [];
+    for (let i = start; i < lines.length; i++) {
+      if (pred(lines[i] ?? '')) matches.push(i);
+    }
+    if (matches.length === 1) {
+      // Report as 'fuzzy' tier so existing usedFuzzy plumbing kicks
+      // in and the summary can surface the softening without a new
+      // tier enum value.
+      return { startIndex: matches[0]!, tier: 'fuzzy' };
+    }
+  }
+  return undefined;
+}
+
 // Post-match validation helper. When a chunk matched at the
 // `quoteStyle` tier, run the REPLACE guardrails (backticks, escaped
 // quotes, monomorphic quote style) and, on success, return the
@@ -818,7 +1001,24 @@ function deriveUpdatedNormalizedContent(
         // we keep anchor matching conservative and do NOT enable the
         // quote tier here — re-evaluate if real patches surface a
         // pain point.
-        const ctxMatch = seekSequence(originalLines, [anchor], lineIndex, false);
+        let ctxMatch: SequenceMatch | undefined = seekSequence(
+          originalLines,
+          [anchor],
+          lineIndex,
+          false,
+        );
+        if (ctxMatch === undefined) {
+          // Soft-anchor fallback. `seekSequence` matches anchors as
+          // whole lines with tiered whitespace/quote tolerance. When
+          // none of those tiers produced a hit, try:
+          //   (a) prefix match — file line starts with anchor text
+          //   (b) substring match — anchor appears anywhere in line
+          // Each tier accepts only when exactly one line in the
+          // remaining file matches; 2+ matches are ambiguous and
+          // fall through so the caller sees the standard error.
+          ctxMatch = resolveSoftAnchor(originalLines, anchor, lineIndex);
+          if (ctxMatch !== undefined) usedFuzzy = true;
+        }
         if (ctxMatch === undefined) {
           throw new PatchContextMatchError({
             kind: 'anchor-not-found',
@@ -952,6 +1152,8 @@ function deriveUpdatedNormalizedContent(
         expectedLines: pattern,
         nearestMatch: findNearestSequence(originalLines, pattern, 0),
         scanTruncated: sampling,
+        chunkSource: chunk.source,
+        chunkNewLines: newSlice,
       });
     }
     if (found.tier === 'quoteStyle') {
@@ -966,12 +1168,22 @@ function deriveUpdatedNormalizedContent(
           expectedLines: pattern,
           nearestMatch: findNearestSequence(originalLines, pattern, 0),
           scanTruncated: sampling,
+          chunkSource: chunk.source,
+          chunkNewLines: newSlice,
         });
       }
       newSlice = translated.newLines;
       usedQuoteStyle = true;
-    } else if (found.tier === 'trim' || found.tier === 'fuzzy') {
+    } else if (found.tier === 'trim' || found.tier === 'fuzzy' || found.tier === 'rstrip') {
       usedFuzzy = true;
+      // Indent-aware replacement. A trim/fuzzy match means the
+      // SEARCH lines differed from the file region by leading
+      // whitespace only (indent unit, tabs vs spaces). If we insert
+      // the REPLACE lines verbatim they keep the PATCH's indent,
+      // which is wrong — they should adopt the file's indent so the
+      // edit is structurally correct.
+      const fileRegion = originalLines.slice(found.startIndex, found.startIndex + pattern.length);
+      newSlice = reindentReplaceLines(pattern, fileRegion, newSlice);
     }
     replacements.push([found.startIndex, pattern.length, [...newSlice]]);
     lineIndex = found.startIndex + pattern.length;
@@ -1120,6 +1332,7 @@ function parseUpdateChunk(
   if (parsed === 0) throw new Error('Update hunk does not contain any lines');
   return {
     chunk: {
+      source: 'hunk',
       changeContext: changeContext.length > 0 ? changeContext : undefined,
       oldLines,
       newLines,
@@ -1210,7 +1423,7 @@ function parseFindReplaceChunk(
       endMarkerIdx = j;
       break;
     }
-    if (trimmed === FIND_REPLACE_DIVIDER) {
+    if (trimmed === FIND_REPLACE_DIVIDER || FIND_REPLACE_DIVIDER_RE.test(trimmed)) {
       if (strictDividerIdx === -1) strictDividerIdx = j;
     } else if (trimmed === FIND_REPLACE_BARE_DIVIDER) {
       bareDividerIdxs.push(j);
@@ -1363,8 +1576,59 @@ function preparePatchLines(patchText: string, mode: 'strict' | 'streaming'): Pre
   // we merged so the summary can nudge the agent.
   const mergedEnvelopes = mergeConcatenatedEnvelopes(lines);
 
+  // Envelope auto-wrap. Some models emit a bare operation header
+  // (`*** Add File:`, `*** Update File:`, `*** Delete File:`) at the
+  // top of the payload without wrapping it in
+  // `*** Begin Patch` ... `*** End Patch`. When we're confident the
+  // payload is patch-shaped (first non-blank line is an operation
+  // header AND there's no `*** Begin Patch` anywhere), synthesize
+  // the envelope so the rest of the parser works unchanged.
+  const autoWrappedEnvelope = maybeAutoWrapEnvelope(lines);
+
   const patchComplete = lines[lines.length - 1]?.trim() === END_PATCH_LINE;
-  return { lines, patchComplete, mergedEnvelopes };
+  return { lines, patchComplete, mergedEnvelopes, autoWrappedEnvelope };
+}
+
+/**
+ * Mutates `lines` in place to add `*** Begin Patch` and `*** End Patch`
+ * when the payload starts with a bare operation header and no envelope
+ * is present. Returns true when a wrap was synthesized.
+ */
+function maybeAutoWrapEnvelope(lines: string[]): boolean {
+  // Fast exit: payload already starts with `*** Begin Patch`, or is empty.
+  const firstContentIdx = nextNonBlankIndex(lines, 0);
+  if (firstContentIdx >= lines.length) return false;
+  const firstContent = (lines[firstContentIdx] ?? '').trim();
+  if (firstContent === BEGIN_PATCH_LINE) return false;
+  // Only auto-wrap when the first content line is a recognized
+  // top-level operation header. Anything else is genuinely malformed
+  // (prose, markdown, random text) and should fail loudly.
+  if (
+    !firstContent.startsWith(ADD_FILE_PREFIX) &&
+    !firstContent.startsWith(DELETE_FILE_PREFIX) &&
+    !firstContent.startsWith(UPDATE_FILE_PREFIX)
+  ) {
+    return false;
+  }
+  // And only when the payload contains no `*** Begin Patch` anywhere —
+  // otherwise we'd be hiding a structural problem (stray text before
+  // a real envelope) behind an auto-wrap.
+  if (lines.some((line) => line.trim() === BEGIN_PATCH_LINE)) return false;
+
+  lines.unshift(BEGIN_PATCH_LINE);
+  // Append end marker only when the tail isn't already `*** End Patch`.
+  const lastContentIdx = lastNonBlankIndex(lines);
+  if (lastContentIdx < 0 || lines[lastContentIdx]?.trim() !== END_PATCH_LINE) {
+    lines.push(END_PATCH_LINE);
+  }
+  return true;
+}
+
+function lastNonBlankIndex(lines: string[]): number {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if ((lines[i] ?? '').trim() !== '') return i;
+  }
+  return -1;
 }
 
 function isOperationHeaderLine(line: string | undefined): boolean {
@@ -1681,6 +1945,13 @@ interface PatchParseDiagnostics {
    * envelope per call.
    */
   mergedEnvelopes: number;
+  /**
+   * True when the payload was missing the `*** Begin Patch` /
+   * `*** End Patch` envelope but started with a bare operation
+   * header. Callers should surface this as an advisory so the
+   * agent learns to always include the full envelope.
+   */
+  autoWrappedEnvelope: boolean;
 }
 
 export function parsePatchWithDiagnostics(patchText: string): PatchParseDiagnostics {
@@ -1690,10 +1961,133 @@ export function parsePatchWithDiagnostics(patchText: string): PatchParseDiagnost
     'strict',
     prepared.patchComplete,
   );
+  const ops = operations.map(({ state: _state, ...operation }) => operation);
+  applyChunkAutoFixes(ops);
   return {
-    ops: operations.map(({ state: _state, ...operation }) => operation),
+    autoWrappedEnvelope: prepared.autoWrappedEnvelope,
+    ops,
     mergedEnvelopes: prepared.mergedEnvelopes,
   };
+}
+
+// -------------------------------------------------------------------
+// Chunk auto-fix layer
+//
+// Applies conservative, high-confidence post-parse transformations to
+// FindReplace chunks. Today: one fix, "prefix-leak" — strip a leaked
+// unified-diff `+` prefix from REPLACE lines when every non-blank
+// REPLACE line starts with `+` at column 0 and SEARCH has none.
+//
+// Hunks are never touched: the parser already strips `+`/`-`/` `
+// sigils from hunk context/change lines before populating oldLines
+// and newLines, so a `+` at column 0 there is either impossible or
+// legitimate content (extremely rare).
+// -------------------------------------------------------------------
+
+// Sentinel tokens whose presence in the (hypothetically stripped)
+// REPLACE lines strongly suggests the target is a patch-doc/prompt/
+// template file — in which case auto-stripping would corrupt the
+// agent's intent. Match on whole-line content; a substring hit in a
+// prose sentence shouldn't disqualify the fix.
+const PATCH_SYNTAX_SENTINELS = [
+  /^\*\*\* Update File:\s*\S/,
+  /^\*\*\* Add File:\s*\S/,
+  /^\*\*\* Delete File:\s*\S/,
+  /^\*\*\* Begin Patch$/,
+  /^\*\*\* End Patch$/,
+  /^\*\*\* FindReplaceOnce:$/,
+  /^\*\*\* FindReplaceAll:$/,
+  /^<<<<<<< SEARCH$/,
+  /^======= REPLACE$/,
+  /^>>>>>>> REPLACE$/,
+];
+
+const PREFIX_LEAK_LINE_RE = /^\+[A-Za-z_/#{}()[\]"'`\s]/;
+const PREFIX_LEAK_MIN_LINES = 3;
+
+function applyChunkAutoFixes(ops: PatchOperation[]): void {
+  for (const op of ops) {
+    if (op.kind !== 'update') continue;
+    for (const chunk of op.chunks) {
+      maybeApplyPrefixLeakFix(chunk);
+    }
+  }
+}
+
+// "+" followed by any printable safe char — i.e. a line that is
+// "+<content>". These are the meaningful leaked lines; the
+// minimum-count threshold runs against these.
+function isMeaningfulPlusLine(l: string): boolean {
+  return PREFIX_LEAK_LINE_RE.test(l);
+}
+
+// Bare "+" alone on a line. In a leaked unified-diff REPLACE block
+// this represents a blank line in the new version; after stripping
+// the "+" it becomes a genuine blank line.
+function isBarePlusLine(l: string): boolean {
+  return l === '+';
+}
+
+function isAnyPlusLine(l: string): boolean {
+  return isMeaningfulPlusLine(l) || isBarePlusLine(l);
+}
+
+function maybeApplyPrefixLeakFix(chunk: UpdateChunk): void {
+  // Only FindReplace chunks: hunks use `+`/`-` sigils legitimately
+  // and the parser has already stripped them before reaching us.
+  if (chunk.source !== 'find-replace-once' && chunk.source !== 'find-replace-all') return;
+
+  // Asymmetry requirement: if SEARCH already has "+"-prefixed lines
+  // the agent is probably intentionally working with "+"-prefixed
+  // content (config files, etc.), not leaking diff syntax.
+  const oldPlusLines = chunk.oldLines.filter(isAnyPlusLine).length;
+  if (oldPlusLines > 0) return;
+
+  // Identify the trailing "+"-leak region. We specifically handle
+  // two shapes observed in the 7-day session corpus:
+  //
+  //   1. Full leak — every non-blank REPLACE line starts with "+".
+  //   2. Trailing partial leak — the REPLACE starts with unchanged
+  //      content and drifts into "+"-prefixed unified-diff syntax
+  //      part-way through. This is the shape of the main.go
+  //      catastrophic silent-corruption bug.
+  //
+  // Both collapse to: walk from the end of REPLACE backwards,
+  // collect the longest contiguous suffix of ("+"-prefixed OR
+  // blank) lines. That suffix is the leak region. Anything earlier
+  // is untouched.
+  const lines = chunk.newLines;
+  let leakStart = lines.length;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const l = lines[i] ?? '';
+    if (isAnyPlusLine(l) || l.trim().length === 0) {
+      leakStart = i;
+    } else {
+      break;
+    }
+  }
+  const leakRegion = lines.slice(leakStart);
+
+  // Threshold against meaningful leak lines (content, not bare
+  // blanks). A run of only blank "+" lines or ambiguous short
+  // runs of "+" content isn't safe to mechanically fix.
+  const meaningful = leakRegion.filter(isMeaningfulPlusLine).length;
+  if (meaningful < PREFIX_LEAK_MIN_LINES) return;
+
+  // Strip "+" from the leak region; leave earlier lines untouched.
+  const stripped = [...lines.slice(0, leakStart), ...leakRegion.map(stripLeadingPlus)];
+
+  // Don't autofix when the stripped REPLACE would contain a line
+  // that matches one of the patch-syntax sentinels — strong signal
+  // the target is a patch-doc/prompt/template file.
+  if (stripped.some((line) => PATCH_SYNTAX_SENTINELS.some((re) => re.test(line)))) return;
+
+  chunk.newLines = stripped;
+  chunk.autoFixed = [...(chunk.autoFixed ?? []), 'prefix-leak'];
+}
+
+function stripLeadingPlus(line: string): string {
+  return line.startsWith('+') ? line.slice(1) : line;
 }
 
 function operationIdentityKey(operation: PatchOperation): string {
@@ -2148,6 +2542,13 @@ interface BuildPatchPlanDiagnostics {
    * `summaryText` advisory; unset/0 means no advisory is emitted.
    */
   mergedEnvelopes?: number;
+  /**
+   * True when `preparePatchLines` synthesized a missing
+   * `*** Begin Patch` / `*** End Patch` envelope. See
+   * `parsePatchWithDiagnostics`. Surfaced in `summaryText` as an
+   * advisory so the agent learns to emit the full envelope.
+   */
+  autoWrappedEnvelope?: boolean;
 }
 
 export async function buildPatchPlan(
@@ -2179,6 +2580,10 @@ export async function buildPatchPlan(
   // re-quoted to match the file. Surfaced in the summary as a nudge
   // for the agent to mirror the file's quote style on future patches.
   const quoteStylePaths: string[] = [];
+  // Per-op count of chunks that had any post-parse auto-fix applied,
+  // keyed by fix kind (e.g. 'prefix-leak'). Surfaced in the summary
+  // so the agent sees what the parser corrected and why.
+  const autoFixTotals: Array<{ path: string; kind: AutoFixKind; count: number }> = [];
 
   for (const [index, op] of ops.entries()) {
     const row = rows[index]!;
@@ -2196,6 +2601,16 @@ export async function buildPatchPlan(
       );
       if (lenientCount > 0) {
         lenientDividerTotals.push({ path: op.path, count: lenientCount });
+      }
+      // Tally auto-fixes per kind for the summary advisory.
+      const autoFixCounts = new Map<AutoFixKind, number>();
+      for (const chunk of op.chunks) {
+        for (const kind of chunk.autoFixed ?? []) {
+          autoFixCounts.set(kind, (autoFixCounts.get(kind) ?? 0) + 1);
+        }
+      }
+      for (const [kind, count] of autoFixCounts) {
+        autoFixTotals.push({ path: op.path, kind, count });
       }
     }
 
@@ -2257,6 +2672,8 @@ export async function buildPatchPlan(
       lenientDividerTotals,
       quoteStylePaths,
       diagnostics.mergedEnvelopes ?? 0,
+      diagnostics.autoWrappedEnvelope ?? false,
+      autoFixTotals,
     ),
   };
 }
@@ -2274,17 +2691,33 @@ function buildSummaryText(
   lenientDividerTotals: Array<{ path: string; count: number }> = [],
   quoteStylePaths: string[] = [],
   mergedEnvelopes = 0,
+  autoWrappedEnvelope = false,
+  autoFixTotals: Array<{ path: string; kind: AutoFixKind; count: number }> = [],
 ): string {
   const base = `Applied patch with ${opCount} operation(s).`;
   if (
     replaceAllTotals.length === 0 &&
     lenientDividerTotals.length === 0 &&
     quoteStylePaths.length === 0 &&
-    mergedEnvelopes === 0
+    mergedEnvelopes === 0 &&
+    !autoWrappedEnvelope &&
+    autoFixTotals.length === 0
   ) {
     return base;
   }
   const lines: string[] = [base];
+  if (autoWrappedEnvelope) {
+    lines.push(
+      `  Note: payload was missing '*** Begin Patch' / '*** End Patch' envelope; auto-wrapped it. Include the full envelope on future patches.`,
+    );
+  }
+  for (const { path, kind, count } of autoFixTotals) {
+    if (kind === 'prefix-leak') {
+      lines.push(
+        `  Note: auto-fixed prefix-leak in ${count} chunk${count === 1 ? '' : 's'} in ${path}: stripped leading '+' chars from REPLACE (likely unified-diff syntax leak; REPLACE is literal text, not diff format).`,
+      );
+    }
+  }
   if (mergedEnvelopes > 0) {
     lines.push(
       `  Note: merged ${mergedEnvelopes} concatenated '*** Begin Patch'/'*** End Patch' envelope${mergedEnvelopes === 1 ? '' : 's'} into a single patch. Emit exactly one '*** Begin Patch' ... '*** End Patch' pair per apply_patch call.`,

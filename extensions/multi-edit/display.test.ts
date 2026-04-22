@@ -312,7 +312,7 @@ describe('multi-edit display renderer', () => {
     const rendered = component.render(120).join('\n');
     expect(rendered).toContain('apply_patch');
     // A single line: "<spinner> apply_patch". No "receiving" text.
-    expect(rendered.split('\n').filter((line) => line.trim().length > 0)).toHaveLength(1);
+    expect(rendered.split('\n').filter((line: string) => line.trim().length > 0)).toHaveLength(1);
     expect(rendered).toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s+.*apply_patch/);
     expect(rendered).not.toMatch(/receiving/i);
   });

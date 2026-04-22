@@ -845,9 +845,10 @@ interface PlaceholderPulseState {
   timer?: ReturnType<typeof setTimeout>;
 }
 
-function tickPlaceholderSpinnerFrame(
-  context?: { state?: unknown; invalidate?: () => void },
-): string {
+function tickPlaceholderSpinnerFrame(context?: {
+  state?: unknown;
+  invalidate?: () => void;
+}): string {
   // Called once per render while the apply_patch header is visible but
   // the streaming parser has no rows yet. On Anthropic this window can
   // be 10-30s long because the provider generates the full tool_use

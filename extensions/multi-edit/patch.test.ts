@@ -13,6 +13,7 @@ import {
   parsePatch,
   parsePatchStreaming,
   parsePatchWithDiagnostics,
+  renderContextMatchFailure,
 } from './patch';
 import { PatchContextMatchError, PatchPlanFailedError } from './patch';
 import { AmbiguousFindReplaceOnceError } from './patch';
@@ -1920,6 +1921,643 @@ describe('FindReplaceOnce (phase 2)', () => {
         ].join('\n'),
       ),
     ).toThrow(/ambiguous bare '=======' lines at input lines 6, 8/);
+  });
+
+  test('auto-wraps missing *** Begin Patch / *** End Patch envelope', async () => {
+    // Observed in 7-day session-log analysis: agents occasionally emit
+    // `*** Add File: foo.ts` at the top of the payload without a
+    // surrounding envelope. If the payload otherwise parses cleanly,
+    // synthesize the envelope so the operation still applies.
+    const workspace = createVirtualWorkspace('/repo');
+    const operations = parsePatch(
+      ['*** Add File: hello.ts', '+const greeting = "hi";', '+export { greeting };'].join('\n'),
+    );
+    expect(operations).toHaveLength(1);
+    const op = operations[0];
+    expect(op?.kind).toBe('add');
+    if (op?.kind === 'add') {
+      expect(op.path).toBe('hello.ts');
+      expect(op.contents).toBe('const greeting = "hi";\nexport { greeting };\n');
+    }
+    await applyPatchOperations(operations, workspace, '/repo');
+    await expect(workspace.readText('/repo/hello.ts')).resolves.toBe(
+      'const greeting = "hi";\nexport { greeting };\n',
+    );
+  });
+
+  test('auto-wraps Update File patch missing envelope', () => {
+    const operations = parsePatch(['*** Update File: src/app.ts', '@@', '-foo', '+bar'].join('\n'));
+    expect(operations).toHaveLength(1);
+    expect(operations[0]?.kind).toBe('update');
+  });
+
+  test('auto-wrap is reported in diagnostics so the summary can nudge the agent', () => {
+    const result = parsePatchWithDiagnostics(
+      ['*** Add File: hello.ts', '+const greeting = "hi";'].join('\n'),
+    );
+    expect(result.autoWrappedEnvelope).toBe(true);
+  });
+
+  test('patches that already have the envelope are not flagged as auto-wrapped', () => {
+    const result = parsePatchWithDiagnostics(
+      [
+        '*** Begin Patch',
+        '*** Add File: hello.ts',
+        '+const greeting = "hi";',
+        '*** End Patch',
+      ].join('\n'),
+    );
+    expect(result.autoWrappedEnvelope).toBeFalsy();
+  });
+
+  test('auto-wrap advisory appears in summaryText', async () => {
+    const workspace = createVirtualWorkspace('/repo');
+    const plan = await buildPatchPlan(
+      parsePatch(['*** Add File: hi.ts', '+const hi = 1;'].join('\n')),
+      workspace,
+      '/repo',
+      createRealWorkspace(),
+      { mergedEnvelopes: 0, autoWrappedEnvelope: true },
+    );
+    expect(plan.summaryText).toContain("was missing '*** Begin Patch' / '*** End Patch' envelope");
+  });
+
+  test('autofix: strips leaked "+" prefixes from FindReplaceOnce REPLACE', async () => {
+    // Reproduces the real-world incident where an agent wrote a
+    // unified-diff-style REPLACE block by mistake. Catastrophic
+    // silent corruption fix.
+    const workspace = createVirtualWorkspace('/repo', {
+      '/repo/main.go': ['package main', '', 'func main() {', '\tprintln("hello")', '}'].join('\n'),
+    });
+    const operations = parsePatch(
+      [
+        '*** Begin Patch',
+        '*** Update File: main.go',
+        '*** FindReplaceOnce:',
+        '<<<<<<< SEARCH',
+        'package main',
+        '',
+        'func main() {',
+        '\tprintln("hello")',
+        '}',
+        '======= REPLACE',
+        '+package main',
+        '+',
+        '+const answer = 42',
+        '+',
+        '+func main() {',
+        '+\tprintln("hello")',
+        '+\tprintln(answer)',
+        '+}',
+        '>>>>>>> REPLACE',
+        '*** End Patch',
+      ].join('\n'),
+    );
+    expect(operations).toHaveLength(1);
+    const op = operations[0];
+    expect(op?.kind).toBe('update');
+    if (op?.kind === 'update') {
+      expect(op.chunks).toHaveLength(1);
+      const chunk = op.chunks[0]!;
+      expect(chunk.autoFixed).toEqual(['prefix-leak']);
+      // REPLACE lines should have the "+" stripped.
+      expect(chunk.newLines).toEqual([
+        'package main',
+        '',
+        'const answer = 42',
+        '',
+        'func main() {',
+        '\tprintln("hello")',
+        '\tprintln(answer)',
+        '}',
+      ]);
+    }
+    await applyPatchOperations(operations, workspace, '/repo');
+    const content = await workspace.readText('/repo/main.go');
+    // Verify no stray "+" chars landed in the file.
+    expect(content).not.toMatch(/^\+/m);
+    expect(content).toContain('const answer = 42');
+  });
+
+  test('autofix: does NOT strip when REPLACE contains patch-syntax sentinel tokens after strip', () => {
+    // False-positive guard: if the stripped REPLACE would contain a
+    // line that looks like patch syntax (e.g. `*** Update File:`),
+    // the agent is likely editing a patch-docs / prompt / template
+    // file. Don't silently rewrite — reject the autofix.
+    const operations = parsePatch(
+      [
+        '*** Begin Patch',
+        '*** Update File: docs/apply-patch-guide.md',
+        '*** FindReplaceOnce:',
+        '<<<<<<< SEARCH',
+        'Canonical example:',
+        'Old guidance',
+        'Avoid hunks',
+        '======= REPLACE',
+        '+Canonical example:',
+        '+*** Update File: src/service.ts',
+        '+*** FindReplaceOnce:',
+        '+New guidance',
+        '>>>>>>> REPLACE',
+        '*** End Patch',
+      ].join('\n'),
+    );
+    const op = operations[0];
+    if (op?.kind === 'update') {
+      // After stripping the "+" prefix, the REPLACE would contain
+      // `*** Update File:` — a patch-syntax sentinel. That's a strong
+      // signal the agent is editing a doc that documents patch syntax.
+      expect(op.chunks[0]?.autoFixed).toBeUndefined();
+      expect(op.chunks[0]?.newLines[0]).toBe('+Canonical example:');
+    }
+  });
+
+  test('autofix: does NOT strip when asymmetry is broken (SEARCH also has "+" lines)', () => {
+    // If SEARCH already contains "+" at column 0, the agent is
+    // probably intentionally editing something that uses "+" as a
+    // literal character. Don't rewrite.
+    const operations = parsePatch(
+      [
+        '*** Begin Patch',
+        '*** Update File: config.txt',
+        '*** FindReplaceOnce:',
+        '<<<<<<< SEARCH',
+        '+tag1',
+        '+tag2',
+        '+tag3',
+        '======= REPLACE',
+        '+newtag1',
+        '+newtag2',
+        '+newtag3',
+        '>>>>>>> REPLACE',
+        '*** End Patch',
+      ].join('\n'),
+    );
+    const op = operations[0];
+    if (op?.kind === 'update') {
+      expect(op.chunks[0]?.autoFixed).toBeUndefined();
+      expect(op.chunks[0]?.newLines[0]).toBe('+newtag1');
+    }
+  });
+
+  test('autofix: partial trailing leak (unchanged then "+"-prefixed) is stripped', async () => {
+    // The real airchat-toolbox/main.go bug shape. REPLACE begins
+    // with the ORIGINAL import block unchanged, then drifts into
+    // "+"-prefixed unified-diff syntax for the added declarations.
+    const workspace = createVirtualWorkspace('/repo', {
+      '/repo/main.go': [
+        'package main',
+        '',
+        'import (',
+        '\t"context"',
+        ')',
+        '',
+        'func main() {',
+        '}',
+      ].join('\n'),
+    });
+    const operations = parsePatch(
+      [
+        '*** Begin Patch',
+        '*** Update File: main.go',
+        '*** FindReplaceOnce:',
+        '<<<<<<< SEARCH',
+        'package main',
+        '',
+        'import (',
+        '\t"context"',
+        ')',
+        '',
+        'func main() {',
+        '}',
+        '======= REPLACE',
+        'package main',
+        '',
+        'import (',
+        '\t"context"',
+        ')',
+        '+',
+        '+const answer = 42',
+        '+',
+        '+func main() {',
+        '+\tprintln(answer)',
+        '+}',
+        '>>>>>>> REPLACE',
+        '*** End Patch',
+      ].join('\n'),
+    );
+    const op = operations[0];
+    if (op?.kind === 'update') {
+      expect(op.chunks[0]?.autoFixed).toEqual(['prefix-leak']);
+      // Unchanged import block stays intact; trailing leak stripped.
+      expect(op.chunks[0]?.newLines).toEqual([
+        'package main',
+        '',
+        'import (',
+        '\t"context"',
+        ')',
+        '',
+        'const answer = 42',
+        '',
+        'func main() {',
+        '\tprintln(answer)',
+        '}',
+      ]);
+    }
+    await applyPatchOperations(operations, workspace, '/repo');
+    const content = await workspace.readText('/repo/main.go');
+    expect(content).not.toMatch(/^\+/m);
+    expect(content).toContain('const answer = 42');
+  });
+
+  test('autofix: below threshold (only 2 "+" lines) does NOT trigger', () => {
+    // Threshold guard: a 1-2 line REPLACE that happens to start with
+    // "+" is more likely intentional than a leak.
+    const operations = parsePatch(
+      [
+        '*** Begin Patch',
+        '*** Update File: list.txt',
+        '*** FindReplaceOnce:',
+        '<<<<<<< SEARCH',
+        'item-1',
+        'item-2',
+        '======= REPLACE',
+        '+item-1',
+        '+item-2',
+        '>>>>>>> REPLACE',
+        '*** End Patch',
+      ].join('\n'),
+    );
+    const op = operations[0];
+    if (op?.kind === 'update') {
+      expect(op.chunks[0]?.autoFixed).toBeUndefined();
+      expect(op.chunks[0]?.newLines).toEqual(['+item-1', '+item-2']);
+    }
+  });
+
+  test('autofix: advisory appears in summaryText', async () => {
+    const workspace = createVirtualWorkspace('/repo', {
+      '/repo/main.go': ['package main', 'func main() {}', 'const x = 0'].join('\n'),
+    });
+    const plan = await buildPatchPlan(
+      parsePatch(
+        [
+          '*** Begin Patch',
+          '*** Update File: main.go',
+          '*** FindReplaceOnce:',
+          '<<<<<<< SEARCH',
+          'package main',
+          'func main() {}',
+          'const x = 0',
+          '======= REPLACE',
+          '+package main',
+          '+func main() { println("hi") }',
+          '+const x = 1',
+          '+const y = 2',
+          '>>>>>>> REPLACE',
+          '*** End Patch',
+        ].join('\n'),
+      ),
+      workspace,
+      '/repo',
+      createRealWorkspace(),
+    );
+    expect(plan.summaryText).toContain('auto-fixed');
+    expect(plan.summaryText).toContain('prefix-leak');
+  });
+
+  test('hunk-suggestion: failing @@ hunk error includes FindReplaceOnce rewrite', async () => {
+    const workspace = createVirtualWorkspace('/repo', {
+      '/repo/foo.ts': ['alpha', 'beta', 'gamma'].join('\n'),
+    });
+    // Hunk whose SEARCH doesn't match because 'delta' isn't in the file.
+    const operations = parsePatch(
+      [
+        '*** Begin Patch',
+        '*** Update File: foo.ts',
+        '@@',
+        '-delta',
+        '+epsilon',
+        '*** End Patch',
+      ].join('\n'),
+    );
+    try {
+      await applyPatchOperations(operations, workspace, '/repo');
+      throw new Error('expected failure');
+    } catch (e) {
+      if (!(e instanceof PatchContextMatchError)) throw e;
+      const rendered = renderContextMatchFailure(e.failure);
+      // Error must include a FindReplaceOnce suggestion.
+      expect(rendered).toContain('Consider rewriting as');
+      expect(rendered).toContain('*** FindReplaceOnce:');
+      expect(rendered).toContain('<<<<<<< SEARCH');
+      expect(rendered).toContain('delta');
+      expect(rendered).toContain('======= REPLACE');
+      expect(rendered).toContain('epsilon');
+      expect(rendered).toContain('>>>>>>> REPLACE');
+    }
+  });
+
+  test('hunk-suggestion: FindReplaceOnce failures do NOT get the hunk rewrite suggestion', async () => {
+    const workspace = createVirtualWorkspace('/repo', {
+      '/repo/foo.ts': ['const x = 1;'].join('\n'),
+    });
+    const operations = parsePatch(
+      [
+        '*** Begin Patch',
+        '*** Update File: foo.ts',
+        '*** FindReplaceOnce:',
+        '<<<<<<< SEARCH',
+        'const x = 999;',
+        '======= REPLACE',
+        'const x = 2;',
+        '>>>>>>> REPLACE',
+        '*** End Patch',
+      ].join('\n'),
+    );
+    try {
+      await applyPatchOperations(operations, workspace, '/repo');
+      throw new Error('expected failure');
+    } catch (e) {
+      if (!(e instanceof PatchContextMatchError)) throw e;
+      const rendered = renderContextMatchFailure(e.failure);
+      // FindReplace path shouldn't trigger hunk-rewrite advice.
+      expect(rendered).not.toContain('Consider rewriting as');
+      expect(rendered).not.toContain('*** FindReplaceOnce:');
+    }
+  });
+
+  test('hunk-suggestion: hunk with context-only (no -/+ change) does NOT produce empty suggestion', async () => {
+    const workspace = createVirtualWorkspace('/repo', {
+      '/repo/foo.ts': ['alpha', 'beta'].join('\n'),
+    });
+    // Hunk with only a context line and no change — unusual but
+    // possible. Suggestion should not fire (no meaningful rewrite).
+    const operations = parsePatch(
+      [
+        '*** Begin Patch',
+        '*** Update File: foo.ts',
+        '@@',
+        ' zebra',
+        '-alpha',
+        '+ALPHA',
+        '*** End Patch',
+      ].join('\n'),
+    );
+    try {
+      await applyPatchOperations(operations, workspace, '/repo');
+      // If it applied (shouldn't), we're done.
+    } catch (e) {
+      if (!(e instanceof PatchContextMatchError)) throw e;
+      const rendered = renderContextMatchFailure(e.failure);
+      // Suggestion may or may not appear depending on whether SEARCH
+      // has any content — the critical invariant is we don't emit a
+      // degenerate suggestion with empty SEARCH/REPLACE.
+      if (rendered.includes('Consider rewriting as')) {
+        // If suggestion appears, it must include both SEARCH and REPLACE content.
+        const searchMatch = rendered.match(/<<<<<<< SEARCH\n([\s\S]*?)\n======= REPLACE/);
+        const replaceMatch = rendered.match(/======= REPLACE\n([\s\S]*?)\n>>>>>>> REPLACE/);
+        expect(searchMatch?.[1]?.trim().length).toBeGreaterThan(0);
+        expect(replaceMatch?.[1]?.trim().length).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  test('soft anchor: prefix match when anchor is a prefix of a file line', async () => {
+    // Observed in 7-day session logs: agent writes
+    //   `@@ function shapePublicResult(args: {`
+    // but the file has
+    //   `export function shapePublicResult(args: { a: number }) {`
+    // The whole-line anchor fails; a prefix match should recover.
+    const workspace = createVirtualWorkspace('/repo', {
+      '/repo/src/coord.ts': [
+        'import { thing } from "./thing";',
+        '',
+        'export function shapePublicResult(args: { a: number }) {',
+        '  return args.a + 1;',
+        '}',
+      ].join('\n'),
+    });
+    const operations = parsePatch(
+      [
+        '*** Begin Patch',
+        '*** Update File: src/coord.ts',
+        '@@ function shapePublicResult(args: {',
+        '-  return args.a + 1;',
+        '+  return args.a * 2;',
+        '*** End Patch',
+      ].join('\n'),
+    );
+    await applyPatchOperations(operations, workspace, '/repo');
+    const content = await workspace.readText('/repo/src/coord.ts');
+    expect(content).toContain('return args.a * 2;');
+    expect(content).not.toContain('return args.a + 1;');
+  });
+
+  test('soft anchor: substring match when anchor is in the middle of a file line', async () => {
+    // Anchor appears as substring of a file line (not a prefix).
+    // Still unique — should resolve.
+    const workspace = createVirtualWorkspace('/repo', {
+      '/repo/src/util.ts': [
+        '/* Internal: shapePublicResult is a helper */ export function shapePublicResult(args) {',
+        '  return args;',
+        '}',
+      ].join('\n'),
+    });
+    const operations = parsePatch(
+      [
+        '*** Begin Patch',
+        '*** Update File: src/util.ts',
+        '@@ shapePublicResult(args) {',
+        '-  return args;',
+        '+  return { shaped: args };',
+        '*** End Patch',
+      ].join('\n'),
+    );
+    await applyPatchOperations(operations, workspace, '/repo');
+    const content = await workspace.readText('/repo/src/util.ts');
+    expect(content).toContain('return { shaped: args };');
+  });
+
+  test('soft anchor: ambiguous substring (multiple matches) is rejected', async () => {
+    // If the anchor appears as a substring on 2+ lines, don't pick
+    // one arbitrarily — reject and require the agent to be more
+    // specific.
+    const workspace = createVirtualWorkspace('/repo', {
+      '/repo/src/dup.ts': ['function foo() { return 1; }', 'function bar() { return 1; }'].join(
+        '\n',
+      ),
+    });
+    const operations = parsePatch(
+      [
+        '*** Begin Patch',
+        '*** Update File: src/dup.ts',
+        '@@ return 1;',
+        '-function foo() { return 1; }',
+        '+function foo() { return 42; }',
+        '*** End Patch',
+      ].join('\n'),
+    );
+    await expect(applyPatchOperations(operations, workspace, '/repo')).rejects.toThrow(
+      PatchContextMatchError,
+    );
+  });
+
+  test('soft anchor: exact/trim match is preferred over softer tiers', async () => {
+    // When both exact and softer tiers could match, exact wins (no
+    // silent downgrade). Regression lock.
+    const workspace = createVirtualWorkspace('/repo', {
+      '/repo/src/pref.ts': [
+        'function foo() {',
+        '  const x = 1;',
+        '}',
+        'function foo() { return 2; }', // could match as substring
+      ].join('\n'),
+    });
+    const operations = parsePatch(
+      [
+        '*** Begin Patch',
+        '*** Update File: src/pref.ts',
+        '@@ function foo() {',
+        '-  const x = 1;',
+        '+  const x = 99;',
+        '*** End Patch',
+      ].join('\n'),
+    );
+    await applyPatchOperations(operations, workspace, '/repo');
+    const content = await workspace.readText('/repo/src/pref.ts');
+    expect(content).toContain('const x = 99;');
+  });
+
+  test('indent rewrite: tab patch against space file reindents REPLACE to match file', async () => {
+    // File uses 4-space indent. Patch uses tabs. Trim tier matches
+    // on contents, but the inserted REPLACE line must adopt the
+    // file's indent, not keep the tab.
+    const workspace = createVirtualWorkspace('/repo', {
+      '/repo/spaces.ts': ['function outer() {', '    return 1;', '}'].join('\n'),
+    });
+    const operations = parsePatch(
+      [
+        '*** Begin Patch',
+        '*** Update File: spaces.ts',
+        '@@',
+        ' function outer() {',
+        '-\treturn 1;',
+        '+\treturn 99;',
+        ' }',
+        '*** End Patch',
+      ].join('\n'),
+    );
+    await applyPatchOperations(operations, workspace, '/repo');
+    const content = await workspace.readText('/repo/spaces.ts');
+    expect(content.split('\n')[1]).toBe('    return 99;');
+    expect(content.split('\n')[1]).not.toContain('\t');
+  });
+
+  test('indent rewrite: 2-space patch against 4-space file reindents REPLACE', async () => {
+    const workspace = createVirtualWorkspace('/repo', {
+      '/repo/four.ts': ['function outer() {', '    return 1;', '}'].join('\n'),
+    });
+    const operations = parsePatch(
+      [
+        '*** Begin Patch',
+        '*** Update File: four.ts',
+        '@@',
+        ' function outer() {',
+        '-  return 1;',
+        '+  return 42;',
+        ' }',
+        '*** End Patch',
+      ].join('\n'),
+    );
+    await applyPatchOperations(operations, workspace, '/repo');
+    const content = await workspace.readText('/repo/four.ts');
+    // The patch wrote the line as "  return 42;" (2-space), but the
+    // file had "    return 1;" (4-space). The replacement must use
+    // 4-space to preserve the file's style.
+    expect(content.split('\n')[1]).toBe('    return 42;');
+  });
+
+  test('indent rewrite: exact-tier match does NOT trigger reindent (stays a no-op)', async () => {
+    const workspace = createVirtualWorkspace('/repo', {
+      '/repo/ok.ts': ['function outer() {', '  return 1;', '}'].join('\n'),
+    });
+    const operations = parsePatch(
+      [
+        '*** Begin Patch',
+        '*** Update File: ok.ts',
+        '@@',
+        ' function outer() {',
+        '-  return 1;',
+        '+  return 2;',
+        ' }',
+        '*** End Patch',
+      ].join('\n'),
+    );
+    await applyPatchOperations(operations, workspace, '/repo');
+    const content = await workspace.readText('/repo/ok.ts');
+    expect(content.split('\n')[1]).toBe('  return 2;');
+  });
+
+  test('hunk context tolerates trailing whitespace drift (rstrip tier)', async () => {
+    // Regression lock: the `rstrip` tier already tolerates trailing
+    // whitespace drift on hunk context lines. This is the largest
+    // single auto-fix in the PR1 set, so we pin the behavior with a
+    // test even though the implementation pre-dates this PR.
+    const workspace = createVirtualWorkspace('/repo', {
+      '/repo/foo.ts': ['const a = 1;', 'const b = 2;  ', 'const c = 3;'].join('\n'),
+    });
+    // Patch uses the same line without the two trailing spaces; it
+    // should still match via rstrip.
+    const operations = parsePatch(
+      [
+        '*** Begin Patch',
+        '*** Update File: foo.ts',
+        '@@',
+        ' const a = 1;',
+        '-const b = 2;',
+        '+const b = 20;',
+        ' const c = 3;',
+        '*** End Patch',
+      ].join('\n'),
+    );
+    await applyPatchOperations(operations, workspace, '/repo');
+    await expect(workspace.readText('/repo/foo.ts')).resolves.toBe(
+      ['const a = 1;', 'const b = 20;', 'const c = 3;'].join('\n'),
+    );
+  });
+
+  test("accepts '======= REPLACE' with extra inner whitespace (tolerance, not lenient)", () => {
+    // Observed in 7-day session-log analysis: agents occasionally emit
+    // `=======  REPLACE` (two spaces) or `=======\tREPLACE` (tab).
+    // The content is semantically identical to the canonical form;
+    // the parser should normalize the whitespace without marking the
+    // chunk as `lenientDivider` (which is reserved for genuinely
+    // non-canonical aider-style bare `=======`).
+    for (const divider of ['=======  REPLACE', '======= \tREPLACE', '=======\tREPLACE']) {
+      const operations = parsePatch(
+        [
+          '*** Begin Patch',
+          '*** Update File: pkg.json',
+          '*** FindReplaceOnce:',
+          '<<<<<<< SEARCH',
+          '"test": "bun test"',
+          divider,
+          '"test": "vitest run"',
+          '>>>>>>> REPLACE',
+          '*** End Patch',
+        ].join('\n'),
+      );
+      expect(operations).toHaveLength(1);
+      const op = operations[0];
+      if (op?.kind === 'update') {
+        expect(op.chunks).toHaveLength(1);
+        // Not a lenient divider — whitespace-normalized canonical form.
+        expect(op.chunks[0]?.lenientDivider).toBeUndefined();
+        expect(op.chunks[0]?.oldLines).toEqual(['"test": "bun test"']);
+        expect(op.chunks[0]?.newLines).toEqual(['"test": "vitest run"']);
+      }
+    }
   });
 });
 
