@@ -2,6 +2,7 @@ import type { Component } from '@mariozechner/pi-tui';
 import { truncateToWidth, visibleWidth } from '@mariozechner/pi-tui';
 
 import type { PatchPreviewRow } from '../patch';
+import { shortenDisplayPath } from '../render-utils';
 
 interface SummaryTheme {
   fg(color: string, text: string): string;
@@ -50,11 +51,11 @@ function formatAction(row: PatchPreviewRow): string {
   }
 }
 
-function formatPath(row: PatchPreviewRow): string {
+function formatPath(row: PatchPreviewRow, cwd?: string): string {
   if (row.kind === 'move') {
-    return `${row.path} → ${row.targetPath}`;
+    return `${shortenDisplayPath(row.path, cwd)} → ${shortenDisplayPath(row.targetPath, cwd)}`;
   }
-  return row.path;
+  return shortenDisplayPath(row.path, cwd);
 }
 
 function takeSuffixToWidth(text: string, maxWidth: number): string {
@@ -152,6 +153,7 @@ function renderOperationRow(
   theme: SummaryTheme,
   width: number,
   rowsOnly: boolean,
+  cwd?: string,
 ): string[] {
   const actionLabel = formatAction(row).padEnd(6, ' ');
   const actionPrefix = rowsOnly
@@ -166,13 +168,13 @@ function renderOperationRow(
     1,
     width - visibleWidth(actionPrefix) - visibleWidth(renderedSuffix) - 2,
   );
-  const path = theme.fg('accent', truncateMiddleToWidth(formatPath(row), availablePathWidth));
+  const path = theme.fg('accent', truncateMiddleToWidth(formatPath(row, cwd), availablePathWidth));
   const combined = `${actionPrefix}${path}  ${renderedSuffix}`;
   if (width <= 0 || visibleWidth(combined) <= width) {
     return [combined];
   }
   return [
-    truncateToWidth(`${actionPrefix}${theme.fg('accent', formatPath(row))}`, width, '…'),
+    truncateToWidth(`${actionPrefix}${theme.fg('accent', formatPath(row, cwd))}`, width, '…'),
     truncateToWidth(renderedSuffix, width, '…'),
   ];
 }
@@ -182,6 +184,7 @@ function renderRows(
   theme: SummaryTheme,
   width: number,
   includeHeader: boolean,
+  cwd?: string,
 ): string[] {
   const lines: string[] = [];
 
@@ -205,7 +208,10 @@ function renderRows(
     let availablePathWidth = maxPathWidth;
     let line = '';
     while (availablePathWidth >= minPathWidth) {
-      const path = theme.fg('accent', truncateMiddleToWidth(formatPath(row), availablePathWidth));
+      const path = theme.fg(
+        'accent',
+        truncateMiddleToWidth(formatPath(row, cwd), availablePathWidth),
+      );
       line = `${prefix}${path}  ${metric}`;
       if (width <= 0 || visibleWidth(line) <= width) {
         break;
@@ -224,22 +230,31 @@ class ApplyPatchSummaryComponent implements Component {
     private rows: PatchPreviewRow[],
     private theme: SummaryTheme,
     private includeHeader: boolean,
+    private cwd: string | undefined,
   ) {}
 
   render(width: number): string[] {
     if (this.rows.length === 1) {
-      return renderOperationRow(this.rows[0]!, this.theme, width, !this.includeHeader);
+      return renderOperationRow(this.rows[0]!, this.theme, width, !this.includeHeader, this.cwd);
     }
-    return renderRows(this.rows, this.theme, width, this.includeHeader);
+    return renderRows(this.rows, this.theme, width, this.includeHeader, this.cwd);
   }
 
   invalidate(): void {}
 }
 
-export function renderApplyPatchSummary(rows: PatchPreviewRow[], theme: SummaryTheme): Component {
-  return new ApplyPatchSummaryComponent(rows, theme, true);
+export function renderApplyPatchSummary(
+  rows: PatchPreviewRow[],
+  theme: SummaryTheme,
+  cwd?: string,
+): Component {
+  return new ApplyPatchSummaryComponent(rows, theme, true, cwd);
 }
 
-export function renderApplyPatchRows(rows: PatchPreviewRow[], theme: SummaryTheme): Component {
-  return new ApplyPatchSummaryComponent(rows, theme, false);
+export function renderApplyPatchRows(
+  rows: PatchPreviewRow[],
+  theme: SummaryTheme,
+  cwd?: string,
+): Component {
+  return new ApplyPatchSummaryComponent(rows, theme, false, cwd);
 }

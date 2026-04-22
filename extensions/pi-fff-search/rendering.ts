@@ -1,5 +1,8 @@
 import type { PublicToolName, PublicToolRequest } from 'fff-router';
 import { clampMatchText } from './match-heuristics';
+import { shortenDisplayPath } from '../shared/paths';
+
+export { shortenDisplayPath };
 
 type RenderDetails = {
   toolName: PublicToolName;
@@ -105,39 +108,6 @@ function relativeCandidate(pathValue: string, anchor?: string): string | null {
   }
 
   return normalizedPath.slice(normalizedAnchor.length + 1);
-}
-
-function homeRelativeCandidate(pathValue: string): string | null {
-  const home = process.env.HOME ?? process.env.USERPROFILE;
-  if (!home) {
-    return null;
-  }
-
-  const normalizedPath = normalizeSlashes(pathValue).replace(/\/$/, '');
-  const normalizedHome = normalizeSlashes(home).replace(/\/$/, '');
-  if (normalizedPath === normalizedHome) {
-    return '~';
-  }
-
-  if (!normalizedPath.startsWith(`${normalizedHome}/`)) {
-    return null;
-  }
-
-  return `~/${normalizedPath.slice(normalizedHome.length + 1)}`;
-}
-
-export function shortenDisplayPath(pathValue: string, cwd?: string): string {
-  const candidates = [
-    relativeCandidate(pathValue, cwd),
-    homeRelativeCandidate(pathValue),
-    pathValue,
-  ]
-    .filter((value): value is string => typeof value === 'string' && value.length > 0)
-    .filter((value) => value !== '.');
-
-  return candidates.sort(
-    (left, right) => left.length - right.length || left.localeCompare(right),
-  )[0]!;
 }
 
 function firstString(value: unknown): string | null {

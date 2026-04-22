@@ -462,7 +462,7 @@ async function executePatch(
         };
       }
       if (error instanceof PatchPlanFailedError) {
-        const text = renderPlanFailure(error.statuses, (p) => shortenDisplayPath(p));
+        const text = renderPlanFailure(error.statuses, (p) => shortenDisplayPath(p, cwd));
         return {
           isError: true,
           content: [{ type: 'text' as const, text }],
@@ -772,7 +772,7 @@ function renderApplyPatchPreview(
 
   const container = new Container();
   container.addChild(renderApplyPatchHeader(rows.length, theme));
-  container.addChild(renderApplyPatchRows(rows, theme));
+  container.addChild(renderApplyPatchRows(rows, theme, context?.cwd));
   return container;
 }
 
@@ -988,8 +988,8 @@ export default function multiEditExtension(pi: ExtensionAPI) {
 
       return executeClassic(normalized.edits, ctx.cwd, signal);
     },
-    renderCall(args, theme) {
-      const path = shortenDisplayPath(getToolPathArg(args));
+    renderCall(args, theme, context) {
+      const path = shortenDisplayPath(getToolPathArg(args), context?.cwd);
       const lineCount = getEditLineCount(args);
       return new Text(
         `${theme.fg('toolTitle', theme.bold('edit'))} ${theme.fg('accent', path || '...')}${formatLineCountSuffix(lineCount, theme)}`,
@@ -1066,7 +1066,7 @@ export default function multiEditExtension(pi: ExtensionAPI) {
           ),
         );
         if (displayRows && displayRows.length > 0) {
-          return renderApplyPatchRows(displayRows, theme);
+          return renderApplyPatchRows(displayRows, theme, context?.cwd);
         }
         return new Text(theme.fg('warning', 'patching...'), 0, 0);
       }
@@ -1076,7 +1076,7 @@ export default function multiEditExtension(pi: ExtensionAPI) {
       if (isToolError(result, context)) {
         const failedRows = getApplyPatchFailedRows(result, context as any);
         if (failedRows && failedRows.length > 0) {
-          return renderApplyPatchRows(failedRows, theme);
+          return renderApplyPatchRows(failedRows, theme, context?.cwd);
         }
         const error = fallbackText || 'Patch failed.';
         return new Text(theme.fg('error', error), 0, 0);
@@ -1085,7 +1085,7 @@ export default function multiEditExtension(pi: ExtensionAPI) {
       cacheApplyPatchRows(context as any, rows);
 
       if (!options.expanded && rows && rows.length > 0) {
-        return renderApplyPatchRows(rows, theme);
+        return renderApplyPatchRows(rows, theme, context?.cwd);
       }
 
       if (
@@ -1094,13 +1094,13 @@ export default function multiEditExtension(pi: ExtensionAPI) {
         rows.length > 0 &&
         rows.every((row) => row.kind === 'delete')
       ) {
-        return renderApplyPatchRows(rows, theme);
+        return renderApplyPatchRows(rows, theme, context?.cwd);
       }
 
       if (options.expanded && rows && rows.some((row) => row.kind === 'delete')) {
         const deleteRows = rows.filter((row) => row.kind === 'delete');
         if (deleteRows.length === rows.length) {
-          return renderApplyPatchRows(deleteRows, theme);
+          return renderApplyPatchRows(deleteRows, theme, context?.cwd);
         }
 
         const details = materializeLazyDiffDetails(
@@ -1118,7 +1118,7 @@ export default function multiEditExtension(pi: ExtensionAPI) {
           ),
         );
         container.addChild(new Spacer(1));
-        container.addChild(renderApplyPatchRows(deleteRows, theme));
+        container.addChild(renderApplyPatchRows(deleteRows, theme, context?.cwd));
         return container;
       }
 

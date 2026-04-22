@@ -61,37 +61,9 @@ function sanitizeSgrParams(params: number[]): number[] {
   return sanitized;
 }
 
-export function shortenDisplayPath(inputPath: string | undefined): string {
-  if (!inputPath) {
-    return '';
-  }
-
-  let best = inputPath;
-  const prefixes = [
-    { value: process.env.HOME, label: '~' },
-    { value: process.env.USERPROFILE, label: '~' },
-    { value: process.env.TMPDIR, label: '$TMPDIR' },
-    { value: process.env.TEMP, label: '$TEMP' },
-    { value: process.env.TMP, label: '$TMP' },
-  ].filter(
-    (entry): entry is { value: string; label: string } =>
-      typeof entry.value === 'string' && entry.value.length > 0,
-  );
-
-  for (const prefix of prefixes) {
-    const candidate =
-      inputPath === prefix.value
-        ? prefix.label
-        : inputPath.startsWith(`${prefix.value}/`) || inputPath.startsWith(`${prefix.value}\\`)
-          ? `${prefix.label}${inputPath.slice(prefix.value.length)}`
-          : null;
-    if (candidate && candidate.length < best.length) {
-      best = candidate;
-    }
-  }
-
-  return best;
-}
+// Re-export the shared path-shortening util so edit/apply_patch/grep/find
+// all render paths identically. Source of truth: extensions/shared/paths.ts.
+export { shortenDisplayPath } from '../shared/paths';
 
 export function extractTextOutput(result: ToolResultLike): string {
   const rawBlocks = Array.isArray(result.content) ? result.content : [];
