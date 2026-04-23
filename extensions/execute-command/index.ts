@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
-import { Type } from '@sinclair/typebox';
+import { Type } from 'typebox';
 
 export default function (pi: ExtensionAPI) {
   // Queue of commands to execute after agent turn ends
@@ -9,23 +9,18 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: 'execute_command',
     label: 'Execute Command',
-    description: `Execute /answer or queue plain-text follow-up input as if the user typed it. Use this to:
-- Self-invoke /answer after asking multiple questions
-- Queue a follow-up prompt for yourself
-- Prefill text for the user to send manually
-
-Slash commands other than /answer are not safely supported here and should be run manually.`,
-    promptSnippet:
-      'Execute /answer or queue plain-text follow-up input. ' +
-      'Do not use this tool for /reload or other slash commands.',
+    description: `Queue a follow-up for yourself after the current turn. Supports:
+- /answer to self-invoke the answer flow after asking questions
+- Plain text to prefill the editor for the user to review and send`,
+    promptSnippet: 'Queue /answer or plain-text follow-up input for after this turn',
 
     parameters: Type.Object({
       command: Type.String({
-        description: "The command or message to execute (e.g., '/answer', '/reload', or any text)",
+        description: "The command or message to queue (e.g., '/answer' or any plain text)",
       }),
       reason: Type.Optional(
         Type.String({
-          description: "Optional explanation for why you're executing this command (shown to user)",
+          description: "Optional explanation for why you're queueing this (shown to user)",
         }),
       ),
     }),
@@ -34,13 +29,13 @@ Slash commands other than /answer are not safely supported here and should be ru
       const { command, reason } = params;
 
       if (command.startsWith('/') && command !== '/answer') {
-        const explanation =
-          command === '/reload' || command === '/reload-runtime'
-            ? 'Cannot safely execute /reload or /reload-runtime via execute_command in this runtime. Run /reload manually, or type /reload-runtime manually if you want the custom alias.'
-            : `Cannot safely execute ${command} via execute_command in this runtime. Run that slash command manually instead.`;
-
         return {
-          content: [{ type: 'text', text: explanation }],
+          content: [
+            {
+              type: 'text',
+              text: `Only /answer is supported. To run ${command}, have the user type it manually.`,
+            },
+          ],
           details: {
             command,
             reason,
@@ -64,6 +59,13 @@ Slash commands other than /answer are not safely supported here and should be ru
           reason,
           queued: true,
         },
+        // 0.69.0+: end the current tool batch without paying for an automatic
+        // follow-up LLM turn. The queued command runs from `agent_end` below,
+        // so any assistant reply would be wasted. This only takes effect when
+        // every finalized result in the batch is terminating, so if the model
+        // calls execute_command alongside other tools we still get a normal
+        // follow-up turn.
+        terminate: true,
       };
     },
   });

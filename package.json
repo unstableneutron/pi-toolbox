@@ -1,6 +1,6 @@
 {
   "name": "pi-toolbox",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "private": true,
   "description": "My own pi-toolbox of extensions, skills, prompts, and subagent templates.",
   "license": "MIT",
@@ -17,17 +17,17 @@
   },
   "devDependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1027.0",
-    "@mariozechner/pi-agent-core": "0.68.1",
-    "@mariozechner/pi-ai": "0.68.1",
-    "@mariozechner/pi-coding-agent": "0.68.1",
-    "@mariozechner/pi-tui": "0.68.1",
-    "@sinclair/typebox": "^0.34.48",
+    "@mariozechner/pi-agent-core": "0.69.0",
+    "@mariozechner/pi-ai": "0.69.0",
+    "@mariozechner/pi-coding-agent": "0.69.0",
+    "@mariozechner/pi-tui": "0.69.0",
     "@types/node": "^24.3.0",
     "knip": "^6.3.1",
     "oxfmt": "^0.44.0",
     "oxlint": "^1.59.0",
     "oxlint-tsgolint": "^0.20.0",
     "tsx": "^4.21.0",
+    "typebox": "^1.1.24",
     "typescript": "^5.7.3",
     "vitest": "^3.2.4"
   },
@@ -35,7 +35,7 @@
     "@mariozechner/pi-ai": "*",
     "@mariozechner/pi-coding-agent": "*",
     "@mariozechner/pi-tui": "*",
-    "@sinclair/typebox": "*"
+    "typebox": "*"
   },
   "prettier": {
     "singleQuote": true

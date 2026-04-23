@@ -1,7 +1,7 @@
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { Text, type Component } from '@mariozechner/pi-tui';
-import { Type, type TSchema } from '@sinclair/typebox';
+import { Type, type TSchema } from 'typebox';
 import {
   createBashToolDefinition,
   createFindToolDefinition,
