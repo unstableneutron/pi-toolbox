@@ -574,10 +574,66 @@ function bindRuntimeState(_event: unknown, ctx: ExtensionContext): void {
   registerAllWrappedApis();
 }
 
+/**
+ * Human-friendly summary of provider response headers that matter when a
+ * request fails. Returns undefined when the headers are empty or irrelevant
+ * to back-pressure decisions.
+ */
+function summarizeProviderResponseHeaders(headers: Record<string, string>): string | undefined {
+  const picked: string[] = [];
+  const consider = (key: string): void => {
+    const value = headers[key] ?? headers[key.toLowerCase()];
+    if (value !== undefined && value !== '') picked.push(`${key}=${value}`);
+  };
+
+  // Rate-limit + retry signals that most providers expose in some form.
+  consider('retry-after');
+  consider('x-ratelimit-remaining');
+  consider('x-ratelimit-remaining-requests');
+  consider('x-ratelimit-remaining-tokens');
+  consider('x-ratelimit-reset');
+  consider('x-ratelimit-reset-requests');
+  consider('x-ratelimit-reset-tokens');
+  // Provider-level identification is useful when diagnosing proxy routing.
+  consider('server');
+  consider('x-served-by');
+
+  return picked.length > 0 ? picked.join(' ') : undefined;
+}
+
+function shouldDiagnoseResponseStatus(status: number): boolean {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+/**
+ * Minimal observer for provider responses. Logs back-pressure signals to
+ * stderr when a request fails in a way the auto-retry logic reacts to.
+ * Visible in `/log` and any process capturing stderr, and silent on the
+ * happy path so it does not clutter normal sessions.
+ *
+ * Opt-out via `PI_PROXIED_PROVIDERS_DIAGNOSTICS=0`.
+ */
+function reportProviderResponse(event: { status: number; headers: Record<string, string> }): void {
+  if (process.env.PI_PROXIED_PROVIDERS_DIAGNOSTICS === '0') return;
+  if (!shouldDiagnoseResponseStatus(event.status)) return;
+
+  const summary = summarizeProviderResponseHeaders(event.headers);
+  if (summary) {
+    console.warn(`[proxied-providers] provider response ${event.status} — ${summary}`);
+  } else {
+    console.warn(`[proxied-providers] provider response ${event.status}`);
+  }
+}
+
 export default function (pi: ExtensionAPI) {
   registerAllWrappedApis();
 
   pi.on('session_start', bindRuntimeState);
   pi.on('before_agent_start', bindRuntimeState);
   pi.on('model_select', bindRuntimeState);
+  pi.on('after_provider_response', (event) => {
+    reportProviderResponse(event);
+  });
 }
+
+export { reportProviderResponse, summarizeProviderResponseHeaders };

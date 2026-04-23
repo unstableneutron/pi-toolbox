@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 import type { AutocompleteProvider } from '@mariozechner/pi-tui';
 
 import skillShortcut, {
-  createSkillShortcutBehavior,
+  createSkillAutocompleteProvider,
   extractDollarPrefix,
   transformSkillShortcutInput,
 } from './index';
@@ -18,17 +18,9 @@ function createAutocompleteOptions() {
   return { signal: new AbortController().signal };
 }
 
-function requireWrappedProvider(
-  behavior: ReturnType<typeof createSkillShortcutBehavior>,
-  fallbackProvider: AutocompleteProvider,
-): AutocompleteProvider {
-  const provider = behavior.wrapAutocompleteProvider?.(fallbackProvider);
-  expect(provider).toBeDefined();
-  return provider as AutocompleteProvider;
-}
-
 function createExtensionHarness() {
   const handlers = new Map<string, (event: any, ctx: any) => Promise<void> | void>();
+  const addAutocompleteProvider = vi.fn();
   const setEditorComponent = vi.fn();
 
   const pi = {
@@ -48,6 +40,7 @@ function createExtensionHarness() {
 
   const ctx = {
     ui: {
+      addAutocompleteProvider,
       setEditorComponent,
     },
   };
@@ -56,6 +49,7 @@ function createExtensionHarness() {
     pi,
     ctx,
     handlers,
+    addAutocompleteProvider,
     setEditorComponent,
   };
 }
@@ -83,99 +77,26 @@ describe('skill-shortcut helpers', () => {
   });
 });
 
-describe('afterHandleInput', () => {
-  test('requests autocomplete when cursor is inside a $ token', () => {
-    const tryTriggerAutocomplete = vi.fn();
-    const behavior = createSkillShortcutBehavior(() => [
-      { name: 'agent-browser', description: 'Open browser tooling' },
-    ]);
+describe('createSkillAutocompleteProvider', () => {
+  function createDelegatingProvider(
+    suggestions: Awaited<ReturnType<AutocompleteProvider['getSuggestions']>> = null,
+  ): AutocompleteProvider & {
+    getSuggestions: ReturnType<typeof vi.fn>;
+    applyCompletion: ReturnType<typeof vi.fn>;
+  } {
+    return {
+      getSuggestions: vi.fn(async () => suggestions),
+      applyCompletion: vi.fn((lines: string[]) => ({ lines, cursorLine: 0, cursorCol: 0 })),
+    };
+  }
 
-    behavior.afterHandleInput?.(
-      't',
-      {
-        state: { lines: ['$aut'], cursorLine: 0, cursorCol: 4 },
-        isShowingAutocomplete: () => false,
-        tryTriggerAutocomplete,
-      },
-      { wasShowingAutocomplete: false },
-    );
-
-    expect(tryTriggerAutocomplete).toHaveBeenCalled();
-  });
-
-  test('does not trigger when autocomplete was already showing', () => {
-    const tryTriggerAutocomplete = vi.fn();
-    const behavior = createSkillShortcutBehavior(() => [
-      { name: 'agent-browser', description: 'Open browser tooling' },
-    ]);
-
-    behavior.afterHandleInput?.(
-      't',
-      {
-        state: { lines: ['$aut'], cursorLine: 0, cursorCol: 4 },
-        isShowingAutocomplete: () => true,
-        tryTriggerAutocomplete,
-      },
-      { wasShowingAutocomplete: true },
-    );
-
-    expect(tryTriggerAutocomplete).not.toHaveBeenCalled();
-  });
-
-  test('ignores non-printable input like escape', () => {
-    const tryTriggerAutocomplete = vi.fn();
-    const behavior = createSkillShortcutBehavior(() => [
-      { name: 'agent-browser', description: 'Open browser tooling' },
-    ]);
-
-    behavior.afterHandleInput?.(
-      '\x1b',
-      {
-        state: { lines: ['$aut'], cursorLine: 0, cursorCol: 4 },
-        isShowingAutocomplete: () => false,
-        tryTriggerAutocomplete,
-      },
-      { wasShowingAutocomplete: false },
-    );
-
-    expect(tryTriggerAutocomplete).not.toHaveBeenCalled();
-  });
-
-  test.each(['$Foo', '$name.'])('ignores invalid potential skill tokens like %s', (token) => {
-    const tryTriggerAutocomplete = vi.fn();
-    const behavior = createSkillShortcutBehavior(() => [
-      { name: 'agent-browser', description: 'Open browser tooling' },
-    ]);
-
-    behavior.afterHandleInput?.(
-      't',
-      {
-        state: { lines: [`Use ${token}`], cursorLine: 0, cursorCol: `Use ${token}`.length },
-        isShowingAutocomplete: () => false,
-        tryTriggerAutocomplete,
-      },
-      { wasShowingAutocomplete: false },
-    );
-
-    expect(tryTriggerAutocomplete).not.toHaveBeenCalled();
-  });
-});
-
-describe('autocomplete wrapper', () => {
-  test('returns skill suggestions for $ prefixes before delegating', async () => {
-    const behavior = createSkillShortcutBehavior(() => [
+  test('returns skill suggestions for $ prefixes instead of delegating', async () => {
+    const current = createDelegatingProvider();
+    const provider = createSkillAutocompleteProvider(current, () => [
       { name: 'agent-browser', description: 'Open browser tooling' },
       { name: 'systematic-debugging', description: 'Debug rigorously' },
     ]);
 
-    const fallbackProvider = {
-      getSuggestions: vi.fn(async () => null),
-      applyCompletion(lines: string[]) {
-        return { lines, cursorLine: 0, cursorCol: 0 };
-      },
-    };
-
-    const provider = requireWrappedProvider(behavior, fallbackProvider);
     const result = await provider.getSuggestions(
       ['Use $agent'],
       0,
@@ -185,20 +106,14 @@ describe('autocomplete wrapper', () => {
 
     expect(result?.prefix).toBe('$agent');
     expect(result?.items.map((item) => item.value)).toContain('agent-browser');
-    expect(fallbackProvider.getSuggestions).not.toHaveBeenCalled();
+    expect(current.getSuggestions).not.toHaveBeenCalled();
   });
 
   test('delegates getSuggestions for non-$ prefixes', async () => {
     const delegated = { items: [{ value: 'fallback', label: 'fallback' }], prefix: 'agent' };
-    const behavior = createSkillShortcutBehavior(() => [{ name: 'agent-browser' }]);
-    const fallbackProvider = {
-      getSuggestions: vi.fn(async () => delegated),
-      applyCompletion(lines: string[]) {
-        return { lines, cursorLine: 0, cursorCol: 0 };
-      },
-    };
+    const current = createDelegatingProvider(delegated);
+    const provider = createSkillAutocompleteProvider(current, () => [{ name: 'agent-browser' }]);
 
-    const provider = requireWrappedProvider(behavior, fallbackProvider);
     const result = await provider.getSuggestions(
       ['Use agent'],
       0,
@@ -207,23 +122,38 @@ describe('autocomplete wrapper', () => {
     );
 
     expect(result).toBe(delegated);
-    expect(fallbackProvider.getSuggestions).toHaveBeenCalledTimes(1);
+    expect(current.getSuggestions).toHaveBeenCalledTimes(1);
+  });
+
+  test('delegates when $ token has no fuzzy matches so the built-in provider can try', async () => {
+    const delegated = { items: [{ value: 'other', label: 'other' }], prefix: '$nope' };
+    const current = createDelegatingProvider(delegated);
+    const provider = createSkillAutocompleteProvider(current, () => [{ name: 'agent-browser' }]);
+
+    const result = await provider.getSuggestions(
+      ['Use $nope'],
+      0,
+      'Use $nope'.length,
+      createAutocompleteOptions(),
+    );
+
+    expect(result).toBe(delegated);
+    expect(current.getSuggestions).toHaveBeenCalledTimes(1);
   });
 
   test('delegates applyCompletion for non-$ prefixes', () => {
     const delegated = { lines: ['Use fallback'], cursorLine: 0, cursorCol: 12 };
-    const behavior = createSkillShortcutBehavior(() => [{ name: 'agent-browser' }]);
-    const fallbackProvider = {
+    const current = {
       getSuggestions: vi.fn(async () => null),
       applyCompletion: vi.fn(() => delegated),
-    };
+    } satisfies AutocompleteProvider & { applyCompletion: ReturnType<typeof vi.fn> };
+    const provider = createSkillAutocompleteProvider(current, () => [{ name: 'agent-browser' }]);
 
-    const provider = requireWrappedProvider(behavior, fallbackProvider);
     const item = { value: 'fallback', label: 'fallback' };
     const result = provider.applyCompletion(['Use agent'], 0, 'Use agent'.length, item, 'agent');
 
     expect(result).toBe(delegated);
-    expect(fallbackProvider.applyCompletion).toHaveBeenCalledWith(
+    expect(current.applyCompletion).toHaveBeenCalledWith(
       ['Use agent'],
       0,
       'Use agent'.length,
@@ -233,15 +163,9 @@ describe('autocomplete wrapper', () => {
   });
 
   test('$ applyCompletion preserves text after the cursor', () => {
-    const behavior = createSkillShortcutBehavior(() => [{ name: 'agent-browser' }]);
-    const fallbackProvider = {
-      getSuggestions: vi.fn(async () => null),
-      applyCompletion(lines: string[]) {
-        return { lines, cursorLine: 0, cursorCol: 0 };
-      },
-    };
+    const current = createDelegatingProvider();
+    const provider = createSkillAutocompleteProvider(current, () => [{ name: 'agent-browser' }]);
 
-    const provider = requireWrappedProvider(behavior, fallbackProvider);
     const result = provider.applyCompletion(
       ['Use $ag now'],
       0,
@@ -258,15 +182,9 @@ describe('autocomplete wrapper', () => {
     'invalid tokens like %s do not trigger suggestions',
     async (token) => {
       const delegated = { items: [{ value: 'fallback', label: 'fallback' }], prefix: token };
-      const behavior = createSkillShortcutBehavior(() => [{ name: 'agent-browser' }]);
-      const fallbackProvider = {
-        getSuggestions: vi.fn(async () => delegated),
-        applyCompletion(lines: string[]) {
-          return { lines, cursorLine: 0, cursorCol: 0 };
-        },
-      };
+      const current = createDelegatingProvider(delegated);
+      const provider = createSkillAutocompleteProvider(current, () => [{ name: 'agent-browser' }]);
 
-      const provider = requireWrappedProvider(behavior, fallbackProvider);
       const result = await provider.getSuggestions(
         [`Use ${token}`],
         0,
@@ -275,24 +193,23 @@ describe('autocomplete wrapper', () => {
       );
 
       expect(result).toBe(delegated);
-      expect(fallbackProvider.getSuggestions).toHaveBeenCalledTimes(1);
+      expect(current.getSuggestions).toHaveBeenCalledTimes(1);
     },
   );
 
   test('delegates applyCompletion for invalid $ prefixes', () => {
     const delegated = { lines: ['Use delegated'], cursorLine: 0, cursorCol: 13 };
-    const behavior = createSkillShortcutBehavior(() => [{ name: 'agent-browser' }]);
-    const fallbackProvider = {
+    const current = {
       getSuggestions: vi.fn(async () => null),
       applyCompletion: vi.fn(() => delegated),
-    };
+    } satisfies AutocompleteProvider & { applyCompletion: ReturnType<typeof vi.fn> };
+    const provider = createSkillAutocompleteProvider(current, () => [{ name: 'agent-browser' }]);
 
-    const provider = requireWrappedProvider(behavior, fallbackProvider);
     const item = { value: 'fallback', label: 'fallback' };
     const result = provider.applyCompletion(['Use $Foo'], 0, 'Use $Foo'.length, item, '$Foo');
 
     expect(result).toBe(delegated);
-    expect(fallbackProvider.applyCompletion).toHaveBeenCalledWith(
+    expect(current.applyCompletion).toHaveBeenCalledWith(
       ['Use $Foo'],
       0,
       'Use $Foo'.length,
@@ -300,30 +217,54 @@ describe('autocomplete wrapper', () => {
       '$Foo',
     );
   });
+
+  test('shouldTriggerFileCompletion delegates to current provider', () => {
+    const shouldTrigger = vi.fn(() => false);
+    const current: AutocompleteProvider = {
+      async getSuggestions() {
+        return null;
+      },
+      applyCompletion(lines) {
+        return { lines, cursorLine: 0, cursorCol: 0 };
+      },
+      shouldTriggerFileCompletion: shouldTrigger,
+    };
+    const provider = createSkillAutocompleteProvider(current, () => []);
+
+    expect(provider.shouldTriggerFileCompletion?.([''], 0, 0)).toBe(false);
+    expect(shouldTrigger).toHaveBeenCalledWith([''], 0, 0);
+  });
 });
 
 describe('extension registration', () => {
-  test('skillShortcut registers one skill-shortcut behavior', () => {
+  test('session_start installs exactly one autocomplete provider', async () => {
     const harness = createExtensionHarness();
 
     skillShortcut(harness.pi as any);
+    await harness.handlers.get('session_start')?.({ type: 'session_start' }, harness.ctx);
 
-    expect(getEditorBehaviors()).toHaveLength(1);
-    expect(getEditorBehaviors()[0]?.id).toBe('skill-shortcut');
+    expect(harness.addAutocompleteProvider).toHaveBeenCalledTimes(1);
   });
 
-  test('calling skillShortcut twice does not create duplicates in the shared registry', () => {
-    const firstHarness = createExtensionHarness();
-    const secondHarness = createExtensionHarness();
+  test('session_start does not install a custom editor component', async () => {
+    const harness = createExtensionHarness();
 
-    skillShortcut(firstHarness.pi as any);
-    skillShortcut(secondHarness.pi as any);
+    skillShortcut(harness.pi as any);
+    await harness.handlers.get('session_start')?.({ type: 'session_start' }, harness.ctx);
 
-    expect(getEditorBehaviors()).toHaveLength(1);
-    expect(getEditorBehaviors()[0]?.id).toBe('skill-shortcut');
+    expect(harness.setEditorComponent).not.toHaveBeenCalled();
   });
 
-  test('safe-escape and skill-shortcut register compatible behaviors', () => {
+  test('skill-shortcut no longer registers anything in the editor-behavior bridge', async () => {
+    const harness = createExtensionHarness();
+
+    skillShortcut(harness.pi as any);
+    await harness.handlers.get('session_start')?.({ type: 'session_start' }, harness.ctx);
+
+    expect(getEditorBehaviors()).toEqual([]);
+  });
+
+  test('safe-escape remains the only editor-behavior registrar after both load', async () => {
     clearEditorBehaviors();
 
     const handlers = new Map<string, (event: any, ctx: any) => Promise<void> | void>();
@@ -346,89 +287,44 @@ describe('extension registration', () => {
     safeEscape(pi as any);
     skillShortcut(pi as any);
 
-    expect(getEditorBehaviors().map((behavior) => behavior.id)).toEqual([
-      'safe-escape',
-      'skill-shortcut',
-    ]);
+    expect(getEditorBehaviors().map((behavior) => behavior.id)).toEqual(['safe-escape']);
   });
 
-  test('safe-escape and skill-shortcut do not compete for editor ownership', async () => {
-    clearEditorBehaviors();
-
-    const originalStdinIsTTY = process.stdin.isTTY;
-    const originalStdoutIsTTY = process.stdout.isTTY;
-    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
-    Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true });
-
-    const handlers = new Map<string, (event: any, ctx: any) => Promise<void> | void>();
-    const setEditorComponent = vi.fn();
-
-    try {
-      const pi = {
-        on(event: string, handler: (event: any, ctx: any) => Promise<void> | void) {
-          handlers.set(`${event}:${handlers.size}`, handler);
-        },
-        registerCommand: vi.fn(),
-        getCommands() {
-          return [
-            {
-              source: 'skill',
-              name: 'skill:agent-browser',
-              description: 'Open browser tooling',
-            },
-          ];
-        },
-      };
-
-      safeEscape(pi as any);
-      skillShortcut(pi as any);
-
-      const ctx = {
-        hasUI: true,
-        isIdle: () => false,
-        hasPendingMessages: () => false,
-        abort: vi.fn(),
-        ui: {
-          setWidget: vi.fn(),
-          setStatus: vi.fn(),
-          notify: vi.fn(),
-          setEditorComponent,
-        },
-      };
-
-      for (const [key, handler] of handlers) {
-        if (key.startsWith('session_start')) {
-          await handler({ type: 'session_start' }, ctx as any);
-        }
-      }
-    } finally {
-      Object.defineProperty(process.stdin, 'isTTY', {
-        value: originalStdinIsTTY,
-        configurable: true,
-      });
-      Object.defineProperty(process.stdout, 'isTTY', {
-        value: originalStdoutIsTTY,
-        configurable: true,
-      });
-    }
-
-    expect(setEditorComponent).not.toHaveBeenCalled();
-  });
-
-  test('session_start no longer installs a custom editor component', async () => {
+  test('wired provider returns skill suggestions when session_start runs', async () => {
     const harness = createExtensionHarness();
-
     skillShortcut(harness.pi as any);
     await harness.handlers.get('session_start')?.({ type: 'session_start' }, harness.ctx);
 
-    expect(harness.setEditorComponent).not.toHaveBeenCalled();
+    const builder = harness.addAutocompleteProvider.mock.calls[0]?.[0] as (
+      current: AutocompleteProvider,
+    ) => AutocompleteProvider;
+    expect(builder).toBeTypeOf('function');
+
+    const current: AutocompleteProvider = {
+      async getSuggestions() {
+        return null;
+      },
+      applyCompletion(lines) {
+        return { lines, cursorLine: 0, cursorCol: 0 };
+      },
+    };
+    const provider = builder(current);
+
+    const result = await provider.getSuggestions(
+      ['$agent'],
+      0,
+      '$agent'.length,
+      createAutocompleteOptions(),
+    );
+
+    expect(result?.items.map((item) => item.value)).toEqual(['agent-browser']);
   });
 
   test('input handler transforms only loaded skill shortcuts', async () => {
     const harness = createExtensionHarness();
 
     skillShortcut(harness.pi as any);
-    await harness.handlers.get('session_start')?.({}, harness.ctx as any);
+    await harness.handlers.get('session_start')?.({ type: 'session_start' }, harness.ctx);
 
     const inputHandler = harness.handlers.get('input');
 

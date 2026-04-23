@@ -4,9 +4,11 @@ import { createAssistantMessageEventStream, type StreamFunction } from '@marioze
 
 import {
   buildDelegatingStream,
+  reportProviderResponse,
   resolveConfiguredTargetModel,
   resolveProxyRoute,
   resolveTargetProviderModel,
+  summarizeProviderResponseHeaders,
 } from './index';
 
 function createDoneStream(model: any) {
@@ -847,5 +849,72 @@ describe('extension registration', () => {
         },
       },
     ]);
+  });
+});
+
+describe('provider response diagnostics', () => {
+  beforeEach(() => {
+    delete process.env.PI_PROXIED_PROVIDERS_DIAGNOSTICS;
+  });
+
+  test('summarizes rate-limit and retry headers', () => {
+    const summary = summarizeProviderResponseHeaders({
+      'retry-after': '12',
+      'x-ratelimit-remaining-requests': '0',
+      'x-ratelimit-reset-requests': '1700000000',
+      server: 'cloudflare',
+    });
+    expect(summary).toBe(
+      'retry-after=12 x-ratelimit-remaining-requests=0 x-ratelimit-reset-requests=1700000000 server=cloudflare',
+    );
+  });
+
+  test('returns undefined when no interesting headers are present', () => {
+    expect(
+      summarizeProviderResponseHeaders({ 'content-type': 'application/json' }),
+    ).toBeUndefined();
+  });
+
+  test('warns on 429 responses with retry-after', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      reportProviderResponse({ status: 429, headers: { 'retry-after': '3' } });
+      expect(warn).toHaveBeenCalledWith(
+        '[proxied-providers] provider response 429 — retry-after=3',
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test('warns on 5xx responses without headers using a short form', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      reportProviderResponse({ status: 503, headers: {} });
+      expect(warn).toHaveBeenCalledWith('[proxied-providers] provider response 503');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test('stays silent for successful responses', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      reportProviderResponse({ status: 200, headers: { 'retry-after': '10' } });
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test('honors PI_PROXIED_PROVIDERS_DIAGNOSTICS=0 to opt out', () => {
+    process.env.PI_PROXIED_PROVIDERS_DIAGNOSTICS = '0';
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      reportProviderResponse({ status: 500, headers: { 'retry-after': '1' } });
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
