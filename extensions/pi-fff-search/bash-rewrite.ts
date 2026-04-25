@@ -1107,11 +1107,12 @@ function classifyNoticeOnly(tokens: Token[]): { notice: string } | null {
 
 // --- Multi-stage recognizers ------------------------------------------------
 
-/** Return N if the stage is exactly `head -N` / `head -n N` / `head --lines=N`. */
+/** Return N if the stage is exactly `head` / `head -N` / `head -n N` / `head --lines=N`. */
 function extractHeadLimit(tokens: Token[]): number | null {
   const strs = asStrings(tokens);
   if (!strs || strs[0] !== 'head') return null;
   const rest = strs.slice(1);
+  if (rest.length === 0) return 10;
   if (rest.length === 1) {
     const m = /^-(\d+)$/.exec(rest[0]!);
     if (m) return Number(m[1]);

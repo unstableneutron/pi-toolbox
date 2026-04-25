@@ -509,6 +509,19 @@ describe('tryRewriteBash — pipelines', () => {
     });
   });
 
+  test('cd X && /usr/bin/grep | head → fff_grep with default limit 10', () => {
+    const r = rewrite('cd /repo && /usr/bin/grep -n "Doctor {" crates/portl-cli/src/lib.rs | head');
+    expect(r?.decision).toMatchObject({
+      tool: 'fff_grep',
+      params: { patterns: ['Doctor {'], within: 'crates/portl-cli/src', glob: 'lib.rs', limit: 10 },
+      recognizer: 'grep-search+head',
+    });
+  });
+
+  test('grep | head --bytes=N → pass through', () => {
+    expect(rewrite('grep -rn "foo" src/ | head --bytes=20')).toBeNull();
+  });
+
   test('cat | head -N → read with limit', () => {
     const r = rewrite('cat /tmp/a.ts | head -80');
     expect(r?.decision).toMatchObject({
