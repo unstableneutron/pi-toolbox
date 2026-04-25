@@ -9,7 +9,7 @@ Two corpora drive `bash-rewrite-corpus.test.ts`:
 
 Both files are JSON Lines, one `{"command": "..."}` per line, deduplicated,
 filtered (no multi-line, ≤ 2048 bytes), and sanitized through the pipeline in
-`../scripts/extract-bash-corpus.py`.
+`../scripts/extract-bash-corpus.ts` (Bun-powered TypeScript).
 
 ## `bash-corpus.jsonl` (public, committed)
 
@@ -34,12 +34,12 @@ defense-in-depth.
 
 ```shell
 cd extensions/pi-fff-search
-python3 scripts/extract-bash-corpus.py --from pi-mono \
+./scripts/extract-bash-corpus.ts --from pi-mono \
     --out test-fixtures/bash-corpus.jsonl
 ```
 
 Downloads the pi-mono parquet shard (~215 MB) to `/tmp/pi-mono-cache/` if
-absent; subsequent runs hit the cache. Requires `duckdb` on PATH.
+absent; subsequent runs hit the cache. Requires `bun` and `duckdb` on PATH.
 
 ## `bash-corpus.local.jsonl` (private, gitignored)
 
@@ -48,14 +48,34 @@ committed — the file is listed in `.gitignore`.
 
 ```shell
 cd extensions/pi-fff-search
-python3 scripts/extract-bash-corpus.py --from local --days 7 \
+./scripts/extract-bash-corpus.ts --from local --days 7 \
     --out test-fixtures/bash-corpus.local.jsonl
 ```
+
+### Triage: finding bash shapes we could rewrite but don't yet
+
+Add `--triage` to any extraction run. The script classifies every command
+through `tryRewriteBash`, clusters the non-rewritten ones by first token
+and pipe-shape, and writes a markdown report next to the corpus. Handy
+when newer models (e.g. opus-4-7, gpt-5.5) start reaching for bash shapes
+that fall through the current recognizers.
+
+```shell
+cd extensions/pi-fff-search
+./scripts/extract-bash-corpus.ts --from local --days 3 \
+    --out test-fixtures/bash-corpus.local.jsonl --triage
+# → writes test-fixtures/bash-corpus.local.jsonl.triage.md
+```
+
+The report lists rewrite hit rate, breakdown by target tool and
+recognizer, and the top pass-through clusters with representative
+examples — the raw material for adding new recognizers to
+`../bash-rewrite.ts`.
 
 ### What the sanitizer redacts (both corpora)
 
 The extraction script applies these sanitizers in order (see
-`../scripts/extract-bash-corpus.py` for the authoritative list):
+`../scripts/extract-bash-corpus.ts` for the authoritative list):
 
 1. API tokens (GitHub, OpenAI/Anthropic, Slack, AWS, Bearer headers, JWTs).
 2. Email addresses (including backslash-escaped shell-regex forms).
@@ -78,5 +98,6 @@ grep -E '<your-username>|<your-email>|<internal-repo-name>' \
     test-fixtures/bash-corpus.local.jsonl
 ```
 
-Add additional redaction patterns to the `SANITIZERS` / `INTERNAL_NAMES` lists
-in the script, rerun, re-audit, commit only when clean.
+Add additional redaction patterns to the `SECRET_PATTERNS` /
+`PII_PATTERNS` / `PATH_PATTERNS` / `INTERNAL_NAMES` / `INTERNAL_PATTERNS`
+lists in the script, rerun, re-audit, commit only when clean.

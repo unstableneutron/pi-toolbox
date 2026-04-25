@@ -1,5 +1,10 @@
 {
   "$schema": "https://raw.githubusercontent.com/oxc-project/oxc/refs/heads/main/npm/oxfmt/configuration_schema.json",
   "singleQuote": true,
-  "ignorePatterns": ["**/node_modules/**", "**/dist/**"]
+  "ignorePatterns": [
+    "**/node_modules/**",
+    "**/dist/**",
+    "test-fixtures/*.local.jsonl",
+    "test-fixtures/*.triage.md"
+  ]
 }
