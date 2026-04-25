@@ -16,6 +16,7 @@ import { buildConversationSnapshot } from '../smart-sessions/conversation';
 import { readRollingSummarySidecar } from '../smart-sessions/sidecar';
 
 type TextPart = { type: 'text'; text: string };
+type AssistantLike = { role?: string; stopReason?: string };
 type AskUserArgs = { question?: unknown };
 type SessionManagerLike = {
   getSessionId?: () => string;
@@ -96,6 +97,18 @@ const extractLastAssistantText = (
   }
 
   return null;
+};
+
+const findLastAssistantMessage = (
+  messages: Array<{ role?: string }>,
+): AssistantLike | undefined => {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message?.role === 'assistant') {
+      return message as AssistantLike;
+    }
+  }
+  return undefined;
 };
 
 const extractAskUserQuestion = (args: unknown): string | null => {
@@ -384,6 +397,17 @@ export default function (pi: ExtensionAPI) {
   pi.on('agent_end', async (event, ctx) => {
     if (!isUIContext(ctx)) return;
     if (lastTurnStart === undefined) {
+      return;
+    }
+
+    // Skip scheduling when the agent loop terminated on an error or was
+    // aborted. For retryable errors the core auto-retry (or pi-retry) will
+    // start a fresh agent_start/agent_end cycle whose successful agent_end
+    // schedules the real notification. For aborted turns the user is already
+    // interacting. For non-retryable terminal errors the TUI surfaces the
+    // failure inline, so a spurious "Ready for input" would be misleading.
+    const lastAssistant = findLastAssistantMessage(event.messages ?? []);
+    if (lastAssistant?.stopReason === 'error' || lastAssistant?.stopReason === 'aborted') {
       return;
     }
 

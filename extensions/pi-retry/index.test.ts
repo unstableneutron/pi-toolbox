@@ -3,7 +3,6 @@ import { afterEach, describe, expect, test, vi } from 'vitest';
 import {
   filterSessionContextForRetryDisplay,
   linearizeRetryRecoveryTreeForDisplay,
-  buildRetryStatus,
   classifyRetryableProviderError,
   createPiRetryExtension,
   getAbortListenerBindingCount,
@@ -121,33 +120,8 @@ describe('pi-retry extra provider classification', () => {
   });
 });
 
-describe('pi-retry status text', () => {
-  test('formats compact retry status with a reason label', () => {
-    expect(
-      buildRetryStatus({
-        type: 'auto_retry_start',
-        attempt: 1,
-        maxAttempts: 3,
-        delayMs: 2000,
-        errorMessage:
-          '404 The API deployment for this resource does not exist. If you created the deployment recently, please wait a moment and try again.',
-      }),
-    ).toBe('↻ Retry 1/3 in 2s (deployment missing)');
-  });
-
-  test('omits the reason suffix when the error has no custom label', () => {
-    expect(
-      buildRetryStatus({
-        type: 'auto_retry_start',
-        attempt: 2,
-        maxAttempts: 3,
-        delayMs: 4000,
-        errorMessage: 'overloaded_error',
-      }),
-    ).toBe('↻ Retry 2/3 in 4s');
-  });
-
-  test('uses the same exponential backoff pattern for queued recovery dispatch', () => {
+describe('pi-retry recovery backoff', () => {
+  test('uses exponential backoff for queued recovery dispatch', () => {
     expect(getRecoveryDispatchDelayMs(1)).toBe(2000);
     expect(getRecoveryDispatchDelayMs(2)).toBe(4000);
     expect(getRecoveryDispatchDelayMs(3)).toBe(8000);
@@ -404,24 +378,145 @@ describe('pi-retry patch installation', () => {
     expect(session.baseClassifierCalls).toHaveLength(2);
   });
 
-  test('patches SessionManager display paths to hide historical retry recovery nodes', async () => {
+  test('patches SessionManager getTree to hide historical retry recovery nodes', async () => {
     const fakeModule = makeFakeAgentSessionModule();
     const loader = vi.fn().mockResolvedValue(fakeModule);
 
     await installAgentSessionPatch(loader);
 
     const sessionManager = new fakeModule.SessionManager();
-    const context = sessionManager.buildSessionContext();
-    expect(context.messages).toEqual([
-      { role: 'user', content: [{ type: 'text', text: 'Do the thing' }] },
-      { role: 'assistant', content: [{ type: 'text', text: 'Recovered answer' }] },
-    ]);
+
+    // buildSessionContext is no longer patched. LLM-context filtering now
+    // happens via the `context` extension event; that path is covered in the
+    // dedicated "pi-retry context hook" describe block below.
+    const rawContext = sessionManager.buildSessionContext();
+    expect(rawContext.messages).toHaveLength(3);
 
     const tree = sessionManager.getTree();
     expect(tree).toHaveLength(1);
     expect(tree[0].children).toHaveLength(1);
     expect(tree[0].children[0].entry.id).toBe('assistant-success');
     expect(tree[0].children[0].entry.parentId).toBe('user-1');
+  });
+
+  test('filters hidden retry-recovery custom messages via the context event', async () => {
+    const fakeModule = makeFakeAgentSessionModule();
+    const loader = vi.fn().mockResolvedValue(fakeModule);
+
+    const { handlers, ctx } = await createExtensionHarness(loader);
+
+    // Branch containing two hidden recovery entries plus a trailing assistant.
+    (ctx.sessionManager as any).getBranch = () => [
+      { id: 'user-1', parentId: null, type: 'message' },
+      { id: 'assistant-error-1', parentId: 'user-1', type: 'message' },
+      {
+        id: 'recovery-1',
+        parentId: 'assistant-error-1',
+        type: 'custom_message',
+        customType: 'pi-retry-recovery',
+        display: false,
+      },
+      {
+        id: 'recovery-2',
+        parentId: 'recovery-1',
+        type: 'custom_message',
+        customType: 'pi-retry-recovery',
+        display: false,
+      },
+      { id: 'assistant-success', parentId: 'recovery-2', type: 'message' },
+    ];
+    (ctx.sessionManager as any).getLeafId = () => 'assistant-success';
+
+    const contextHandler = getHandler(handlers, 'context');
+    const messages = [
+      { role: 'user', content: [{ type: 'text', text: 'Do the thing' }] },
+      {
+        role: 'custom',
+        customType: 'pi-retry-recovery',
+        content: 'Continue.',
+        display: false,
+      },
+      {
+        role: 'custom',
+        customType: 'pi-retry-recovery',
+        content: 'Please continue.',
+        display: false,
+      },
+      {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Recovered answer' }],
+      },
+    ];
+
+    const result = await contextHandler({ type: 'context', messages }, ctx);
+
+    // Both hidden recovery messages are dropped because neither is the leaf.
+    expect(result).toEqual({
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'Do the thing' }] },
+        {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Recovered answer' }],
+        },
+      ],
+    });
+  });
+
+  test('keeps the trailing retry-recovery message when it is the current leaf', async () => {
+    const fakeModule = makeFakeAgentSessionModule();
+    const loader = vi.fn().mockResolvedValue(fakeModule);
+
+    const { handlers, ctx } = await createExtensionHarness(loader);
+
+    (ctx.sessionManager as any).getBranch = () => [
+      { id: 'user-1', parentId: null, type: 'message' },
+      { id: 'assistant-error-1', parentId: 'user-1', type: 'message' },
+      {
+        id: 'recovery-1',
+        parentId: 'assistant-error-1',
+        type: 'custom_message',
+        customType: 'pi-retry-recovery',
+        display: false,
+      },
+    ];
+    (ctx.sessionManager as any).getLeafId = () => 'recovery-1';
+
+    const contextHandler = getHandler(handlers, 'context');
+    const messages = [
+      { role: 'user', content: [{ type: 'text', text: 'Do the thing' }] },
+      {
+        role: 'custom',
+        customType: 'pi-retry-recovery',
+        content: 'Continue.',
+        display: false,
+      },
+    ];
+
+    const result = await contextHandler({ type: 'context', messages }, ctx);
+    // Trailing recovery entry is the leaf, so it survives the filter.
+    expect(result).toBeUndefined();
+  });
+
+  test('returns undefined when the current branch has no recovery entries', async () => {
+    const fakeModule = makeFakeAgentSessionModule();
+    const loader = vi.fn().mockResolvedValue(fakeModule);
+
+    const { handlers, ctx } = await createExtensionHarness(loader);
+
+    (ctx.sessionManager as any).getBranch = () => [
+      { id: 'user-1', parentId: null, type: 'message' },
+      { id: 'assistant-1', parentId: 'user-1', type: 'message' },
+    ];
+    (ctx.sessionManager as any).getLeafId = () => 'assistant-1';
+
+    const contextHandler = getHandler(handlers, 'context');
+    const messages = [
+      { role: 'user', content: [{ type: 'text', text: 'Do the thing' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'Answer' }] },
+    ];
+
+    const result = await contextHandler({ type: 'context', messages }, ctx);
+    expect(result).toBeUndefined();
   });
 
   test('fails soft when the internal module shape is unavailable', async () => {
@@ -993,6 +1088,148 @@ describe('pi-retry display linearization helpers', () => {
     // dropped even though it is the current leaf.
     expect(tree[0].children).toHaveLength(0);
   });
+
+  test('hides assistant error leaves that were retried successfully', () => {
+    const tree = linearizeRetryRecoveryTreeForDisplay(
+      [
+        {
+          entry: { id: 'toolresult-1', parentId: null, type: 'message' },
+          children: [
+            {
+              entry: {
+                id: 'assistant-error',
+                parentId: 'toolresult-1',
+                type: 'message',
+                message: {
+                  role: 'assistant',
+                  stopReason: 'error',
+                  errorMessage: 'Internal server error',
+                },
+              },
+              children: [],
+            },
+            {
+              entry: {
+                id: 'assistant-success',
+                parentId: 'toolresult-1',
+                type: 'message',
+                message: { role: 'assistant', stopReason: 'toolUse' },
+              },
+              children: [],
+            },
+          ],
+        },
+      ],
+      'assistant-success',
+    );
+
+    expect(tree).toHaveLength(1);
+    expect(tree[0].children.map((c) => c.entry.id)).toEqual(['assistant-success']);
+  });
+
+  test('keeps a terminal assistant error when no sibling recovered it', () => {
+    const tree = linearizeRetryRecoveryTreeForDisplay(
+      [
+        {
+          entry: { id: 'toolresult-1', parentId: null, type: 'message' },
+          children: [
+            {
+              entry: {
+                id: 'assistant-error',
+                parentId: 'toolresult-1',
+                type: 'message',
+                message: {
+                  role: 'assistant',
+                  stopReason: 'error',
+                  errorMessage: 'Internal server error',
+                },
+              },
+              children: [],
+            },
+          ],
+        },
+      ],
+      'assistant-error',
+    );
+
+    expect(tree).toHaveLength(1);
+    expect(tree[0].children.map((c) => c.entry.id)).toEqual(['assistant-error']);
+  });
+
+  test('keeps an assistant error when it is still the current leaf', () => {
+    const tree = linearizeRetryRecoveryTreeForDisplay(
+      [
+        {
+          entry: { id: 'toolresult-1', parentId: null, type: 'message' },
+          children: [
+            {
+              entry: {
+                id: 'assistant-error',
+                parentId: 'toolresult-1',
+                type: 'message',
+                message: {
+                  role: 'assistant',
+                  stopReason: 'error',
+                  errorMessage: 'Internal server error',
+                },
+              },
+              children: [],
+            },
+            {
+              entry: {
+                id: 'assistant-success',
+                parentId: 'toolresult-1',
+                type: 'message',
+                message: { role: 'assistant', stopReason: 'toolUse' },
+              },
+              children: [],
+            },
+          ],
+        },
+      ],
+      'assistant-error',
+    );
+
+    expect(tree).toHaveLength(1);
+    expect(tree[0].children.map((c) => c.entry.id)).toEqual([
+      'assistant-error',
+      'assistant-success',
+    ]);
+  });
+
+  test('keeps both assistant errors when neither sibling recovered the chain', () => {
+    const tree = linearizeRetryRecoveryTreeForDisplay(
+      [
+        {
+          entry: { id: 'toolresult-1', parentId: null, type: 'message' },
+          children: [
+            {
+              entry: {
+                id: 'error-1',
+                parentId: 'toolresult-1',
+                type: 'message',
+                message: { role: 'assistant', stopReason: 'error' },
+              },
+              children: [],
+            },
+            {
+              entry: {
+                id: 'error-2',
+                parentId: 'toolresult-1',
+                type: 'message',
+                message: { role: 'assistant', stopReason: 'error' },
+              },
+              children: [],
+            },
+          ],
+        },
+      ],
+      'error-2',
+    );
+
+    expect(tree).toHaveLength(1);
+    expect(tree[0].children.map((c) => c.entry.id)).toEqual(['error-1', 'error-2']);
+  });
 });
 
 describe('pi-retry extension runtime', () => {
@@ -1138,69 +1375,11 @@ describe('pi-retry extension runtime', () => {
     });
     expect(harness.sendUserMessageCalls).toEqual([]);
   });
-  test('mirrors auto-retry events into UI status and clears them later', async () => {
-    const fakeModule = makeFakeAgentSessionModule();
-    const harness = await createExtensionHarness(async () => fakeModule);
-    const session = new fakeModule.AgentSession();
-
-    await getHandler(harness.handlers, 'session_start')({ type: 'session_start' }, harness.ctx);
-
-    const retryStartEvent = {
-      type: 'auto_retry_start',
-      attempt: 1,
-      maxAttempts: 3,
-      delayMs: 2000,
-      errorMessage: '404 The API deployment for this resource does not exist.',
-    };
-
-    const retryEndEvent = {
-      type: 'auto_retry_end',
-      success: true,
-      attempt: 1,
-    };
-
-    expect(session._emit(retryStartEvent)).toBe(retryStartEvent);
-    expect(session._emit(retryEndEvent)).toBe(retryEndEvent);
-    expect(session.emitCalls).toEqual([retryStartEvent, retryEndEvent]);
-
-    expect(harness.statusCalls).toEqual([
-      { key: 'pi-retry', text: '↻ Retry 1/3 in 2s (deployment missing)' },
-      { key: 'pi-retry', text: undefined },
-    ]);
-  });
-
   test('does not register the deprecated session_switch handler in 0.65+', async () => {
     const fakeModule = makeFakeAgentSessionModule();
     const harness = await createExtensionHarness(async () => fakeModule);
 
     expect(harness.handlers.has('session_switch')).toBe(false);
-  });
-
-  test('binds status UI from session_start for resume flows using event.reason', async () => {
-    const fakeModule = makeFakeAgentSessionModule();
-    const harness = await createExtensionHarness(async () => fakeModule);
-    const session = new fakeModule.AgentSession();
-
-    await getHandler(harness.handlers, 'session_start')(
-      {
-        type: 'session_start',
-        reason: 'resume',
-        previousSessionFile: '/tmp/previous-session.jsonl',
-      },
-      harness.ctx,
-    );
-
-    session._emit({
-      type: 'auto_retry_start',
-      attempt: 1,
-      maxAttempts: 3,
-      delayMs: 2000,
-      errorMessage: '404 The API deployment for this resource does not exist.',
-    });
-
-    expect(harness.statusCalls).toEqual([
-      { key: 'pi-retry', text: '↻ Retry 1/3 in 2s (deployment missing)' },
-    ]);
   });
 
   test('clears bound status and unregisters the patched session on session shutdown', async () => {
@@ -1232,92 +1411,6 @@ describe('pi-retry extension runtime', () => {
     ]);
   });
 
-  test('agent_end clears a stuck retry status when auto_retry_end never fires', async () => {
-    const fakeModule = makeFakeAgentSessionModule();
-    const harness = await createExtensionHarness(async () => fakeModule);
-    const session = new fakeModule.AgentSession();
-
-    await getHandler(harness.handlers, 'session_start')({ type: 'session_start' }, harness.ctx);
-
-    session._emit({
-      type: 'auto_retry_start',
-      attempt: 1,
-      maxAttempts: 3,
-      delayMs: 2000,
-      errorMessage: 'overloaded_error',
-    });
-
-    expect(harness.statusCalls).toEqual([{ key: 'pi-retry', text: '↻ Retry 1/3 in 2s' }]);
-
-    // Simulate the retried attempt producing a non-retryable error: agent_end
-    // fires carrying a non-retryable assistant error, so core never emits
-    // auto_retry_end.
-    await getHandler(harness.handlers, 'agent_end')(
-      {
-        type: 'agent_end',
-        messages: [
-          {
-            role: 'assistant',
-            stopReason: 'error',
-            errorMessage: '400 bad request: unknown parameter',
-            content: [],
-          },
-        ],
-      },
-      harness.ctx,
-    );
-
-    expect(harness.statusCalls).toEqual([
-      { key: 'pi-retry', text: '↻ Retry 1/3 in 2s' },
-      { key: 'pi-retry', text: undefined },
-    ]);
-  });
-
-  test('agent_end preserves retry status when another auto_retry_start follows', async () => {
-    const fakeModule = makeFakeAgentSessionModule();
-    const harness = await createExtensionHarness(async () => fakeModule);
-    const session = new fakeModule.AgentSession();
-
-    await getHandler(harness.handlers, 'session_start')({ type: 'session_start' }, harness.ctx);
-
-    session._emit({
-      type: 'auto_retry_start',
-      attempt: 1,
-      maxAttempts: 3,
-      delayMs: 2000,
-      errorMessage: 'overloaded_error',
-    });
-
-    // agent_end carries a retryable error message — our handler must leave
-    // the status alone so the core's next auto_retry_start can refresh it.
-    await getHandler(harness.handlers, 'agent_end')(
-      {
-        type: 'agent_end',
-        messages: [
-          {
-            role: 'assistant',
-            stopReason: 'error',
-            errorMessage: 'overloaded_error',
-            content: [],
-          },
-        ],
-      },
-      harness.ctx,
-    );
-    session._emit({
-      type: 'auto_retry_start',
-      attempt: 2,
-      maxAttempts: 3,
-      delayMs: 4000,
-      errorMessage: 'overloaded_error',
-    });
-
-    expect(harness.statusCalls).toEqual([
-      { key: 'pi-retry', text: '↻ Retry 1/3 in 2s' },
-      { key: 'pi-retry', text: '↻ Retry 2/3 in 4s' },
-    ]);
-  });
-
   test('agent_end is a no-op when no retry status is currently shown', async () => {
     const fakeModule = makeFakeAgentSessionModule();
     const harness = await createExtensionHarness(async () => fakeModule);
@@ -1336,36 +1429,82 @@ describe('pi-retry extension runtime', () => {
     expect(harness.statusCalls).toEqual([]);
   });
 
-  test('agent_end defensively clears a retry status even on a successful stop', async () => {
-    // auto_retry_end on the success path is emitted from message_end, but if
-    // for any reason it did not fire, agent_end should still clear a lingering
-    // retry status when the final assistant message is a clean stop.
+  test('agent_end branches the failed leaf out of main path for retryable errors', async () => {
     const fakeModule = makeFakeAgentSessionModule();
     const harness = await createExtensionHarness(async () => fakeModule);
-    const session = new fakeModule.AgentSession();
 
-    await getHandler(harness.handlers, 'session_start')({ type: 'session_start' }, harness.ctx);
-
-    session._emit({
-      type: 'auto_retry_start',
-      attempt: 1,
-      maxAttempts: 3,
-      delayMs: 2000,
-      errorMessage: 'overloaded_error',
-    });
+    const branchSpy = vi.fn();
+    (harness.ctx.sessionManager as any).branch = branchSpy;
+    (harness.ctx.sessionManager as any).getLeafId = () => 'assistant-error-1';
+    (harness.ctx.sessionManager as any).getEntries = () => [
+      { id: 'user-1', type: 'message', message: { role: 'user' } },
+      {
+        id: 'assistant-error-1',
+        parentId: 'user-1',
+        type: 'message',
+        message: {
+          role: 'assistant',
+          stopReason: 'error',
+          errorMessage: 'overloaded_error',
+        },
+      },
+    ];
 
     await getHandler(harness.handlers, 'agent_end')(
       {
         type: 'agent_end',
-        messages: [{ role: 'assistant', stopReason: 'stop', content: [] }],
+        messages: [
+          {
+            role: 'assistant',
+            stopReason: 'error',
+            errorMessage: 'overloaded_error',
+            content: [],
+          },
+        ],
       },
       harness.ctx,
     );
 
-    expect(harness.statusCalls).toEqual([
-      { key: 'pi-retry', text: '↻ Retry 1/3 in 2s' },
-      { key: 'pi-retry', text: undefined },
-    ]);
+    expect(branchSpy).toHaveBeenCalledWith('user-1');
+  });
+
+  test('agent_end does not branch when the final assistant error is not retryable', async () => {
+    const fakeModule = makeFakeAgentSessionModule();
+    const harness = await createExtensionHarness(async () => fakeModule);
+
+    const branchSpy = vi.fn();
+    (harness.ctx.sessionManager as any).branch = branchSpy;
+    (harness.ctx.sessionManager as any).getLeafId = () => 'assistant-error-1';
+    (harness.ctx.sessionManager as any).getEntries = () => [
+      { id: 'user-1', type: 'message', message: { role: 'user' } },
+      {
+        id: 'assistant-error-1',
+        parentId: 'user-1',
+        type: 'message',
+        message: {
+          role: 'assistant',
+          stopReason: 'error',
+          errorMessage: 'context window exceeded',
+        },
+      },
+    ];
+
+    await getHandler(harness.handlers, 'agent_end')(
+      {
+        type: 'agent_end',
+        messages: [
+          {
+            role: 'assistant',
+            stopReason: 'error',
+            errorMessage: 'context window exceeded',
+            content: [],
+          },
+        ],
+      },
+      harness.ctx,
+    );
+
+    expect(branchSpy).not.toHaveBeenCalled();
   });
 
   test('interactive input resets refusal recovery state and clears the current session status', async () => {
@@ -1431,24 +1570,15 @@ describe('pi-retry extension runtime', () => {
     expect(getAbortListenerBindingCount()).toBe(0);
   });
 
-  test('turn_end triggers refusal recovery through the registered patched session for terminal stop turns', async () => {
+  test('turn_end triggers refusal recovery for terminal stop turns', async () => {
     const fakeModule = makeFakeAgentSessionModule();
     const harness = await createExtensionHarness(async () => fakeModule);
-    const session = new fakeModule.AgentSession();
 
-    const getRegisteredPatchedSessionSpy = vi
-      .spyOn(runtime, 'getRegisteredPatchedSession')
-      .mockReturnValue(session as any);
     const handleRefusalRecoverySpy = vi
       .spyOn(runtime, 'handleRefusalRecovery')
       .mockResolvedValue(undefined);
 
     await getHandler(harness.handlers, 'session_start')({ type: 'session_start' }, harness.ctx);
-    session._emit({
-      type: 'auto_retry_end',
-      success: true,
-      attempt: 1,
-    });
 
     await getHandler(harness.handlers, 'turn_end')(
       {
@@ -1463,7 +1593,6 @@ describe('pi-retry extension runtime', () => {
       harness.ctx,
     );
 
-    expect(getRegisteredPatchedSessionSpy).toHaveBeenCalledWith('session-1');
     expect(handleRefusalRecoverySpy).toHaveBeenCalledTimes(1);
     expect(handleRefusalRecoverySpy).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1478,6 +1607,7 @@ describe('pi-retry extension runtime', () => {
             },
           ],
         },
+        patchedSession: { sessionManager: harness.ctx.sessionManager },
       }),
     );
 
@@ -1705,11 +1835,7 @@ describe('pi-retry extension runtime', () => {
   test('turn_end recovers empty-stop turns even when tool results are present', async () => {
     const fakeModule = makeFakeAgentSessionModule();
     const harness = await createExtensionHarness(async () => fakeModule);
-    const session = new fakeModule.AgentSession();
 
-    const getRegisteredPatchedSessionSpy = vi
-      .spyOn(runtime, 'getRegisteredPatchedSession')
-      .mockReturnValue(session as any);
     const handleRefusalRecoverySpy = vi
       .spyOn(runtime, 'handleRefusalRecovery')
       .mockResolvedValue(undefined);
@@ -1727,18 +1853,13 @@ describe('pi-retry extension runtime', () => {
       harness.ctx,
     );
 
-    expect(getRegisteredPatchedSessionSpy).toHaveBeenCalledWith('session-1');
     expect(handleRefusalRecoverySpy).toHaveBeenCalledTimes(1);
   });
 
   test('turn_end ignores visible assistant turns that still have tool results', async () => {
     const fakeModule = makeFakeAgentSessionModule();
     const harness = await createExtensionHarness(async () => fakeModule);
-    const session = new fakeModule.AgentSession();
 
-    const getRegisteredPatchedSessionSpy = vi
-      .spyOn(runtime, 'getRegisteredPatchedSession')
-      .mockReturnValue(session as any);
     const handleRefusalRecoverySpy = vi
       .spyOn(runtime, 'handleRefusalRecovery')
       .mockResolvedValue(undefined);
@@ -1756,20 +1877,15 @@ describe('pi-retry extension runtime', () => {
       harness.ctx,
     );
 
-    expect(getRegisteredPatchedSessionSpy).not.toHaveBeenCalled();
     expect(handleRefusalRecoverySpy).not.toHaveBeenCalled();
   });
 
   test('turn_end ignores terminal stop turns when there are already pending queued messages', async () => {
     const fakeModule = makeFakeAgentSessionModule();
     const harness = await createExtensionHarness(async () => fakeModule);
-    const session = new fakeModule.AgentSession();
 
     harness.ctx.hasPendingMessages = () => true;
 
-    const getRegisteredPatchedSessionSpy = vi
-      .spyOn(runtime, 'getRegisteredPatchedSession')
-      .mockReturnValue(session as any);
     const handleRefusalRecoverySpy = vi
       .spyOn(runtime, 'handleRefusalRecovery')
       .mockResolvedValue(undefined);
@@ -1787,7 +1903,6 @@ describe('pi-retry extension runtime', () => {
       harness.ctx,
     );
 
-    expect(getRegisteredPatchedSessionSpy).not.toHaveBeenCalled();
     expect(handleRefusalRecoverySpy).not.toHaveBeenCalled();
   });
 
@@ -1796,11 +1911,7 @@ describe('pi-retry extension runtime', () => {
 
     const fakeModule = makeFakeAgentSessionModule();
     const harness = await createExtensionHarness(async () => fakeModule);
-    const session = new fakeModule.AgentSession();
 
-    const getRegisteredPatchedSessionSpy = vi
-      .spyOn(runtime, 'getRegisteredPatchedSession')
-      .mockReturnValue(session as any);
     const handleRefusalRecoverySpy = vi
       .spyOn(runtime, 'handleRefusalRecovery')
       .mockResolvedValue(undefined);
@@ -1818,24 +1929,6 @@ describe('pi-retry extension runtime', () => {
       harness.ctx,
     );
 
-    expect(getRegisteredPatchedSessionSpy).not.toHaveBeenCalled();
     expect(handleRefusalRecoverySpy).not.toHaveBeenCalled();
-  });
-
-  test('provider retry branching does not call sendUserMessage', async () => {
-    const fakeModule = makeFakeAgentSessionModule();
-    const harness = await createExtensionHarness(async () => fakeModule);
-    const session = new fakeModule.AgentSession();
-
-    await getHandler(harness.handlers, 'session_start')({ type: 'session_start' }, harness.ctx);
-    session._emit({
-      type: 'auto_retry_start',
-      attempt: 1,
-      maxAttempts: 3,
-      delayMs: 2000,
-      errorMessage: 'The server had an error processing your request',
-    });
-
-    expect(harness.sendUserMessageCalls).toEqual([]);
   });
 });

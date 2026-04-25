@@ -494,10 +494,6 @@ export function unregisterPatchedSession(sessionId: string): void {
   pruneSessionState(sessionId);
 }
 
-export function getRegisteredPatchedSession(sessionId: string): PatchedSessionLike | undefined {
-  return stateBySessionId.get(sessionId)?.session;
-}
-
 export function getQueuedRecovery(sessionId: string): ActiveRecovery | undefined {
   const recovery = getActiveRecovery(sessionId);
   return 'queued' === recovery?.phase ? recovery : undefined;

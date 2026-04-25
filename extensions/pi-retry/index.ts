@@ -15,7 +15,6 @@ import {
   dispatchPendingRecovery,
   getQueuedRecovery,
   getPendingRecovery,
-  getRegisteredPatchedSession,
   handleRecoveryAbort,
   handleRefusalRecovery,
   registerPatchedSession,
@@ -68,23 +67,6 @@ export interface AssistantErrorLike {
   errorMessage?: string;
 }
 
-export interface AutoRetryStartEventLike {
-  type: 'auto_retry_start';
-  attempt: number;
-  maxAttempts: number;
-  delayMs: number;
-  errorMessage: string;
-}
-
-export interface AutoRetryEndEventLike {
-  type: 'auto_retry_end';
-  success: boolean;
-  attempt: number;
-  finalError?: string;
-}
-
-export type RetryLifecycleEventLike = AutoRetryStartEventLike | AutoRetryEndEventLike;
-
 type StatusUi = Pick<ExtensionUIContext, 'setStatus' | 'notify'>;
 
 type SessionManagerLike = {
@@ -108,12 +90,6 @@ const uiBySessionId = new Map<string, StatusUi>();
 const recoveryDispatchTimerBySessionId = new Map<string, ReturnType<typeof setTimeout>>();
 const abortListenerBySessionId = new Map<string, { signal: AbortSignal; onAbort: () => void }>();
 
-// Tracks sessions currently showing a retry-in-flight status. Used to
-// defensively clear the status on agent_end when the retry cycle terminates
-// without auto_retry_end (e.g. the retried attempt produces a non-retryable
-// error, or the live LLM call is aborted mid-turn).
-const retryStatusActiveSessions = new Set<string>();
-
 let patchInstallPromise: Promise<PatchInstallResult> | undefined;
 let patchFailureReason: string | undefined;
 let patchFailureNotified = false;
@@ -125,6 +101,29 @@ export function isExtraRetryableAssistantError(message: AssistantErrorLike): boo
     'string' === typeof message.errorMessage &&
     classifyRetryableProviderError(message.errorMessage) !== undefined
   );
+}
+
+// Mirrors the regex used by `AgentSession._isRetryableError` in
+// `@mariozechner/pi-coding-agent` 0.70.x. Kept local because the core
+// exposes no extension hook for classifying retryable errors. When the core
+// retries an error whose text matches, it starts a fresh agent_start/end
+// cycle via `agent.continue()` without a `before_agent_start` event; we use
+// this predicate in the `agent_end` handler to branch the failed leaf out
+// of the main path before the next attempt writes a sibling.
+const CORE_RETRYABLE_ERROR_PATTERN =
+  /overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|network.?error|connection.?error|connection.?refused|connection.?lost|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|ended without|http2 request did not get a response|timed? out|timeout|terminated|retry delay/i;
+
+function isLikelyCoreRetryableError(message: AssistantErrorLike): boolean {
+  return (
+    'assistant' === message.role &&
+    'error' === message.stopReason &&
+    'string' === typeof message.errorMessage &&
+    CORE_RETRYABLE_ERROR_PATTERN.test(message.errorMessage)
+  );
+}
+
+function isBranchableRetryableError(message: AssistantErrorLike): boolean {
+  return isExtraRetryableAssistantError(message) || isLikelyCoreRetryableError(message);
 }
 
 function hasUserVisibleAssistantOutput(content: unknown): boolean {
@@ -150,34 +149,9 @@ function hasUserVisibleAssistantOutput(content: unknown): boolean {
   });
 }
 
-export function formatRetryReason(reason: RetryReason | undefined): string | undefined {
-  switch (reason) {
-    case 'deploymentMissing':
-      return 'deployment missing';
-    case 'encryptedContentVerification':
-      return 'encrypted content verify';
-    case 'nativeCompactionCreatedBy':
-      return 'native replay metadata';
-    case 'providerServerError':
-      return 'provider server error';
-    default:
-      return undefined;
-  }
-}
-
-export function formatRetryDelay(delayMs: number): string {
-  return `${Math.max(1, Math.ceil(delayMs / 1000))}s`;
-}
-
 export function getRecoveryDispatchDelayMs(attempt: number): number {
   const normalizedAttempt = Math.max(1, Math.floor(attempt));
   return RECOVERY_DISPATCH_BASE_DELAY_MS * 2 ** (normalizedAttempt - 1);
-}
-
-export function buildRetryStatus(event: AutoRetryStartEventLike): string {
-  const reason = formatRetryReason(classifyRetryableProviderError(event.errorMessage));
-  const suffix = reason ? ` (${reason})` : '';
-  return `↻ Retry ${event.attempt}/${event.maxAttempts} in ${formatRetryDelay(event.delayMs)}${suffix}`;
 }
 
 type SessionContextLike = {
@@ -207,6 +181,53 @@ function isHiddenRetryRecoveryEntry(entry: Record<string, any> | undefined): boo
     entry.customType === PI_RETRY_RECOVERY_CUSTOM_TYPE &&
     entry.display === false
   );
+}
+
+function isAssistantErrorEntry(entry: Record<string, any> | undefined): boolean {
+  return (
+    entry?.type === 'message' &&
+    entry.message?.role === 'assistant' &&
+    entry.message?.stopReason === 'error'
+  );
+}
+
+function isAssistantNonErrorMessage(node: SessionTreeNodeLike | undefined): boolean {
+  const entry = node?.entry;
+  return (
+    entry?.type === 'message' &&
+    entry.message?.role === 'assistant' &&
+    entry.message?.stopReason !== 'error'
+  );
+}
+
+/**
+ * An assistant error entry is considered "retried" (and therefore safe to
+ * hide from the display tree) when:
+ *   - it is not the current leaf,
+ *   - it has no children of its own (branching always moves the leaf back to
+ *     the error's parent, so retry responses land as siblings rather than
+ *     descendants of the error), and
+ *   - at least one of its siblings is a non-error assistant message (i.e.
+ *     the recovery that superseded it).
+ *
+ * The check operates on a parent's children list so we can evaluate siblings
+ * in one pass while walking the tree.
+ */
+function isRetriedAssistantError(
+  node: SessionTreeNodeLike,
+  siblings: SessionTreeNodeLike[],
+  currentLeafId: string | undefined,
+): boolean {
+  if (!isAssistantErrorEntry(node.entry)) {
+    return false;
+  }
+  if (node.entry.id && node.entry.id === currentLeafId) {
+    return false;
+  }
+  if (node.children.length > 0) {
+    return false;
+  }
+  return siblings.some((sibling) => sibling !== node && isAssistantNonErrorMessage(sibling));
 }
 
 function parseRetryRecoveryDetails(value: unknown): RetryRecoveryMessageDetails | undefined {
@@ -317,6 +338,14 @@ function linearizeRetryRecoveryNodes(
       continue;
     }
 
+    // Drop assistant error messages whose sibling list contains a
+    // non-error assistant recovery. These are failed attempts that the
+    // core (or pi-retry) subsequently retried successfully, so showing
+    // them in the display tree just adds noise.
+    if (isRetriedAssistantError(node, frame.nodes, currentLeafId)) {
+      continue;
+    }
+
     if (isHiddenRetryRecoveryEntry(node.entry) && node.entry.id !== currentLeafId) {
       // Hoist: descend into children but append them into the current
       // frame's output, keeping the same parent id so hoisted grandchildren
@@ -387,24 +416,26 @@ export function linearizeRetryRecoveryTreeForDisplay(
   roots: SessionTreeNodeLike[],
   currentLeafId?: string,
 ): SessionTreeNodeLike[] {
-  if (!hasLinearizableRetryRecoveryEntry(roots, currentLeafId)) {
+  if (!hasLinearizableDisplayNode(roots, currentLeafId)) {
     return roots;
   }
   return linearizeRetryRecoveryNodes(roots, null, currentLeafId).nodes;
 }
 
-function hasLinearizableRetryRecoveryEntry(
-  roots: SessionTreeNodeLike[],
-  currentLeafId?: string,
-): boolean {
-  const stack: SessionTreeNodeLike[] = [...roots];
+function hasLinearizableDisplayNode(roots: SessionTreeNodeLike[], currentLeafId?: string): boolean {
+  const stack: Array<{ nodes: SessionTreeNodeLike[] }> = [{ nodes: roots }];
   while (stack.length > 0) {
-    const node = stack.pop() as SessionTreeNodeLike;
-    if (isHiddenRetryRecoveryEntry(node.entry) && node.entry.id !== currentLeafId) {
-      return true;
-    }
-    for (const child of node.children) {
-      stack.push(child);
+    const frame = stack.pop() as { nodes: SessionTreeNodeLike[] };
+    for (const node of frame.nodes) {
+      if (isHiddenRetryRecoveryEntry(node.entry) && node.entry.id !== currentLeafId) {
+        return true;
+      }
+      if (isRetriedAssistantError(node, frame.nodes, currentLeafId)) {
+        return true;
+      }
+      if (node.children.length > 0) {
+        stack.push({ nodes: node.children });
+      }
     }
   }
   return false;
@@ -447,8 +478,6 @@ function clearStatusForSession(sessionId: string | undefined, removeBinding = fa
   }
 
   clearRefusalStatus(sessionId);
-
-  retryStatusActiveSessions.delete(sessionId);
 
   const ui = uiBySessionId.get(sessionId);
   ui?.setStatus(STATUS_KEY, undefined);
@@ -603,34 +632,9 @@ function maybeWarnAboutPatchFailure(ctx: ExtensionContext): void {
   ctx.ui.notify(`pi-retry disabled: ${patchFailureReason}`, 'warning');
 }
 
-function getSessionIdFromPatchedSession(session: any): string | undefined {
-  return session?.sessionManager?.getSessionId?.();
-}
-
 function refusalRecoveryDisabled(): boolean {
   const value = process.env[REFUSAL_DISABLE_ENV_VAR]?.trim().toLowerCase();
   return '1' === value || 'true' === value || 'yes' === value;
-}
-
-function handleRetryLifecycleEvent(session: any, event: RetryLifecycleEventLike): void {
-  const sessionId = getSessionIdFromPatchedSession(session);
-  if (!sessionId) {
-    return;
-  }
-
-  const ui = uiBySessionId.get(sessionId);
-  if (!ui) {
-    return;
-  }
-
-  if ('auto_retry_start' === event.type) {
-    retryStatusActiveSessions.add(sessionId);
-    ui.setStatus(STATUS_KEY, buildRetryStatus(event));
-    return;
-  }
-
-  retryStatusActiveSessions.delete(sessionId);
-  ui.setStatus(STATUS_KEY, undefined);
 }
 
 function maybePatchSessionManager(
@@ -641,17 +645,13 @@ function maybePatchSessionManager(
     return;
   }
 
-  const originalBuildSessionContext = proto.buildSessionContext;
+  // NOTE: We only patch `getTree` here. Filtering hidden retry-recovery
+  // entries out of the LLM context used to be done via a `buildSessionContext`
+  // prototype patch, but since pi-coding-agent 0.70.x we can do the same work
+  // through the public `context` extension event (see the `pi.on('context',
+  // ...)` handler in `createPiRetryExtension`). Tree-display linearization has
+  // no equivalent extension hook yet, so `getTree` remains patched.
   const originalGetTree = proto.getTree;
-
-  if ('function' === typeof originalBuildSessionContext) {
-    proto.buildSessionContext = function patchedBuildSessionContext() {
-      const sessionContext = originalBuildSessionContext.call(this) as SessionContextLike;
-      const pathEntries = 'function' === typeof this.getBranch ? this.getBranch() : [];
-      const leafId = 'function' === typeof this.getLeafId ? this.getLeafId() : undefined;
-      return filterSessionContextForRetryDisplay(sessionContext, pathEntries, leafId);
-    };
-  }
 
   if ('function' === typeof originalGetTree) {
     proto.getTree = function patchedGetTree(this: SessionManagerLike) {
@@ -707,41 +707,22 @@ export async function installAgentSessionPatch(
     }
 
     const originalIsRetryableError = proto._isRetryableError;
-    const originalEmit = proto._emit;
 
     if ('function' !== typeof originalIsRetryableError) {
       patchFailureReason = 'AgentSession._isRetryableError is not available';
       return { ok: false, reason: patchFailureReason };
     }
 
-    if ('function' !== typeof originalEmit) {
-      patchFailureReason = 'AgentSession._emit is not available';
-      return { ok: false, reason: patchFailureReason };
-    }
-
+    // _isRetryableError is extended to add provider-specific error strings
+    // that the core's built-in regex doesn't cover. There is no public
+    // extension hook to register additional retryable-error matchers, so this
+    // remains a prototype patch. Remove once core exposes such an API.
     proto._isRetryableError = function patchedIsRetryableError(
       message: AssistantErrorLike,
     ): boolean {
       return Boolean(
         originalIsRetryableError.call(this, message) || isExtraRetryableAssistantError(message),
       );
-    };
-
-    proto._emit = function patchedEmit(event: RetryLifecycleEventLike) {
-      registerPatchedSession(this);
-      const result = originalEmit.call(this, event);
-      if ('auto_retry_start' === event?.type) {
-        const reason = classifyRetryableProviderError(event.errorMessage) ?? 'providerServerError';
-        branchLatestAssistantErrorOutOfMainPath(this, {
-          attempt: event.attempt,
-          errorMessage: event.errorMessage,
-          reason,
-        });
-        handleRetryLifecycleEvent(this, event);
-      } else if ('auto_retry_end' === event?.type) {
-        handleRetryLifecycleEvent(this, event);
-      }
-      return result;
     };
 
     Object.defineProperty(proto, PATCHED, {
@@ -763,7 +744,6 @@ export async function installAgentSessionPatch(
 
 export function resetPiRetryTestState(): void {
   uiBySessionId.clear();
-  retryStatusActiveSessions.clear();
   for (const sessionId of abortListenerBySessionId.keys()) {
     unbindAbortListener(sessionId);
   }
@@ -826,8 +806,49 @@ export function createPiRetryExtension(
       },
     });
 
+    // Filter hidden retry-recovery custom messages out of the LLM context on
+    // every call. This replaces the older `SessionManager.buildSessionContext`
+    // prototype patch. `agent.state.messages` may still contain recovery
+    // entries after a session is restored, but the LLM itself never sees more
+    // than the most recent one (kept when it is the current leaf).
+    pi.on('context', async (event, ctx) => {
+      const sessionManagerLike = ctx.sessionManager as unknown as {
+        getBranch?: () => Array<Record<string, any>>;
+        getLeafId?: () => string | undefined;
+      };
+      const pathEntries =
+        typeof sessionManagerLike.getBranch === 'function' ? sessionManagerLike.getBranch() : [];
+      if (pathEntries.length === 0) {
+        return undefined;
+      }
+      const leafId =
+        typeof sessionManagerLike.getLeafId === 'function'
+          ? sessionManagerLike.getLeafId()
+          : undefined;
+      const input: SessionContextLike = {
+        messages: event.messages as unknown as SessionContextLike['messages'],
+        thinkingLevel: 'off',
+        model: null,
+      };
+      const filtered = filterSessionContextForRetryDisplay(input, pathEntries, leafId);
+      if (filtered.messages === input.messages) {
+        return undefined;
+      }
+      return { messages: filtered.messages as unknown as typeof event.messages };
+    });
+
+    // Capture `{ sessionManager }` in the runtime's per-session stash so
+    // downstream helpers (e.g. dispatchPendingRecovery's expected-leaf
+    // check) can reach the same SessionManager without relying on a
+    // prototype patch. This used to be done from the patched `_emit`; now
+    // it happens on every normal lifecycle boundary.
+    const stashSessionReference = (ctx: ExtensionContext) => {
+      registerPatchedSession({ sessionManager: ctx.sessionManager as any });
+    };
+
     pi.on('session_start', async (event, ctx) => {
       bindStatusUi(ctx);
+      stashSessionReference(ctx);
       maybeWarnAboutPatchFailure(ctx);
 
       if ('startup' !== event.reason && 'resume' !== event.reason && 'reload' !== event.reason) {
@@ -843,6 +864,7 @@ export function createPiRetryExtension(
 
     pi.on('input', async (event, ctx) => {
       bindStatusUi(ctx);
+      stashSessionReference(ctx);
       maybeWarnAboutPatchFailure(ctx);
       if ('extension' === event.source) {
         return;
@@ -852,12 +874,14 @@ export function createPiRetryExtension(
 
     pi.on('before_agent_start', async (_event, ctx) => {
       bindStatusUi(ctx);
+      stashSessionReference(ctx);
       maybeWarnAboutPatchFailure(ctx);
       bindAbortCleanup(ctx.sessionManager.getSessionId(), ctx);
     });
 
     pi.on('agent_start', async (_event, ctx) => {
       bindStatusUi(ctx);
+      stashSessionReference(ctx);
       maybeWarnAboutPatchFailure(ctx);
       bindAbortCleanup(ctx.sessionManager.getSessionId(), ctx);
     });
@@ -888,15 +912,10 @@ export function createPiRetryExtension(
         return;
       }
 
-      const patchedSession = getRegisteredPatchedSession(ctx.sessionManager.getSessionId());
-      if (!patchedSession) {
-        return;
-      }
-
       await handleRefusalRecovery({
         event: { messages: [event.message] },
         ctx,
-        patchedSession,
+        patchedSession: { sessionManager: ctx.sessionManager as any },
         reviewRewrite: requestRefusalRewrite,
         sendUserMessage: (content, details) =>
           pi.sendMessage(
@@ -928,18 +947,14 @@ export function createPiRetryExtension(
         schedulePendingRecoveryDispatch(sessionId, ctx, pi);
       }
 
-      // Defensive clear: the core only emits auto_retry_end on successful
-      // recovery (message_end), max retries exceeded, or sleep-cancelled
-      // aborts. When a retry attempt produces a non-retryable error (or the
-      // live LLM call is aborted mid-turn), no auto_retry_end fires and the
-      // retry status would otherwise stay stuck until the next user input.
-      //
-      // Classify the final assistant message synchronously: if it's a
-      // retryable error the core will refresh the status via a new
-      // auto_retry_start, so leave it alone. Otherwise clear.
-      if (!retryStatusActiveSessions.has(sessionId)) {
-        return;
-      }
+      // Branch the failed leaf out of the main path BEFORE the core's
+      // `_handleRetryableError` fires a retry. Extension agent_end is awaited
+      // inside `_processAgentEvent` before the retry path runs, so by the
+      // time the retry emits `auto_retry_start` and calls `agent.continue()`
+      // the SessionManager's leaf already points at the error's parent.
+      // The retry's new message therefore lands as a sibling of the error
+      // rather than a child of it, preserving the same session-tree shape
+      // the old `_emit` prototype patch produced.
       const messages =
         (event as unknown as { messages?: Array<Record<string, unknown>> }).messages ?? [];
       let lastAssistant: Record<string, unknown> | undefined;
@@ -952,20 +967,20 @@ export function createPiRetryExtension(
       if (!lastAssistant) {
         return;
       }
-      if (lastAssistant.stopReason === 'error') {
-        const patchedSession = getRegisteredPatchedSession(sessionId) as
-          | { _isRetryableError?: (message: AssistantErrorLike) => boolean }
-          | undefined;
-        const isRetryable = Boolean(
-          patchedSession?._isRetryableError?.(lastAssistant as unknown as AssistantErrorLike),
-        );
-        if (isRetryable) {
-          return;
-        }
+      const lastAssistantLike = lastAssistant as unknown as AssistantErrorLike;
+      if (!isBranchableRetryableError(lastAssistantLike)) {
+        return;
       }
-      retryStatusActiveSessions.delete(sessionId);
-      const ui = uiBySessionId.get(sessionId);
-      ui?.setStatus(STATUS_KEY, undefined);
+      const reason =
+        classifyRetryableProviderError(lastAssistantLike.errorMessage) ?? 'providerServerError';
+      branchLatestAssistantErrorOutOfMainPath(
+        { sessionManager: ctx.sessionManager as any },
+        {
+          attempt: 0,
+          errorMessage: lastAssistantLike.errorMessage ?? '',
+          reason,
+        },
+      );
     });
 
     pi.on('session_shutdown', async (_event, ctx) => {

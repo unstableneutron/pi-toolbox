@@ -166,6 +166,110 @@ describe('notify extension', () => {
     );
   });
 
+  test('skips scheduling when the final assistant message ended with an error', async () => {
+    vi.useFakeTimers();
+    delete process.env.KITTY_WINDOW_ID;
+
+    const harness = createHarness();
+    const writeSpy = installWriteSpy();
+
+    await harness.handlers.get('turn_start')?.({ type: 'turn_start', timestamp: 1 }, harness.ctx);
+
+    await harness.handlers.get('agent_end')?.(
+      {
+        type: 'agent_end',
+        messages: [
+          {
+            role: 'assistant',
+            content: [],
+            stopReason: 'error',
+            errorMessage: '{"error":{"message":"Internal server error"}}',
+          },
+        ],
+      },
+      harness.ctx,
+    );
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(writeSpy).not.toHaveBeenCalled();
+  });
+
+  test('skips scheduling when the agent loop was aborted', async () => {
+    vi.useFakeTimers();
+    delete process.env.KITTY_WINDOW_ID;
+
+    const harness = createHarness();
+    const writeSpy = installWriteSpy();
+
+    await harness.handlers.get('turn_start')?.({ type: 'turn_start', timestamp: 1 }, harness.ctx);
+
+    await harness.handlers.get('agent_end')?.(
+      {
+        type: 'agent_end',
+        messages: [
+          {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'partial' }],
+            stopReason: 'aborted',
+          },
+        ],
+      },
+      harness.ctx,
+    );
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(writeSpy).not.toHaveBeenCalled();
+  });
+
+  test('schedules the real notification when a retry succeeds after an error', async () => {
+    vi.useFakeTimers();
+    delete process.env.KITTY_WINDOW_ID;
+
+    const harness = createHarness();
+    const writeSpy = installWriteSpy();
+
+    await harness.handlers.get('turn_start')?.({ type: 'turn_start', timestamp: 1 }, harness.ctx);
+
+    // First agent_end terminates on an error: no notification should fire.
+    await harness.handlers.get('agent_end')?.(
+      {
+        type: 'agent_end',
+        messages: [
+          {
+            role: 'assistant',
+            content: [],
+            stopReason: 'error',
+            errorMessage: 'Internal server error',
+          },
+        ],
+      },
+      harness.ctx,
+    );
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(writeSpy).not.toHaveBeenCalled();
+
+    // Core auto-retry runs `agent.continue()`, which fires a fresh
+    // agent_end whose final assistant message is the successful response.
+    await harness.handlers.get('agent_end')?.(
+      {
+        type: 'agent_end',
+        messages: [
+          {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'Recovered answer' }],
+            stopReason: 'stop',
+          },
+        ],
+      },
+      harness.ctx,
+    );
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(writeSpy).toHaveBeenCalledTimes(1);
+    expect(lastNotification(writeSpy)).toBe('\x1b]777;notify;π ~/.pi/agent;Recovered answer\x07');
+  });
+
   test('ignores non ask_user tool starts', async () => {
     delete process.env.KITTY_WINDOW_ID;
     const harness = createHarness();
