@@ -2002,7 +2002,15 @@ const PATCH_SYNTAX_SENTINELS = [
   /^>>>>>>> REPLACE$/,
 ];
 
-const PREFIX_LEAK_LINE_RE = /^\+[A-Za-z_/#{}()[\]"'`\s]/;
+// Any line that begins with "+" and has at least one more character.
+// Earlier revisions whitelisted a small set of "safe" characters, which
+// missed real leaks where the next char was a digit, "-", "*", "=", or
+// other punctuation (e.g. leaked numbered lists like `+1. attach...`).
+// Such lines failed isMeaningfulPlusLine, broke the trailing-walk in
+// maybeApplyPrefixLeakFix, and left "+"-prefixed content in the file.
+// False positives are handled by the asymmetry, sentinel, and
+// threshold guards downstream — not by an opinionated character class.
+const PREFIX_LEAK_LINE_RE = /^\+[^\n]/;
 const PREFIX_LEAK_MIN_LINES = 3;
 
 function applyChunkAutoFixes(ops: PatchOperation[]): void {

@@ -2226,6 +2226,60 @@ describe('FindReplaceOnce (phase 2)', () => {
     expect(plan.summaryText).toContain('prefix-leak');
   });
 
+  test('autofix: trailing leak with non-alpha first chars (digits, lists) is stripped', async () => {
+    // Regression: the prefix-leak detector previously whitelisted a
+    // narrow set of "safe" characters after "+". A leaked numbered
+    // list line like "+1. ..." failed that whitelist, broke the
+    // trailing-walk early in maybeApplyPrefixLeakFix, and left
+    // "+"-prefixed content in the file. Observed in a gpt-5.5 session
+    // editing docs/specs/210-session-control-lanes.md.
+    const workspace = createVirtualWorkspace('/repo', {
+      '/repo/spec.md': [
+        '## 6. Portl session-control model',
+        '',
+        'The model is provider-neutral and surface-oriented.',
+      ].join('\n'),
+    });
+    const operations = parsePatch(
+      [
+        '*** Begin Patch',
+        '*** Update File: spec.md',
+        '*** FindReplaceOnce:',
+        '<<<<<<< SEARCH',
+        '## 6. Portl session-control model',
+        '',
+        'The model is provider-neutral and surface-oriented.',
+        '======= REPLACE',
+        '## 6. Portl session-control model',
+        '',
+        'The model is provider-neutral and surface-oriented, but the v1 contract',
+        '+should stay intentionally small. The first optimized slice proves four',
+        '+things only:',
+        '+',
+        '+1. attach can show the active viewport before history,',
+        '+2. user interaction stays responsive while lower-priority data moves,',
+        '+3. providers can expose one selected terminal surface through a common',
+        '+   model,',
+        '+4. optimized control can fall back to the v0.4.0 PTY bridge.',
+        '+',
+        '+Full collaborative sharing, provider-independent terminal diffs,',
+        '+native resume, arbitrary multipane UI, and rich telemetry are future',
+        '+extensions. They should not shape the minimum wire/API surface.',
+        '>>>>>>> REPLACE',
+        '*** End Patch',
+      ].join('\n'),
+    );
+    const op = operations[0];
+    if (op?.kind === 'update') {
+      expect(op.chunks[0]?.autoFixed).toEqual(['prefix-leak']);
+      expect(op.chunks[0]?.newLines.some((l) => l.startsWith('+'))).toBe(false);
+    }
+    await applyPatchOperations(operations, workspace, '/repo');
+    const content = await workspace.readText('/repo/spec.md');
+    expect(content).not.toMatch(/^\+/m);
+    expect(content).toContain('1. attach can show the active viewport before history,');
+  });
+
   test('hunk-suggestion: failing @@ hunk error includes FindReplaceOnce rewrite', async () => {
     const workspace = createVirtualWorkspace('/repo', {
       '/repo/foo.ts': ['alpha', 'beta', 'gamma'].join('\n'),
