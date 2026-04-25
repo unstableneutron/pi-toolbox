@@ -714,7 +714,9 @@ describe('tryRewriteBash — cheap prefix gate', () => {
     'for i in a b c; do echo $i; done',
     'if [ -f foo ]; then cat foo; fi',
     'FOO=bar grep foo file',
-    '/usr/bin/grep foo file',
+    // NOTE: `/usr/bin/grep foo file` is now a candidate (see the
+    // "absolute-path builtin prefix" suite). Keep sudo/quoted-command
+    // shapes here since they still bail.
     'sudo grep foo /etc/passwd',
     '"grep" foo file',
     'rm -rf /tmp/junk',
@@ -841,5 +843,126 @@ describe('tryRewriteBash — cat -A notice-only (BSD cat incompatibility)', () =
   test('cat FILE (no flags) still routes to read, not the notice path', () => {
     const r = rewrite('cat file.ts');
     expect(r?.decision).toMatchObject({ tool: 'read', params: { path: 'file.ts' } });
+  });
+});
+
+describe('tryRewriteBash — absolute-path builtin prefix', () => {
+  test('/usr/bin/grep PAT FILE → fff_grep', () => {
+    const r = rewrite('/usr/bin/grep -n foo src/router.ts');
+    expect(r?.decision).toMatchObject({
+      tool: 'fff_grep',
+      params: { patterns: ['foo'], within: 'src', glob: 'router.ts' },
+      recognizer: 'grep-search',
+    });
+  });
+
+  test('/opt/homebrew/bin/rg PAT → fff_grep', () => {
+    const r = rewrite('/opt/homebrew/bin/rg -i ActorAuth src/');
+    expect(r?.decision).toMatchObject({
+      tool: 'fff_grep',
+      params: { patterns: ['ActorAuth'], within: 'src/', case_sensitive: false },
+      recognizer: 'rg-search',
+    });
+  });
+
+  test('/bin/cat FILE → read', () => {
+    const r = rewrite('/bin/cat package.json');
+    expect(r?.decision).toMatchObject({ tool: 'read', params: { path: 'package.json' } });
+  });
+
+  test('cd X && /usr/bin/grep PAT FILE | head -N → fff_grep with limit', () => {
+    const r = rewrite('cd /repo/pkg && /usr/bin/grep -n "pub mod" crates/foo/src/lib.rs | head -5');
+    expect(r?.decision).toMatchObject({
+      tool: 'fff_grep',
+      params: { patterns: ['pub mod'], limit: 5 },
+    });
+  });
+
+  test('/usr/local/bin/fd PAT DIR → fff_find_files', () => {
+    const r = rewrite('/usr/local/bin/fd router src/');
+    expect(r?.decision).toMatchObject({
+      tool: 'fff_find_files',
+      params: { query: 'router', within: 'src/' },
+    });
+  });
+
+  test('unknown absolute path (e.g. /opt/mytool/bin/grep) → pass through', () => {
+    // Only the standard builtin locations are stripped. User-installed tools
+    // at other paths must keep the full path and get no rewrite.
+    expect(rewrite('/opt/mytool/bin/grep foo bar.ts')).toBeNull();
+  });
+});
+
+describe('tryRewriteBash — leading `command` shell-builtin prefix', () => {
+  test('command grep PAT FILE → fff_grep', () => {
+    const r = rewrite('command grep -n foo src/router.ts');
+    expect(r?.decision).toMatchObject({
+      tool: 'fff_grep',
+      params: { patterns: ['foo'], within: 'src', glob: 'router.ts' },
+    });
+  });
+
+  test('command cat FILE → read', () => {
+    const r = rewrite('command cat package.json');
+    expect(r?.decision).toMatchObject({ tool: 'read', params: { path: 'package.json' } });
+  });
+
+  test('command /usr/bin/grep PAT FILE → fff_grep (both prefixes stripped)', () => {
+    const r = rewrite('command /usr/bin/grep -n foo src/router.ts');
+    expect(r?.decision).toMatchObject({
+      tool: 'fff_grep',
+      params: { patterns: ['foo'] },
+    });
+  });
+
+  test('cd X && command grep PAT FILE → fff_grep', () => {
+    const r = rewrite('cd /repo && command grep "pub mod" src/lib.rs');
+    expect(r?.decision).toMatchObject({
+      tool: 'fff_grep',
+      params: { patterns: ['pub mod'] },
+    });
+  });
+
+  test('`command` alone without a tool → pass through', () => {
+    // Bare `command` is not itself a rewrite target.
+    expect(rewrite('command')).toBeNull();
+  });
+});
+
+describe('tryRewriteBash — cat FILE | sed -n range pipeline', () => {
+  test("cat FILE | sed -n '10,50p' → read(offset=10, limit=41)", () => {
+    const r = rewrite("cat src/router.ts | sed -n '10,50p'");
+    expect(r?.decision).toMatchObject({
+      tool: 'read',
+      params: { path: 'src/router.ts', offset: 10, limit: 41 },
+      recognizer: 'cat-sed-range',
+    });
+  });
+
+  test("cat FILE | sed -n '42p' → single-line read(offset=42, limit=1)", () => {
+    const r = rewrite("cat README.md | sed -n '42p'");
+    expect(r?.decision).toMatchObject({
+      tool: 'read',
+      params: { path: 'README.md', offset: 42, limit: 1 },
+      recognizer: 'cat-sed-range',
+    });
+  });
+
+  test('cd X && cat FILE | sed -n range → read', () => {
+    const r = rewrite("cd /tmp && cat a.txt | sed -n '1,5p'");
+    expect(r?.decision).toMatchObject({
+      tool: 'read',
+      params: { path: 'a.txt', offset: 1, limit: 5 },
+      recognizer: 'cat-sed-range',
+    });
+  });
+
+  test('cat FILE | sed with substitution → pass through (not a range read)', () => {
+    expect(rewrite("cat a.txt | sed 's/foo/bar/'")).toBeNull();
+  });
+
+  test('cat FILE | sed -n with other expression → pass through', () => {
+    // `/pattern/p` is a regex address, not a numeric range.
+    expect(rewrite("cat a.txt | sed -n '/foo/p'")).toBeNull();
   });
 });

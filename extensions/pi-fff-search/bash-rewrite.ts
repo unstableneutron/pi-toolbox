@@ -146,8 +146,37 @@ const FIRST_TOKEN_ALLOWLIST: ReadonlySet<string> = new Set([
 /** Commands longer than this are assumed to be heredocs / inline scripts and skipped. */
 const MAX_REWRITE_CANDIDATE_LENGTH = 4096;
 
-/** Match the first word-like token, ignoring leading whitespace. */
-const FIRST_TOKEN_PATTERN = /^\s*([A-Za-z][A-Za-z0-9_-]*)/;
+/**
+ * Absolute-path prefixes for the standard binary locations Claude Code,
+ * zsh, and a handful of other setups prepend when invoking builtin tools
+ * (e.g. `/usr/bin/grep`, `/opt/homebrew/bin/rg`). Stripped during
+ * classification so the downstream recognizers only see bare names.
+ *
+ * Keep this list tight: expanding it to every directory on `$PATH` would
+ * start matching user-installed tools that happen to share a name with a
+ * builtin but behave differently.
+ */
+const BINARY_PATH_PREFIX_PATTERN =
+  /^(?:\/usr\/local\/bin\/|\/opt\/homebrew\/bin\/|\/usr\/bin\/|\/bin\/)/;
+
+function stripBinaryPathPrefix(token: string): string {
+  return token.replace(BINARY_PATH_PREFIX_PATTERN, '');
+}
+
+/**
+ * Match the first program-like token, ignoring leading whitespace. Tolerates
+ * two common prefixes that otherwise cause false-negative gate rejections:
+ *   - `command <tool>` — shell builtin that bypasses aliases/functions.
+ *     We only strip when followed by a bare identifier; `command` as a
+ *     verb in other contexts (e.g. `command &&`) is rejected by the
+ *     identifier capture below.
+ *   - `/usr/bin/<tool>` (and friends) — see BINARY_PATH_PREFIX_PATTERN.
+ *
+ * Only captures the bare tool name; the downstream token walk re-validates
+ * the full command shape.
+ */
+const FIRST_TOKEN_PATTERN =
+  /^\s*(?:command\s+)?(?:\/usr\/local\/bin\/|\/opt\/homebrew\/bin\/|\/usr\/bin\/|\/bin\/)?([A-Za-z][A-Za-z0-9_-]*)/;
 
 /**
  * Cheap gate that runs before the shell-quote parser. Rejects:
@@ -155,12 +184,13 @@ const FIRST_TOKEN_PATTERN = /^\s*([A-Za-z][A-Za-z0-9_-]*)/;
  *   - commands longer than MAX_REWRITE_CANDIDATE_LENGTH
  *   - multi-line commands (heredocs, inline scripts, for/while bodies)
  *   - first token outside FIRST_TOKEN_ALLOWLIST
- *   - commands that start with an absolute path, `sudo`, `env`, variable
- *     assignment, quoted command, etc. — the regex simply doesn't match a bare
- *     identifier in those shapes, so they fall through naturally.
+ *   - commands that start with an unsupported absolute path, `sudo`,
+ *     `env`, variable assignment, quoted command, etc. — the regex
+ *     simply doesn't match a bare identifier in those shapes, so they
+ *     fall through naturally.
  *
- * Corpus data (522 real bash invocations): ~34% of commands are rejected here,
- * skipping shell-quote entirely. For the 66% that pass, the downstream walk
+ * Corpus data (2434 real bash invocations): ~34% of commands are rejected
+ * here, skipping shell-quote entirely. For the rest, the downstream walk
  * remains the source of truth.
  */
 function looksLikeRewriteCandidate(cmd: string): boolean {
@@ -307,6 +337,34 @@ function stripTrivialTrailingRedirects(tokens: Token[]): Token[] {
     break;
   }
   return work;
+}
+
+/**
+ * Normalize the leading program-name token of a pipe stage / chain segment:
+ *   - strip a leading `command` shell-builtin token (used to bypass aliases,
+ *     e.g. `command grep -n PAT FILE` → `grep -n PAT FILE`).
+ *   - strip absolute-path prefixes for builtin binaries (`/usr/bin/grep`,
+ *     `/opt/homebrew/bin/rg`, …) so the downstream classifiers match their
+ *     bare `strs[0] === 'grep'` checks.
+ *
+ * Returns the same array reference when nothing changed so the caller can
+ * cheaply detect and skip the no-op case.
+ */
+function normalizeStageFirstToken(stage: Token[]): Token[] {
+  if (stage.length === 0) return stage;
+  let start = 0;
+  if (stage.length >= 2 && stage[0] === 'command' && isStringToken(stage[1]!)) {
+    start = 1;
+  }
+  const first = stage[start];
+  if (typeof first !== 'string') {
+    return start === 0 ? stage : stage.slice(start);
+  }
+  const normalized = stripBinaryPathPrefix(first);
+  if (normalized === first && start === 0) return stage;
+  const copy = stage.slice(start);
+  copy[0] = normalized;
+  return copy;
 }
 
 /** Split a single chain segment on `|` into pipe stages. */
@@ -960,6 +1018,29 @@ function classifySedRange(tokens: Token[]): RewriteDecision | null {
   };
 }
 
+/**
+ * Match the "filter" form of a sed range — `sed -n 'N,Mp'` (or `sed -n 'Np'`)
+ * with no FILE argument. This shape only makes sense as a stdin consumer in
+ * a pipeline (the second stage of `cat FILE | sed -n 'N,Mp'`); the source
+ * file arrives via the upstream stage. Returns the resolved offset/limit,
+ * or null for anything else.
+ *
+ * Intentionally paired with — not merged into — `classifySedRange`: the
+ * single-stage recognizer wants a FILE arg, this one requires its absence.
+ */
+function extractSedRangeFilter(tokens: Token[]): { offset: number; limit: number } | null {
+  const strs = asStrings(tokens);
+  if (!strs || strs[0] !== 'sed') return null;
+  if (strs.length !== 3) return null;
+  if (strs[1] !== '-n') return null;
+  const m = /^(\d+)(?:,(\d+))?p$/.exec(strs[2]!);
+  if (!m) return null;
+  const start = Number(m[1]);
+  const end = m[2] !== undefined ? Number(m[2]) : start;
+  if (start < 1 || end < start) return null;
+  return { offset: start, limit: end - start + 1 };
+}
+
 const SINGLE_STAGE_CLASSIFIERS = [
   classifyCat,
   classifyLs,
@@ -1178,7 +1259,9 @@ export function tryRewriteBash(cmd: string, _cwd: string): RewriteResult | null 
   const pipeStages = splitPipeStages(stripped);
   if (!pipeStages) return null;
 
-  const strippedStages = pipeStages.map(stripTrivialTrailingRedirects);
+  const strippedStages = pipeStages
+    .map(stripTrivialTrailingRedirects)
+    .map(normalizeStageFirstToken);
 
   // Reject any stage that still contains a redirect operator after stripping —
   // those are real redirects we don't understand, not noise.
@@ -1205,8 +1288,30 @@ export function tryRewriteBash(cmd: string, _cwd: string): RewriteResult | null 
     return notice ? { notice: notice.notice } : null;
   }
 
-  // Two-stage: `<search> | head -N`
+  // Two-stage: `<search> | head -N`, or `cat FILE | sed -n 'N,Mp'`.
   if (strippedStages.length === 2) {
+    // `cat FILE | sed -n 'N,Mp'` → read(path=FILE, offset=N, limit=M-N+1).
+    // Recognizing this shape matters because the model often reaches for the
+    // pipeline form (muscle memory from `sed`'s stdin-filter usage) even when
+    // the pure `sed -n 'N,Mp' FILE` is available. Both collapse to the same
+    // read call; catching the pipeline form here saves a round-trip through
+    // bash.
+    const sedRange = extractSedRangeFilter(strippedStages[1]!);
+    if (sedRange) {
+      const catDecision = classifyCat(strippedStages[0]!);
+      if (catDecision && catDecision.recognizer === 'cat-file') {
+        const d: RewriteDecision = {
+          tool: 'read',
+          params: {
+            path: catDecision.params.path,
+            offset: sedRange.offset,
+            limit: sedRange.limit,
+          },
+          recognizer: 'cat-sed-range',
+        };
+        return { decision: d, notice: formatNotice(cmd.trim(), d) };
+      }
+    }
     const limit = extractHeadLimit(strippedStages[1]!);
     if (limit === null) {
       // Even without a rewriteable pipeline shape, a notice on the
