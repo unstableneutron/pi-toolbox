@@ -4,7 +4,7 @@
   },
   "modelToolPolicies": [
     {
-      "match": ["gpt-5.3", "gpt-5.4", "claude-opus-4-7"],
+      "match": ["gpt-5", "claude-opus-4-7"],
       "disable": ["edit", "write"]
     }
   ],
