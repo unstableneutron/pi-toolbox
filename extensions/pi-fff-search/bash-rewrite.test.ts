@@ -156,8 +156,65 @@ describe('tryRewriteBash — grep rewrites', () => {
     expect(rewrite('grep -l "foo" file.ts')).toBeNull();
   });
 
-  test('grep with multiple paths → pass through', () => {
-    expect(rewrite('grep foo a.ts b.ts c.ts')).toBeNull();
+  test('grep with multiple paths → fff_grep with within array (union semantics)', () => {
+    // fff-router accepts `within: string[]` and unions the entries via
+    // brace-expansion on fff-mcp or positional-arg spread on rg, matching
+    // `grep PAT file1 file2 file3`'s per-file output.
+    const r = rewrite('grep foo a.ts b.ts c.ts');
+    expect(r?.decision).toMatchObject({
+      tool: 'fff_grep',
+      params: {
+        patterns: ['foo'],
+        literal: true,
+        within: ['a.ts', 'b.ts', 'c.ts'],
+      },
+      recognizer: 'grep-search',
+    });
+    // No glob split when multi-path — the adapter classifies each entry
+    // as file vs dir at constraint-compile time.
+    expect(r?.decision?.params.glob).toBeUndefined();
+  });
+
+  test('grep with multiple paths + --include= → pass through', () => {
+    // Mixing multi-path `within` with a single glob would require per-entry
+    // globs, which fff_grep's API doesn't express.
+    expect(rewrite('grep --include="*.ts" foo src/ tests/')).toBeNull();
+  });
+
+  test('grep with mixed file + dir paths → multi-path within', () => {
+    const r = rewrite('grep -rn foo src/ lib/utils.ts');
+    expect(r?.decision).toMatchObject({
+      tool: 'fff_grep',
+      params: {
+        patterns: ['foo'],
+        literal: true,
+        within: ['src/', 'lib/utils.ts'],
+      },
+    });
+  });
+
+  test('cd X && grep PAT file1 file2 → multi-path within', () => {
+    const r = rewrite('cd /repo && grep rustls crates/portl-cli/Cargo.toml Cargo.toml');
+    expect(r?.decision).toMatchObject({
+      tool: 'fff_grep',
+      params: {
+        patterns: ['rustls'],
+        within: ['crates/portl-cli/Cargo.toml', 'Cargo.toml'],
+      },
+    });
+  });
+
+  test('grep PAT file1 file2 | head -N → multi-path within with limit', () => {
+    const r = rewrite('grep foo a.ts b.ts | head -20');
+    expect(r?.decision).toMatchObject({
+      tool: 'fff_grep',
+      params: {
+        patterns: ['foo'],
+        within: ['a.ts', 'b.ts'],
+        limit: 20,
+      },
+      recognizer: 'grep-search+head',
+    });
   });
 
   test('grep -- PAT FILE with end-of-opts marker', () => {

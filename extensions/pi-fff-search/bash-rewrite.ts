@@ -572,6 +572,11 @@ const GREP_DISALLOWED_SHORT = new Set(['v', 'o', 'l', 'L', 'c', 'q', 'x', 'Z', '
  * and more robust to engine-flavor differences.
  */
 const REGEX_META_PATTERN = /[.*+?^$[\](){}|\\]/;
+// Shell metacharacters that should never appear inside a legitimate file/dir
+// token — their presence signals that shell-quote couldn't fully parse the
+// construct (e.g. backticks from `grep PAT `which foo``) and the remaining
+// literal escaped into our path list.
+const SHELL_META_IN_PATH_PATTERN = /[`$()<>&|;]/;
 
 /**
  * BRE-specific escape sequences whose meaning differs between GNU BRE grep
@@ -763,8 +768,24 @@ function classifyGrep(tokens: Token[]): RewriteDecision | null {
       params.within = target;
     }
   } else if (paths.length > 1) {
-    // fff_grep's `within` is a single path. Multiple paths cannot be mapped cleanly.
-    return null;
+    // Multi-path grep (`grep PAT file1 file2 dir/`) maps to fff_grep's array
+    // form of `within`. fff-router unions the entries via brace-expansion on
+    // fff-mcp or spread positional args on rg, preserving grep's per-file
+    // output semantics. Bail if the caller passed a glob/include — mixing
+    // multi-path with a glob would require per-entry globs, which the API
+    // doesn't express. An `--exclude=` / `--exclude-dir=` is still fine; it
+    // applies uniformly across all entries.
+    if (flags.glob !== undefined) return null;
+    // Reject paths that contain shell metacharacters — shell-quote keeps
+    // backticks as literal string content (e.g. `grep foo `which ls``
+    // tokenizes to `["`which", "ls`"]`), so a naive multi-path emit would
+    // pass those through to the tool as fake paths. Filenames legitimately
+    // contain `.`, `/`, `-`, `_`, but not ` $ ( ) < > & | ; ` — bail on
+    // any of those.
+    for (const p of paths) {
+      if (SHELL_META_IN_PATH_PATTERN.test(p)) return null;
+    }
+    params.within = paths;
   }
   if (flags.caseSensitive === false) params.case_sensitive = false;
   if (flags.contextLines !== undefined) params.context_lines = flags.contextLines;
