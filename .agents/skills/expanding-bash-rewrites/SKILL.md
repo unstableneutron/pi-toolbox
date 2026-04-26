@@ -33,7 +33,7 @@ Sample 3–5 commands from each top cluster, then classify:
 
 - **Rewritable** — simple shape, safe semantics, maps to a target tool (e.g. `/usr/bin/grep PAT FILE`, `cat FILE | sed -n 'N,Mp'`).
 - **Not a candidate** — build tools (`cargo`, `pnpm`), vcs (`git`, `gh`), shell flow (`for`, `if`), edit ops (`sed -i`), env-prefixed invocations.
-- **Intentional pass-through** — existing recognizer deliberately bails (`grep -c`, multi-file grep, `find -o`).
+- **Intentional pass-through** — existing recognizer deliberately bails (`grep -c`, `find -o` boolean, multi-file `head`/`cat` with order-dependent output).
 
 If rewritable, identify what's blocking the existing recognizer (first-token match, flag handling, stage count, redirect shape).
 
@@ -45,6 +45,13 @@ jq -r '.command' test-fixtures/bash-corpus.local.jsonl \
   | sort | uniq -c | sort -rn | head -20
 ```
 
+For a sharper lens on "is this specific shape passing through, and why," use the probe script — it runs every command through `tryRewriteBash` and samples unique pass-through shapes per first-token:
+
+```shell
+./scripts/probe-passthrough.ts test-fixtures/bash-corpus.local.jsonl grep 20
+./scripts/probe-passthrough.ts test-fixtures/bash-corpus.local.jsonl head 20
+```
+
 ## Current recognizer inventory
 
 Read this before adding anything new — your target may already exist and just need one flag or shape loosened.
@@ -54,7 +61,7 @@ Read this before adding anything new — your target may already exist and just 
 | `cat-file`          | `cat FILE`                                | `read(path)`                       |
 | `ls-dir`            | `ls [flags] [PATH]`                       | `ls(path?)`                        |
 | `head-n-file`       | `head [-N] FILE`                          | `read(path, limit?)`               |
-| `grep-search`       | `grep/rg/egrep/fgrep PAT [FILE]`          | `fff_grep(patterns, within, …)`    |
+| `grep-search`       | `grep/rg/egrep/fgrep PAT [FILE ...]`      | `fff_grep(patterns, within, …)` — multi-path emits `within: string[]` |
 | `find-name-glob`    | `find PATH -name GLOB`                    | `fff_find_files(query, glob)`      |
 | `fd-search`         | `fd PAT [PATH]`                           | `fff_find_files(query, within?)`   |
 | `sed-range-print`   | `sed -n 'N,Mp' FILE`                      | `read(path, offset, limit)`        |
