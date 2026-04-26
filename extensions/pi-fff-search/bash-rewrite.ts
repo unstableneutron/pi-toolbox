@@ -1019,6 +1019,28 @@ function classifySedRange(tokens: Token[]): RewriteDecision | null {
 }
 
 /**
+ * Match the "filter" form of grep — `grep PAT` (and its egrep/fgrep/rg
+ * aliases) with no positional FILE argument, meaning it acts as a stdin
+ * consumer in a pipeline (the second stage of `cat FILE | grep PAT`).
+ * Returns the grep decision's params (patterns, literal, context_lines,
+ * case_sensitive, …) — everything except the missing `within`. Returns
+ * null for any grep shape we don't understand, and for stdin-grep that
+ * already carries a positional FILE (which would race with the cat
+ * stage's file claim).
+ *
+ * Intentionally paired with — not merged into — `classifyGrep`: the
+ * single-stage recognizer accepts one FILE arg (and maps it to `within`);
+ * this one requires its absence so the source file can come from the
+ * upstream `cat`.
+ */
+function extractGrepFilter(tokens: Token[]): RewriteDecision | null {
+  const decision = classifyGrep(tokens);
+  if (!decision) return null;
+  if ('within' in decision.params) return null;
+  return decision;
+}
+
+/**
  * Match the "filter" form of a sed range — `sed -n 'N,Mp'` (or `sed -n 'Np'`)
  * with no FILE argument. This shape only makes sense as a stdin consumer in
  * a pipeline (the second stage of `cat FILE | sed -n 'N,Mp'`); the source
@@ -1289,8 +1311,40 @@ export function tryRewriteBash(cmd: string, _cwd: string): RewriteResult | null 
     return notice ? { notice: notice.notice } : null;
   }
 
-  // Two-stage: `<search> | head -N`, or `cat FILE | sed -n 'N,Mp'`.
+  // Two-stage: `<search> | head -N`, `cat FILE | sed -n 'N,Mp'`, or
+  // `cat FILE | grep PAT`.
   if (strippedStages.length === 2) {
+    // `cat FILE | grep PAT` → fff_grep over FILE with PAT. The pipeline
+    // shape is common muscle memory for "search this file" that the
+    // single-stage grep recognizer doesn't catch (it wants the file as
+    // grep's own positional argument). Composing preserves grep's flag
+    // handling (context lines, case-insensitive, alternation, etc.) via
+    // the shared `classifyGrep` parser.
+    const grepFilter = extractGrepFilter(strippedStages[1]!);
+    if (grepFilter) {
+      const catDecision = classifyCat(strippedStages[0]!);
+      if (catDecision && catDecision.recognizer === 'cat-file') {
+        const catPath = catDecision.params.path as string;
+        const params: Record<string, unknown> = { ...grepFilter.params };
+        // Apply the same file-like split policy as the single-stage grep
+        // recognizer so behaviour stays consistent with `grep PAT FILE`.
+        // An explicit `--include=` on the stdin-consuming grep would be a
+        // no-op in real bash, so we ignore it in favour of the cat path.
+        if (looksLikeFileTarget(catPath)) {
+          params.within = pathDirname(catPath);
+          params.glob = pathBasename(catPath);
+        } else {
+          params.within = catPath;
+          delete params.glob;
+        }
+        const d: RewriteDecision = {
+          tool: 'fff_grep',
+          params,
+          recognizer: 'cat-grep',
+        };
+        return { decision: d, notice: formatNotice(cmd.trim(), d) };
+      }
+    }
     // `cat FILE | sed -n 'N,Mp'` → read(path=FILE, offset=N, limit=M-N+1).
     // Recognizing this shape matters because the model often reaches for the
     // pipeline form (muscle memory from `sed`'s stdin-filter usage) even when

@@ -979,3 +979,60 @@ describe('tryRewriteBash — cat FILE | sed -n range pipeline', () => {
     expect(rewrite("cat a.txt | sed -n '/foo/p'")).toBeNull();
   });
 });
+
+describe('tryRewriteBash — cat FILE | grep pattern pipeline', () => {
+  test('cat FILE | grep PAT → fff_grep with file-like split', () => {
+    const r = rewrite('cat crates/portl-cli/src/lib.rs | grep -n "Shell" -A 10');
+    expect(r?.decision).toMatchObject({
+      tool: 'fff_grep',
+      params: {
+        patterns: ['Shell'],
+        literal: true,
+        within: 'crates/portl-cli/src',
+        glob: 'lib.rs',
+        context_lines: 10,
+      },
+      recognizer: 'cat-grep',
+    });
+  });
+
+  test('cat FILE | grep -iE PAT preserves case flag and alternation', () => {
+    const r = rewrite('cat src/router.ts | grep -iE "foo|bar"');
+    expect(r?.decision).toMatchObject({
+      tool: 'fff_grep',
+      params: {
+        patterns: ['foo', 'bar'],
+        literal: true,
+        case_sensitive: false,
+        within: 'src',
+        glob: 'router.ts',
+      },
+      recognizer: 'cat-grep',
+    });
+  });
+
+  test('cd X && cat FILE | grep PAT → fff_grep (cd prefix not inlined into path)', () => {
+    // Matching the cat-sed-range convention: the `cd` prefix is accepted as
+    // a chain prefix but the cat path is preserved as-is. Here `a.log` has
+    // no directory component, so dirname collapses to `.`.
+    const r = rewrite('cd /tmp && cat a.log | grep "boom"');
+    expect(r?.decision).toMatchObject({
+      tool: 'fff_grep',
+      params: { patterns: ['boom'], within: '.', glob: 'a.log' },
+      recognizer: 'cat-grep',
+    });
+  });
+
+  test('cat FILE1 FILE2 | grep PAT → pass through (multi-file cat)', () => {
+    // classifyCat requires exactly one file, so the pipeline bails.
+    expect(rewrite('cat a.txt b.txt | grep "foo"')).toBeNull();
+  });
+
+  test('cat FILE | grep -v PAT → pass through (inverted match unsupported)', () => {
+    expect(rewrite('cat a.txt | grep -v "foo"')).toBeNull();
+  });
+
+  test('cat FILE | grep -c PAT → pass through (count-only unsupported)', () => {
+    expect(rewrite('cat a.txt | grep -c "foo"')).toBeNull();
+  });
+});
