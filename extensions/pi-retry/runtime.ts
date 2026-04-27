@@ -221,6 +221,10 @@ export function classifyRetryableProviderError(
     return 'providerServerError';
   }
 
+  if (text.includes('unknown error (no error details in response)')) {
+    return 'providerServerError';
+  }
+
   return undefined;
 }
 

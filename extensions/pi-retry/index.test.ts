@@ -85,6 +85,12 @@ describe('pi-retry extra provider classification', () => {
     ).toBe('providerServerError');
   });
 
+  test('classifies no-details unknown errors as retryable', () => {
+    expect(classifyRetryableProviderError('Unknown error (no error details in response)')).toBe(
+      'providerServerError',
+    );
+  });
+
   test('classifies peak-load provisioned-throughput failures as retryable', () => {
     expect(
       classifyRetryableProviderError(
