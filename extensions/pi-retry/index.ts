@@ -191,6 +191,60 @@ function isAssistantErrorEntry(entry: Record<string, any> | undefined): boolean 
   );
 }
 
+function normalizeToolCallId(value: unknown): string | undefined {
+  if ('string' !== typeof value || value.trim().length === 0) {
+    return undefined;
+  }
+  return value.split('|', 1)[0];
+}
+
+function rememberOpenToolCallId(openToolCallIds: Set<string>, value: unknown): void {
+  const normalized = normalizeToolCallId(value);
+  if (!normalized) {
+    return;
+  }
+  openToolCallIds.add(normalized);
+}
+
+function messageContentParts(message: Record<string, unknown>): Array<Record<string, unknown>> {
+  return Array.isArray(message.content) ? (message.content as Array<Record<string, unknown>>) : [];
+}
+
+function filterOrphanToolResults(sessionContext: SessionContextLike): SessionContextLike {
+  const openToolCallIds = new Set<string>();
+  let changed = false;
+  const filteredMessages: Array<Record<string, unknown>> = [];
+
+  for (const message of sessionContext.messages) {
+    if (message.role === 'toolResult') {
+      const normalizedToolCallId = normalizeToolCallId(
+        (message as { toolCallId?: unknown }).toolCallId,
+      );
+      const hasMatchingToolCall =
+        normalizedToolCallId !== undefined && openToolCallIds.has(normalizedToolCallId);
+
+      if (!hasMatchingToolCall) {
+        changed = true;
+        continue;
+      }
+
+      openToolCallIds.delete(normalizedToolCallId);
+    }
+
+    filteredMessages.push(message);
+
+    if (message.role === 'assistant') {
+      for (const part of messageContentParts(message)) {
+        if (part.type === 'toolCall') {
+          rememberOpenToolCallId(openToolCallIds, part.id);
+        }
+      }
+    }
+  }
+
+  return changed ? { ...sessionContext, messages: filteredMessages } : sessionContext;
+}
+
 function isAssistantNonErrorMessage(node: SessionTreeNodeLike | undefined): boolean {
   const entry = node?.entry;
   return (
@@ -260,9 +314,10 @@ export function filterSessionContextForRetryDisplay(
   pathEntries: Array<Record<string, any>>,
   leafId?: string | null,
 ): SessionContextLike {
+  const sanitizedContext = filterOrphanToolResults(sessionContext);
   const hiddenRecoveryEntries = pathEntries.filter(isHiddenRetryRecoveryEntry);
   if (hiddenRecoveryEntries.length === 0) {
-    return sessionContext;
+    return sanitizedContext;
   }
 
   const keepTrailingRecoveryCount =
@@ -277,7 +332,7 @@ export function filterSessionContextForRetryDisplay(
   }
 
   let dropped = 0;
-  const filteredMessages = sessionContext.messages.filter((message) => {
+  const filteredMessages = sanitizedContext.messages.filter((message) => {
     if (dropped >= hiddenMessagesToDrop || !isHiddenRetryRecoveryCustomMessage(message)) {
       return true;
     }
@@ -285,7 +340,7 @@ export function filterSessionContextForRetryDisplay(
     return false;
   });
 
-  return dropped === 0 ? sessionContext : { ...sessionContext, messages: filteredMessages };
+  return dropped === 0 ? sanitizedContext : { ...sanitizedContext, messages: filteredMessages };
 }
 
 function cloneEntryWithParent(
@@ -818,9 +873,6 @@ export function createPiRetryExtension(
       };
       const pathEntries =
         typeof sessionManagerLike.getBranch === 'function' ? sessionManagerLike.getBranch() : [];
-      if (pathEntries.length === 0) {
-        return undefined;
-      }
       const leafId =
         typeof sessionManagerLike.getLeafId === 'function'
           ? sessionManagerLike.getLeafId()

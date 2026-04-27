@@ -91,6 +91,14 @@ describe('pi-retry extra provider classification', () => {
     );
   });
 
+  test('classifies missing-tool-call output errors as retryable', () => {
+    expect(
+      classifyRetryableProviderError(
+        '400 No tool call found for function call output with call_id call_t9dSFr1B217OEXGFGKzOL5vw.',
+      ),
+    ).toBe('providerServerError');
+  });
+
   test('classifies peak-load provisioned-throughput failures as retryable', () => {
     expect(
       classifyRetryableProviderError(
@@ -523,6 +531,94 @@ describe('pi-retry patch installation', () => {
 
     const result = await contextHandler({ type: 'context', messages }, ctx);
     expect(result).toBeUndefined();
+  });
+
+  test('filters orphan tool results from context before provider calls', async () => {
+    const fakeModule = makeFakeAgentSessionModule();
+    const loader = vi.fn().mockResolvedValue(fakeModule);
+
+    const { handlers, ctx } = await createExtensionHarness(loader);
+
+    (ctx.sessionManager as any).getBranch = () => [
+      { id: 'user-1', parentId: null, type: 'message' },
+      { id: 'assistant-1', parentId: 'user-1', type: 'message' },
+      { id: 'result-1', parentId: 'assistant-1', type: 'message' },
+      { id: 'orphan-result', parentId: 'result-1', type: 'message' },
+    ];
+    (ctx.sessionManager as any).getLeafId = () => 'orphan-result';
+
+    const contextHandler = getHandler(handlers, 'context');
+    const validToolResult = {
+      role: 'toolResult',
+      toolCallId: 'toolu_valid|fc_valid',
+      toolName: 'bash',
+      content: [{ type: 'text', text: 'valid output' }],
+    };
+    const orphanToolResult = {
+      role: 'toolResult',
+      toolCallId: 'toolu_orphan|fc_orphan',
+      toolName: 'bash',
+      content: [{ type: 'text', text: 'orphan output' }],
+    };
+    const messages = [
+      { role: 'user', content: [{ type: 'text', text: 'Do the thing' }] },
+      {
+        role: 'assistant',
+        content: [{ type: 'toolCall', id: 'toolu_valid|fc_valid', name: 'bash', arguments: {} }],
+      },
+      validToolResult,
+      orphanToolResult,
+    ];
+
+    const result = await contextHandler({ type: 'context', messages }, ctx);
+
+    expect(result).toEqual({
+      messages: [messages[0], messages[1], validToolResult],
+    });
+  });
+
+  test('filters duplicate tool results after their tool call is matched once', async () => {
+    const fakeModule = makeFakeAgentSessionModule();
+    const loader = vi.fn().mockResolvedValue(fakeModule);
+
+    const { handlers, ctx } = await createExtensionHarness(loader);
+
+    (ctx.sessionManager as any).getBranch = () => [
+      { id: 'user-1', parentId: null, type: 'message' },
+      { id: 'assistant-1', parentId: 'user-1', type: 'message' },
+      { id: 'result-1', parentId: 'assistant-1', type: 'message' },
+      { id: 'duplicate-result', parentId: 'result-1', type: 'message' },
+    ];
+    (ctx.sessionManager as any).getLeafId = () => 'duplicate-result';
+
+    const contextHandler = getHandler(handlers, 'context');
+    const firstToolResult = {
+      role: 'toolResult',
+      toolCallId: 'call_once|fc_once',
+      toolName: 'bash',
+      content: [{ type: 'text', text: 'first output' }],
+    };
+    const duplicateToolResult = {
+      role: 'toolResult',
+      toolCallId: 'call_once|fc_once',
+      toolName: 'bash',
+      content: [{ type: 'text', text: 'duplicate output' }],
+    };
+    const messages = [
+      { role: 'user', content: [{ type: 'text', text: 'Do the thing' }] },
+      {
+        role: 'assistant',
+        content: [{ type: 'toolCall', id: 'call_once|fc_once', name: 'bash', arguments: {} }],
+      },
+      firstToolResult,
+      duplicateToolResult,
+    ];
+
+    const result = await contextHandler({ type: 'context', messages }, ctx);
+
+    expect(result).toEqual({
+      messages: [messages[0], messages[1], firstToolResult],
+    });
   });
 
   test('fails soft when the internal module shape is unavailable', async () => {

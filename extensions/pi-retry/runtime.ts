@@ -225,6 +225,10 @@ export function classifyRetryableProviderError(
     return 'providerServerError';
   }
 
+  if (text.includes('no tool call found for function call output with call_id')) {
+    return 'providerServerError';
+  }
+
   return undefined;
 }
 
