@@ -4,6 +4,9 @@ description: Autonomous web researcher — searches, evaluates, and synthesizes 
 tools: read, write, web_search, fetch_content, get_search_content
 model: claude-sonnet-4-6
 thinking: low
+systemPromptMode: replace
+inheritProjectContext: true
+inheritSkills: false
 output: research.md
 defaultProgress: true
 ---

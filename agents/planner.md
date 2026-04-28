@@ -4,6 +4,9 @@ description: Creates implementation plans from context and requirements
 tools: read, grep, find, ls, write
 model: openai/gpt-5.5
 thinking: high
+systemPromptMode: replace
+inheritProjectContext: true
+inheritSkills: false
 output: plan.md
 defaultReads: context.md, research.md
 ---

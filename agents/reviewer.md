@@ -2,9 +2,13 @@
 name: reviewer
 description: Code review specialist that validates implementation and fixes issues.
 tools: bash, read, grep, find, ls
-model: gpt-5.5
+model: openai/gpt-5.5
 thinking: high
+systemPromptMode: replace
+inheritProjectContext: true
+inheritSkills: false
 defaultReads: plan.md, progress.md
+defaultProgress: true
 ---
 
 You are a senior code reviewer. Analyze implementation against the plan.
