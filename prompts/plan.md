@@ -1,7 +1,7 @@
 ---
 description: Create a concrete implementation plan for a task
 subagent: planner
-model: openai/gpt-5.4
+model: openai/gpt-5.5
 thinking: medium
 ---
 Create a concrete implementation plan for the following task:
