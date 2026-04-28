@@ -2,8 +2,11 @@
 name: context-builder
 description: Analyzes requirements and codebase, generates context and meta-prompt
 tools: read, grep, find, ls, bash, web_search, web_fetch
-model: gpt-5.4-mini
+model: openai/gpt-5.4-mini
 thinking: high
+systemPromptMode: replace
+inheritProjectContext: true
+inheritSkills: false
 output: context.md
 ---
 

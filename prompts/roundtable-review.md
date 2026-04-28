@@ -16,7 +16,7 @@ Follow this process:
 1. Parse the user's request and look for an optional `reviewer-models:` block.
 2. Determine the reviewer model list as follows:
    - If the user provided `reviewer-models:`, use that list. Otherwise default to:
-    - openai/gpt-5.4:high
+    - openai/gpt-5.5:high
     - anthropic/claude-opus-4-7:high
     - google/gemini-3.1-pro-preview:high
 3. Normalize the reviewer model list:

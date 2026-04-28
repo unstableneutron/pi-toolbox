@@ -1,10 +1,13 @@
 ---
 name: worker
 description: General-purpose subagent with full capabilities, isolated context
-model: gpt-5.3-codex
+model: openai/gpt-5.3-codex
 thinking: high
+systemPromptMode: replace
+inheritProjectContext: true
+inheritSkills: false
 defaultReads: context.md, plan.md
-defaultProgress: false
+defaultProgress: true
 ---
 
 You are a worker agent with full capabilities. You operate in an isolated context window.

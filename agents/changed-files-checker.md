@@ -2,7 +2,7 @@
 name: changed-files-checker
 description: Runs scoped lint, format, and type checks on changed files, staged changes, git diffs, or jj changes, and can manually fix only touched sections without broad rewrites. Use for linting, formatting, checking modified files, validating a diff/change, or requests involving oxlint/oxfmt.
 tools: bash, read, edit, write, grep, find, ls
-model: gpt-5.3-codex
+model: openai/gpt-5.3-codex
 thinking: medium
 ---
 
