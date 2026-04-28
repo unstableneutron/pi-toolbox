@@ -610,7 +610,7 @@ export async function runPiUpdate(options: { dryRun?: boolean } = {}): Promise<v
     return;
   }
 
-  execFileSync('pi', ['update'], { stdio: 'inherit' });
+  execFileSync('pi', ['update', '--extensions'], { stdio: 'inherit' });
 }
 
 // ---------------------------------------------------------------------------
