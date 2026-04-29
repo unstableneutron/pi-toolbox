@@ -49,11 +49,15 @@ export interface UpdateChunk {
   // parsed from a `*** FindReplaceAll:` section.
   replaceAll?: boolean;
   // Parser forgiveness flag. True when the chunk's SEARCH/REPLACE
-  // divider was accepted as bare `=======` (aider / git-conflict
-  // style) instead of the canonical `======= REPLACE`. Surfaced in
-  // the apply_patch summary so the agent learns to prefer the
-  // explicit form next time, without failing the call outright.
+  // divider was accepted as a non-canonical variant instead of the
+  // canonical `======= REPLACE`. Surfaced in the apply_patch summary
+  // so the agent learns to prefer the explicit form next time,
+  // without failing the call outright.
   lenientDivider?: boolean;
+  // Which non-canonical divider form was accepted. `bare` is aider /
+  // git-conflict style `=======`; `compact` is frontier-model drift
+  // like `=======REPLACE` (missing whitespace before REPLACE).
+  dividerStyle?: 'bare' | 'compact';
   // Names of any auto-fixes applied to this chunk's newLines post-parse.
   // The chunk's oldLines are never mutated by autofix. Surfaced in the
   // summary so the agent learns what was changed and why.
@@ -180,13 +184,13 @@ interface ContextMatchFailure {
   nearestMatch?: NearestMatch;
   nearbyIdentifiers?: Array<{ line: number; text: string }>;
   scanTruncated?: boolean;
-  // When the failing chunk is a hunk (`source: 'hunk'`), these
-  // carry the chunk's newLines so the renderer can emit a
-  // FindReplaceOnce-shaped suggestion for the agent. Hunks fail
-  // 3× more often than FindReplace in practice (session-log
-  // analysis, 7-day window); the suggestion converts the error
-  // from "no match" into "here's the FindReplace rewrite that
-  // does the same edit."
+  // When the failing chunk carries replacement text, these preserve
+  // its source and newLines so renderers can emit targeted retry
+  // guidance: hunk failures get a FindReplaceOnce-shaped rewrite,
+  // while FindReplace near-misses can show a corrected SEARCH block
+  // from the current file. Hunks fail 3× more often than FindReplace
+  // in practice (session-log analysis, 7-day window), so keeping the
+  // replacement payload turns failures into copy-pasteable retries.
   chunkSource?: 'hunk' | 'find-replace-once' | 'find-replace-all';
   chunkNewLines?: string[];
 }
@@ -221,11 +225,7 @@ export class PatchPlanFailedError extends Error {
 
   constructor(statuses: PlanOpStatus[]) {
     const failures = statuses.filter((s) => s.failure !== undefined).map((s) => s.failure!);
-    const failedCount = failures.length;
-    const okCount = statuses.length - failedCount;
-    super(
-      `Patch plan failed: ${failedCount} operation(s) would fail; ${okCount} would succeed (all rolled back per atomic policy).`,
-    );
+    super(renderPlanFailure(statuses));
     this.statuses = statuses;
     this.failures = failures;
     this.name = 'PatchPlanFailedError';
@@ -345,8 +345,17 @@ function renderContextNotFound(failure: ContextMatchFailure): string {
   }
   parts.push('');
   parts.push(
+    'Probable cause: the file changed since you read it, or the SEARCH block includes text already edited by an earlier operation.',
+  );
+  parts.push(
     'Tip: rebuild using the actual text above; no re-read needed unless you suspect broader drift.',
   );
+
+  const correctedSearch = maybeRenderCorrectedSearchBlock(failure);
+  if (correctedSearch) {
+    parts.push('');
+    parts.push(correctedSearch);
+  }
 
   const suggestion = maybeRenderHunkRewriteSuggestion(failure);
   if (suggestion) {
@@ -362,6 +371,24 @@ function renderContextNotFound(failure: ContextMatchFailure): string {
 // practice (session-log analysis, 7-day window); this suggestion
 // converts the error from "no match" into "here's a rewrite that
 // does the same edit in a more reliable shape."
+function maybeRenderCorrectedSearchBlock(failure: ContextMatchFailure): string | undefined {
+  if (failure.chunkSource !== 'find-replace-once' && failure.chunkSource !== 'find-replace-all') {
+    return undefined;
+  }
+  const near = failure.nearestMatch;
+  if (!near || near.score < 0.5 || near.actualLines.length === 0) return undefined;
+  if (near.actualLines.every((line) => line.trim().length === 0)) return undefined;
+
+  return [
+    'Corrected SEARCH block from the current file:',
+    '<<<<<<< SEARCH',
+    ...near.actualLines,
+    '======= REPLACE',
+    ...(failure.chunkNewLines ?? []),
+    '>>>>>>> REPLACE',
+  ].join('\n');
+}
+
 function maybeRenderHunkRewriteSuggestion(failure: ContextMatchFailure): string | undefined {
   if (failure.chunkSource !== 'hunk') return undefined;
   const search = failure.expectedLines;
@@ -503,6 +530,7 @@ const FIND_REPLACE_DIVIDER = '======= REPLACE';
 // without setting `lenientDivider` (which is reserved for the
 // genuinely non-canonical bare `=======` aider form).
 const FIND_REPLACE_DIVIDER_RE = /^=======[ \t]+REPLACE[ \t]*$/;
+const FIND_REPLACE_COMPACT_DIVIDER_RE = /^=======REPLACE[ \t]*$/;
 // Aider / git-conflict style bare divider. Accepted as a fallback
 // only when the canonical `======= REPLACE` form is absent from the
 // chunk and exactly one bare `=======` line appears before the end
@@ -840,15 +868,43 @@ function seekAllInWinningTier(
 export class AmbiguousFindReplaceOnceError extends Error {
   readonly filePath: string;
   readonly matchLines: number[];
+  readonly matchPreviews: string[];
 
-  constructor(filePath: string, matchLines: number[]) {
+  constructor(filePath: string, matchLines: number[], matchPreviews: string[] = []) {
+    const previewText = matchPreviews.length > 0 ? `\n${matchPreviews.join('\n\n')}` : '';
     super(
-      `FindReplaceOnce in ${filePath} found ${matchLines.length} matches; expected exactly 1: ${matchLines.map((l) => `line ${l}`).join(', ')}.`,
+      [
+        `FindReplaceOnce in ${filePath} found ${matchLines.length} matches; expected exactly 1: ${matchLines.map((l) => `line ${l}`).join(', ')}.`,
+        previewText,
+        '',
+        'Tip: expand SEARCH with surrounding context to make it unique, or use FindReplaceAll if every occurrence should change.',
+      ]
+        .filter((part) => part.length > 0)
+        .join('\n'),
     );
     this.filePath = filePath;
     this.matchLines = matchLines;
+    this.matchPreviews = matchPreviews;
     this.name = 'AmbiguousFindReplaceOnceError';
   }
+}
+
+function buildAmbiguousMatchPreviews(
+  lines: string[],
+  positions: number[],
+  patternLength: number,
+): string[] {
+  const margin = 1;
+  return positions.map((position, index) => {
+    const start = Math.max(0, position - margin);
+    const end = Math.min(lines.length, position + Math.max(1, patternLength) + margin);
+    const rendered = [`Match ${index + 1} at line ${position + 1}:`];
+    for (let i = start; i < end; i++) {
+      const marker = i >= position && i < position + patternLength ? '>' : ' ';
+      rendered.push(`  ${String(i + 1).padStart(4, ' ')} ${marker} ${lines[i] ?? ''}`);
+    }
+    return rendered.join('\n');
+  });
 }
 
 // Indent-aware replacement. When a hunk matched at a
@@ -1055,12 +1111,15 @@ function deriveUpdatedNormalizedContent(
           expectedLines: chunk.oldLines,
           nearestMatch: findNearestSequence(originalLines, chunk.oldLines, 0),
           scanTruncated: sampling,
+          chunkSource: chunk.source,
+          chunkNewLines: chunk.newLines,
         });
       }
       if (result.positions.length > 1) {
         throw new AmbiguousFindReplaceOnceError(
           filePath,
           result.positions.map((p) => p + 1),
+          buildAmbiguousMatchPreviews(originalLines, result.positions, chunk.oldLines.length),
         );
       }
       const pos = result.positions[0]!;
@@ -1080,6 +1139,8 @@ function deriveUpdatedNormalizedContent(
             expectedLines: chunk.oldLines,
             nearestMatch: findNearestSequence(originalLines, chunk.oldLines, 0),
             scanTruncated: sampling,
+            chunkSource: chunk.source,
+            chunkNewLines: chunk.newLines,
           });
         }
         newLines = translated.newLines;
@@ -1111,6 +1172,8 @@ function deriveUpdatedNormalizedContent(
           expectedLines: chunk.oldLines,
           nearestMatch: findNearestSequence(originalLines, chunk.oldLines, 0),
           scanTruncated: sampling,
+          chunkSource: chunk.source,
+          chunkNewLines: chunk.newLines,
         });
       }
       if (result.tier === 'trim' || result.tier === 'fuzzy') usedFuzzy = true;
@@ -1415,6 +1478,7 @@ function parseFindReplaceChunk(
   // and fails with a message listing the candidate lines.
   const searchStart = i;
   let strictDividerIdx = -1;
+  let compactDividerIdx = -1;
   const bareDividerIdxs: number[] = [];
   let endMarkerIdx = -1;
   for (let j = searchStart; j <= lastContentLine; j++) {
@@ -1425,6 +1489,8 @@ function parseFindReplaceChunk(
     }
     if (trimmed === FIND_REPLACE_DIVIDER || FIND_REPLACE_DIVIDER_RE.test(trimmed)) {
       if (strictDividerIdx === -1) strictDividerIdx = j;
+    } else if (FIND_REPLACE_COMPACT_DIVIDER_RE.test(trimmed)) {
+      if (compactDividerIdx === -1) compactDividerIdx = j;
     } else if (trimmed === FIND_REPLACE_BARE_DIVIDER) {
       bareDividerIdxs.push(j);
     }
@@ -1437,19 +1503,22 @@ function parseFindReplaceChunk(
     // actually reached EOF while still inside the SEARCH block with
     // no divider candidates at all; otherwise the terminator is the
     // immediate problem.
-    if (strictDividerIdx === -1 && bareDividerIdxs.length === 0) {
+    if (strictDividerIdx === -1 && compactDividerIdx === -1 && bareDividerIdxs.length === 0) {
       throw new Error(`${expectedHeader} missing '${FIND_REPLACE_DIVIDER}' divider`);
     }
     throw new Error(`${expectedHeader} missing '${FIND_REPLACE_END_MARKER}' terminator`);
   }
 
   let dividerIdx: number;
-  let lenientDivider = false;
+  let dividerStyle: UpdateChunk['dividerStyle'] | undefined;
   if (strictDividerIdx !== -1) {
     dividerIdx = strictDividerIdx;
+  } else if (compactDividerIdx !== -1) {
+    dividerIdx = compactDividerIdx;
+    dividerStyle = 'compact';
   } else if (bareDividerIdxs.length === 1) {
     dividerIdx = bareDividerIdxs[0]!;
-    lenientDivider = true;
+    dividerStyle = 'bare';
   } else if (bareDividerIdxs.length > 1) {
     const humanLines = bareDividerIdxs.map((n) => n + 1).join(', ');
     throw new Error(
@@ -1487,7 +1556,7 @@ function parseFindReplaceChunk(
       modifiedBytes,
       mustBeUnique,
       replaceAll,
-      ...(lenientDivider ? { lenientDivider: true } : {}),
+      ...(dividerStyle ? { lenientDivider: true, dividerStyle } : {}),
     },
     nextIndex: i,
   };
@@ -1708,7 +1777,7 @@ function parsePatchOperationsFromLines(
     return [];
   }
   if (startIndex === 1 && mode === 'strict' && !patchComplete) {
-    throw new Error("The last line of the patch must be '*** End Patch'");
+    throw new Error(describeIncompleteStrictPatch(lines));
   }
 
   const operations: StreamingPatchOperation[] = [];
@@ -1810,7 +1879,15 @@ function parsePatchOperationsFromLines(
             break;
           }
           const variant = nextTrimmed === FIND_REPLACE_ONCE_PREFIX ? 'once' : 'all';
-          const parsed = parseFindReplaceChunk(lines, i, lines.length - 1, variant);
+          let parsed: { chunk: UpdateChunk; nextIndex: number };
+          try {
+            parsed = parseFindReplaceChunk(lines, i, lines.length - 1, variant);
+          } catch (error) {
+            if (mode === 'strict' && error instanceof Error) {
+              throw rewriteFindReplaceParseError(path, variant, error);
+            }
+            throw error;
+          }
           chunks.push(parsed.chunk);
           i = parsed.nextIndex;
           continue;
@@ -1858,6 +1935,71 @@ function parsePatchOperationsFromLines(
   }
 
   return operations;
+}
+
+function describeIncompleteStrictPatch(lines: string[]): string {
+  let currentAddFile: string | undefined;
+  let currentUpdateFile: string | undefined;
+  let currentFindReplace: 'FindReplaceOnce' | 'FindReplaceAll' | undefined;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith(ADD_FILE_PREFIX)) {
+      currentAddFile = parsePathFromHeader(trimmed, ADD_FILE_PREFIX, 'streaming');
+      currentUpdateFile = undefined;
+      currentFindReplace = undefined;
+      continue;
+    }
+    if (trimmed.startsWith(UPDATE_FILE_PREFIX)) {
+      currentUpdateFile = parsePathFromHeader(trimmed, UPDATE_FILE_PREFIX, 'streaming');
+      currentAddFile = undefined;
+      currentFindReplace = undefined;
+      continue;
+    }
+    if (trimmed.startsWith(DELETE_FILE_PREFIX)) {
+      currentAddFile = undefined;
+      currentUpdateFile = undefined;
+      currentFindReplace = undefined;
+      continue;
+    }
+    if (trimmed === FIND_REPLACE_ONCE_PREFIX) {
+      currentFindReplace = 'FindReplaceOnce';
+      continue;
+    }
+    if (trimmed === FIND_REPLACE_ALL_PREFIX) {
+      currentFindReplace = 'FindReplaceAll';
+      continue;
+    }
+    if (trimmed === FIND_REPLACE_END_MARKER) {
+      currentFindReplace = undefined;
+    }
+  }
+
+  if (currentFindReplace && currentUpdateFile) {
+    return `${currentFindReplace} chunk in ${currentUpdateFile} appears truncated: missing '${FIND_REPLACE_END_MARKER}' terminator and final '${END_PATCH_LINE}'. Finish the block, or split large edits into smaller apply_patch calls.`;
+  }
+  if (currentAddFile) {
+    return `Patch appears truncated while adding file '${currentAddFile}': missing '${END_PATCH_LINE}'. For large generated files, split large file creation into smaller chunks or create a shorter skeleton first.`;
+  }
+  return `The last line of the patch must be '${END_PATCH_LINE}'`;
+}
+
+function rewriteFindReplaceParseError(path: string, variant: 'once' | 'all', error: Error): Error {
+  const label = variant === 'once' ? 'FindReplaceOnce' : 'FindReplaceAll';
+  if (error.message.includes(`missing '${FIND_REPLACE_END_MARKER}' terminator`)) {
+    return new Error(
+      `${label} chunk in ${path} is missing '${FIND_REPLACE_END_MARKER}' terminator. Finish the REPLACE block before '${END_PATCH_LINE}', or split the edit into a smaller apply_patch call.`,
+    );
+  }
+  if (error.message.includes('ambiguous bare')) {
+    return error;
+  }
+  if (error.message.includes(`missing '${FIND_REPLACE_DIVIDER}' divider`)) {
+    return new Error(
+      `${label} chunk in ${path} is missing '${FIND_REPLACE_DIVIDER}' divider. Use the canonical SEARCH/REPLACE shape: '${FIND_REPLACE_SEARCH_MARKER}', '${FIND_REPLACE_DIVIDER}', '${FIND_REPLACE_END_MARKER}'.`,
+    );
+  }
+  return error;
 }
 
 function summarizeUpdateChunks(chunks: UpdateChunk[]): {
@@ -2583,7 +2725,8 @@ export async function buildPatchPlan(
   // bare `=======` (aider / git-conflict style) instead of the
   // canonical `======= REPLACE`. Surfaced in the summary so the agent
   // learns to prefer the explicit form, without failing the call.
-  const lenientDividerTotals: Array<{ path: string; count: number }> = [];
+  const lenientDividerTotals: Array<{ path: string; count: number; style: 'bare' | 'compact' }> =
+    [];
   // Per-op flag set when the `quoteStyle` tier fired and REPLACE was
   // re-quoted to match the file. Surfaced in the summary as a nudge
   // for the agent to mirror the file's quote style on future patches.
@@ -2603,12 +2746,15 @@ export async function buildPatchPlan(
     await collectVersionToken(readSnapshot, sourceVersions, seenSourceVersionPaths, targetKey);
 
     if (op.kind === 'update') {
-      const lenientCount = op.chunks.reduce(
-        (total, chunk) => total + (chunk.lenientDivider ? 1 : 0),
-        0,
-      );
-      if (lenientCount > 0) {
-        lenientDividerTotals.push({ path: op.path, count: lenientCount });
+      const lenientCounts = new Map<'bare' | 'compact', number>();
+      for (const chunk of op.chunks) {
+        if (chunk.lenientDivider) {
+          const style = chunk.dividerStyle ?? 'bare';
+          lenientCounts.set(style, (lenientCounts.get(style) ?? 0) + 1);
+        }
+      }
+      for (const [style, count] of lenientCounts) {
+        lenientDividerTotals.push({ path: op.path, count, style });
       }
       // Tally auto-fixes per kind for the summary advisory.
       const autoFixCounts = new Map<AutoFixKind, number>();
@@ -2696,7 +2842,7 @@ const FIND_REPLACE_ALL_ADVISORY_THRESHOLD = 20;
 function buildSummaryText(
   opCount: number,
   replaceAllTotals: Array<{ path: string; count: number }>,
-  lenientDividerTotals: Array<{ path: string; count: number }> = [],
+  lenientDividerTotals: Array<{ path: string; count: number; style: 'bare' | 'compact' }> = [],
   quoteStylePaths: string[] = [],
   mergedEnvelopes = 0,
   autoWrappedEnvelope = false,
@@ -2742,9 +2888,10 @@ function buildSummaryText(
       );
     }
   }
-  for (const { path, count } of lenientDividerTotals) {
+  for (const { path, count, style } of lenientDividerTotals) {
+    const accepted = style === 'compact' ? "compact '=======REPLACE'" : "bare '======='";
     lines.push(
-      `  Note: accepted bare '=======' as the SEARCH/REPLACE divider in ${count} chunk${count === 1 ? '' : 's'} in ${path}. Prefer '======= REPLACE' (explicit form) so SEARCH blocks containing '=======' lines stay unambiguous.`,
+      `  Note: accepted ${accepted} as the SEARCH/REPLACE divider in ${count} chunk${count === 1 ? '' : 's'} in ${path}. Prefer '======= REPLACE' (explicit form) so SEARCH blocks containing divider-like lines stay unambiguous.`,
     );
   }
   for (const path of quoteStylePaths) {

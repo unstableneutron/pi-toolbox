@@ -93,6 +93,84 @@ describe('parsePatch', () => {
     );
   });
 
+  test('accepts compact FindReplace divider with an advisory flag', () => {
+    const operations = parsePatch(
+      [
+        '*** Begin Patch',
+        '*** Update File: demo.txt',
+        '*** FindReplaceOnce:',
+        '<<<<<<< SEARCH',
+        'old',
+        '=======REPLACE',
+        'new',
+        '>>>>>>> REPLACE',
+        '*** End Patch',
+      ].join('\n'),
+    );
+
+    expect(operations).toEqual([
+      {
+        kind: 'update',
+        path: 'demo.txt',
+        chunks: [
+          expect.objectContaining({
+            oldLines: ['old'],
+            newLines: ['new'],
+            lenientDivider: true,
+            dividerStyle: 'compact',
+          }),
+        ],
+      },
+    ]);
+  });
+
+  test('missing End Patch inside Add File reports likely truncation', () => {
+    const patch = [
+      '*** Begin Patch',
+      '*** Add File: notes.md',
+      '+# Long generated document',
+      '+still streaming when the tool call stopped',
+    ].join('\n');
+
+    expect(() => parsePatch(patch)).toThrow(
+      /Patch appears truncated while adding file 'notes\.md'.*missing '\*\*\* End Patch'.*split large file creation/s,
+    );
+  });
+
+  test('missing FindReplace terminator names the file and open chunk', () => {
+    const patch = [
+      '*** Begin Patch',
+      '*** Update File: demo.txt',
+      '*** FindReplaceOnce:',
+      '<<<<<<< SEARCH',
+      'old',
+      '======= REPLACE',
+      'new',
+      '*** End Patch',
+    ].join('\n');
+
+    expect(() => parsePatch(patch)).toThrow(
+      /FindReplaceOnce chunk in demo\.txt is missing '>>>>>>> REPLACE' terminator/s,
+    );
+  });
+
+  test('compact FindReplace divider still reports missing terminator when unterminated', () => {
+    const patch = [
+      '*** Begin Patch',
+      '*** Update File: demo.txt',
+      '*** FindReplaceOnce:',
+      '<<<<<<< SEARCH',
+      'old',
+      '=======REPLACE',
+      'new',
+      '*** End Patch',
+    ].join('\n');
+
+    expect(() => parsePatch(patch)).toThrow(
+      /FindReplaceOnce chunk in demo\.txt is missing '>>>>>>> REPLACE' terminator/s,
+    );
+  });
+
   test('accepts a trailing newline after end patch', () => {
     const operations = parsePatch(`*** Begin Patch
 *** Delete File: old.txt
@@ -190,7 +268,7 @@ describe('parsePatch', () => {
             // No trailing '*** End Patch'
           ].join('\n'),
         ),
-      ).toThrow(/last line of the patch must be '\*\*\* End Patch'/);
+      ).toThrow(/Patch appears truncated while adding file 'b\.txt'.*missing '\*\*\* End Patch'/);
     });
   });
 });
@@ -1053,6 +1131,32 @@ describe('buildPatchPlan', () => {
     expect(plan.summaryText).toContain("Prefer '======= REPLACE'");
   });
 
+  test('summaryText notes compact-divider chunks so the agent can correct them', async () => {
+    const workspace = createVirtualWorkspace('/repo', {
+      '/repo/foo.ts': 'const a = 1;\n',
+    });
+    const ops = parsePatch(
+      [
+        '*** Begin Patch',
+        '*** Update File: foo.ts',
+        '*** FindReplaceOnce:',
+        '<<<<<<< SEARCH',
+        'const a = 1;',
+        '=======REPLACE',
+        'const a = 42;',
+        '>>>>>>> REPLACE',
+        '*** End Patch',
+      ].join('\n'),
+    );
+
+    const plan = await buildPatchPlan(ops, workspace, '/repo');
+    expect(plan.summaryText).toContain(
+      "accepted compact '=======REPLACE' as the SEARCH/REPLACE divider",
+    );
+    expect(plan.summaryText).toContain('foo.ts');
+    expect(plan.summaryText).toContain("Prefer '======= REPLACE'");
+  });
+
   test('summaryText advises when concatenated envelopes were merged', async () => {
     const workspace = createVirtualWorkspace('/repo', {});
     const { ops, mergedEnvelopes } = parsePatchWithDiagnostics(
@@ -1190,6 +1294,65 @@ describe('near-miss baseline (phase 0 characterization)', () => {
         expect.arrayContaining(['def foo_helper(x):', 'def handle_foo(y):']),
       );
     });
+  });
+
+  test('ambiguous FindReplaceOnce includes match previews and retry guidance', async () => {
+    const workspace = createVirtualWorkspace('/repo', {
+      '/repo/notes.md': [
+        'alpha',
+        'shared target',
+        'omega',
+        '',
+        'beta',
+        'shared target',
+        'gamma',
+      ].join('\n'),
+    });
+    const operations = parsePatch(
+      [
+        '*** Begin Patch',
+        '*** Update File: notes.md',
+        '*** FindReplaceOnce:',
+        '<<<<<<< SEARCH',
+        'shared target',
+        '======= REPLACE',
+        'unique target',
+        '>>>>>>> REPLACE',
+        '*** End Patch',
+      ].join('\n'),
+    );
+
+    const attempt = buildPatchPlan(operations, workspace, '/repo');
+    await expect(attempt).rejects.toThrow(/found 2 matches; expected exactly 1/);
+    await expect(attempt).rejects.toThrow(/Match 1 at line 2[\s\S]*alpha[\s\S]*shared target/);
+    await expect(attempt).rejects.toThrow(/Match 2 at line 6[\s\S]*beta[\s\S]*shared target/);
+    await expect(attempt).rejects.toThrow(/expand SEARCH with surrounding context|FindReplaceAll/s);
+  });
+
+  test('near-miss FindReplaceOnce suggests probable cause and corrected SEARCH block', async () => {
+    const workspace = createVirtualWorkspace('/repo', {
+      '/repo/config.ts': ['export const mode = "prod";', 'export const retries = 3;'].join('\n'),
+    });
+    const operations = parsePatch(
+      [
+        '*** Begin Patch',
+        '*** Update File: config.ts',
+        '*** FindReplaceOnce:',
+        '<<<<<<< SEARCH',
+        'export const mode = "production";',
+        'export const retries = 3;',
+        '======= REPLACE',
+        'export const mode = "dev";',
+        'export const retries = 3;',
+        '>>>>>>> REPLACE',
+        '*** End Patch',
+      ].join('\n'),
+    );
+
+    const attempt = buildPatchPlan(operations, workspace, '/repo');
+    await expect(attempt).rejects.toThrow(/Probable cause: the file changed since you read it/);
+    await expect(attempt).rejects.toThrow(/Corrected SEARCH block from the current file:/);
+    await expect(attempt).rejects.toThrow(/export const mode = "prod";/);
   });
 
   test('buildPatchPlan evaluates all ops via lookahead and aggregates failures', async () => {
