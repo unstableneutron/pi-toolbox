@@ -66,8 +66,8 @@ importers:
         specifier: 0.70.5
         version: 0.70.5(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
       fff-router:
-        specifier: github:unstableneutron/fff-router#semver:>=0.5.0
-        version: https://codeload.github.com/unstableneutron/fff-router/tar.gz/9f9e7f49fcd7a1d88405bf83a3b63bda7066f809(typescript@5.9.3)
+        specifier: github:unstableneutron/fff-router#semver:>=0.6.1
+        version: https://codeload.github.com/unstableneutron/fff-router/tar.gz/049cc199944a95b956cafa2f5086198074bcc26d(typescript@5.9.3)
       picomatch:
         specifier: ^4.0.3
         version: 4.0.4
@@ -2014,9 +2014,9 @@ packages:
     resolution: {integrity: sha512-7yAQpD2UMJzLi1Dqv7qFYnPbaPx7ZfFK6PiIxQ4PfkGPyNyl2Ugx+a/umUonmKqjhM4DnfbMvdX6otXq83soQQ==}
     engines: {node: ^12.20 || >= 14.13}
 
-  fff-router@https://codeload.github.com/unstableneutron/fff-router/tar.gz/9f9e7f49fcd7a1d88405bf83a3b63bda7066f809:
-    resolution: {tarball: https://codeload.github.com/unstableneutron/fff-router/tar.gz/9f9e7f49fcd7a1d88405bf83a3b63bda7066f809}
-    version: 0.5.0
+  fff-router@https://codeload.github.com/unstableneutron/fff-router/tar.gz/049cc199944a95b956cafa2f5086198074bcc26d:
+    resolution: {tarball: https://codeload.github.com/unstableneutron/fff-router/tar.gz/049cc199944a95b956cafa2f5086198074bcc26d}
+    version: 0.6.1
     engines: {node: '>=20.6.0'}
     hasBin: true
     peerDependencies:
@@ -4714,7 +4714,7 @@ snapshots:
       node-domexception: 1.0.0
       web-streams-polyfill: 3.3.3
 
-  fff-router@https://codeload.github.com/unstableneutron/fff-router/tar.gz/9f9e7f49fcd7a1d88405bf83a3b63bda7066f809(typescript@5.9.3):
+  fff-router@https://codeload.github.com/unstableneutron/fff-router/tar.gz/049cc199944a95b956cafa2f5086198074bcc26d(typescript@5.9.3):
     dependencies:
       '@ff-labs/fff-node': 0.5.2
       '@modelcontextprotocol/sdk': 1.29.0(zod@4.3.6)
