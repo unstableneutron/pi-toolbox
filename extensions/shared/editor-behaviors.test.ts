@@ -190,6 +190,51 @@ describe('global editor behavior patches', () => {
     expect(calls).toEqual(['before:x', 'after:x']);
   });
 
+  test('wrapped default editor preserves CustomEditor app keybindings', async () => {
+    const handlers = new Map<string, (event: any, ctx: any) => Promise<void> | void>();
+    const pi = {
+      on(event: string, handler: (event: any, ctx: any) => Promise<void> | void) {
+        handlers.set(event, handler);
+      },
+    };
+    const copiedAppClear = vi.fn();
+    const setEditorComponent = vi.fn();
+    const keybindings = {
+      matches: (data: string, action: string) => data === '\x03' && action === 'app.clear',
+    };
+
+    registerExtensionEditorBehavior(pi as any, { id: 'managed-behavior' });
+
+    await handlers.get('session_start')?.(
+      { type: 'session_start' },
+      {
+        hasUI: true,
+        ui: {
+          getEditorComponent: () => undefined,
+          setEditorComponent,
+        },
+      },
+    );
+
+    const factory = setEditorComponent.mock.calls[0]?.[0];
+    expect(factory).toBeTypeOf('function');
+    const editor = factory(
+      {} as any,
+      { borderColor: (value: string) => value, selectList: {} as any } as any,
+      keybindings,
+    );
+
+    // Mirrors pi-coding-agent's setCustomEditorComponent behavior: it only copies
+    // app handlers when the custom editor exposes CustomEditor's actionHandlers map.
+    expect('actionHandlers' in editor).toBe(true);
+    expect(editor.actionHandlers).toBeInstanceOf(Map);
+    editor.actionHandlers.set('app.clear', copiedAppClear);
+
+    editor.handleInput('\x03');
+
+    expect(copiedAppClear).toHaveBeenCalledTimes(1);
+  });
+
   test('run input behaviors for plain CustomEditor instances', () => {
     const calls: string[] = [];
 

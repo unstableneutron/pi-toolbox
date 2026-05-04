@@ -1,5 +1,5 @@
 import type { Model } from '@mariozechner/pi-ai';
-import type { ExtensionContext } from '@mariozechner/pi-coding-agent';
+import { getAgentDir, SettingsManager, type ExtensionContext } from '@mariozechner/pi-coding-agent';
 
 import {
   buildRefusalStatus,
@@ -12,6 +12,7 @@ import {
 const DEFAULT_REFUSAL_CONTINUE_ATTEMPTS = 5;
 const DEFAULT_REFUSAL_REWRITE_ATTEMPTS = 2;
 const MAX_EMPTY_RESPONSE_CONTINUE_ATTEMPTS = 3;
+const DEFAULT_CORE_RETRY_MAX_RETRIES = 3;
 const CONTINUE_RETRY_MESSAGE = 'Continue.';
 const CONTINUE_RETRY_STATUS = '↻ Refusal detected; retrying...';
 const EMPTY_RESPONSE_RETRY_STATUS = '↻ Empty assistant response; retrying with Continue...';
@@ -23,6 +24,7 @@ const RETRY_SUCCESS_STATUS_DURATION_MS = 4000;
 const REFUSAL_CONTINUE_ATTEMPTS_ENV_VAR = 'PI_RETRY_REFUSAL_CONTINUE_ATTEMPTS';
 const REFUSAL_REWRITE_ATTEMPTS_ENV_VAR = 'PI_RETRY_REFUSAL_REWRITE_ATTEMPTS';
 const REFUSAL_REWRITES_DISABLED_ENV_VAR = 'PI_RETRY_REFUSAL_REWRITES_DISABLED';
+const RETRYABLE_ERROR_CONTINUE_ATTEMPTS_ENV_VAR = 'PI_RETRY_PROVIDER_ERROR_CONTINUE_ATTEMPTS';
 
 export const STOCK_REFUSAL_CONTINUE_MESSAGES = [
   'Continue.',
@@ -166,6 +168,23 @@ function getConfiguredRefusalRewriteAttempts(): number {
 
 function refusalRewritesDisabled(): boolean {
   return isTruthyEnv(process.env[REFUSAL_REWRITES_DISABLED_ENV_VAR]);
+}
+
+function getConfiguredRetryableErrorContinueAttempts(cwd: string | undefined): number {
+  const envValue = process.env[RETRYABLE_ERROR_CONTINUE_ATTEMPTS_ENV_VAR]?.trim();
+  if (envValue) {
+    return parsePositiveIntEnv(
+      RETRYABLE_ERROR_CONTINUE_ATTEMPTS_ENV_VAR,
+      DEFAULT_CORE_RETRY_MAX_RETRIES,
+    );
+  }
+
+  try {
+    return SettingsManager.create(cwd ?? process.cwd(), getAgentDir()).getRetrySettings()
+      .maxRetries;
+  } catch {
+    return DEFAULT_CORE_RETRY_MAX_RETRIES;
+  }
 }
 
 export function pickStockContinueMessage(input?: {
@@ -380,7 +399,7 @@ export function buildRecoveryStatus(recovery: ActiveRecovery): string {
     case 'empty-stop':
       return `${EMPTY_RESPONSE_RETRY_STATUS}${suffix}`;
     case 'retryable-error':
-      return RETRYABLE_ERROR_CONTINUE_STATUS;
+      return `${RETRYABLE_ERROR_CONTINUE_STATUS}${suffix}`;
     default:
       return `${CONTINUE_RETRY_STATUS}${suffix}`;
   }
@@ -596,6 +615,11 @@ export function setRefusalAttempt(sessionId: string, attempt: number): void {
 function getEmptyResponseContinueAttempts(sessionId: string): number {
   const recovery = getActiveRecovery(sessionId);
   return 'empty-stop' === recovery?.kind ? recovery.attempt : 0;
+}
+
+function getRetryableErrorContinueAttempts(sessionId: string): number {
+  const recovery = getActiveRecovery(sessionId);
+  return 'retryable-error' === recovery?.kind ? recovery.attempt : 0;
 }
 
 function clearRecoveryState(sessionId: string): void {
@@ -1148,6 +1172,22 @@ export async function handleRefusalRecovery(input: {
     'string' === typeof finalAssistant.errorMessage &&
     classifyRetryableProviderError(finalAssistant.errorMessage)
   ) {
+    const retryableErrorAttemptLimit = getConfiguredRetryableErrorContinueAttempts(input.ctx.cwd);
+    const currentRetryableErrorAttempts = getRetryableErrorContinueAttempts(sessionId);
+    if (currentRetryableErrorAttempts >= retryableErrorAttemptLimit) {
+      clearRecoveryState(sessionId);
+      ui.clearStatus();
+      ui.notify(
+        `pi-retry stopped ${formatAttemptCount(
+          currentRetryableErrorAttempts,
+          'retryable provider error recovery attempt',
+        )}`,
+        'warning',
+      );
+      return;
+    }
+
+    const nextRetryableErrorAttempt = currentRetryableErrorAttempts + 1;
     const reason =
       classifyRetryableProviderError(finalAssistant.errorMessage) ?? 'providerServerError';
 
@@ -1180,19 +1220,24 @@ export async function handleRefusalRecovery(input: {
     }
 
     const branchResult = branchLatestAssistantErrorOutOfMainPath(input.patchedSession, {
-      attempt: 0,
+      attempt: nextRetryableErrorAttempt,
       errorMessage: finalAssistant.errorMessage,
       reason,
     });
 
     await deliverRecoveryMessage(
-      { kind: 'retryable-error', attempt: 1, messageKind: 'continue' },
+      {
+        kind: 'retryable-error',
+        attempt: nextRetryableErrorAttempt,
+        messageKind: 'continue',
+        maxAttempts: retryableErrorAttemptLimit,
+      },
       CONTINUE_RETRY_MESSAGE,
       branchResult.parentEntryId,
       createRecoveryMessageDetails({
         kind: 'retryable-error',
         messageKind: 'continue',
-        attempt: 1,
+        attempt: nextRetryableErrorAttempt,
         expectedLeafId: branchResult.parentEntryId,
         failedEntryId: branchResult.failedEntryId,
         parentEntryId: branchResult.parentEntryId,

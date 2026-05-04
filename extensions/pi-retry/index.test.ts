@@ -135,10 +135,14 @@ describe('pi-retry extra provider classification', () => {
 });
 
 describe('pi-retry recovery backoff', () => {
-  test('uses exponential backoff for queued recovery dispatch', () => {
-    expect(getRecoveryDispatchDelayMs(1)).toBe(2000);
-    expect(getRecoveryDispatchDelayMs(2)).toBe(4000);
-    expect(getRecoveryDispatchDelayMs(3)).toBe(8000);
+  test('uses aggressive early delays before backing off for queued recovery dispatch', () => {
+    const settings = { baseDelayMs: 250, maxRetries: 8 };
+    expect(getRecoveryDispatchDelayMs(1, settings)).toBe(250);
+    expect(getRecoveryDispatchDelayMs(2, settings)).toBe(500);
+    expect(getRecoveryDispatchDelayMs(3, settings)).toBe(1000);
+    expect(getRecoveryDispatchDelayMs(4, settings)).toBe(2000);
+    expect(getRecoveryDispatchDelayMs(8, settings)).toBe(32000);
+    expect(getRecoveryDispatchDelayMs(9, settings)).toBe(32000);
   });
 });
 
@@ -1736,7 +1740,7 @@ describe('pi-retry extension runtime', () => {
     expect(harness.sendUserMessageCalls).toEqual([]);
     expect(harness.sendMessageCalls).toEqual([]);
 
-    await vi.advanceTimersByTimeAsync(1999);
+    await vi.advanceTimersByTimeAsync(249);
     expect(harness.sendMessageCalls).toEqual([]);
 
     harness.ctx.isIdle = () => true;
@@ -1770,7 +1774,7 @@ describe('pi-retry extension runtime', () => {
     );
 
     harness.ctx.isIdle = () => true;
-    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(250);
 
     expect(harness.sendUserMessageCalls).toEqual([]);
     expect(harness.sendMessageCalls).toEqual([

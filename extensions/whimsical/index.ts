@@ -470,8 +470,6 @@ const DEFAULT_PROVIDER_BASE_URLS: Record<string, string[]> = {
   cerebras: ['https://api.cerebras.ai/v1'],
   'github-copilot': ['https://api.individual.githubcopilot.com'],
   google: ['https://generativelanguage.googleapis.com/v1beta'],
-  'google-antigravity': ['https://daily-cloudcode-pa.sandbox.googleapis.com'],
-  'google-gemini-cli': ['https://cloudcode-pa.googleapis.com'],
   'google-vertex': ['https://{location}-aiplatform.googleapis.com'],
   groq: ['https://api.groq.com/openai/v1'],
   huggingface: ['https://router.huggingface.co/v1'],

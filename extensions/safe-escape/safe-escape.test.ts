@@ -64,7 +64,11 @@ function createExtensionHarness() {
 
   const pi = {
     on(event: string, handler: (event: any, ctx: any) => Promise<void> | void) {
-      handlers.set(event, handler);
+      const existing = handlers.get(event);
+      handlers.set(event, async (eventArg: any, ctx: any) => {
+        await existing?.(eventArg, ctx);
+        await handler(eventArg, ctx);
+      });
     },
     appendEntry(customType: string, data: Record<string, unknown>) {
       appendedEntries.push({ customType, data });
@@ -372,10 +376,11 @@ describe('safeEscape extension registration', () => {
     expect(getSafeEscapeBehavior().priority).toBe(10);
   });
 
-  test('session_start leaves editor installation to another extension', async () => {
+  test('session_start wraps the current editor component when the new API is available', async () => {
     await withInteractiveTTY(async () => {
       const { pi, handlers } = createExtensionHarness();
       const setEditorComponent = vi.fn();
+      const getEditorComponent = vi.fn(() => undefined);
 
       safeEscape(pi as any);
 
@@ -389,12 +394,14 @@ describe('safeEscape extension registration', () => {
           setWidget: vi.fn(),
           setStatus: vi.fn(),
           setEditorComponent,
+          getEditorComponent,
         },
       };
 
       await handlers.get('session_start')?.({}, ctx);
 
-      expect(setEditorComponent).not.toHaveBeenCalled();
+      expect(getEditorComponent).toHaveBeenCalledTimes(1);
+      expect(setEditorComponent).toHaveBeenCalledWith(expect.any(Function));
     });
   });
 });

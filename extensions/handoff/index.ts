@@ -13,8 +13,13 @@
  */
 
 import { complete, type Message } from '@mariozechner/pi-ai';
-import type { ExtensionAPI, SessionEntry } from '@mariozechner/pi-coding-agent';
-import { BorderedLoader, convertToLlm, serializeConversation } from '@mariozechner/pi-coding-agent';
+import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
+import {
+  BorderedLoader,
+  buildSessionContext,
+  convertToLlm,
+  serializeConversation,
+} from '@mariozechner/pi-coding-agent';
 
 const SYSTEM_PROMPT = `You are a context transfer assistant. Given a conversation history and the user's goal for a new thread, generate a focused prompt that:
 
@@ -58,11 +63,13 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      // Gather conversation context from current branch
-      const branch = ctx.sessionManager.getBranch();
-      const messages = branch
-        .filter((entry): entry is SessionEntry & { type: 'message' } => entry.type === 'message')
-        .map((entry) => entry.message);
+      // Gather the same resolved context pi sends to the LLM, including
+      // compaction summaries and branch summaries.
+      const sessionContext = buildSessionContext(
+        ctx.sessionManager.getEntries(),
+        ctx.sessionManager.getLeafId(),
+      );
+      const messages = sessionContext.messages;
 
       if (messages.length === 0) {
         ctx.ui.notify('No conversation to hand off', 'error');

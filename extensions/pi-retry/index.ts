@@ -1,7 +1,9 @@
-import type {
-  ExtensionAPI,
-  ExtensionContext,
-  ExtensionUIContext,
+import {
+  getAgentDir,
+  SettingsManager,
+  type ExtensionAPI,
+  type ExtensionContext,
+  type ExtensionUIContext,
 } from '@mariozechner/pi-coding-agent';
 
 import {
@@ -40,7 +42,8 @@ const STATUS_KEY = 'pi-retry';
 const PATCHED = Symbol.for('pi-retry.agent-session.patched');
 const SESSION_MANAGER_PATCHED = Symbol.for('pi-retry.session-manager.patched');
 const REFUSAL_DISABLE_ENV_VAR = 'PI_RETRY_REFUSAL_RECOVERY_DISABLED';
-const RECOVERY_DISPATCH_BASE_DELAY_MS = 2000;
+const DEFAULT_CORE_RETRY_BASE_DELAY_MS = 2000;
+const DEFAULT_CORE_RETRY_MAX_RETRIES = 3;
 const RECOVERY_DISPATCH_IDLE_POLL_DELAY_MS = 100;
 
 export interface PatchInstallResult {
@@ -149,9 +152,33 @@ function hasUserVisibleAssistantOutput(content: unknown): boolean {
   });
 }
 
-export function getRecoveryDispatchDelayMs(attempt: number): number {
+type CoreRetrySettingsLike = { baseDelayMs: number; maxRetries: number };
+
+function getCoreRetrySettings(cwd: string | undefined): CoreRetrySettingsLike {
+  try {
+    const settings = SettingsManager.create(cwd ?? process.cwd(), getAgentDir()).getRetrySettings();
+    return {
+      baseDelayMs: settings.baseDelayMs,
+      maxRetries: settings.maxRetries,
+    };
+  } catch {
+    return {
+      baseDelayMs: DEFAULT_CORE_RETRY_BASE_DELAY_MS,
+      maxRetries: DEFAULT_CORE_RETRY_MAX_RETRIES,
+    };
+  }
+}
+
+export function getRecoveryDispatchDelayMs(
+  attempt: number,
+  settings: CoreRetrySettingsLike = {
+    baseDelayMs: DEFAULT_CORE_RETRY_BASE_DELAY_MS,
+    maxRetries: DEFAULT_CORE_RETRY_MAX_RETRIES,
+  },
+): number {
   const normalizedAttempt = Math.max(1, Math.floor(attempt));
-  return RECOVERY_DISPATCH_BASE_DELAY_MS * 2 ** (normalizedAttempt - 1);
+  const cappedAttempt = Math.min(normalizedAttempt, Math.max(1, settings.maxRetries));
+  return settings.baseDelayMs * 2 ** (cappedAttempt - 1);
 }
 
 type SessionContextLike = {
@@ -676,7 +703,7 @@ function schedulePendingRecoveryDispatch(
     }
   };
 
-  scheduleTick(getRecoveryDispatchDelayMs(queuedRecovery.attempt));
+  scheduleTick(getRecoveryDispatchDelayMs(queuedRecovery.attempt, getCoreRetrySettings(ctx.cwd)));
 }
 
 function maybeWarnAboutPatchFailure(ctx: ExtensionContext): void {

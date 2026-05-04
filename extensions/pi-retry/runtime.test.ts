@@ -460,6 +460,7 @@ afterEach(() => {
   delete process.env.PI_RETRY_REFUSAL_CONTINUE_ATTEMPTS;
   delete process.env.PI_RETRY_REFUSAL_REWRITE_ATTEMPTS;
   delete process.env.PI_RETRY_REFUSAL_REWRITES_DISABLED;
+  delete process.env.PI_RETRY_PROVIDER_ERROR_CONTINUE_ATTEMPTS;
   clearRuntimeState();
   vi.useRealTimers();
 });
@@ -563,6 +564,15 @@ describe('recovery status helpers', () => {
         messageKind: 'continue',
       }),
     ).toBe('↻ Continue sent; waiting for recovery... · 3/3');
+    expect(
+      buildRecoveryStatus({
+        kind: 'retryable-error',
+        phase: 'queued',
+        attempt: 2,
+        messageKind: 'continue',
+        maxAttempts: 3,
+      }),
+    ).toBe('↻ Retryable error detected; retrying with Continue... · 2/3');
   });
 });
 
@@ -906,6 +916,94 @@ describe('handleRefusalRecovery', () => {
     expect(getPendingRecovery('session-1')).toBeUndefined();
     expect(notify).toHaveBeenCalledWith(
       'pi-retry could not recover from an empty assistant response',
+      'warning',
+    );
+  });
+
+  test('stops after three consecutive retryable provider error recovery attempts', async () => {
+    process.env.PI_RETRY_PROVIDER_ERROR_CONTINUE_ATTEMPTS = '3';
+
+    const reviewRewrite = vi.fn();
+    const sendUserMessage = vi.fn();
+    const { session, sessionManager, entries } = createFakeErrorSession();
+    const { ctx, statusCalls, notify } = createCtx(sessionManager);
+
+    for (const attempt of [1, 2, 3]) {
+      await handleRefusalRecovery({
+        event: {
+          messages: [
+            {
+              role: 'assistant',
+              stopReason: 'error',
+              errorMessage: 'Unknown error (no error details in response)',
+              content: [],
+            },
+          ],
+        },
+        ctx,
+        patchedSession: session as any,
+        reviewRewrite,
+        sendUserMessage,
+      });
+
+      expect(getPendingRecovery('session-1')).toMatchObject({
+        kind: 'retryable-error',
+        message: 'Continue.',
+        details: expect.objectContaining({ attempt }),
+      });
+
+      await dispatchPendingRecovery({
+        sessionId: 'session-1',
+        sendUserMessage,
+        ui: createDispatchUi(statusCalls),
+      });
+
+      entries.push({
+        id: `assistant-error-${attempt + 1}`,
+        parentId: 'user-1',
+        type: 'message',
+        message: {
+          role: 'assistant',
+          stopReason: 'error',
+          errorMessage: 'Unknown error (no error details in response)',
+          content: [],
+        },
+      });
+      sessionManager.leafId = `assistant-error-${attempt + 1}`;
+    }
+
+    await handleRefusalRecovery({
+      event: {
+        messages: [
+          {
+            role: 'assistant',
+            stopReason: 'error',
+            errorMessage: 'Unknown error (no error details in response)',
+            content: [],
+          },
+        ],
+      },
+      ctx,
+      patchedSession: session as any,
+      reviewRewrite,
+      sendUserMessage,
+    });
+
+    expect(reviewRewrite).not.toHaveBeenCalled();
+    expect(sendUserMessage).toHaveBeenCalledTimes(3);
+    expect(statusCalls).toEqual([
+      '↻ Retryable error detected; retrying with Continue...',
+      '↻ Continue sent; waiting for recovery...',
+      '↻ Retryable error detected; retrying with Continue... · 2/3',
+      '↻ Continue sent; waiting for recovery... · 2/3',
+      '↻ Retryable error detected; retrying with Continue... · 3/3',
+      '↻ Continue sent; waiting for recovery... · 3/3',
+      undefined,
+    ]);
+    expect(getPendingRecovery('session-1')).toBeUndefined();
+    expect(sessionManager.leafId).toBe('assistant-error-4');
+    expect(notify).toHaveBeenCalledWith(
+      'pi-retry stopped after 3 retryable provider error recovery attempts',
       'warning',
     );
   });
