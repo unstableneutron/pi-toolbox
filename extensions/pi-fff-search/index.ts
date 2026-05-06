@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { Text, type Component } from '@mariozechner/pi-tui';
@@ -163,6 +164,7 @@ export interface CreatePiFffSearchExtensionOptions {
   createBuiltInFindTool?: typeof createFindToolDefinition;
   createBuiltInLsTool?: typeof createLsToolDefinition;
   createBuiltInBashTool?: typeof createBashToolDefinition;
+  findGitRootForReadFallback?: (cwd: string) => string | null | Promise<string | null>;
 }
 
 export default createPiFffSearchExtension();
@@ -806,6 +808,18 @@ function formatRewrittenLsPath(requestedPath: string, cwd: string): string {
   return shortenDisplayPath(resolvedBase, cwd);
 }
 
+const BROAD_READ_METADATA_BASENAMES = new Set([
+  'package.json',
+  'pnpm-workspace.yaml',
+  'pnpm-lock.yaml',
+  'tsconfig.json',
+  'vitest.config.ts',
+  'Cargo.toml',
+  'go.mod',
+  'pyproject.toml',
+  'uv.lock',
+]);
+
 function buildReadResolutionParams(readPath: string): Record<string, unknown> | null {
   const normalized = normalizeRequestedPath(readPath);
   if (!normalized || path.isAbsolute(normalized) || normalized.startsWith('~')) {
@@ -831,6 +845,48 @@ function buildReadResolutionParams(readPath: string): Record<string, unknown> | 
   }
 
   return params;
+}
+
+function buildBroadReadResolutionParams(
+  readPath: string,
+  within: string | null,
+): Record<string, unknown> | null {
+  const normalized = normalizeRequestedPath(readPath);
+  if (!normalized || path.isAbsolute(normalized) || normalized.startsWith('~')) {
+    return null;
+  }
+
+  const basename = path.posix.basename(normalized);
+  if (!basename || GLOB_META_PATTERN.test(basename)) {
+    return null;
+  }
+
+  const dirname = path.posix.dirname(normalized);
+  if ((dirname === '.' || dirname === '') && !BROAD_READ_METADATA_BASENAMES.has(basename)) {
+    return null;
+  }
+
+  return {
+    query: basename,
+    glob: `**/${basename}`,
+    ...(within ? { within } : {}),
+    limit: 10,
+  };
+}
+
+function defaultFindGitRootForReadFallback(cwd: string): string | null {
+  let current = path.resolve(cwd);
+  for (;;) {
+    if (existsSync(path.join(current, '.git'))) {
+      return current;
+    }
+
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return null;
+    }
+    current = parent;
+  }
 }
 
 function pickResolvedReadPath(requestedPath: string, text: string): string | null {
@@ -863,6 +919,37 @@ function pickResolvedReadPath(requestedPath: string, text: string): string | nul
 
   if (candidates.length === 1) {
     return path.join(parsed.basePath, candidates[0]!);
+  }
+
+  return null;
+}
+
+function pickBroadenedReadPath(requestedPath: string, text: string): string | null {
+  const parsed = parseBasePathPayload(text);
+  if (!parsed) {
+    return null;
+  }
+
+  const candidates = parsed.bodyLines.filter((line) => line !== '(no files found)');
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  const normalizedRequested = normalizeRequestedPath(requestedPath);
+  const requestedBasename = path.posix.basename(normalizedRequested);
+  const suffixMatches = candidates.filter(
+    (candidate) =>
+      candidate === normalizedRequested || candidate.endsWith(`/${normalizedRequested}`),
+  );
+  if (suffixMatches.length === 1) {
+    return path.join(parsed.basePath, suffixMatches[0]!);
+  }
+
+  const basenameMatches = candidates.filter(
+    (candidate) => path.posix.basename(candidate) === requestedBasename,
+  );
+  if (basenameMatches.length === 1 && BROAD_READ_METADATA_BASENAMES.has(requestedBasename)) {
+    return path.join(parsed.basePath, basenameMatches[0]!);
   }
 
   return null;
@@ -1518,6 +1605,8 @@ export function createPiFffSearchExtension(options: CreatePiFffSearchExtensionOp
   const createBuiltInFind = options.createBuiltInFindTool ?? createFindToolDefinition;
   const createBuiltInLs = options.createBuiltInLsTool ?? createLsToolDefinition;
   const createBuiltInBash = options.createBuiltInBashTool ?? createBashToolDefinition;
+  const findGitRootForReadFallback =
+    options.findGitRootForReadFallback ?? defaultFindGitRootForReadFallback;
   const builtInTemplates =
     overrideBuiltinRead || overrideBuiltinGrep || overrideBuiltinFind || rewriteBuiltinBash
       ? {
@@ -1743,7 +1832,29 @@ export function createPiFffSearchExtension(options: CreatePiFffSearchExtensionOp
                 callPublicToolOverHttp: callTool,
                 runRipgrepFallback: runFallback,
               });
-              const resolvedPath = pickResolvedReadPath(requestedPath, resolution.text);
+              let resolvedPath = pickResolvedReadPath(requestedPath, resolution.text);
+              let broadenedResolution = false;
+
+              if (!resolvedPath) {
+                const broadWithin = (await findGitRootForReadFallback(ctx.cwd)) ?? ctx.cwd;
+                const broadResolutionParams = buildBroadReadResolutionParams(
+                  requestedPath,
+                  broadWithin,
+                );
+                if (broadResolutionParams) {
+                  const broadResolution = await forwardToolCall({
+                    toolName: 'fff_find_files',
+                    params: broadResolutionParams,
+                    cwd: ctx.cwd,
+                    ensureDaemonRunning: ensureDaemon,
+                    callPublicToolOverHttp: callTool,
+                    runRipgrepFallback: runFallback,
+                  });
+                  resolvedPath = pickBroadenedReadPath(requestedPath, broadResolution.text);
+                  broadenedResolution = resolvedPath !== null;
+                }
+              }
+
               if (!resolvedPath) {
                 throw error;
               }
@@ -1766,10 +1877,16 @@ export function createPiFffSearchExtension(options: CreatePiFffSearchExtensionOp
                   }
 
                   const fixedPath = formatFixedReadPath(resolvedPath, ctx.cwd);
+                  const resolutionNotice = broadenedResolution
+                    ? `\nAuto-resolved missing read path ${requestedPath} → ${fixedPath}.`
+                    : '';
                   const updatedContent = resolvedResult.content.map((entry, index) =>
                     index === resolvedResult.content.indexOf(firstTextBlock)
                       ? entry.type === 'text'
-                        ? { ...entry, text: `Path (fixed): ${fixedPath}\n\n${entry.text}` }
+                        ? {
+                            ...entry,
+                            text: `Path (fixed): ${fixedPath}${resolutionNotice}\n\n${entry.text}`,
+                          }
                         : entry
                       : entry,
                   );
@@ -1784,11 +1901,13 @@ export function createPiFffSearchExtension(options: CreatePiFffSearchExtensionOp
                             routedVia: 'fff-then-builtin',
                             resolvedFromPath: requestedPath,
                             resolvedToPath: fixedPath,
+                            broadenedResolution,
                           }
                         : {
                             routedVia: 'fff-then-builtin',
                             resolvedFromPath: requestedPath,
                             resolvedToPath: fixedPath,
+                            broadenedResolution,
                           },
                   };
                 });

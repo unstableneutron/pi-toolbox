@@ -1487,6 +1487,208 @@ describe('pi-fff-search extension', () => {
     ]);
   });
 
+  test('builtin read override broadens missing manifest reads when scoped resolution misses', async () => {
+    const ensureDaemonRunning = vi.fn(async () => {});
+    const callPublicToolOverHttp = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true as const,
+        value: {
+          mode: 'compact' as const,
+          base_path: '/repo/extensions/multi-edit',
+          next_cursor: null,
+          items: [],
+        },
+      })
+      .mockResolvedValueOnce({
+        ok: true as const,
+        value: {
+          mode: 'compact' as const,
+          base_path: '/repo',
+          next_cursor: null,
+          items: [{ path: 'package.json' }],
+        },
+      });
+    const builtinExecute = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('ENOENT: no such file or directory'))
+      .mockResolvedValueOnce({
+        content: [{ type: 'text' as const, text: '{"name":"pi-toolbox"}' }],
+        details: undefined,
+      });
+    const { tools } = createHarness({
+      ensureDaemonRunning,
+      callPublicToolOverHttp,
+      overrideBuiltinRead: true,
+      createBuiltInReadTool: ((cwd: string) => ({
+        ...createReadToolDefinition(cwd),
+        execute: builtinExecute,
+      })) as any,
+    });
+
+    const result = await tools
+      .find((tool) => tool.name === 'read')!
+      .execute('tool-call', { path: 'extensions/multi-edit/package.json' }, undefined, undefined, {
+        cwd: '/repo',
+      });
+
+    expect(callPublicToolOverHttp).toHaveBeenNthCalledWith(1, {
+      tool: 'fff_find_files',
+      query: 'package.json',
+      within: ['/repo/extensions/multi-edit'],
+      glob: 'package.json',
+      extensions: [],
+      excludePaths: [],
+      limit: 10,
+      cursor: null,
+      outputMode: 'compact',
+    });
+    expect(callPublicToolOverHttp).toHaveBeenNthCalledWith(2, {
+      tool: 'fff_find_files',
+      query: 'package.json',
+      within: ['/repo'],
+      glob: '**/package.json',
+      extensions: [],
+      excludePaths: [],
+      limit: 10,
+      cursor: null,
+      outputMode: 'compact',
+    });
+    expect(builtinExecute).toHaveBeenNthCalledWith(
+      2,
+      'tool-call',
+      { path: '/repo/package.json' },
+      expect.objectContaining({ aborted: false }),
+      undefined,
+      { cwd: '/repo' },
+    );
+    expect(result.content).toEqual([
+      {
+        type: 'text',
+        text: 'Path (fixed): package.json\nAuto-resolved missing read path extensions/multi-edit/package.json → package.json.\n\n{"name":"pi-toolbox"}',
+      },
+    ]);
+  });
+
+  test('builtin read override broadens from subdirectory cwd to git root', async () => {
+    const ensureDaemonRunning = vi.fn(async () => {});
+    const callPublicToolOverHttp = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true as const,
+        value: {
+          mode: 'compact' as const,
+          base_path: '/repo/extensions/multi-edit',
+          next_cursor: null,
+          items: [],
+        },
+      })
+      .mockResolvedValueOnce({
+        ok: true as const,
+        value: {
+          mode: 'compact' as const,
+          base_path: '/repo',
+          next_cursor: null,
+          items: [{ path: 'package.json' }],
+        },
+      });
+    const builtinExecute = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('ENOENT: no such file or directory'))
+      .mockResolvedValueOnce({
+        content: [{ type: 'text' as const, text: '{"name":"pi-toolbox"}' }],
+        details: undefined,
+      });
+    const { tools } = createHarness({
+      ensureDaemonRunning,
+      callPublicToolOverHttp,
+      overrideBuiltinRead: true,
+      findGitRootForReadFallback: vi.fn(async () => '/repo'),
+      createBuiltInReadTool: ((cwd: string) => ({
+        ...createReadToolDefinition(cwd),
+        execute: builtinExecute,
+      })) as any,
+    });
+
+    const result = await tools
+      .find((tool) => tool.name === 'read')!
+      .execute('tool-call', { path: 'package.json' }, undefined, undefined, {
+        cwd: '/repo/extensions/multi-edit',
+      });
+
+    expect(callPublicToolOverHttp).toHaveBeenNthCalledWith(2, {
+      tool: 'fff_find_files',
+      query: 'package.json',
+      within: ['/repo'],
+      glob: '**/package.json',
+      extensions: [],
+      excludePaths: [],
+      limit: 10,
+      cursor: null,
+      outputMode: 'compact',
+    });
+    expect(builtinExecute).toHaveBeenNthCalledWith(
+      2,
+      'tool-call',
+      { path: '/repo/package.json' },
+      expect.objectContaining({ aborted: false }),
+      undefined,
+      { cwd: '/repo/extensions/multi-edit' },
+    );
+    expect(result.content).toEqual([
+      {
+        type: 'text',
+        text: 'Path (fixed): /repo/package.json\nAuto-resolved missing read path package.json → /repo/package.json.\n\n{"name":"pi-toolbox"}',
+      },
+    ]);
+  });
+
+  test('builtin read override does not broaden ambiguous non-manifest misses', async () => {
+    const ensureDaemonRunning = vi.fn(async () => {});
+    const callPublicToolOverHttp = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true as const,
+        value: {
+          mode: 'compact' as const,
+          base_path: '/repo/src/missing',
+          next_cursor: null,
+          items: [],
+        },
+      })
+      .mockResolvedValueOnce({
+        ok: true as const,
+        value: {
+          mode: 'compact' as const,
+          base_path: '/repo',
+          next_cursor: null,
+          items: [{ path: 'src/config.ts' }],
+        },
+      });
+    const builtinError = new Error('ENOENT: no such file or directory');
+    const builtinExecute = vi.fn().mockRejectedValue(builtinError);
+    const { tools } = createHarness({
+      ensureDaemonRunning,
+      callPublicToolOverHttp,
+      overrideBuiltinRead: true,
+      createBuiltInReadTool: ((cwd: string) => ({
+        ...createReadToolDefinition(cwd),
+        execute: builtinExecute,
+      })) as any,
+    });
+
+    await expect(
+      tools
+        .find((tool) => tool.name === 'read')!
+        .execute('tool-call', { path: 'src/missing/config.ts' }, undefined, undefined, {
+          cwd: '/repo',
+        }),
+    ).rejects.toThrow('ENOENT');
+
+    expect(callPublicToolOverHttp).toHaveBeenCalledTimes(2);
+    expect(builtinExecute).toHaveBeenCalledTimes(1);
+  });
+
   test('builtin read override does not guess when fff path resolution is ambiguous', async () => {
     const ensureDaemonRunning = vi.fn(async () => {});
     const callPublicToolOverHttp = vi.fn(async () => ({
