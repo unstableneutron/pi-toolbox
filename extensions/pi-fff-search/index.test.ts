@@ -1643,6 +1643,68 @@ describe('pi-fff-search extension', () => {
     ]);
   });
 
+  test('builtin read override broadens unique non-metadata path matches with strong overlap', async () => {
+    const ensureDaemonRunning = vi.fn(async () => {});
+    const callPublicToolOverHttp = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true as const,
+        value: {
+          mode: 'compact' as const,
+          base_path: '/repo/src/server',
+          next_cursor: null,
+          items: [],
+        },
+      })
+      .mockResolvedValueOnce({
+        ok: true as const,
+        value: {
+          mode: 'compact' as const,
+          base_path: '/repo',
+          next_cursor: null,
+          items: [{ path: 'app/server/router.ts' }],
+        },
+      });
+    const builtinExecute = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('ENOENT: no such file or directory'))
+      .mockResolvedValueOnce({
+        content: [{ type: 'text' as const, text: 'export const router = true;' }],
+        details: undefined,
+      });
+    const { tools } = createHarness({
+      ensureDaemonRunning,
+      callPublicToolOverHttp,
+      overrideBuiltinRead: true,
+      findGitRootForReadFallback: vi.fn(async () => '/repo'),
+      createBuiltInReadTool: ((cwd: string) => ({
+        ...createReadToolDefinition(cwd),
+        execute: builtinExecute,
+      })) as any,
+    });
+
+    const result = await tools
+      .find((tool) => tool.name === 'read')!
+      .execute('tool-call', { path: 'src/server/router.ts' }, undefined, undefined, {
+        cwd: '/repo',
+      });
+
+    expect(builtinExecute).toHaveBeenNthCalledWith(
+      2,
+      'tool-call',
+      { path: '/repo/app/server/router.ts' },
+      expect.objectContaining({ aborted: false }),
+      undefined,
+      { cwd: '/repo' },
+    );
+    expect(result.content).toEqual([
+      {
+        type: 'text',
+        text: 'Path (fixed): app/server/router.ts\nAuto-resolved missing read path src/server/router.ts → app/server/router.ts.\n\nexport const router = true;',
+      },
+    ]);
+  });
+
   test('builtin read override does not broaden ambiguous non-manifest misses', async () => {
     const ensureDaemonRunning = vi.fn(async () => {});
     const callPublicToolOverHttp = vi

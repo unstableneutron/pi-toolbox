@@ -819,6 +819,23 @@ const BROAD_READ_METADATA_BASENAMES = new Set([
   'pyproject.toml',
   'uv.lock',
 ]);
+const BROAD_READ_GENERIC_BASENAMES = new Set([
+  'index.ts',
+  'index.tsx',
+  'index.js',
+  'index.jsx',
+  'config.ts',
+  'config.js',
+  'types.ts',
+  'types.js',
+  'utils.ts',
+  'utils.js',
+  'helpers.ts',
+  'helpers.js',
+  'constants.ts',
+  'constants.js',
+  'README.md',
+]);
 
 function buildReadResolutionParams(readPath: string): Record<string, unknown> | null {
   const normalized = normalizeRequestedPath(readPath);
@@ -948,11 +965,48 @@ function pickBroadenedReadPath(requestedPath: string, text: string): string | nu
   const basenameMatches = candidates.filter(
     (candidate) => path.posix.basename(candidate) === requestedBasename,
   );
-  if (basenameMatches.length === 1 && BROAD_READ_METADATA_BASENAMES.has(requestedBasename)) {
-    return path.join(parsed.basePath, basenameMatches[0]!);
+  if (basenameMatches.length === 1) {
+    const candidate = basenameMatches[0]!;
+    if (BROAD_READ_METADATA_BASENAMES.has(requestedBasename)) {
+      return path.join(parsed.basePath, candidate);
+    }
+    if (isHighConfidenceBroadReadMatch(normalizedRequested, candidate)) {
+      return path.join(parsed.basePath, candidate);
+    }
   }
 
   return null;
+}
+
+function isHighConfidenceBroadReadMatch(requestedPath: string, candidatePath: string): boolean {
+  const requestedBasename = path.posix.basename(requestedPath);
+  if (path.posix.basename(candidatePath) !== requestedBasename) {
+    return false;
+  }
+
+  const requestedParts = splitPathTokens(requestedPath);
+  const candidateParts = splitPathTokens(candidatePath);
+  if (requestedParts.length < 2 || candidateParts.length < 2) {
+    return false;
+  }
+
+  const requestedDirTokens = requestedParts.slice(0, -1);
+  const candidateDirTokens = candidateParts.slice(0, -1);
+  const sharedDirTokens = requestedDirTokens.filter((token) => candidateDirTokens.includes(token));
+  const basenameGeneric = BROAD_READ_GENERIC_BASENAMES.has(requestedBasename);
+
+  if (sharedDirTokens.length >= 2) {
+    return true;
+  }
+
+  return !basenameGeneric && sharedDirTokens.length >= 1 && candidateParts.length > 2;
+}
+
+function splitPathTokens(pathValue: string): string[] {
+  return normalizeRequestedPath(pathValue)
+    .split('/')
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0 && part !== '.');
 }
 
 function formatFixedReadPath(resolvedPath: string, cwd: string): string {
