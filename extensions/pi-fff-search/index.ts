@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { Text, type Component } from '@mariozechner/pi-tui';
-import { Type, type TSchema } from 'typebox';
+import { type TSchema } from 'typebox';
 import {
   createBashToolDefinition,
   createFindToolDefinition,
@@ -129,11 +129,26 @@ const DAEMON_RESTART_NOTICE =
   'Notice: FFF daemon config changed; restarted the daemon and retried the search once.';
 
 function stripSchemaFields(schema: TSchema, hiddenFields: string[]): TSchema {
-  const properties = (schema as { properties?: Record<string, TSchema> }).properties ?? {};
-  const filteredProperties = Object.fromEntries(
-    Object.entries(properties).filter(([field]) => !hiddenFields.includes(field)),
-  );
-  return Type.Object(filteredProperties, { additionalProperties: false });
+  const hidden = new Set(hiddenFields);
+  const schemaWithObjectFields = schema as TSchema & {
+    properties?: Record<string, TSchema>;
+    required?: string[];
+  };
+  const properties = schemaWithObjectFields.properties ?? {};
+  const strippedSchema = {
+    ...schema,
+    properties: Object.fromEntries(
+      Object.entries(properties).filter(([field]) => !hidden.has(field)),
+    ),
+  } as TSchema & { required?: string[] };
+
+  if (Array.isArray(schemaWithObjectFields.required)) {
+    strippedSchema.required = schemaWithObjectFields.required.filter((field) => !hidden.has(field));
+  } else {
+    delete strippedSchema.required;
+  }
+
+  return strippedSchema;
 }
 
 export const PI_TOOL_DEFINITIONS: Array<PublicToolDefinition<TSchema>> =

@@ -1,6 +1,6 @@
 {
   "name": "pi-fff-search",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Pi extension for FFF-backed repository search with local fallbacks",
   "keywords": [
     "pi-extension",

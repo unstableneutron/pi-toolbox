@@ -30,7 +30,7 @@ type ThemeLike = ReturnType<typeof createTheme>;
 
 type RegisteredTool = {
   name: string;
-  parameters: { properties?: Record<string, unknown> };
+  parameters: { properties?: Record<string, unknown>; required?: string[] };
   renderCall?: (
     args: Record<string, unknown>,
     theme: ThemeLike,
@@ -419,6 +419,20 @@ describe('pi-fff-search extension', () => {
     expect(grepFields).not.toContain('cursor');
     expect(grepFields).not.toContain('output_mode');
     expect(grepFields).not.toContain('context_lines');
+  });
+
+  test('preserves optional fields when stripping Pi-facing fff_grep schema', () => {
+    const { tools } = createHarness({
+      overrideBuiltinRead: false,
+      overrideBuiltinGrep: false,
+      overrideBuiltinFind: false,
+      rewriteBuiltinBash: false,
+    });
+    const grepTool = tools.find((tool) => tool.name === 'fff_grep');
+
+    expect(grepTool?.parameters.required).toEqual(['patterns', 'literal']);
+    expect(grepTool?.parameters.required).not.toContain('case_sensitive');
+    expect(grepTool?.parameters.required).not.toContain('context_lines');
   });
 
   test('can additionally register builtin read/grep/find overrides without changing default fff tools', () => {
