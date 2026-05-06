@@ -2333,9 +2333,10 @@ describe('FindReplaceOnce (phase 2)', () => {
     expect(content).toContain('const answer = 42');
   });
 
-  test('autofix: below threshold (only 2 "+" lines) does NOT trigger', () => {
+  test('autofix: below threshold plain text plus lines do NOT trigger', () => {
     // Threshold guard: a 1-2 line REPLACE that happens to start with
-    // "+" is more likely intentional than a leak.
+    // "+" is more likely intentional than a leak when it does not look
+    // like source-code diff syntax.
     const operations = parsePatch(
       [
         '*** Begin Patch',
@@ -2355,6 +2356,105 @@ describe('FindReplaceOnce (phase 2)', () => {
     if (op?.kind === 'update') {
       expect(op.chunks[0]?.autoFixed).toBeUndefined();
       expect(op.chunks[0]?.newLines).toEqual(['+item-1', '+item-2']);
+    }
+  });
+
+  test('autofix: strips indented leaked "+" prefixes in source code', async () => {
+    // Regression from session 019dfad1...: a FindReplaceOnce REPLACE
+    // block used unified-diff syntax inside indented Go code. The old
+    // prefix-leak detector stripped only column-0 pluses, leaving
+    // `\t+value, err := ...` in the file.
+    const workspace = createVirtualWorkspace('/repo', {
+      '/repo/command_test.go': [
+        'func TestRelay(t *testing.T) {',
+        '\tclient := newClient()',
+        '\trequire.Equal(t, "ready", client.State())',
+        '}',
+      ].join('\n'),
+    });
+    const operations = parsePatch(
+      [
+        '*** Begin Patch',
+        '*** Update File: command_test.go',
+        '*** FindReplaceOnce:',
+        '<<<<<<< SEARCH',
+        'func TestRelay(t *testing.T) {',
+        '\tclient := newClient()',
+        '\trequire.Equal(t, "ready", client.State())',
+        '}',
+        '======= REPLACE',
+        'func TestRelay(t *testing.T) {',
+        '\tclient := newClient()',
+        '\t+value, err := client.relay(request)',
+        '\t+require.NoError(t, err)',
+        '\trequire.Equal(t, "ready", client.State())',
+        '\trequire.Equal(t, value, client.Value())',
+        '}',
+        '>>>>>>> REPLACE',
+        '*** End Patch',
+      ].join('\n'),
+    );
+
+    const op = operations[0];
+    if (op?.kind === 'update') {
+      expect(op.chunks[0]?.autoFixed).toEqual(['prefix-leak']);
+      expect(op.chunks[0]?.newLines).toContain('\tvalue, err := client.relay(request)');
+      expect(op.chunks[0]?.newLines).toContain('\trequire.NoError(t, err)');
+      expect(op.chunks[0]?.newLines).not.toContain('\t+value, err := client.relay(request)');
+    }
+    await applyPatchOperations(operations, workspace, '/repo');
+    const content = await workspace.readText('/repo/command_test.go');
+    expect(content).not.toMatch(/^\s*\+(?:value|require\.)/m);
+    expect(content).toContain('\tvalue, err := client.relay(request)');
+  });
+
+  test('autofix: strips short high-confidence code declaration leaks', () => {
+    // A short insertion with one meaningful plus line is below the
+    // generic 3-line threshold. In source files, `+var ...` after a
+    // bare `+` is still high-confidence unified-diff syntax.
+    const operations = parsePatch(
+      [
+        '*** Begin Patch',
+        '*** Update File: command_test.go',
+        '*** FindReplaceOnce:',
+        '<<<<<<< SEARCH',
+        'package chromeapix',
+        '======= REPLACE',
+        'package chromeapix',
+        '+',
+        '+var relayReady = true',
+        '>>>>>>> REPLACE',
+        '*** End Patch',
+      ].join('\n'),
+    );
+
+    const op = operations[0];
+    if (op?.kind === 'update') {
+      expect(op.chunks[0]?.autoFixed).toEqual(['prefix-leak']);
+      expect(op.chunks[0]?.newLines).toEqual(['package chromeapix', '', 'var relayReady = true']);
+    }
+  });
+
+  test('autofix: preserves intentional unary plus expressions in source code', () => {
+    const operations = parsePatch(
+      [
+        '*** Begin Patch',
+        '*** Update File: calc.ts',
+        '*** FindReplaceOnce:',
+        '<<<<<<< SEARCH',
+        'const x = 1;',
+        '======= REPLACE',
+        'const x = +input;',
+        'const y = +other;',
+        '>>>>>>> REPLACE',
+        '*** End Patch',
+      ].join('\n'),
+    );
+
+    const op = operations[0];
+    if (op?.kind === 'update') {
+      expect(op.chunks[0]?.autoFixed).toBeUndefined();
+      expect(op.chunks[0]?.newLines).toEqual(['const x = +input;', 'const y = +other;']);
     }
   });
 

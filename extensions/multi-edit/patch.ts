@@ -2116,9 +2116,12 @@ export function parsePatchWithDiagnostics(patchText: string): PatchParseDiagnost
 // Chunk auto-fix layer
 //
 // Applies conservative, high-confidence post-parse transformations to
-// FindReplace chunks. Today: one fix, "prefix-leak" — strip a leaked
-// unified-diff `+` prefix from REPLACE lines when every non-blank
-// REPLACE line starts with `+` at column 0 and SEARCH has none.
+// FindReplace chunks. Today: one fix, "prefix-leak" — strip leaked
+// unified-diff `+` prefixes from REPLACE regions when SEARCH has no
+// corresponding plus-prefixed content. It handles full leaks, trailing
+// partial leaks, indented source-code leaks, and short source-code
+// declaration/statement leaks while keeping sentinel and threshold
+// guards for docs/templates and ambiguous prose.
 //
 // Hunks are never touched: the parser already strips `+`/`-`/` `
 // sigils from hunk context/change lines before populating oldLines
@@ -2144,45 +2147,44 @@ const PATCH_SYNTAX_SENTINELS = [
   /^>>>>>>> REPLACE$/,
 ];
 
-// Any line that begins with "+" and has at least one more character.
-// Earlier revisions whitelisted a small set of "safe" characters, which
-// missed real leaks where the next char was a digit, "-", "*", "=", or
-// other punctuation (e.g. leaked numbered lists like `+1. attach...`).
-// Such lines failed isMeaningfulPlusLine, broke the trailing-walk in
-// maybeApplyPrefixLeakFix, and left "+"-prefixed content in the file.
-// False positives are handled by the asymmetry, sentinel, and
-// threshold guards downstream — not by an opinionated character class.
-const PREFIX_LEAK_LINE_RE = /^\+[^\n]/;
+// Any line whose first non-indentation character is "+" and has at
+// least one more character. Earlier revisions required column 0, which
+// missed real leaks in indented Go/TS code like `\t+value, err := ...`.
+// False positives are handled by the asymmetry, sentinel, source-code,
+// and threshold guards downstream — not by an opinionated character
+// class.
+const PREFIX_LEAK_LINE_RE = /^(\s*)\+[^\n]/;
 const PREFIX_LEAK_MIN_LINES = 3;
 
 function applyChunkAutoFixes(ops: PatchOperation[]): void {
   for (const op of ops) {
     if (op.kind !== 'update') continue;
     for (const chunk of op.chunks) {
-      maybeApplyPrefixLeakFix(chunk);
+      maybeApplyPrefixLeakFix(op.path, chunk);
     }
   }
 }
 
-// "+" followed by any printable safe char — i.e. a line that is
-// "+<content>". These are the meaningful leaked lines; the
-// minimum-count threshold runs against these.
+// Optional indentation + "+" followed by any printable char — i.e. a
+// line that is "<indent>+<content>". These are meaningful leaked lines;
+// the minimum-count threshold runs against these.
 function isMeaningfulPlusLine(l: string): boolean {
   return PREFIX_LEAK_LINE_RE.test(l);
 }
 
-// Bare "+" alone on a line. In a leaked unified-diff REPLACE block
-// this represents a blank line in the new version; after stripping
-// the "+" it becomes a genuine blank line.
+// Bare "+" alone on a line, with optional indentation. In a leaked
+// unified-diff REPLACE block this represents a blank line in the new
+// version; after stripping the "+" it becomes a genuine blank line
+// preserving any indentation the model emitted.
 function isBarePlusLine(l: string): boolean {
-  return l === '+';
+  return /^\s*\+$/.test(l);
 }
 
 function isAnyPlusLine(l: string): boolean {
   return isMeaningfulPlusLine(l) || isBarePlusLine(l);
 }
 
-function maybeApplyPrefixLeakFix(chunk: UpdateChunk): void {
+function maybeApplyPrefixLeakFix(path: string, chunk: UpdateChunk): void {
   // Only FindReplace chunks: hunks use `+`/`-` sigils legitimately
   // and the parser has already stripped them before reaching us.
   if (chunk.source !== 'find-replace-once' && chunk.source !== 'find-replace-all') return;
@@ -2193,39 +2195,19 @@ function maybeApplyPrefixLeakFix(chunk: UpdateChunk): void {
   const oldPlusLines = chunk.oldLines.filter(isAnyPlusLine).length;
   if (oldPlusLines > 0) return;
 
-  // Identify the trailing "+"-leak region. We specifically handle
-  // two shapes observed in the 7-day session corpus:
-  //
-  //   1. Full leak — every non-blank REPLACE line starts with "+".
-  //   2. Trailing partial leak — the REPLACE starts with unchanged
-  //      content and drifts into "+"-prefixed unified-diff syntax
-  //      part-way through. This is the shape of the main.go
-  //      catastrophic silent-corruption bug.
-  //
-  // Both collapse to: walk from the end of REPLACE backwards,
-  // collect the longest contiguous suffix of ("+"-prefixed OR
-  // blank) lines. That suffix is the leak region. Anything earlier
-  // is untouched.
   const lines = chunk.newLines;
-  let leakStart = lines.length;
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const l = lines[i] ?? '';
-    if (isAnyPlusLine(l) || l.trim().length === 0) {
-      leakStart = i;
-    } else {
-      break;
+  const sourceFile = isSourceCodePath(path);
+  const stripped = [...lines];
+  let changed = false;
+
+  for (const region of findPrefixLeakRegions(lines)) {
+    if (!shouldStripPrefixLeakRegion(region, sourceFile)) continue;
+    for (let i = region.start; i < region.end; i++) {
+      stripped[i] = stripLeadingPlus(stripped[i] ?? '');
     }
+    changed = true;
   }
-  const leakRegion = lines.slice(leakStart);
-
-  // Threshold against meaningful leak lines (content, not bare
-  // blanks). A run of only blank "+" lines or ambiguous short
-  // runs of "+" content isn't safe to mechanically fix.
-  const meaningful = leakRegion.filter(isMeaningfulPlusLine).length;
-  if (meaningful < PREFIX_LEAK_MIN_LINES) return;
-
-  // Strip "+" from the leak region; leave earlier lines untouched.
-  const stripped = [...lines.slice(0, leakStart), ...leakRegion.map(stripLeadingPlus)];
+  if (!changed) return;
 
   // Don't autofix when the stripped REPLACE would contain a line
   // that matches one of the patch-syntax sentinels — strong signal
@@ -2236,8 +2218,52 @@ function maybeApplyPrefixLeakFix(chunk: UpdateChunk): void {
   chunk.autoFixed = [...(chunk.autoFixed ?? []), 'prefix-leak'];
 }
 
+interface PrefixLeakRegion {
+  start: number;
+  end: number;
+  lines: string[];
+}
+
+function findPrefixLeakRegions(lines: string[]): PrefixLeakRegion[] {
+  const regions: PrefixLeakRegion[] = [];
+  let start: number | undefined;
+  for (let i = 0; i <= lines.length; i++) {
+    const line = lines[i];
+    const inRegion = line !== undefined && (isAnyPlusLine(line) || line.trim().length === 0);
+    if (inRegion && start === undefined) {
+      start = i;
+    }
+    if ((!inRegion || i === lines.length) && start !== undefined) {
+      const end = i;
+      const regionLines = lines.slice(start, end);
+      if (regionLines.some(isAnyPlusLine)) {
+        regions.push({ start, end, lines: regionLines });
+      }
+      start = undefined;
+    }
+  }
+  return regions;
+}
+
+function shouldStripPrefixLeakRegion(region: PrefixLeakRegion, sourceFile: boolean): boolean {
+  const meaningful = region.lines.filter(isMeaningfulPlusLine);
+  if (meaningful.length >= PREFIX_LEAK_MIN_LINES) return true;
+  return sourceFile && meaningful.some(isHighConfidenceSourceLeakLine);
+}
+
+function isSourceCodePath(path: string): boolean {
+  return /\.(?:c|cc|cpp|cs|go|java|js|jsx|kt|m|mm|php|py|rb|rs|swift|ts|tsx)$/i.test(path);
+}
+
+function isHighConfidenceSourceLeakLine(line: string): boolean {
+  const stripped = stripLeadingPlus(line).trimStart();
+  return /^(?:func\b|function\b|class\b|interface\b|type\b|struct\b|enum\b|var\b|let\b|const\b|return\b|if\b|for\b|switch\b|case\b|defer\b|go\b|require\.|assert\.|expect\(|[A-Za-z_]\w*(?:\s*,[^=]*)?\s*:=)/.test(
+    stripped,
+  );
+}
+
 function stripLeadingPlus(line: string): string {
-  return line.startsWith('+') ? line.slice(1) : line;
+  return line.replace(/^(\s*)\+/, '$1');
 }
 
 function operationIdentityKey(operation: PatchOperation): string {
