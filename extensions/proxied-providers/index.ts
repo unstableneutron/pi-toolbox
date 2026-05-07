@@ -12,8 +12,8 @@ import {
   type SimpleStreamOptions,
   type StreamFunction,
   type StreamOptions,
-} from '@mariozechner/pi-ai';
-import type { ExtensionAPI, ExtensionContext } from '@mariozechner/pi-coding-agent';
+} from '@earendil-works/pi-ai';
+import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 
 import {
   findProxiedProviderRewrite,
@@ -62,7 +62,7 @@ const MAX_ROUTING_DEPTH = 8;
  *
  * We need this because pi-coding-agent's `ModelRegistry.refresh()` —
  * invoked from the interactive model picker on open, among other
- * places — calls `resetApiProviders()` from `@mariozechner/pi-ai`,
+ * places — calls `resetApiProviders()` from `@earendil-works/pi-ai`,
  * wiping every `registerApiProvider` entry. `refresh()` then only
  * re-applies providers registered through
  * `modelRegistry.registerProvider(name, config)` (the

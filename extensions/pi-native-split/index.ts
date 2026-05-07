@@ -1,4 +1,4 @@
-import { complete, type Message } from '@mariozechner/pi-ai';
+import { complete, type Message } from '@earendil-works/pi-ai';
 import {
   BorderedLoader,
   SessionManager,
@@ -9,7 +9,7 @@ import {
   type ExtensionAPI,
   type ExtensionCommandContext,
   type SessionEntry,
-} from '@mariozechner/pi-coding-agent';
+} from '@earendil-works/pi-coding-agent';
 import fs from 'node:fs';
 import os from 'node:os';
 import * as path from 'node:path';

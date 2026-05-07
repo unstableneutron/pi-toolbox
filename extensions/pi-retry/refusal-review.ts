@@ -3,7 +3,7 @@ import {
   type Model,
   type UserMessage,
   completeSimple,
-} from '@mariozechner/pi-ai';
+} from '@earendil-works/pi-ai';
 
 type ModelFamily = 'openai' | 'claude' | 'gemini' | 'other';
 

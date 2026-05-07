@@ -2,8 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import type { ExtensionAPI, ExtensionContext } from '@mariozechner/pi-coding-agent';
-import { getCapabilities } from '@mariozechner/pi-tui';
+import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { getCapabilities } from '@earendil-works/pi-tui';
 
 const PATCHED = Symbol.for('pi-md-hooks.markdown.patched');
 const STATE_KEY = Symbol.for('pi-md-hooks.runtime-state');
@@ -46,7 +46,7 @@ function getRuntimeState(): RuntimeState {
 }
 
 export async function defaultLoadMarkdownModule(): Promise<MarkdownModuleLike> {
-  const packageEntryUrl = import.meta.resolve('@mariozechner/pi-tui');
+  const packageEntryUrl = import.meta.resolve('@earendil-works/pi-tui');
   const packageEntryPath = fileURLToPath(packageEntryUrl);
   const markdownUrl = pathToFileURL(
     path.join(path.dirname(packageEntryPath), 'components', 'markdown.js'),

@@ -1,5 +1,9 @@
-import { CustomEditor, type AppKeybinding, type ExtensionAPI } from '@mariozechner/pi-coding-agent';
-import type { EditorComponent } from '@mariozechner/pi-tui';
+import {
+  CustomEditor,
+  type AppKeybinding,
+  type ExtensionAPI,
+} from '@earendil-works/pi-coding-agent';
+import type { EditorComponent } from '@earendil-works/pi-tui';
 
 /**
  * Composable editor input-hook bridge.

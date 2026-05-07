@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { wrapTextWithAnsi } from '@mariozechner/pi-tui';
+import { wrapTextWithAnsi } from '@earendil-works/pi-tui';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 const { completeSimpleMock, getAgentDirMock } = vi.hoisted(() => ({
@@ -10,13 +10,13 @@ const { completeSimpleMock, getAgentDirMock } = vi.hoisted(() => ({
   getAgentDirMock: vi.fn(),
 }));
 
-vi.mock('@mariozechner/pi-ai', () => ({
+vi.mock('@earendil-works/pi-ai', () => ({
   completeSimple: completeSimpleMock,
 }));
 
-vi.mock('@mariozechner/pi-coding-agent', async () => {
-  const actual = await vi.importActual<typeof import('@mariozechner/pi-coding-agent')>(
-    '@mariozechner/pi-coding-agent',
+vi.mock('@earendil-works/pi-coding-agent', async () => {
+  const actual = await vi.importActual<typeof import('@earendil-works/pi-coding-agent')>(
+    '@earendil-works/pi-coding-agent',
   );
 
   class MockBorderedLoader {

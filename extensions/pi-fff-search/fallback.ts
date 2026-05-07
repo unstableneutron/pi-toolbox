@@ -2,7 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { stat as statCallback, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative } from 'node:path';
-import { createFindToolDefinition, createGrepToolDefinition } from '@mariozechner/pi-coding-agent';
+import {
+  createFindToolDefinition,
+  createGrepToolDefinition,
+} from '@earendil-works/pi-coding-agent';
 import picomatch from 'picomatch';
 import type {
   PublicFindFilesRequest,

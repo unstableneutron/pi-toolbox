@@ -2,8 +2,8 @@ import {
   type ExtensionAPI,
   type ExtensionContext,
   type Theme,
-} from '@mariozechner/pi-coding-agent';
-import { Key, matchesKey, truncateToWidth, visibleWidth } from '@mariozechner/pi-tui';
+} from '@earendil-works/pi-coding-agent';
+import { Key, matchesKey, truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
 
 import { registerExtensionEditorBehavior, type EditorBehavior } from '../shared/editor-behaviors';
 

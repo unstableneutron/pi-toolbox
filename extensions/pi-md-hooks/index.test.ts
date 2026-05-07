@@ -10,9 +10,9 @@ import { afterEach, describe, expect, test, vi } from 'vitest';
 // process env ($TERM, $TERM_PROGRAM, etc.) and typically returns
 // `hyperlinks: false` in a test runner, causing the file:// linkification
 // under test to be skipped entirely.
-vi.mock('@mariozechner/pi-tui', async () => {
+vi.mock('@earendil-works/pi-tui', async () => {
   const actual =
-    await vi.importActual<typeof import('@mariozechner/pi-tui')>('@mariozechner/pi-tui');
+    await vi.importActual<typeof import('@earendil-works/pi-tui')>('@earendil-works/pi-tui');
   return {
     ...actual,
     getCapabilities: () => ({
@@ -23,7 +23,7 @@ vi.mock('@mariozechner/pi-tui', async () => {
   };
 });
 
-import { Markdown, type MarkdownTheme } from '@mariozechner/pi-tui';
+import { Markdown, type MarkdownTheme } from '@earendil-works/pi-tui';
 
 import {
   createPiMdHooksExtension,

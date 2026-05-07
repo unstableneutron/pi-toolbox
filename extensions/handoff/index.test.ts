@@ -4,17 +4,18 @@ const { completeMock } = vi.hoisted(() => ({
   completeMock: vi.fn(),
 }));
 
-vi.mock('@mariozechner/pi-ai', async () => {
-  const actual = await vi.importActual<typeof import('@mariozechner/pi-ai')>('@mariozechner/pi-ai');
+vi.mock('@earendil-works/pi-ai', async () => {
+  const actual =
+    await vi.importActual<typeof import('@earendil-works/pi-ai')>('@earendil-works/pi-ai');
   return {
     ...actual,
     complete: completeMock,
   };
 });
 
-vi.mock('@mariozechner/pi-coding-agent', async () => {
-  const actual = await vi.importActual<typeof import('@mariozechner/pi-coding-agent')>(
-    '@mariozechner/pi-coding-agent',
+vi.mock('@earendil-works/pi-coding-agent', async () => {
+  const actual = await vi.importActual<typeof import('@earendil-works/pi-coding-agent')>(
+    '@earendil-works/pi-coding-agent',
   );
 
   class MockBorderedLoader {

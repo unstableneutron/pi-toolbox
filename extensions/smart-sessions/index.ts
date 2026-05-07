@@ -5,7 +5,7 @@ import {
   type ExtensionAPI,
   type ExtensionCommandContext,
   type ExtensionContext,
-} from '@mariozechner/pi-coding-agent';
+} from '@earendil-works/pi-coding-agent';
 import {
   type Component,
   Key,
@@ -14,7 +14,7 @@ import {
   type TUI,
   truncateToWidth,
   visibleWidth,
-} from '@mariozechner/pi-tui';
+} from '@earendil-works/pi-tui';
 
 import { compactName, WINDOW_TITLE_MAX_WORDS, type RollingSessionSummary } from './contracts';
 import { buildConversationSnapshot, buildRollingSummaryInput } from './conversation';

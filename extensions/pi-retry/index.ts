@@ -4,7 +4,7 @@ import {
   type ExtensionAPI,
   type ExtensionContext,
   type ExtensionUIContext,
-} from '@mariozechner/pi-coding-agent';
+} from '@earendil-works/pi-coding-agent';
 
 import {
   PI_RETRY_RECOVERY_CUSTOM_TYPE,
@@ -107,7 +107,7 @@ export function isExtraRetryableAssistantError(message: AssistantErrorLike): boo
 }
 
 // Mirrors the regex used by `AgentSession._isRetryableError` in
-// `@mariozechner/pi-coding-agent` 0.70.x. Kept local because the core
+// `@earendil-works/pi-coding-agent` 0.70.x. Kept local because the core
 // exposes no extension hook for classifying retryable errors. When the core
 // retries an error whose text matches, it starts a fresh agent_start/end
 // cycle via `agent.continue()` without a `before_agent_start` event; we use
@@ -526,7 +526,7 @@ function hasLinearizableDisplayNode(roots: SessionTreeNodeLike[], currentLeafId?
 export async function defaultLoadAgentSessionModule(): Promise<AgentSessionModuleLike> {
   const [pathModule, urlModule] = await Promise.all([import('node:path'), import('node:url')]);
 
-  const packageEntryUrl = import.meta.resolve('@mariozechner/pi-coding-agent');
+  const packageEntryUrl = import.meta.resolve('@earendil-works/pi-coding-agent');
   const packageEntryPath = urlModule.fileURLToPath(packageEntryUrl);
   const coreDir = pathModule.join(pathModule.dirname(packageEntryPath), 'core');
   const agentSessionUrl = urlModule.pathToFileURL(

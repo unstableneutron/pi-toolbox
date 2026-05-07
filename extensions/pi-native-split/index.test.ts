@@ -3,17 +3,17 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { complete } from '@mariozechner/pi-ai';
-import { SessionManager } from '@mariozechner/pi-coding-agent';
+import { complete } from '@earendil-works/pi-ai';
+import { SessionManager } from '@earendil-works/pi-coding-agent';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 
-vi.mock('@mariozechner/pi-ai', () => ({
+vi.mock('@earendil-works/pi-ai', () => ({
   complete: vi.fn(),
 }));
 
-vi.mock('@mariozechner/pi-coding-agent', async () => {
-  const actual = await vi.importActual<typeof import('@mariozechner/pi-coding-agent')>(
-    '@mariozechner/pi-coding-agent',
+vi.mock('@earendil-works/pi-coding-agent', async () => {
+  const actual = await vi.importActual<typeof import('@earendil-works/pi-coding-agent')>(
+    '@earendil-works/pi-coding-agent',
   );
 
   class MockBorderedLoader {

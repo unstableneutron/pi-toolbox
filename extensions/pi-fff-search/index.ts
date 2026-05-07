@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import { Text, type Component } from '@mariozechner/pi-tui';
+import { Text, type Component } from '@earendil-works/pi-tui';
 import { type TSchema } from 'typebox';
 import {
   createBashToolDefinition,
@@ -11,7 +11,7 @@ import {
   createReadToolDefinition,
   defineTool,
   type ExtensionAPI,
-} from '@mariozechner/pi-coding-agent';
+} from '@earendil-works/pi-coding-agent';
 import {
   PUBLIC_TOOL_DEFINITIONS,
   callPublicToolOverHttp as defaultCallPublicToolOverHttp,

@@ -4,12 +4,12 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
   type Component,
-} from '@mariozechner/pi-tui';
+} from '@earendil-works/pi-tui';
 import {
   getLanguageFromPath,
   highlightCode,
   type EditToolDetails,
-} from '@mariozechner/pi-coding-agent';
+} from '@earendil-works/pi-coding-agent';
 import {
   buildCollapsedDiffHintText,
   clampRenderedLineToWidth,

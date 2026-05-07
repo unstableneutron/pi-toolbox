@@ -1,7 +1,7 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "tags": ["-lintignore"],
-  "ignoreDependencies": ["@mariozechner/pi-agent-core", "@aws-sdk/client-bedrock-runtime", "tsx"],
+  "ignoreDependencies": ["@earendil-works/pi-agent-core", "@aws-sdk/client-bedrock-runtime", "tsx"],
   "workspaces": {
     ".": {
       "entry": ["extensions/**/index.ts", "scripts/*.ts"],

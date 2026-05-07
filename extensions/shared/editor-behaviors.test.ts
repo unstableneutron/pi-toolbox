@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
-import { CustomEditor } from '@mariozechner/pi-coding-agent';
+import { CustomEditor } from '@earendil-works/pi-coding-agent';
 
 import {
   clearEditorBehaviors,

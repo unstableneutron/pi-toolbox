@@ -1,5 +1,9 @@
-import type { Model } from '@mariozechner/pi-ai';
-import { getAgentDir, SettingsManager, type ExtensionContext } from '@mariozechner/pi-coding-agent';
+import type { Model } from '@earendil-works/pi-ai';
+import {
+  getAgentDir,
+  SettingsManager,
+  type ExtensionContext,
+} from '@earendil-works/pi-coding-agent';
 
 import {
   buildRefusalStatus,

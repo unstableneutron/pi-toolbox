@@ -74,7 +74,7 @@ describe('pi-coding-agent resolver patching', () => {
     const packageRoot = makeTempDir('pi-coding-agent-');
     writeFileSync(
       join(packageRoot, 'package.json'),
-      JSON.stringify({ name: '@mariozechner/pi-coding-agent', version }, null, 2),
+      JSON.stringify({ name: '@earendil-works/pi-coding-agent', version }, null, 2),
     );
     mkdirSync(join(packageRoot, 'dist', 'core'), { recursive: true });
     writeFileSync(join(packageRoot, 'dist', 'core', 'model-resolver.js'), resolverContent);

@@ -1,5 +1,5 @@
-import type { Component } from '@mariozechner/pi-tui';
-import { truncateToWidth, visibleWidth } from '@mariozechner/pi-tui';
+import type { Component } from '@earendil-works/pi-tui';
+import { truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
 
 import type { PatchPreviewRow } from '../patch';
 import { shortenDisplayPath } from '../render-utils';

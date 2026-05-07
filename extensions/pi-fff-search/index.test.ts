@@ -4,8 +4,8 @@ import {
   createGrepToolDefinition,
   createLsToolDefinition,
   createReadToolDefinition,
-} from '@mariozechner/pi-coding-agent';
-import { createBashToolDefinition } from '@mariozechner/pi-coding-agent';
+} from '@earendil-works/pi-coding-agent';
+import { createBashToolDefinition } from '@earendil-works/pi-coding-agent';
 
 import createPiFffSearchExtensionDefault, {
   bashCommandContainsExpensiveTool,

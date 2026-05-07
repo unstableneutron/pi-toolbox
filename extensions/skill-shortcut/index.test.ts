@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
-import type { AutocompleteProvider } from '@mariozechner/pi-tui';
+import type { AutocompleteProvider } from '@earendil-works/pi-tui';
 
 import skillShortcut, {
   createSkillAutocompleteProvider,

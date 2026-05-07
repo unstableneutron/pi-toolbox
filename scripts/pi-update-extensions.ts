@@ -15,10 +15,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
  *    (CustomEditor, Editor) across the process boundary.
  */
 const GITCHAMBER_PACKAGES = [
-  '@mariozechner/pi-agent-core',
-  '@mariozechner/pi-ai',
-  '@mariozechner/pi-coding-agent',
-  '@mariozechner/pi-tui',
+  '@earendil-works/pi-agent-core',
+  '@earendil-works/pi-ai',
+  '@earendil-works/pi-coding-agent',
+  '@earendil-works/pi-tui',
 ] as const;
 
 /** Subset of GITCHAMBER_PACKAGES that must always be pinned in the agent
@@ -142,7 +142,7 @@ export function compareVersions(left: string, right: string): number {
 // pi-coding-agent resolver patch
 //
 // Patches `dist/core/model-resolver.js` in the installed
-// @mariozechner/pi-coding-agent so `resolveCliModel` prefers authenticated
+// @earendil-works/pi-coding-agent so `resolveCliModel` prefers authenticated
 // models when matching `--model`, falling back to the full registry only
 // when no authenticated models exist (preserving the "--api-key + --model"
 // first-time-setup flow).
@@ -158,7 +158,7 @@ export function compareVersions(left: string, right: string): number {
 // the upstream target line changes so we notice instead of silently no-oping.
 // ---------------------------------------------------------------------------
 
-const PI_CODING_AGENT_PACKAGE_NAME = '@mariozechner/pi-coding-agent';
+const PI_CODING_AGENT_PACKAGE_NAME = '@earendil-works/pi-coding-agent';
 const PI_CODING_AGENT_RESOLVER_RELATIVE_PATH = 'dist/core/model-resolver.js';
 const PI_CODING_AGENT_RESOLVER_PATCH_MARKER =
   '__pi_update_extensions:model-resolver-uses-available__';

@@ -1,4 +1,4 @@
-import { wrapTextWithAnsi } from '@mariozechner/pi-tui';
+import { wrapTextWithAnsi } from '@earendil-works/pi-tui';
 
 import type { RollingSessionSummary } from './contracts';
 

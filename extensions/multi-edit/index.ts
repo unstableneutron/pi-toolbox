@@ -5,8 +5,8 @@ import type {
   EditToolDetails,
   ExtensionAPI,
   ToolRenderResultOptions,
-} from '@mariozechner/pi-coding-agent';
-import { Container, Spacer, Text } from '@mariozechner/pi-tui';
+} from '@earendil-works/pi-coding-agent';
+import { Container, Spacer, Text } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
 
 import {
@@ -834,7 +834,7 @@ function renderApplyPatchHeader(
 }
 
 // Same braille spinner frames and cadence as the pi-tui Loader
-// component (@mariozechner/pi-tui/components/loader). Using the
+// component (@earendil-works/pi-tui/components/loader). Using the
 // canonical pi indicator keeps apply_patch visually consistent with
 // other tool loaders (bash-execution, thinking loader, retry loader).
 const PLACEHOLDER_PULSE_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];

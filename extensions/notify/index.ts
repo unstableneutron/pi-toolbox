@@ -8,7 +8,7 @@
  * Not supported: Kitty (uses OSC 99), Terminal.app, Windows Terminal, Alacritty
  */
 
-import type { ExtensionAPI, SessionEntry } from '@mariozechner/pi-coding-agent';
+import type { ExtensionAPI, SessionEntry } from '@earendil-works/pi-coding-agent';
 import { homedir } from 'node:os';
 
 import { compactName as compactSmartSessionName } from '../smart-sessions/contracts';

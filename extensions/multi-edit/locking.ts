@@ -1,6 +1,6 @@
 import { resolve } from 'node:path';
 
-import { withFileMutationQueue } from '@mariozechner/pi-coding-agent';
+import { withFileMutationQueue } from '@earendil-works/pi-coding-agent';
 
 function canonicalize(filePath: string): string {
   return resolve(filePath);

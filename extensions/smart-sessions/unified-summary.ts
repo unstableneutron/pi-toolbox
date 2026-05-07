@@ -1,5 +1,5 @@
-import { completeSimple, type Api, type Model, type UserMessage } from '@mariozechner/pi-ai';
-import type { ExtensionContext } from '@mariozechner/pi-coding-agent';
+import { completeSimple, type Api, type Model, type UserMessage } from '@earendil-works/pi-ai';
+import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 
 import {
   compactName,

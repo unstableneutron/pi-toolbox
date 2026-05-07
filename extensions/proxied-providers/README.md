@@ -10,7 +10,7 @@ This extension exists to do two narrow jobs:
 
 In practice, that sounds simpler than it is.
 
-For some providers, the public `@mariozechner/pi-ai` API gives us enough reusable pieces that we can keep the wrapper thin. For others, the transport, request builder, and stream parser are tightly coupled inside one non-exported implementation, so the only safe option is to carry a **local parity copy** of the missing logic.
+For some providers, the public `@earendil-works/pi-ai` API gives us enough reusable pieces that we can keep the wrapper thin. For others, the transport, request builder, and stream parser are tightly coupled inside one non-exported implementation, so the only safe option is to carry a **local parity copy** of the missing logic.
 
 This document explains:
 
