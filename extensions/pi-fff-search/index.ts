@@ -1405,6 +1405,7 @@ export function renderBashRewriteResult(
     // are plain-text slices (images would have been in the raw content).
     const delegatedContext = {
       args: args as never,
+      cwd,
       lastComponent: context?.lastComponent,
       showImages: context?.showImages ?? false,
     };
