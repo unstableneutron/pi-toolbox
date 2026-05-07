@@ -1628,6 +1628,101 @@ function formatBuiltinSearchCallSummary(
   return parts.join(' ');
 }
 
+function formatCollapsedBuiltinFindText(output: string): string | null {
+  const paths = output
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter((line) => line.length > 0 && !line.startsWith('['));
+
+  if (paths.length === 0) {
+    return output.trim() === 'No files found matching pattern' ? '0 files' : null;
+  }
+
+  const lines = [`${paths.length} files`];
+  for (const pathValue of paths.slice(0, 2)) {
+    lines.push(`  · ${pathValue}`);
+  }
+  if (paths.length > 2) {
+    lines.push(`    … ${paths.length - 2} more`);
+  }
+  return lines.join('\n');
+}
+
+function formatCollapsedBuiltinGrepText(output: string): string | null {
+  const trimmed = output.trim();
+  if (trimmed === 'No matches found') {
+    return 'No matches';
+  }
+
+  const grouped = new Map<string, number>();
+  let totalMatches = 0;
+  for (const rawLine of output.split(/\r?\n/)) {
+    const line = rawLine.trimEnd();
+    if (!line || line.startsWith('[')) {
+      continue;
+    }
+
+    const match = line.match(/^(.+?):(\d+):/);
+    if (!match) {
+      continue;
+    }
+
+    const pathValue = match[1]!;
+    grouped.set(pathValue, (grouped.get(pathValue) ?? 0) + 1);
+    totalMatches += 1;
+  }
+
+  if (totalMatches === 0) {
+    return null;
+  }
+
+  const files = [...grouped.entries()].sort(
+    ([pathA, countA], [pathB, countB]) => countB - countA || pathA.localeCompare(pathB),
+  );
+  const lines = [`${files.length} files · ${totalMatches} matches`];
+  for (const [pathValue, count] of files.slice(0, 2)) {
+    lines.push(`  · ${pathValue} — ${count}`);
+  }
+  if (files.length > 2) {
+    lines.push(`    … ${files.length - 2} more files`);
+  }
+  return lines.join('\n');
+}
+
+function wrapBuiltinCollapsedResultRenderer(args: {
+  builtinRenderResult?:
+    | ((result: any, options: any, theme: any, context?: any) => Component)
+    | undefined;
+  formatter: (output: string) => string | null;
+}): (result: any, options: any, theme: any, context?: any) => Component {
+  return (result, options, theme, context) => {
+    if (options?.expanded || options?.isPartial) {
+      return args.builtinRenderResult!(result, options, theme, context);
+    }
+
+    const output = extractPrimaryText(result?.content) ?? '';
+    const collapsed = args.formatter(output);
+    if (!collapsed) {
+      return args.builtinRenderResult!(result, options, theme, context);
+    }
+
+    return new Text(styleResultText(collapsed, theme), 0, 0);
+  };
+}
+
+function renderCollapsedReadResult(
+  result: any,
+  options: any,
+  theme: any,
+  context: any,
+  builtinRenderResult?: (result: any, options: any, theme: any, context?: any) => Component,
+): Component {
+  if (!options?.expanded && !options?.isPartial && !context?.isError) {
+    return new Text('', 0, 0);
+  }
+  return builtinRenderResult!(result, options, theme, context);
+}
+
 function wrapBuiltinCallRenderer(args: {
   toolName: 'grep' | 'find';
   builtinRenderCall?: ((args: any, theme: any, context?: any) => Component) | undefined;
@@ -1853,6 +1948,15 @@ export function createPiFffSearchExtension(options: CreatePiFffSearchExtensionOp
     if (overrideBuiltinRead && builtInTemplates) {
       pi.registerTool({
         ...builtInTemplates.read,
+        renderResult(result, options, theme, context) {
+          return renderCollapsedReadResult(
+            result,
+            options,
+            theme,
+            context,
+            builtInTemplates.read.renderResult,
+          );
+        },
         async execute(toolCallId, params, signal, onUpdate, ctx) {
           const builtInRead = createBuiltInRead(ctx.cwd);
 
@@ -1994,6 +2098,10 @@ export function createPiFffSearchExtension(options: CreatePiFffSearchExtensionOp
     if (overrideBuiltinGrep && builtInTemplates) {
       pi.registerTool({
         ...builtInTemplates.grep,
+        renderResult: wrapBuiltinCollapsedResultRenderer({
+          builtinRenderResult: builtInTemplates.grep.renderResult,
+          formatter: formatCollapsedBuiltinGrepText,
+        }),
         renderCall(args, theme, context) {
           const fffParams = buildFffGrepParamsFromBuiltin(args as Record<string, unknown>);
           return wrapBuiltinCallRenderer({
@@ -2079,6 +2187,10 @@ export function createPiFffSearchExtension(options: CreatePiFffSearchExtensionOp
     if (overrideBuiltinFind && builtInTemplates) {
       pi.registerTool({
         ...builtInTemplates.find,
+        renderResult: wrapBuiltinCollapsedResultRenderer({
+          builtinRenderResult: builtInTemplates.find.renderResult,
+          formatter: formatCollapsedBuiltinFindText,
+        }),
         renderCall(args, theme, context) {
           const fffParams = buildFffFindParamsFromBuiltin(args as Record<string, unknown>);
           return wrapBuiltinCallRenderer({

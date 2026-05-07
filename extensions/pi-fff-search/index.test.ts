@@ -639,6 +639,98 @@ describe('pi-fff-search extension', () => {
     expect(renderTextTrimmed(rendered, 220)).toBe('find scratch/** in . (limit 20)');
   });
 
+  test('builtin read override hides file contents in collapsed result', () => {
+    const { tools } = createHarness({
+      overrideBuiltinRead: true,
+      overrideBuiltinGrep: false,
+      overrideBuiltinFind: false,
+      rewriteBuiltinBash: false,
+    });
+    const theme = createTheme();
+    const read = tools.find((tool) => tool.name === 'read')!;
+
+    const call = read.renderCall!({ path: 'src/router.ts', offset: 20, limit: 5 }, theme, {
+      cwd: '/repo',
+      expanded: false,
+    } as any);
+    const result = read.renderResult!(
+      {
+        content: [{ type: 'text', text: 'line 20\nline 21\nline 22' }],
+      },
+      { expanded: false, isPartial: false },
+      theme,
+      {
+        args: { path: 'src/router.ts', offset: 20, limit: 5 },
+        cwd: '/repo',
+        showImages: false,
+        isError: false,
+      } as any,
+    );
+
+    expect(renderTextTrimmed(call, 120)).toBe('read src/router.ts:20-24');
+    expect(renderTextTrimmed(result, 120)).toBe('');
+  });
+
+  test('builtin grep override summarizes collapsed results by file', () => {
+    const { tools } = createHarness({
+      overrideBuiltinRead: false,
+      overrideBuiltinGrep: true,
+      overrideBuiltinFind: false,
+      rewriteBuiltinBash: false,
+    });
+    const theme = createTheme();
+    const grep = tools.find((tool) => tool.name === 'grep')!;
+
+    const rendered = grep.renderResult!(
+      {
+        content: [
+          {
+            type: 'text',
+            text: 'router.ts:10: alpha\nrouter.ts:12: beta\nplanner.ts:5: gamma\nother.ts:3: delta',
+          },
+        ],
+      },
+      { expanded: false, isPartial: false },
+      theme,
+      { cwd: '/repo', showImages: false } as any,
+    );
+
+    expect(renderTextTrimmed(rendered, 120)).toBe(
+      ['3 files · 4 matches', '  · router.ts — 2', '  · other.ts — 1', '    … 1 more files'].join(
+        '\n',
+      ),
+    );
+  });
+
+  test('builtin find override summarizes collapsed results like fff_find_files', () => {
+    const { tools } = createHarness({
+      overrideBuiltinRead: false,
+      overrideBuiltinGrep: false,
+      overrideBuiltinFind: true,
+      rewriteBuiltinBash: false,
+    });
+    const theme = createTheme();
+    const find = tools.find((tool) => tool.name === 'find')!;
+
+    const rendered = find.renderResult!(
+      {
+        content: [
+          {
+            type: 'text',
+            text: 'src/router.ts\nsrc/router.test.ts\nsrc/coordinator.ts\n\n[1000 results limit reached]',
+          },
+        ],
+      },
+      { expanded: false, isPartial: false },
+      theme,
+      { cwd: '/repo', showImages: false } as any,
+    );
+
+    expect(renderTextTrimmed(rendered, 120)).toBe(
+      ['3 files', '  · src/router.ts', '  · src/router.test.ts', '    … 1 more'].join('\n'),
+    );
+  });
+
   test('renderCall shortens within using renderer cwd when available', () => {
     vi.stubEnv('HOME', '/Users/example');
     const { tools } = createHarness();
