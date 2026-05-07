@@ -80,6 +80,13 @@ function createTheme() {
   };
 }
 
+function createTaggedTheme() {
+  return {
+    bold: (text: string) => `<b>${text}</b>`,
+    fg: (token: string, text: string) => `<${token}>${text}</${token}>`,
+  };
+}
+
 function renderText(component: unknown, width = 120): string {
   expect(component).toMatchObject({ render: expect.any(Function) });
   return (component as { render: (width: number) => string[] }).render(width).join('\n');
@@ -639,6 +646,53 @@ describe('pi-fff-search extension', () => {
     expect(renderTextTrimmed(rendered, 220)).toBe('find scratch/** in . (limit 20)');
   });
 
+  test('builtin read override shortens absolute paths in the call display', () => {
+    const { tools } = createHarness({
+      overrideBuiltinRead: true,
+      overrideBuiltinGrep: false,
+      overrideBuiltinFind: false,
+      rewriteBuiltinBash: false,
+    });
+    const theme = createTheme();
+    const read = tools.find((tool) => tool.name === 'read')!;
+
+    const call = read.renderCall!(
+      {
+        path: '/Users/example/airlab/repos/treehouse/projects/sceptile/src/test/java/com/airbnb/sceptile/component/inventory/staticjson/ProtectionPlanStaticInventoryTest.java',
+        offset: 700,
+        limit: 190,
+      },
+      theme,
+      {
+        cwd: '/Users/example/airlab/repos/treehouse',
+      } as any,
+    );
+
+    expect(renderTextTrimmed(call, 120)).toBe(
+      'read projects/sceptile/src/test/.../staticjson/ProtectionPlanStaticInventoryTest.java:700-889 (ctrl+o to expand)',
+    );
+  });
+
+  test('builtin read override preserves title, path, and range colors', () => {
+    const { tools } = createHarness({
+      overrideBuiltinRead: true,
+      overrideBuiltinGrep: false,
+      overrideBuiltinFind: false,
+      rewriteBuiltinBash: false,
+    });
+    const theme = createTaggedTheme();
+    const read = tools.find((tool) => tool.name === 'read')!;
+
+    const call = read.renderCall!({ path: 'src/router.ts', offset: 20, limit: 5 }, theme, {
+      cwd: '/repo',
+      expanded: false,
+    } as any);
+
+    expect(renderTextTrimmed(call, 120)).toBe(
+      '<toolTitle><b>read</b></toolTitle> <accent>src/router.ts</accent><warning>:20-24</warning><dim> (ctrl+o to expand)</dim>',
+    );
+  });
+
   test('builtin read override hides file contents in collapsed result', () => {
     const { tools } = createHarness({
       overrideBuiltinRead: true,
@@ -667,7 +721,7 @@ describe('pi-fff-search extension', () => {
       } as any,
     );
 
-    expect(renderTextTrimmed(call, 120)).toBe('read src/router.ts:20-24');
+    expect(renderTextTrimmed(call, 120)).toBe('read src/router.ts:20-24 (ctrl+o to expand)');
     expect(renderTextTrimmed(result, 120)).toBe('');
   });
 

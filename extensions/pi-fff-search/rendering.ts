@@ -172,17 +172,45 @@ function shortenResultPath(
 function collapseRedundantJavaPackage(pathValue: string): string | null {
   const normalizedPath = normalizeSlashes(pathValue);
   const match = normalizedPath.match(
-    /^(projects\/([^/]+)\/src\/(?:main|test))\/java\/com\/example\/\2\/(.+)$/,
+    /^(.*?)(projects\/([^/]+)\/src\/(?:main|test))\/java\/com\/(?:airbnb|example)\/([^/]+)\/(.+)$/,
   );
   if (!match) {
     return null;
   }
 
-  const [, sourceRoot, _projectName, remainder] = match;
-  return `${sourceRoot}/.../${remainder}`;
+  const [, prefix, sourceRoot, projectName, packageProject, remainder] = match;
+  if (packageProject !== projectName) {
+    return null;
+  }
+
+  return `${prefix}${sourceRoot}/.../${remainder}`;
 }
 
-function collapseMiddlePath(pathValue: string, maxWidth: number): string {
+function collapseSemanticEllipsisPath(pathValue: string, maxWidth: number): string | null {
+  const marker = '/.../';
+  const markerIndex = pathValue.indexOf(marker);
+  if (markerIndex === -1) {
+    return null;
+  }
+
+  const prefix = pathValue.slice(0, markerIndex);
+  const tailParts = pathValue
+    .slice(markerIndex + marker.length)
+    .split('/')
+    .filter(Boolean);
+  while (tailParts.length > 1) {
+    const candidate = `${prefix}${marker}${tailParts.join('/')}`;
+    if (candidate.length <= maxWidth) {
+      return candidate;
+    }
+    tailParts.shift();
+  }
+
+  const leafOnly = `${prefix}${marker}${tailParts.join('/')}`;
+  return leafOnly.length <= maxWidth ? leafOnly : null;
+}
+
+export function collapseMiddlePath(pathValue: string, maxWidth: number): string {
   if (maxWidth <= 0 || pathValue.length <= maxWidth) {
     return pathValue;
   }
@@ -194,6 +222,11 @@ function collapseMiddlePath(pathValue: string, maxWidth: number): string {
       : pathValue;
   if (effectivePath.length <= maxWidth) {
     return effectivePath;
+  }
+
+  const semanticCollapsedPath = collapseSemanticEllipsisPath(effectivePath, maxWidth);
+  if (semanticCollapsedPath) {
+    return semanticCollapsedPath;
   }
 
   const parts = effectivePath.split('/').filter(Boolean);

@@ -39,6 +39,7 @@ import {
   runLocalFallback,
 } from './fallback';
 import {
+  collapseMiddlePath,
   formatCollapsedResultText,
   formatExpandedResultText,
   formatToolCallText,
@@ -1724,6 +1725,66 @@ function renderCollapsedReadResult(
   return builtinRenderResult!(result, options, theme, context);
 }
 
+type ReadCallTheme = {
+  bold: (text: string) => string;
+  fg: (...args: any[]) => string;
+};
+
+function formatBuiltinReadLineRange(args: Record<string, unknown>, theme: ReadCallTheme): string {
+  if (args.offset === undefined && args.limit === undefined) {
+    return '';
+  }
+
+  const startLine = typeof args.offset === 'number' ? args.offset : 1;
+  const endLine = typeof args.limit === 'number' ? startLine + args.limit - 1 : '';
+  return theme.fg('warning', `:${startLine}${endLine ? `-${endLine}` : ''}`);
+}
+
+function formatBuiltinReadCallSummary(
+  args: Record<string, unknown>,
+  theme: ReadCallTheme,
+  cwd?: string,
+  width?: number,
+  showExpandHint = false,
+): string {
+  const title = theme.fg('toolTitle', theme.bold('read'));
+  const pathValue = typeof args.path === 'string' ? args.path : '';
+  if (!pathValue) {
+    return title;
+  }
+
+  const rawRange = (() => {
+    if (args.offset === undefined && args.limit === undefined) {
+      return '';
+    }
+    const startLine = typeof args.offset === 'number' ? args.offset : 1;
+    const endLine = typeof args.limit === 'number' ? startLine + args.limit - 1 : '';
+    return `:${startLine}${endLine ? `-${endLine}` : ''}`;
+  })();
+  const expandHintText = showExpandHint ? ' (ctrl+o to expand)' : '';
+  const shortenedPath = shortenDisplayPath(pathValue, cwd);
+  const pathBudget = width
+    ? Math.max(24, width - 'read '.length - rawRange.length - expandHintText.length)
+    : 0;
+  const displayPath =
+    pathBudget > 0 ? collapseMiddlePath(shortenedPath, pathBudget) : shortenedPath;
+  const expandHint = expandHintText ? theme.fg('dim', expandHintText) : '';
+
+  return `${title} ${theme.fg('accent', displayPath)}${formatBuiltinReadLineRange(args, theme)}${expandHint}`;
+}
+
+function wrapBuiltinReadCallRenderer(args: {
+  renderArgs: Record<string, unknown>;
+  theme: ReadCallTheme;
+  context?: { cwd?: string; expanded?: boolean };
+}): Component {
+  const cwd = args.context?.cwd;
+  const showExpandHint = args.context?.expanded !== true;
+  return createWidthAwareText((width) =>
+    formatBuiltinReadCallSummary(args.renderArgs, args.theme, cwd, width, showExpandHint),
+  );
+}
+
 function wrapBuiltinCallRenderer(args: {
   toolName: 'grep' | 'find';
   builtinRenderCall?: ((args: any, theme: any, context?: any) => Component) | undefined;
@@ -1949,6 +2010,13 @@ export function createPiFffSearchExtension(options: CreatePiFffSearchExtensionOp
     if (overrideBuiltinRead && builtInTemplates) {
       pi.registerTool({
         ...builtInTemplates.read,
+        renderCall(args, theme, context) {
+          return wrapBuiltinReadCallRenderer({
+            renderArgs: args as Record<string, unknown>,
+            theme,
+            context,
+          });
+        },
         renderResult(result, options, theme, context) {
           return renderCollapsedReadResult(
             result,
