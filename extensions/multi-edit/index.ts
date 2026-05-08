@@ -105,10 +105,17 @@ function materializeLazyDiffDetails(
 
 const EXTENSION_CONFIG = loadExtensionConfig();
 
-const APPLY_PATCH_PROMPT_APPEND = `Always use apply_patch for manual code edits.
+function buildApplyPatchPromptAppend(disabledTools: string[] = []): string {
+  const disabled = new Set(disabledTools);
+  const editEnabled = !disabled.has('edit');
+  const editGuidance = editEnabled
+    ? '- Use edit for exact text replacements with { path, edits[] }.\n'
+    : '';
+  const mutationAlternatives = editEnabled ? 'apply_patch or edit' : 'apply_patch';
+
+  return `Always use apply_patch for manual code edits.
 - Prefer apply_patch for file creation, deletion, renames, and other patch-shaped edits when a patch would suffice.
-- Use edit for exact text replacements with { path, edits[] }.
-- Do not use bash or shell copy/write commands like cat, tee, cp, or here-docs to create or edit files when apply_patch or edit would suffice.
+${editGuidance}- Do not use bash or shell file-mutation commands like cat, tee, cp, or here-docs when ${mutationAlternatives} would suffice.
 
 Choosing a chunk shape inside *** Update File: blocks:
 - DEFAULT: use *** FindReplaceOnce: for nearly every edit. Paste the exact text you want to change into SEARCH; paste what it should become into REPLACE. SEARCH must match exactly once in the file (0 or 2+ matches fail with a clear error). This single shape covers single-line rewrites, multi-line block rewrites, function-body replacement, and renames of a unique symbol.
@@ -169,6 +176,7 @@ ${'>>>>>>>'} REPLACE
 +const VERBOSE = false;
 *** End Patch
 ${'```'}`;
+}
 
 const replaceEditSchema = Type.Object({
   oldText: Type.String({
@@ -1204,9 +1212,9 @@ export default function multiEditExtension(pi: ExtensionAPI) {
   });
 
   pi.on?.('before_agent_start', async (event, ctx) => {
-    applyModelToolPolicy(pi, ctx.model);
+    const disabledTools = applyModelToolPolicy(pi, ctx.model);
     return {
-      systemPrompt: `${event.systemPrompt}\n\n${APPLY_PATCH_PROMPT_APPEND}`,
+      systemPrompt: `${event.systemPrompt}\n\n${buildApplyPatchPromptAppend(disabledTools)}`,
     };
   });
 

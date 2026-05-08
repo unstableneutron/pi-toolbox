@@ -75,7 +75,8 @@ describe('multi-edit extension', () => {
     }
     const result = await beforeAgentStart({ systemPrompt: 'BASE' }, {});
     expect(result.systemPrompt).toContain('Always use apply_patch for manual code edits.');
-    expect(result.systemPrompt).toContain('Do not use bash or shell copy/write commands');
+    expect(result.systemPrompt).toContain('Do not use bash or shell file-mutation commands');
+    expect(result.systemPrompt).toContain('when apply_patch or edit would suffice');
     expect(result.systemPrompt).toContain(
       'Use edit for exact text replacements with { path, edits[] }.',
     );
@@ -223,12 +224,21 @@ describe('multi-edit extension', () => {
     if (!beforeAgentStart) {
       throw new Error('Expected before_agent_start handler');
     }
-    await beforeAgentStart(
+    const result = await beforeAgentStart(
       { systemPrompt: 'BASE' },
       { model: { id: 'gpt-5.4', provider: 'openai' } },
     );
 
     expect(activeTools).toEqual(['read', 'apply_patch']);
+    expect(result.systemPrompt).toContain('Always use apply_patch for manual code edits.');
+    expect(result.systemPrompt).toContain('when apply_patch would suffice');
+    expect(result.systemPrompt).toContain('*** FindReplaceOnce:');
+    expect(result.systemPrompt).toContain('*** FindReplaceAll:');
+    expect(result.systemPrompt).not.toContain(
+      'Use edit for exact text replacements with { path, edits[] }.',
+    );
+    expect(result.systemPrompt).not.toContain('apply_patch or edit would suffice');
+    expect(result.systemPrompt).not.toContain('copy/write commands');
   });
 
   test('keeps edit and write enabled for non-target models', async () => {
