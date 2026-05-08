@@ -25,6 +25,7 @@ function formatStateIcon(row: PatchPreviewRow, theme: SummaryTheme): string {
   if (row.state === 'staging') return theme.fg('warning', '◌');
   if (row.state === 'staged') return theme.fg('success', '◆');
   if (row.state === 'invalidated') return theme.fg('muted', '◇');
+  if (row.state === 'skipped') return theme.fg('muted', '⊘');
   if (row.state === 'committing') return theme.fg('warning', '▶');
   if (row.state === 'applying') return theme.fg('accent', '▶');
   if (row.state === 'failed') return theme.fg('error', '✗');
@@ -34,6 +35,9 @@ function formatStateIcon(row: PatchPreviewRow, theme: SummaryTheme): string {
 function formatStateSuffix(row: PatchPreviewRow, theme: SummaryTheme): string {
   if (row.state === 'invalidated') {
     return theme.fg('muted', 'restaging');
+  }
+  if (row.state === 'skipped') {
+    return theme.fg('muted', 'skipped');
   }
   return '';
 }

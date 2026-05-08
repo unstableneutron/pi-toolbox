@@ -4,10 +4,34 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { createPatchSession } from './patch-session';
-import { createVirtualWorkspace } from './patch';
+import { createVirtualWorkspace, PatchPlanFailedError } from './patch';
 import { createOverlayWorkspace } from './workspace';
 
 describe('PatchSession', () => {
+  test('staging remains strict for mixed success patches', async () => {
+    const workspace = createVirtualWorkspace('/repo', {
+      '/repo/a.txt': 'old a\n',
+      '/repo/b.txt': 'old b\n',
+    });
+    const session = createPatchSession('/repo', workspace);
+
+    const patch = `*** Begin Patch
+*** Update File: a.txt
+@@
+-missing
++new a
+*** Update File: b.txt
+@@
+-old b
++new b
+*** End Patch`;
+    const update = session.update(patch);
+    await session.whenIdle();
+
+    expect(update.rows.map((row) => row.path)).toEqual(['a.txt', 'b.txt']);
+    await expect(session.finalize(patch)).rejects.toThrow(PatchPlanFailedError);
+  });
+
   test('stages only newly sealed operations on later updates', async () => {
     const workspace = createOverlayWorkspace('/repo', { '/repo/demo.txt': 'alpha\n' });
     const session = createPatchSession('/repo', workspace);

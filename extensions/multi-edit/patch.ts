@@ -80,7 +80,8 @@ export type PatchOperationState =
   | 'committing'
   | 'applying'
   | 'applied'
-  | 'failed';
+  | 'failed'
+  | 'skipped';
 
 export type PatchPreviewRow =
   | {
@@ -210,14 +211,39 @@ export class PatchContextMatchError extends Error {
 // collected; if any occurred, the plan phase rejects with this error
 // carrying every failure so the agent can fix all of them in one
 // round-trip instead of discovering them one at a time.
+type PatchPlanStatusKind = 'planned' | 'failed' | 'skipped';
+
 interface PlanOpStatus {
   opIndex: number;
   opId: string;
   path: string;
   kind: 'update' | 'add' | 'delete' | 'move';
   wouldApply: boolean;
+  status: PatchPlanStatusKind;
   failure?: ContextMatchFailure;
+  error?: string;
+  blockedByPaths?: string[];
+  touchedPaths?: string[];
 }
+
+interface PatchRecoveryInstructions {
+  mustReadFiles: string[];
+  mustNotReadFiles: string[];
+}
+
+interface PartialPatchPlanMetadata {
+  mode: 'partialPerOperation';
+  partial: boolean;
+  statuses: PlanOpStatus[];
+  appliedRows: PatchPreviewRow[];
+  failedRows: PatchPreviewRow[];
+  skippedRows: PatchPreviewRow[];
+  recoveryInstructions: PatchRecoveryInstructions;
+}
+
+type PatchMutationPlan = MutationPlan<PatchPreviewRow> & {
+  patch?: PartialPatchPlanMetadata;
+};
 
 export class PatchPlanFailedError extends Error {
   readonly failures: ContextMatchFailure[];
@@ -444,7 +470,7 @@ export function renderPlanFailure(
   const ok = statuses.filter((s) => s.wouldApply);
 
   parts.push(
-    `Failed to apply patch. ${failed.length} operation${failed.length === 1 ? '' : 's'} would fail; ${ok.length} would succeed (all rolled back per atomic policy).`,
+    `Failed to apply patch. ${failed.length} operation${failed.length === 1 ? '' : 's'} would fail; ${ok.length} would succeed. No file changes were committed because no operation produced a commit-ready plan.`,
   );
 
   const shown = failed.slice(0, MAX_RENDERED_FAILURES);
@@ -452,7 +478,9 @@ export function renderPlanFailure(
   for (const status of shown) {
     parts.push('');
     parts.push(`— ${status.opId} (${status.kind} ${filePath(status.path)}):`);
-    parts.push(renderContextMatchFailure(status.failure!));
+    parts.push(
+      status.failure ? renderContextMatchFailure(status.failure) : (status.error ?? 'failed'),
+    );
   }
   if (hidden > 0) {
     parts.push('');
@@ -471,7 +499,7 @@ export function renderPlanFailure(
 
   parts.push('');
   parts.push(
-    'Tip: fix the failing ops and resubmit the whole patch, OR split passing ops into a separate apply_patch call to commit them independently.',
+    'Tip: fix the failing ops and retry. When at least one independent operation can apply, apply_patch will commit those operations and report failed/skipped ones.',
   );
   return parts.join('\n');
 }
@@ -2574,6 +2602,71 @@ function mergePlannedMutation(
   });
 }
 
+function planKindForOperation(op: PatchOperation): PlanOpStatus['kind'] {
+  return op.kind === 'update' && op.moveTo ? 'move' : op.kind;
+}
+
+function operationTouchedPaths(cwd: string, op: PatchOperation): string[] {
+  const paths = [resolvePatchPath(cwd, op.path)];
+  if (op.kind === 'update' && op.moveTo) {
+    paths.push(resolvePatchPath(cwd, op.moveTo));
+  }
+  return [...new Set(paths)];
+}
+
+function pathsForRecovery(row: PatchPreviewRow): string[] {
+  if (row.kind === 'move') {
+    return [row.path, row.targetPath];
+  }
+  return [row.path];
+}
+
+function rowsFromPlanStatuses(
+  rows: PatchPreviewRow[],
+  statuses: PlanOpStatus[],
+  kind: PatchPlanStatusKind,
+): PatchPreviewRow[] {
+  return statuses
+    .filter((status) => status.status === kind)
+    .map((status) => rows[status.opIndex])
+    .filter((row): row is PatchPreviewRow => row !== undefined);
+}
+
+function buildRecoveryInstructions(
+  appliedRows: PatchPreviewRow[],
+  failedRows: PatchPreviewRow[],
+  skippedRows: PatchPreviewRow[],
+): PatchRecoveryInstructions {
+  const mustRead = new Set([...failedRows, ...skippedRows].flatMap(pathsForRecovery));
+  const mustNotRead = new Set(appliedRows.flatMap(pathsForRecovery));
+  for (const path of mustRead) {
+    mustNotRead.delete(path);
+  }
+  return {
+    mustReadFiles: [...mustRead],
+    mustNotReadFiles: [...mustNotRead],
+  };
+}
+
+function isClassifiedPlanningError(error: unknown): error is Error {
+  if (error instanceof PatchContextMatchError) return true;
+  if (error instanceof AmbiguousFindReplaceOnceError) return true;
+  if (!(error instanceof Error)) return false;
+  return (
+    /^Failed to add .*: file already exists$/.test(error.message) ||
+    /^Failed to delete .*: file does not exist$/.test(error.message) ||
+    /^Failed to move .*: target already exists$/.test(error.message) ||
+    error.message.startsWith('File not found:') ||
+    error.message.startsWith(
+      'Binary file mutations are not supported in apply_patch plan/commit mode:',
+    )
+  );
+}
+
+function classifiedPlanningMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 async function collectVersionToken(
   readSnapshot: (absolutePath: string) => Promise<{
     version: FileVersionToken;
@@ -2711,7 +2804,13 @@ async function materializeMutationForOperation(
   };
 }
 
-interface BuildPatchPlanDiagnostics {
+interface BuildPatchPlanOptions {
+  /**
+   * Strict mode preserves the historical all-or-nothing planning
+   * behavior. Partial mode returns commit-ready independent ops and
+   * records failed/skipped rows for final apply_patch execution.
+   */
+  mode?: 'strict' | 'partial';
   /**
    * Count of stray `*** End Patch` markers merged away during parse.
    * See `parsePatchWithDiagnostics`. Plumbs through into the final
@@ -2732,9 +2831,10 @@ export async function buildPatchPlan(
   workspace: OverlayWorkspace,
   cwd: string,
   snapshotWorkspace: Workspace = workspace,
-  diagnostics: BuildPatchPlanDiagnostics = {},
-): Promise<MutationPlan<PatchPreviewRow>> {
-  const virtual = workspace.fork();
+  options: BuildPatchPlanOptions = {},
+): Promise<PatchMutationPlan> {
+  const planningMode = options.mode ?? 'strict';
+  let virtual = workspace.fork();
   const readSnapshot = createSnapshotReader(snapshotWorkspace);
   const rows = toPatchPreviewRows(ops, 'streamed').map((row, index) => ({
     ...row,
@@ -2743,6 +2843,7 @@ export async function buildPatchPlan(
   const mutationsByKey = new Map<string, PlannedFileMutation>();
   const sourceVersions: FileVersionToken[] = [];
   const seenSourceVersionPaths = new Set<string>();
+  const blockedPaths = new Set<string>();
   const statuses: PlanOpStatus[] = [];
   // Phase 2: collect per-op FindReplaceAll match counts so the final
   // summaryText can include an advisory when totals are high.
@@ -2767,9 +2868,23 @@ export async function buildPatchPlan(
     const beforeKey = resolvePatchPath(cwd, op.path);
     const targetKey =
       op.kind === 'update' && op.moveTo ? resolvePatchPath(cwd, op.moveTo) : beforeKey;
+    const touchedPaths = operationTouchedPaths(cwd, op);
+    const blockedByPaths = touchedPaths.filter((path) => blockedPaths.has(path));
 
-    await collectVersionToken(readSnapshot, sourceVersions, seenSourceVersionPaths, beforeKey);
-    await collectVersionToken(readSnapshot, sourceVersions, seenSourceVersionPaths, targetKey);
+    if (planningMode === 'partial' && blockedByPaths.length > 0) {
+      statuses.push({
+        opIndex: index,
+        opId: row.id!,
+        path: op.path,
+        kind: planKindForOperation(op),
+        wouldApply: false,
+        status: 'skipped',
+        error: `Skipped because an earlier failed operation affected ${blockedByPaths.join(', ')}`,
+        blockedByPaths,
+        touchedPaths,
+      });
+      continue;
+    }
 
     if (op.kind === 'update') {
       const lenientCounts = new Map<'bare' | 'compact', number>();
@@ -2795,7 +2910,23 @@ export async function buildPatchPlan(
     }
 
     try {
-      const results = await applyPatchOperations([op], virtual, cwd, undefined, {
+      const opSourceVersions: FileVersionToken[] = [];
+      const opSeenSourceVersionPaths = new Set<string>();
+      await collectVersionToken(
+        readSnapshot,
+        opSourceVersions,
+        opSeenSourceVersionPaths,
+        beforeKey,
+      );
+      await collectVersionToken(
+        readSnapshot,
+        opSourceVersions,
+        opSeenSourceVersionPaths,
+        targetKey,
+      );
+
+      const operationWorkspace = planningMode === 'partial' ? virtual.fork() : virtual;
+      const results = await applyPatchOperations([op], operationWorkspace, cwd, undefined, {
         collectDiff: false,
       });
       const opResult = results[0];
@@ -2805,26 +2936,59 @@ export async function buildPatchPlan(
       if (opResult?.usedQuoteStyle === true) {
         quoteStylePaths.push(op.path);
       }
-      const mutation = await materializeMutationForOperation(op, readSnapshot, virtual, cwd);
+      const mutation = await materializeMutationForOperation(
+        op,
+        readSnapshot,
+        operationWorkspace,
+        cwd,
+      );
       mergePlannedMutation(mutationsByKey, mutation, { id: row.id!, rowIndex: index });
+      for (const token of opSourceVersions) {
+        if (seenSourceVersionPaths.has(token.absolutePath)) continue;
+        seenSourceVersionPaths.add(token.absolutePath);
+        sourceVersions.push(token);
+      }
+      if (planningMode === 'partial') {
+        virtual = operationWorkspace;
+      }
       statuses.push({
         opIndex: index,
         opId: row.id!,
         path: op.path,
-        kind: op.kind === 'update' && op.moveTo ? 'move' : op.kind,
+        kind: planKindForOperation(op),
         wouldApply: true,
+        status: 'planned',
+        touchedPaths,
       });
     } catch (error) {
       if (error instanceof PatchContextMatchError) {
-        // Record failure and continue; virtual state is untouched
-        // because applyPatchOperations throws before mutating.
+        if (planningMode === 'partial') {
+          for (const path of touchedPaths) blockedPaths.add(path);
+        }
         statuses.push({
           opIndex: index,
           opId: row.id!,
           path: op.path,
-          kind: op.kind === 'update' && op.moveTo ? 'move' : op.kind,
+          kind: planKindForOperation(op),
           wouldApply: false,
+          status: 'failed',
           failure: error.failure,
+          error: error.message,
+          touchedPaths,
+        });
+        continue;
+      }
+      if (planningMode === 'partial' && isClassifiedPlanningError(error)) {
+        for (const path of touchedPaths) blockedPaths.add(path);
+        statuses.push({
+          opIndex: index,
+          opId: row.id!,
+          path: op.path,
+          kind: planKindForOperation(op),
+          wouldApply: false,
+          status: 'failed',
+          error: classifiedPlanningMessage(error),
+          touchedPaths,
         });
         continue;
       }
@@ -2832,7 +2996,8 @@ export async function buildPatchPlan(
     }
   }
 
-  if (statuses.some((s) => !s.wouldApply)) {
+  const hasFailures = statuses.some((s) => !s.wouldApply);
+  if (hasFailures && planningMode === 'strict') {
     throw new PatchPlanFailedError(statuses);
   }
 
@@ -2842,8 +3007,22 @@ export async function buildPatchPlan(
     return aIndex - bIndex;
   });
 
+  const finalRows = rows.map((row, index) => {
+    const status = statuses[index];
+    if (status?.status === 'failed') return { ...row, state: 'failed' as const };
+    if (status?.status === 'skipped') return { ...row, state: 'skipped' as const };
+    return row;
+  });
+  const appliedRows = rowsFromPlanStatuses(finalRows, statuses, 'planned');
+  const failedRows = rowsFromPlanStatuses(finalRows, statuses, 'failed');
+  const skippedRows = rowsFromPlanStatuses(finalRows, statuses, 'skipped');
+
+  if (planningMode === 'partial' && appliedRows.length === 0 && failedRows.length > 0) {
+    throw new PatchPlanFailedError(statuses);
+  }
+
   return {
-    rows,
+    rows: finalRows,
     mutations,
     sourceVersions,
     summaryText: buildSummaryText(
@@ -2851,10 +3030,22 @@ export async function buildPatchPlan(
       replaceAllTotals,
       lenientDividerTotals,
       quoteStylePaths,
-      diagnostics.mergedEnvelopes ?? 0,
-      diagnostics.autoWrappedEnvelope ?? false,
+      options.mergedEnvelopes ?? 0,
+      options.autoWrappedEnvelope ?? false,
       autoFixTotals,
     ),
+    patch:
+      planningMode === 'partial' && (failedRows.length > 0 || skippedRows.length > 0)
+        ? {
+            mode: 'partialPerOperation',
+            partial: true,
+            statuses,
+            appliedRows,
+            failedRows,
+            skippedRows,
+            recoveryInstructions: buildRecoveryInstructions(appliedRows, failedRows, skippedRows),
+          }
+        : undefined,
   };
 }
 

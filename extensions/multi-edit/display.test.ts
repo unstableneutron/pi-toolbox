@@ -149,6 +149,30 @@ describe('multi-edit display renderer', () => {
     expect(text).toContain('restaging');
   });
 
+  test('renders skipped rows without restaging label', () => {
+    const text = renderApplyPatchRows(
+      [
+        {
+          kind: 'edit',
+          path: 'blocked.txt',
+          addedLines: 1,
+          removedLines: 1,
+          modifiedBytes: 12,
+          renameOnly: false,
+          state: 'skipped',
+        },
+      ],
+      createTheme(),
+      '/repo',
+    )
+      .render(120)
+      .join('\n');
+
+    expect(text).toContain('⊘ edit');
+    expect(text).toContain('skipped');
+    expect(text).not.toContain('restaging');
+  });
+
   test('truncates long single-operation summaries on narrow widths', () => {
     const lines = renderApplyPatchSummary(
       [

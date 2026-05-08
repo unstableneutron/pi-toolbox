@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -121,6 +121,11 @@ describe('multi-edit extension', () => {
     expect(result.systemPrompt).toMatch(
       /Use @@ hunks (only|ONLY) when you need several coordinated/,
     );
+    expect(result.systemPrompt).toContain('apply_patch applies valid independent operations');
+    expect(result.systemPrompt).not.toContain('Each apply_patch call is atomic');
+    expect(result.systemPrompt).toContain(
+      'All chunks within one *** Update File: block match against the ORIGINAL file state',
+    );
 
     expect(tools[1].description).toBe(
       'Apply a Codex-style patch payload. Default to *** FindReplaceOnce: blocks for almost every edit (unique SEARCH/REPLACE). Use *** FindReplaceAll: for deliberate whole-line mass substitutions. Use @@ hunks only for complex coordinated edits that FindReplace would fracture. One payload can mix shapes.',
@@ -176,6 +181,12 @@ describe('multi-edit extension', () => {
     // @@ context label is WHOLE-LINE and preserved as context.
     expect(tools[1].promptGuidelines.some((g: string) => g.includes('WHOLE-LINE match'))).toBe(
       true,
+    );
+    expect(tools[1].promptGuidelines).toContain(
+      'All chunks in one *** Update File: block match against the original file state, not against prior chunks within the same block. Split dependent edits into separate blocks or separate apply_patch calls.',
+    );
+    expect(tools[1].promptGuidelines).toContain(
+      'apply_patch may partially apply independent operations. If a partial result reports failed or skipped files, read those files before retrying and avoid rereading applied files unless a specific dependency requires it.',
     );
     expect(tools[1].promptGuidelines).not.toContain(
       'Prefer apply_patch for manual code edits, file creation/deletion, and renames when a patch would suffice.',
@@ -895,6 +906,83 @@ describe('multi-edit extension', () => {
       expect(result.details?.execution?.reusedStage).toBe(true);
     } finally {
       await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('apply_patch returns partial success details when independent operations apply', async () => {
+    const tool = getApplyPatchTool();
+    const cwd = await mkdtemp(join(tmpdir(), 'multi-edit-partial-'));
+
+    try {
+      await writeFile(join(cwd, 'a.txt'), 'old a\n', 'utf8');
+      await writeFile(join(cwd, 'b.txt'), 'old b\n', 'utf8');
+
+      const result = await tool.execute(
+        'call-partial',
+        {
+          patch: `*** Begin Patch
+*** Update File: a.txt
+@@
+-old a
++new a
+*** Update File: missing.txt
+@@
+-old missing
++new missing
+*** Update File: b.txt
+@@
+-old b
++new b
+*** End Patch`,
+        },
+        undefined,
+        undefined,
+        { cwd, state: {} },
+      );
+
+      expect(result.isError).not.toBe(true);
+      expect(result.content[0]?.text).toContain('partially applied 2 of 3 operations');
+      expect(result.details.execution.partial).toBe(true);
+      expect(result.details.execution.appliedRows.map((row: any) => row.path)).toEqual([
+        'a.txt',
+        'b.txt',
+      ]);
+      expect(result.details.execution.failedRows.map((row: any) => row.path)).toEqual([
+        'missing.txt',
+      ]);
+      await expect(readFile(join(cwd, 'a.txt'), 'utf8')).resolves.toBe('new a\n');
+      await expect(readFile(join(cwd, 'b.txt'), 'utf8')).resolves.toBe('new b\n');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test('apply_patch returns hard error when no operations apply', async () => {
+    const tool = getApplyPatchTool();
+    const cwd = await mkdtemp(join(tmpdir(), 'multi-edit-partial-none-'));
+
+    try {
+      await writeFile(join(cwd, 'a.txt'), 'old a\n', 'utf8');
+      const result = await tool.execute(
+        'call-partial-none',
+        {
+          patch: `*** Begin Patch
+*** Update File: a.txt
+@@
+-missing
++new
+*** End Patch`,
+        },
+        undefined,
+        undefined,
+        { cwd, state: {} },
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0]?.text).toContain('Failed to apply patch');
+      await expect(readFile(join(cwd, 'a.txt'), 'utf8')).resolves.toBe('old a\n');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
     }
   });
 

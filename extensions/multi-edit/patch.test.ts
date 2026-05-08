@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -862,6 +862,293 @@ describe('buildPatchPlan', () => {
     await buildPatchPlan(ops, virtual, '/repo', snapshotWorkspace);
 
     expect(readBufferCalls).toBe(1);
+  });
+
+  describe('partial mode', () => {
+    test('plans independent operations around a failed operation', async () => {
+      const workspace = createVirtualWorkspace('/repo', {
+        '/repo/a.txt': 'old a\n',
+        '/repo/b.txt': 'old b\n',
+      });
+      const ops = parsePatch(`*** Begin Patch
+*** Update File: a.txt
+@@
+-old a
++new a
+*** Update File: missing.txt
+@@
+-old missing
++new missing
+*** Update File: b.txt
+@@
+-old b
++new b
+*** End Patch`);
+
+      const plan = await buildPatchPlan(ops, workspace, '/repo', workspace, {
+        mode: 'partial',
+      });
+
+      expect(plan.patch?.partial).toBe(true);
+      expect(plan.patch?.appliedRows.map((row) => row.path)).toEqual(['a.txt', 'b.txt']);
+      expect(plan.patch?.failedRows.map((row) => row.path)).toEqual(['missing.txt']);
+      expect(plan.patch?.skippedRows).toEqual([]);
+      expect(plan.rows.map((row) => row.state)).toEqual(['streamed', 'failed', 'streamed']);
+      expect(plan.mutations.map((mutation) => mutation.displayPath)).toEqual(['a.txt', 'b.txt']);
+    });
+
+    test('skips later operations that overlap a failed operation path', async () => {
+      const workspace = createVirtualWorkspace('/repo', {
+        '/repo/a.txt': 'old a\n',
+        '/repo/b.txt': 'old b\n',
+      });
+      const ops = parsePatch(`*** Begin Patch
+*** Update File: a.txt
+@@
+-not present
++new a
+*** Update File: ./a.txt
+@@
+ old a
++after a
+*** Update File: b.txt
+@@
+-old b
++new b
+*** End Patch`);
+
+      const plan = await buildPatchPlan(ops, workspace, '/repo', workspace, {
+        mode: 'partial',
+      });
+
+      expect(plan.patch?.failedRows.map((row) => row.path)).toEqual(['a.txt']);
+      expect(plan.patch?.skippedRows.map((row) => row.path)).toEqual(['./a.txt']);
+      expect(plan.patch?.appliedRows.map((row) => row.path)).toEqual(['b.txt']);
+      expect(plan.rows.map((row) => row.state)).toEqual(['failed', 'skipped', 'streamed']);
+      expect(plan.mutations.map((mutation) => mutation.displayPath)).toEqual(['b.txt']);
+    });
+
+    test('failed move blocks both source and target aliases', async () => {
+      const workspace = createVirtualWorkspace('/repo', {
+        '/repo/source.txt': 'source\n',
+        '/repo/later.txt': 'later\n',
+      });
+      const ops = parsePatch(`*** Begin Patch
+*** Update File: source.txt
+*** Move to: target.txt
+@@
+-missing source text
++target
+*** Update File: /repo/target.txt
+@@
+ target
++after target
+*** Update File: later.txt
+@@
+-later
++later changed
+*** End Patch`);
+
+      const plan = await buildPatchPlan(ops, workspace, '/repo', workspace, {
+        mode: 'partial',
+      });
+
+      expect(plan.patch?.failedRows.map((row) => row.path)).toEqual(['source.txt']);
+      expect(plan.patch?.skippedRows.map((row) => row.path)).toEqual(['/repo/target.txt']);
+      expect(plan.patch?.appliedRows.map((row) => row.path)).toEqual(['later.txt']);
+    });
+
+    test('partializes ambiguous FindReplaceOnce errors', async () => {
+      const workspace = createVirtualWorkspace('/repo', {
+        '/repo/a.txt': 'same\nsame\n',
+        '/repo/b.txt': 'old b\n',
+      });
+      const begin = '*** Begin ' + 'Patch';
+      const end = '*** End ' + 'Patch';
+      const search = '<<<<<<< ' + 'SEARCH';
+      const replaceEnd = '>>>>>>> ' + 'REPLACE';
+      const ops = parsePatch(
+        [
+          begin,
+          '*** Update File: a.txt',
+          '*** FindReplaceOnce:',
+          search,
+          'same',
+          '======= REPLACE',
+          'changed',
+          replaceEnd,
+          '*** Update File: b.txt',
+          '@@',
+          '-old b',
+          '+new b',
+          end,
+        ].join('\n'),
+      );
+
+      const plan = await buildPatchPlan(ops, workspace, '/repo', workspace, { mode: 'partial' });
+
+      expect(plan.patch?.failedRows.map((row) => row.path)).toEqual(['a.txt']);
+      expect(plan.patch?.appliedRows.map((row) => row.path)).toEqual(['b.txt']);
+    });
+
+    test('partializes add target exists and delete source missing', async () => {
+      const workspace = createVirtualWorkspace('/repo', {
+        '/repo/existing.txt': 'already here\n',
+        '/repo/ok.txt': 'old\n',
+      });
+      const begin = '*** Begin ' + 'Patch';
+      const end = '*** End ' + 'Patch';
+      const ops = parsePatch(
+        [
+          begin,
+          '*** Add File: existing.txt',
+          '+new',
+          '*** Delete File: missing.txt',
+          '*** Update File: ok.txt',
+          '@@',
+          '-old',
+          '+new',
+          end,
+        ].join('\n'),
+      );
+
+      const plan = await buildPatchPlan(ops, workspace, '/repo', workspace, { mode: 'partial' });
+
+      expect(plan.patch?.failedRows.map((row) => row.path)).toEqual([
+        'existing.txt',
+        'missing.txt',
+      ]);
+      expect(plan.patch?.appliedRows.map((row) => row.path)).toEqual(['ok.txt']);
+    });
+
+    test('recovery instructions prefer mustReadFiles when applied and failed rows share a path', async () => {
+      const workspace = createVirtualWorkspace('/repo', {
+        '/repo/a.txt': 'old\n',
+      });
+      const ops = parsePatch(`*** Begin Patch
+*** Update File: a.txt
+@@
+-old
++new
+*** Update File: a.txt
+@@
+-missing
++later
+*** End Patch`);
+
+      const plan = await buildPatchPlan(ops, workspace, '/repo', workspace, { mode: 'partial' });
+
+      expect(plan.patch?.recoveryInstructions.mustReadFiles).toEqual(['a.txt']);
+      expect(plan.patch?.recoveryInstructions.mustNotReadFiles).toEqual([]);
+    });
+
+    test('blocked paths use canonical aliases for relative and absolute paths', async () => {
+      const workspace = createVirtualWorkspace('/repo', {
+        '/repo/a.txt': 'old\n',
+        '/repo/b.txt': 'old b\n',
+      });
+      const ops = parsePatch(`*** Begin Patch
+*** Update File: ./a.txt
+@@
+-missing
++new
+*** Update File: /repo/a.txt
+@@
+ old
++later
+*** Update File: b.txt
+@@
+-old b
++new b
+*** End Patch`);
+
+      const plan = await buildPatchPlan(ops, workspace, '/repo', workspace, { mode: 'partial' });
+
+      expect(plan.patch?.failedRows.map((row) => row.path)).toEqual(['./a.txt']);
+      expect(plan.patch?.skippedRows.map((row) => row.path)).toEqual(['/repo/a.txt']);
+      expect(plan.patch?.appliedRows.map((row) => row.path)).toEqual(['b.txt']);
+    });
+
+    test('partial plan excludes failed paths from source version checks', async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'multi-edit-source-version-'));
+      try {
+        await writeFile(join(dir, 'ok.txt'), 'old ok\n', 'utf8');
+        await writeFile(join(dir, 'failed.txt'), 'old failed\n', 'utf8');
+        const ops = parsePatch(`*** Begin Patch
+*** Update File: failed.txt
+@@
+-missing
++new failed
+*** Update File: ok.txt
+@@
+-old ok
++new ok
+*** End Patch`);
+        const plan = await buildPatchPlan(
+          ops,
+          createVirtualWorkspace(dir),
+          dir,
+          createRealWorkspace(),
+          { mode: 'partial' },
+        );
+
+        await writeFile(join(dir, 'failed.txt'), 'changed after planning\n', 'utf8');
+        const commit = await commitMutationPlan(plan, createRealWorkspace(), {
+          rollbackOnFailure: true,
+        });
+
+        expect(commit.ok).toBe(true);
+        await expect(readFile(join(dir, 'ok.txt'), 'utf8')).resolves.toBe('new ok\n');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    test('partial plan preserves source version checks for applied paths', async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'multi-edit-source-version-applied-'));
+      try {
+        await writeFile(join(dir, 'ok.txt'), 'old ok\n', 'utf8');
+        const ops = parsePatch(`*** Begin Patch
+*** Update File: ok.txt
+@@
+-old ok
++new ok
+*** End Patch`);
+        const plan = await buildPatchPlan(
+          ops,
+          createVirtualWorkspace(dir),
+          dir,
+          createRealWorkspace(),
+          { mode: 'partial' },
+        );
+
+        await writeFile(join(dir, 'ok.txt'), 'changed after planning\n', 'utf8');
+        const commit = await commitMutationPlan(plan, createRealWorkspace(), {
+          rollbackOnFailure: true,
+        });
+
+        expect(commit.ok).toBe(false);
+        expect(commit.failure?.error).toContain('Source file changed before commit');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    test('all failed operations preserve strict plan failure diagnostics', async () => {
+      const workspace = createVirtualWorkspace('/repo', {
+        '/repo/a.txt': 'old a\n',
+      });
+      const ops = parsePatch(`*** Begin Patch
+*** Update File: a.txt
+@@
+-missing
++new
+*** End Patch`);
+
+      await expect(
+        buildPatchPlan(ops, workspace, '/repo', workspace, { mode: 'partial' }),
+      ).rejects.toThrow(PatchPlanFailedError);
+    });
   });
 
   test('commits against real workspace without false source version mismatches', async () => {

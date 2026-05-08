@@ -130,7 +130,7 @@ For *** Add File: blocks, every content line must start with a literal "+" with 
 
 Other invariants:
 - All chunks within one *** Update File: block match against the ORIGINAL file state — not against earlier chunks' results. If two chunks must depend on each other, split into separate *** Update File: sections or separate apply_patch calls.
-- Each apply_patch call is atomic: all operations succeed or all roll back. Batch operations into one call when they share invariants (renaming a function and updating its callsites). Split into separate calls when operations are independent so each can commit even if another fails.
+- apply_patch applies valid independent operations and reports failed or skipped operations. After a partial failure, read failed/skipped files before retrying. Do not reread applied files unless a specific dependency requires it. Batch tightly-coupled edits when they share invariants, but remember a partial result can leave related cross-file work incomplete.
 - Formatting commands, tests, and read/search commands do not need apply_patch.
 
 Canonical example. Most real patches look like the FindReplaceOnce / FindReplaceAll portions; @@ is shown last for completeness.
@@ -377,6 +377,56 @@ function markRowsInProgress(rows: PatchPreviewRow[]): PatchPreviewRow[] {
   return rows.map((row) => ({ ...row, state: 'committing' }));
 }
 
+function applyPartialPlanRows(
+  rows: PatchPreviewRow[],
+  partial: NonNullable<Awaited<ReturnType<typeof buildPatchPlan>>['patch']> | undefined,
+): PatchPreviewRow[] {
+  if (!partial) {
+    return rows.map((row) => ({ ...row, state: 'applied' as const }));
+  }
+
+  const failed = new Set(partial.failedRows.map((row) => patchRowKey(row)));
+  const skipped = new Set(partial.skippedRows.map((row) => patchRowKey(row)));
+  return rows.map((row) => {
+    const key = patchRowKey(row);
+    if (failed.has(key)) return { ...row, state: 'failed' as const };
+    if (skipped.has(key)) return { ...row, state: 'skipped' as const };
+    return { ...row, state: 'applied' as const };
+  });
+}
+
+function formatPartialPatchSummary(
+  total: number,
+  appliedRows: PatchPreviewRow[],
+  failedRows: PatchPreviewRow[],
+  skippedRows: PatchPreviewRow[],
+  recovery: { mustReadFiles: string[]; mustNotReadFiles: string[] },
+): string {
+  const lines = [`apply_patch partially applied ${appliedRows.length} of ${total} operations.`];
+  if (failedRows.length > 0) {
+    lines.push(`Failed: ${failedRows.map((row) => row.path).join(', ')}`);
+  }
+  if (skippedRows.length > 0) {
+    lines.push(
+      `Skipped due to failed dependencies: ${skippedRows.map((row) => row.path).join(', ')}`,
+    );
+  }
+  if (appliedRows.length > 0) {
+    lines.push(`Applied: ${appliedRows.map((row) => row.path).join(', ')}`);
+  }
+  if (recovery.mustReadFiles.length > 0) {
+    lines.push(
+      `Recovery: read failed/skipped files before retrying: ${recovery.mustReadFiles.join(', ')}.`,
+    );
+  }
+  if (recovery.mustNotReadFiles.length > 0) {
+    lines.push(
+      `Do not reread applied files unless a specific dependency requires it: ${recovery.mustNotReadFiles.join(', ')}.`,
+    );
+  }
+  return lines.join('\n');
+}
+
 function buildPatchCommitRows(
   rows: PatchPreviewRow[],
   failure:
@@ -426,26 +476,12 @@ async function executePatch(
   });
   return withFilesMutationQueue(files, async () => {
     const existingSession = getExistingApplyPatchSession(context, cwd);
-    let finalized: {
-      plan: Awaited<ReturnType<typeof buildPatchPlan>>;
-      reusedStage: boolean;
-      rows: PatchPreviewRow[] | undefined;
-    };
-    try {
-      finalized = existingSession
-        ? await existingSession.finalize(patch)
-        : {
-            plan: await buildPatchPlan(
-              ops,
-              createVirtualWorkspace(cwd),
-              cwd,
-              createRealWorkspace(),
-              { mergedEnvelopes },
-            ),
-            reusedStage: false,
-            rows: undefined,
-          };
-    } catch (error) {
+    const buildFreshPartialPlan = () =>
+      buildPatchPlan(ops, createVirtualWorkspace(cwd), cwd, createRealWorkspace(), {
+        mergedEnvelopes,
+        mode: 'partial',
+      });
+    const renderPlanningError = (error: unknown) => {
       if (error instanceof PatchContextMatchError) {
         const text = renderContextMatchFailure(error.failure);
         return {
@@ -454,7 +490,7 @@ async function executePatch(
           details: {
             contextMatch: error.failure,
             execution: {
-              mode: 'logicalAtomicPerFile' as const,
+              mode: 'partialPerOperation' as const,
               ok: false,
               phase: 'plan' as const,
             },
@@ -470,7 +506,7 @@ async function executePatch(
             planFailures: error.failures,
             planStatuses: error.statuses,
             execution: {
-              mode: 'logicalAtomicPerFile' as const,
+              mode: 'partialPerOperation' as const,
               ok: false,
               phase: 'plan' as const,
             },
@@ -478,6 +514,43 @@ async function executePatch(
         };
       }
       throw error;
+    };
+
+    let finalized:
+      | {
+          plan: Awaited<ReturnType<typeof buildPatchPlan>>;
+          reusedStage: boolean;
+          rows: PatchPreviewRow[] | undefined;
+        }
+      | undefined;
+    try {
+      finalized = existingSession
+        ? await existingSession.finalize(patch)
+        : {
+            plan: await buildFreshPartialPlan(),
+            reusedStage: false,
+            rows: undefined,
+          };
+    } catch (error) {
+      if (
+        existingSession &&
+        (error instanceof PatchContextMatchError || error instanceof PatchPlanFailedError)
+      ) {
+        try {
+          finalized = {
+            plan: await buildFreshPartialPlan(),
+            reusedStage: false,
+            rows: undefined,
+          };
+        } catch (partialError) {
+          return renderPlanningError(partialError);
+        }
+      } else {
+        return renderPlanningError(error);
+      }
+    }
+    if (!finalized) {
+      throw new Error('Failed to finalize patch plan.');
     }
     const plan = finalized.plan;
     const commitRows = finalized.rows ?? plan.rows;
@@ -494,7 +567,9 @@ async function executePatch(
       includeDiff: true,
       signal,
     });
-    const operationRows = buildPatchCommitRows(commitRows, commit.failure);
+    const operationRows = plan.patch?.partial
+      ? applyPartialPlanRows(commitRows, plan.patch)
+      : buildPatchCommitRows(commitRows, commit.failure);
 
     onUpdate?.({
       content: [{ type: 'text', text: '' }],
@@ -517,17 +592,32 @@ async function executePatch(
           execution: {
             ...commit,
             reusedStage: finalized.reusedStage,
-            mode: 'logicalAtomicPerFile' as const,
+            mode: plan.patch?.partial
+              ? ('partialPerOperation' as const)
+              : ('logicalAtomicPerFile' as const),
+            partial: plan.patch?.partial ?? false,
+            plannerFailedRows: plan.patch?.failedRows ?? [],
+            plannerSkippedRows: plan.patch?.skippedRows ?? [],
           },
         },
       };
     }
 
+    const text = plan.patch?.partial
+      ? formatPartialPatchSummary(
+          commitRows.length,
+          plan.patch.appliedRows,
+          plan.patch.failedRows,
+          plan.patch.skippedRows,
+          plan.patch.recoveryInstructions,
+        )
+      : (commit.summaryText ?? `Applied patch with ${commit.rows.length} operation(s).`);
+
     return {
       content: [
         {
           type: 'text' as const,
-          text: commit.summaryText ?? `Applied patch with ${commit.rows.length} operation(s).`,
+          text,
         },
       ],
       details: {
@@ -537,7 +627,14 @@ async function executePatch(
         execution: {
           ...commit,
           reusedStage: finalized.reusedStage,
-          mode: 'logicalAtomicPerFile' as const,
+          mode: plan.patch?.partial
+            ? ('partialPerOperation' as const)
+            : ('logicalAtomicPerFile' as const),
+          partial: plan.patch?.partial ?? false,
+          appliedRows: plan.patch?.appliedRows ?? operationRows,
+          failedRows: plan.patch?.failedRows ?? [],
+          skippedRows: plan.patch?.skippedRows ?? [],
+          recoveryInstructions: plan.patch?.recoveryInstructions,
         },
       },
     };
@@ -1204,6 +1301,7 @@ export default function multiEditExtension(pi: ExtensionAPI) {
       'Prefer relative paths when practical; absolute paths are allowed when necessary.',
       'Use *** End of File when needed for EOF-sensitive changes.',
       'All chunks in one *** Update File: block match against the original file state, not against prior chunks within the same block. Split dependent edits into separate blocks or separate apply_patch calls.',
+      'apply_patch may partially apply independent operations. If a partial result reports failed or skipped files, read those files before retrying and avoid rereading applied files unless a specific dependency requires it.',
     ],
     parameters: applyPatchSchema,
     prepareArguments: prepareApplyPatchArguments,
