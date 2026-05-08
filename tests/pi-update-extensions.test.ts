@@ -5,10 +5,12 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   applyPiCodingAgentResolverPatch,
+  applyPiContinuousLearningPatch,
   applyPiMermaidPatch,
   buildPiCodingAgentResolverReplacement,
   compareVersions,
   isPiCodingAgentResolverPatchApplied,
+  isPiContinuousLearningPatchApplied,
   isPiMermaidPatchApplied,
   parsePiListOutput,
 } from '../scripts/pi-update-extensions.ts';
@@ -187,6 +189,127 @@ describe('pi-mermaid patching', () => {
     const packageRoot = setupFakePackage('1.0.0', 'export default function extension() {}\n');
     await expect(applyPiMermaidPatch({ packageRoot })).rejects.toThrow(
       /target text for pi-mermaid patch not found/i,
+    );
+  });
+});
+
+describe('pi-continuous-learning patching', () => {
+  const INDEX_CONTENT = [
+    'import { loadSkills } from "@mariozechner/pi-coding-agent";',
+    'export default function extension() { return loadSkills; }',
+    '',
+  ].join('\n');
+
+  const FACT_TOOLS_CONTENT = [
+    'import { StringEnum } from "@mariozechner/pi-ai";',
+    'export const schema = StringEnum(["instinct"]);',
+    '',
+  ].join('\n');
+
+  const ANALYZE_CONTENT = [
+    'import { AuthStorage } from "@mariozechner/pi-coding-agent";',
+    'export async function analyze() {',
+    '  const { loadSkills } = await import("@mariozechner/pi-coding-agent");',
+    '  return { AuthStorage, loadSkills };',
+    '}',
+    '',
+  ].join('\n');
+
+  const ANALYZE_MODEL_CONTENT = [
+    'import { getModel } from "@mariozechner/pi-ai";',
+    'export const model = getModel;',
+    '',
+  ].join('\n');
+
+  function setupFakePackage(version: string, patched = false): string {
+    const packageRoot = makeTempDir('pi-continuous-learning-');
+    writeFileSync(
+      join(packageRoot, 'package.json'),
+      JSON.stringify({ name: 'pi-continuous-learning', version }, null, 2),
+    );
+    mkdirSync(join(packageRoot, 'dist', 'cli'), { recursive: true });
+    const transform = (content: string) =>
+      patched ? content.replaceAll('@mariozechner/', '@earendil-works/') : content;
+    writeFileSync(join(packageRoot, 'dist', 'index.js'), transform(INDEX_CONTENT));
+    writeFileSync(join(packageRoot, 'dist', 'fact-tools.js'), transform(FACT_TOOLS_CONTENT));
+    writeFileSync(join(packageRoot, 'dist', 'cli', 'analyze.js'), transform(ANALYZE_CONTENT));
+    writeFileSync(
+      join(packageRoot, 'dist', 'cli', 'analyze-model.js'),
+      transform(ANALYZE_MODEL_CONTENT),
+    );
+    return packageRoot;
+  }
+
+  it('reports unpatched fixture as not yet patched', () => {
+    const packageRoot = setupFakePackage('0.14.0');
+    expect(isPiContinuousLearningPatchApplied(packageRoot)).toBe(false);
+  });
+
+  it('patches old pi namespace imports in compiled runtime JavaScript', async () => {
+    const packageRoot = setupFakePackage('0.14.0');
+    const result = await applyPiContinuousLearningPatch({ packageRoot });
+
+    expect(result).toMatchObject({
+      status: 'applied',
+      packageRoot,
+      version: '0.14.0',
+    });
+    expect(result.patchPath).toBe(join(packageRoot, 'dist'));
+
+    for (const relativePath of [
+      'dist/index.js',
+      'dist/fact-tools.js',
+      'dist/cli/analyze.js',
+      'dist/cli/analyze-model.js',
+    ]) {
+      const patched = readFileSync(join(packageRoot, relativePath), 'utf8');
+      expect(patched).not.toContain('@mariozechner/');
+      expect(patched).toContain('@earendil-works/');
+    }
+    expect(isPiContinuousLearningPatchApplied(packageRoot)).toBe(true);
+  });
+
+  it('is idempotent after patching', async () => {
+    const packageRoot = setupFakePackage('0.14.0');
+    await applyPiContinuousLearningPatch({ packageRoot });
+    const second = await applyPiContinuousLearningPatch({ packageRoot });
+
+    expect(second).toMatchObject({
+      status: 'already-applied',
+      packageRoot,
+      version: '0.14.0',
+    });
+  });
+
+  it('supports dry-run without mutating compiled files', async () => {
+    const packageRoot = setupFakePackage('0.14.0');
+    const analyzePath = join(packageRoot, 'dist', 'cli', 'analyze.js');
+    const original = readFileSync(analyzePath, 'utf8');
+
+    const result = await applyPiContinuousLearningPatch({ packageRoot, dryRun: true });
+    expect(result).toMatchObject({
+      status: 'would-apply',
+      packageRoot,
+      version: '0.14.0',
+    });
+    expect(readFileSync(analyzePath, 'utf8')).toBe(original);
+    expect(isPiContinuousLearningPatchApplied(packageRoot)).toBe(false);
+  });
+
+  it('treats a pre-existing manual namespace patch as applied', () => {
+    const packageRoot = setupFakePackage('0.14.0', true);
+    expect(isPiContinuousLearningPatchApplied(packageRoot)).toBe(true);
+  });
+
+  it('throws a descriptive error when dist is missing', async () => {
+    const packageRoot = makeTempDir('pi-continuous-learning-');
+    writeFileSync(
+      join(packageRoot, 'package.json'),
+      JSON.stringify({ name: 'pi-continuous-learning', version: '1.0.0' }, null, 2),
+    );
+
+    await expect(applyPiContinuousLearningPatch({ packageRoot })).rejects.toThrow(
+      /compiled dist directory not found/i,
     );
   });
 });

@@ -1,7 +1,14 @@
 #!/usr/bin/env bun
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -369,6 +376,111 @@ export async function applyPiMermaidPatch(
     );
   writeFileSync(filePath, patched);
   return { status: 'applied', packageRoot, version, patchPath: filePath };
+}
+
+// ---------------------------------------------------------------------------
+// pi-continuous-learning compatibility patch
+//
+// pi-continuous-learning@0.14.0 was published before Pi's package namespace
+// moved from @mariozechner/* to @earendil-works/*. Its compiled runtime JS
+// still imports the old packages, so standalone commands such as
+// `pi-cl-analyze` fail with ERR_MODULE_NOT_FOUND after `pi install` installs
+// only the current Pi runtime packages.
+//
+// Patch compiled JS in dist/ only. The source and declaration files can keep
+// their published contents; runtime import resolution is the broken path.
+// ---------------------------------------------------------------------------
+
+const PI_CONTINUOUS_LEARNING_PACKAGE_NAME = 'pi-continuous-learning';
+const PI_CONTINUOUS_LEARNING_DIST_RELATIVE_PATH = 'dist';
+const PI_CONTINUOUS_LEARNING_NAMESPACE_REPLACEMENTS = [
+  ['@mariozechner/pi-coding-agent', '@earendil-works/pi-coding-agent'],
+  ['@mariozechner/pi-ai', '@earendil-works/pi-ai'],
+  ['@mariozechner/pi-tui', '@earendil-works/pi-tui'],
+] as const;
+
+function collectJavaScriptFiles(directory: string): string[] {
+  const files: string[] = [];
+  for (const entry of readdirSync(directory)) {
+    const entryPath = join(directory, entry);
+    const entryStat = statSync(entryPath);
+    if (entryStat.isDirectory()) {
+      files.push(...collectJavaScriptFiles(entryPath));
+    } else if (entryStat.isFile() && entryPath.endsWith('.js')) {
+      files.push(entryPath);
+    }
+  }
+  return files;
+}
+
+function replaceOldPiNamespaces(content: string): string {
+  let patched = content;
+  for (const [from, to] of PI_CONTINUOUS_LEARNING_NAMESPACE_REPLACEMENTS) {
+    patched = patched.replaceAll(from, to);
+  }
+  return patched;
+}
+
+function readContinuousLearningRuntimeFiles(
+  packageRoot: string,
+): Array<{ path: string; content: string }> {
+  const distPath = join(packageRoot, PI_CONTINUOUS_LEARNING_DIST_RELATIVE_PATH);
+  if (!existsSync(distPath)) return [];
+  return collectJavaScriptFiles(distPath).map((path) => ({
+    path,
+    content: readFileSync(path, 'utf8'),
+  }));
+}
+
+export function isPiContinuousLearningPatchApplied(packageRoot: string): boolean {
+  const runtimeFiles = readContinuousLearningRuntimeFiles(packageRoot);
+  if (runtimeFiles.length === 0) return false;
+  return runtimeFiles.every(({ content }) => !content.includes('@mariozechner/'));
+}
+
+export async function applyPiContinuousLearningPatch(
+  options: { dryRun?: boolean; packageRoot?: string; cwd?: string } = {},
+): Promise<ApplyPatchResult> {
+  const packageRoot =
+    options.packageRoot ??
+    findGlobalPnpmPackagePath(PI_CONTINUOUS_LEARNING_PACKAGE_NAME, { cwd: options.cwd });
+  if (!packageRoot) {
+    throw new Error(
+      `Could not locate installed ${PI_CONTINUOUS_LEARNING_PACKAGE_NAME} via 'pnpm root -g'`,
+    );
+  }
+
+  const version = getPackageVersion(packageRoot) ?? 'unknown';
+  const distPath = join(packageRoot, PI_CONTINUOUS_LEARNING_DIST_RELATIVE_PATH);
+  if (!existsSync(distPath)) {
+    throw new Error(
+      `pi-continuous-learning@${version}: compiled dist directory not found at ${distPath}`,
+    );
+  }
+
+  const runtimeFiles = readContinuousLearningRuntimeFiles(packageRoot);
+  if (runtimeFiles.length === 0) {
+    throw new Error(
+      `pi-continuous-learning@${version}: no compiled JavaScript files found in ${distPath}`,
+    );
+  }
+
+  const filesToPatch = runtimeFiles
+    .map(({ path, content }) => ({ path, content, patched: replaceOldPiNamespaces(content) }))
+    .filter(({ content, patched }) => content !== patched);
+
+  if (filesToPatch.length === 0) {
+    return { status: 'already-applied', packageRoot, version, patchPath: distPath };
+  }
+
+  if (options.dryRun) {
+    return { status: 'would-apply', packageRoot, version, patchPath: distPath };
+  }
+
+  for (const { path, patched } of filesToPatch) {
+    writeFileSync(path, patched);
+  }
+  return { status: 'applied', packageRoot, version, patchPath: distPath };
 }
 
 export function getInstalledPackage(
@@ -986,6 +1098,24 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     } catch (error) {
       console.error(
         `Skipped pi-mermaid compatibility patch: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    try {
+      const continuousLearningResult = await applyPiContinuousLearningPatch({
+        dryRun,
+        cwd: REPO_ROOT,
+      });
+      const label =
+        continuousLearningResult.status === 'already-applied'
+          ? `Already applied: pi-continuous-learning compatibility patch (${continuousLearningResult.version})`
+          : continuousLearningResult.status === 'would-apply'
+            ? `Would apply: pi-continuous-learning compatibility patch (${continuousLearningResult.version})`
+            : `${continuousLearningResult.status}: pi-continuous-learning compatibility patch (${continuousLearningResult.version}) via ${continuousLearningResult.patchPath}`;
+      console.log(label);
+    } catch (error) {
+      console.error(
+        `Skipped pi-continuous-learning compatibility patch: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
