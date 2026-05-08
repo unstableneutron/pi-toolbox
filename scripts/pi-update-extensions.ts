@@ -246,6 +246,131 @@ export async function applyPiCodingAgentResolverPatch(
   return { status: 'applied', packageRoot, version, patchPath: filePath };
 }
 
+// ---------------------------------------------------------------------------
+// pi-mermaid compatibility patch
+//
+// Patches the installed pi-mermaid extension after `pi update --extensions`.
+// pi-mermaid@0.3.0 still imports the pre-rename @mariozechner/* packages and
+// statically imports beautiful-mermaid. Under the @earendil-works CLI this can
+// fail extension startup because beautiful-mermaid is ESM-only and the loader
+// may try to require it.
+//
+// The patch moves pi imports to @earendil-works/* and lazy-loads
+// beautiful-mermaid through dynamic import from the existing async render path.
+// ---------------------------------------------------------------------------
+
+const PI_MERMAID_PACKAGE_NAME = 'pi-mermaid';
+const PI_MERMAID_INDEX_RELATIVE_PATH = 'index.ts';
+const PI_MERMAID_PATCH_MARKER = '__pi_update_extensions:pi-mermaid-earendil-dynamic-import__';
+const PI_MERMAID_IMPORT_TARGET = [
+  'import type { ExtensionAPI, ExtensionContext, MessageRenderer, SessionEntry } from "@mariozechner/pi-coding-agent";',
+  'import { getMarkdownTheme, keyHint } from "@mariozechner/pi-coding-agent";',
+  'import { Box, Spacer, Text, type Component, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";',
+  'import { createHash } from "node:crypto";',
+  'import { renderMermaidAscii } from "beautiful-mermaid";',
+].join('\n');
+const PI_MERMAID_RENDER_FUNCTION_TARGET =
+  'function renderAsciiVariant(block: string, diagramHash: string, preset: AsciiPreset): AsciiVariant {';
+const PI_MERMAID_RENDER_CALL_TARGET = '\tconst ascii = renderMermaidAscii(block, {';
+const PI_MERMAID_VARIANT_PUSH_TARGET =
+  'variants.push(renderAsciiVariant(block, diagramHash, preset));';
+
+function buildPiMermaidImportReplacement(): string {
+  return [
+    `// ${PI_MERMAID_PATCH_MARKER}`,
+    'import type { ExtensionAPI, ExtensionContext, MessageRenderer, SessionEntry } from "@earendil-works/pi-coding-agent";',
+    'import { getMarkdownTheme, keyHint } from "@earendil-works/pi-coding-agent";',
+    'import { Box, Spacer, Text, type Component, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";',
+    'import { createHash } from "node:crypto";',
+    '',
+    'type RenderMermaidAscii = typeof import("beautiful-mermaid")["renderMermaidAscii"];',
+    'let renderMermaidAsciiPromise: Promise<RenderMermaidAscii> | null = null;',
+    '',
+    'async function getRenderMermaidAscii(): Promise<RenderMermaidAscii> {',
+    '\tif (!renderMermaidAsciiPromise) {',
+    '\t\trenderMermaidAsciiPromise = import("beautiful-mermaid").then((mod) => mod.renderMermaidAscii);',
+    '\t}',
+    '\treturn renderMermaidAsciiPromise;',
+    '}',
+  ].join('\n');
+}
+
+function isPiMermaidSemanticallyPatched(content: string): boolean {
+  return (
+    content.includes('@earendil-works/pi-coding-agent') &&
+    content.includes('@earendil-works/pi-tui') &&
+    content.includes(
+      'type RenderMermaidAscii = typeof import("beautiful-mermaid")["renderMermaidAscii"]',
+    ) &&
+    content.includes('import("beautiful-mermaid").then((mod) => mod.renderMermaidAscii)') &&
+    content.includes('async function renderAsciiVariant') &&
+    content.includes('const renderMermaidAscii = await getRenderMermaidAscii();') &&
+    content.includes('variants.push(await renderAsciiVariant(block, diagramHash, preset));')
+  );
+}
+
+export function isPiMermaidPatchApplied(packageRoot: string): boolean {
+  const filePath = join(packageRoot, PI_MERMAID_INDEX_RELATIVE_PATH);
+  if (!existsSync(filePath)) return false;
+  const content = readFileSync(filePath, 'utf8');
+  return content.includes(PI_MERMAID_PATCH_MARKER) || isPiMermaidSemanticallyPatched(content);
+}
+
+export async function applyPiMermaidPatch(
+  options: { dryRun?: boolean; packageRoot?: string; cwd?: string } = {},
+): Promise<ApplyPatchResult> {
+  const packageRoot =
+    options.packageRoot ?? findGlobalPnpmPackagePath(PI_MERMAID_PACKAGE_NAME, { cwd: options.cwd });
+  if (!packageRoot) {
+    throw new Error(`Could not locate installed ${PI_MERMAID_PACKAGE_NAME} via 'pnpm root -g'`);
+  }
+
+  const version = getPackageVersion(packageRoot) ?? 'unknown';
+  const filePath = join(packageRoot, PI_MERMAID_INDEX_RELATIVE_PATH);
+  if (!existsSync(filePath)) {
+    throw new Error(`pi-mermaid@${version}: extension file not found at ${filePath}`);
+  }
+
+  if (isPiMermaidPatchApplied(packageRoot)) {
+    return { status: 'already-applied', packageRoot, version, patchPath: filePath };
+  }
+
+  const content = readFileSync(filePath, 'utf8');
+  const missingTargets = [
+    PI_MERMAID_IMPORT_TARGET,
+    PI_MERMAID_RENDER_FUNCTION_TARGET,
+    PI_MERMAID_RENDER_CALL_TARGET,
+    PI_MERMAID_VARIANT_PUSH_TARGET,
+  ].filter((target) => !content.includes(target));
+  if (missingTargets.length > 0) {
+    throw new Error(
+      `pi-mermaid@${version}: target text for pi-mermaid patch not found at ${filePath}. ` +
+        `Missing ${missingTargets.length} target(s). Upstream may have changed; update pi-update-extensions.ts.`,
+    );
+  }
+
+  if (options.dryRun) {
+    return { status: 'would-apply', packageRoot, version, patchPath: filePath };
+  }
+
+  const patched = content
+    .replace(PI_MERMAID_IMPORT_TARGET, buildPiMermaidImportReplacement())
+    .replace(
+      PI_MERMAID_RENDER_FUNCTION_TARGET,
+      'async function renderAsciiVariant(block: string, diagramHash: string, preset: AsciiPreset): Promise<AsciiVariant> {',
+    )
+    .replace(
+      PI_MERMAID_RENDER_CALL_TARGET,
+      '\tconst renderMermaidAscii = await getRenderMermaidAscii();\n\tconst ascii = renderMermaidAscii(block, {',
+    )
+    .replace(
+      PI_MERMAID_VARIANT_PUSH_TARGET,
+      'variants.push(await renderAsciiVariant(block, diagramHash, preset));',
+    );
+  writeFileSync(filePath, patched);
+  return { status: 'applied', packageRoot, version, patchPath: filePath };
+}
+
 export function getInstalledPackage(
   installedPackages: readonly InstalledPackage[],
   source: string,
@@ -843,6 +968,24 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     } catch (error) {
       console.error(
         `Skipped pi-coding-agent resolver patch: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    try {
+      const mermaidResult = await applyPiMermaidPatch({
+        dryRun,
+        cwd: REPO_ROOT,
+      });
+      const label =
+        mermaidResult.status === 'already-applied'
+          ? `Already applied: pi-mermaid compatibility patch (${mermaidResult.version})`
+          : mermaidResult.status === 'would-apply'
+            ? `Would apply: pi-mermaid compatibility patch (${mermaidResult.version})`
+            : `${mermaidResult.status}: pi-mermaid compatibility patch (${mermaidResult.version}) via ${mermaidResult.patchPath}`;
+      console.log(label);
+    } catch (error) {
+      console.error(
+        `Skipped pi-mermaid compatibility patch: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }

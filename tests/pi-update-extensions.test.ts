@@ -5,9 +5,11 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   applyPiCodingAgentResolverPatch,
+  applyPiMermaidPatch,
   buildPiCodingAgentResolverReplacement,
   compareVersions,
   isPiCodingAgentResolverPatchApplied,
+  isPiMermaidPatchApplied,
   parsePiListOutput,
 } from '../scripts/pi-update-extensions.ts';
 
@@ -54,6 +56,138 @@ describe('compareVersions', () => {
     expect(compareVersions('0.12.2', '0.12.2')).toBe(0);
     expect(compareVersions('0.12.3', '0.12.2')).toBeGreaterThan(0);
     expect(compareVersions('0.11.9', '0.12.2')).toBeLessThan(0);
+  });
+});
+
+describe('pi-mermaid patching', () => {
+  const FIXTURE_CONTENT = [
+    'import type { ExtensionAPI, ExtensionContext, MessageRenderer, SessionEntry } from "@mariozechner/pi-coding-agent";',
+    'import { getMarkdownTheme, keyHint } from "@mariozechner/pi-coding-agent";',
+    'import { Box, Spacer, Text, type Component, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";',
+    'import { createHash } from "node:crypto";',
+    'import { renderMermaidAscii } from "beautiful-mermaid";',
+    '',
+    'function renderAsciiVariant(block: string, diagramHash: string, preset: AsciiPreset): AsciiVariant {',
+    '\tconst cacheKey = getAsciiCacheKey(diagramHash, preset.key);',
+    '\tconst cached = getCachedVariant(cacheKey);',
+    '\tif (cached) return cached;',
+    '',
+    '\tconst ascii = renderMermaidAscii(block, {',
+    '\t\tpaddingX: preset.paddingX,',
+    '\t\tboxBorderPadding: preset.boxBorderPadding,',
+    '\t\tcolorMode: "none",',
+    '\t}).trimEnd();',
+    '\treturn { presetKey: preset.key, ascii, lineCount: 1, maxLineWidth: 1 };',
+    '}',
+    '',
+    'async function processBlock() {',
+    '\tconst variants: AsciiVariant[] = [];',
+    '\tfor (const preset of ASCII_PRESETS) {',
+    '\t\ttry {',
+    '\t\t\tvariants.push(renderAsciiVariant(block, diagramHash, preset));',
+    '\t\t} catch (error) {',
+    '\t\t\tconsole.error(error);',
+    '\t\t}',
+    '\t}',
+    '}',
+    '',
+  ].join('\n');
+
+  function setupFakePackage(version: string, indexContent = FIXTURE_CONTENT): string {
+    const packageRoot = makeTempDir('pi-mermaid-');
+    writeFileSync(
+      join(packageRoot, 'package.json'),
+      JSON.stringify({ name: 'pi-mermaid', version }, null, 2),
+    );
+    writeFileSync(join(packageRoot, 'index.ts'), indexContent);
+    return packageRoot;
+  }
+
+  it('reports unpatched fixture as not yet patched', () => {
+    const packageRoot = setupFakePackage('0.3.0');
+    expect(isPiMermaidPatchApplied(packageRoot)).toBe(false);
+  });
+
+  it('patches imports and lazy-loads beautiful-mermaid through dynamic import', async () => {
+    const packageRoot = setupFakePackage('0.3.0');
+    const result = await applyPiMermaidPatch({ packageRoot });
+
+    expect(result).toMatchObject({
+      status: 'applied',
+      packageRoot,
+      version: '0.3.0',
+    });
+    expect(result.patchPath).toBe(join(packageRoot, 'index.ts'));
+
+    const patched = readFileSync(join(packageRoot, 'index.ts'), 'utf8');
+    expect(patched).toContain('@earendil-works/pi-coding-agent');
+    expect(patched).toContain('@earendil-works/pi-tui');
+    expect(patched).not.toContain('@mariozechner/pi-coding-agent');
+    expect(patched).not.toContain('@mariozechner/pi-tui');
+    expect(patched).toContain('__pi_update_extensions:pi-mermaid-earendil-dynamic-import__');
+    expect(patched).toContain('import("beautiful-mermaid").then((mod) => mod.renderMermaidAscii)');
+    expect(patched).toContain('async function renderAsciiVariant');
+    expect(patched).toContain('const renderMermaidAscii = await getRenderMermaidAscii();');
+    expect(patched).toContain(
+      'variants.push(await renderAsciiVariant(block, diagramHash, preset));',
+    );
+    expect(isPiMermaidPatchApplied(packageRoot)).toBe(true);
+  });
+
+  it('is idempotent after patching', async () => {
+    const packageRoot = setupFakePackage('0.3.0');
+    await applyPiMermaidPatch({ packageRoot });
+    const second = await applyPiMermaidPatch({ packageRoot });
+
+    expect(second).toMatchObject({
+      status: 'already-applied',
+      packageRoot,
+      version: '0.3.0',
+    });
+  });
+
+  it('supports dry-run without mutating the extension', async () => {
+    const packageRoot = setupFakePackage('0.3.0');
+    const indexPath = join(packageRoot, 'index.ts');
+    const original = readFileSync(indexPath, 'utf8');
+
+    const result = await applyPiMermaidPatch({ packageRoot, dryRun: true });
+    expect(result).toMatchObject({
+      status: 'would-apply',
+      packageRoot,
+      version: '0.3.0',
+    });
+    expect(readFileSync(indexPath, 'utf8')).toBe(original);
+    expect(isPiMermaidPatchApplied(packageRoot)).toBe(false);
+  });
+
+  it('treats the pre-existing manual patch as applied', () => {
+    const packageRoot = setupFakePackage(
+      '0.3.0',
+      FIXTURE_CONTENT.replaceAll('@mariozechner/', '@earendil-works/')
+        .replace(
+          'import { renderMermaidAscii } from "beautiful-mermaid";\n',
+          'type RenderMermaidAscii = typeof import("beautiful-mermaid")["renderMermaidAscii"];\nlet renderMermaidAsciiPromise: Promise<RenderMermaidAscii> | null = null;\n\nasync function getRenderMermaidAscii(): Promise<RenderMermaidAscii> {\n\tif (!renderMermaidAsciiPromise) {\n\t\trenderMermaidAsciiPromise = import("beautiful-mermaid").then((mod) => mod.renderMermaidAscii);\n\t}\n\treturn renderMermaidAsciiPromise;\n}\n',
+        )
+        .replace('function renderAsciiVariant', 'async function renderAsciiVariant')
+        .replace(
+          '\tconst ascii = renderMermaidAscii(block, {',
+          '\tconst renderMermaidAscii = await getRenderMermaidAscii();\n\tconst ascii = renderMermaidAscii(block, {',
+        )
+        .replace(
+          'variants.push(renderAsciiVariant(block, diagramHash, preset));',
+          'variants.push(await renderAsciiVariant(block, diagramHash, preset));',
+        ),
+    );
+
+    expect(isPiMermaidPatchApplied(packageRoot)).toBe(true);
+  });
+
+  it('throws a descriptive error when the target text is missing', async () => {
+    const packageRoot = setupFakePackage('1.0.0', 'export default function extension() {}\n');
+    await expect(applyPiMermaidPatch({ packageRoot })).rejects.toThrow(
+      /target text for pi-mermaid patch not found/i,
+    );
   });
 });
 
