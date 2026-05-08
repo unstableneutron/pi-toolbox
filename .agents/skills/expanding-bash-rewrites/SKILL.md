@@ -56,19 +56,19 @@ For a sharper lens on "is this specific shape passing through, and why," use the
 
 Read this before adding anything new — your target may already exist and just need one flag or shape loosened.
 
-| Recognizer          | Source shape                              | Target                             |
-| ------------------- | ----------------------------------------- | ---------------------------------- |
-| `cat-file`          | `cat FILE`                                | `read(path)`                       |
-| `ls-dir`            | `ls [flags] [PATH]`                       | `ls(path?)`                        |
-| `head-n-file`       | `head [-N] FILE`                          | `read(path, limit?)`               |
-| `grep-search`       | `grep/rg/egrep/fgrep PAT [FILE ...]`      | `fff_grep(patterns, within, …)` — multi-path emits `within: string[]` |
-| `find-name-glob`    | `find PATH -name GLOB`                    | `fff_find_files(query, glob)`      |
-| `fd-search`         | `fd PAT [PATH]`                           | `fff_find_files(query, within?)`   |
-| `sed-range-print`   | `sed -n 'N,Mp' FILE`                      | `read(path, offset, limit)`        |
-| `cat-sed-range`     | `cat FILE \| sed -n 'N,Mp'`               | `read(path, offset, limit)`        |
-| `cat-grep`          | `cat FILE \| grep PAT`                    | `fff_grep(patterns, within, …)`    |
-| `find-xargs-cat`    | `find PATH \| head -1 \| xargs cat [\| head -N]` | `read(path, limit?)`         |
-| `<recognizer>+head` | any of the above `\| head -N`             | same target, with `limit: N`       |
+| Recognizer          | Source shape                                     | Target                                                                |
+| ------------------- | ------------------------------------------------ | --------------------------------------------------------------------- |
+| `cat-file`          | `cat FILE`                                       | `read(path)`                                                          |
+| `ls-dir`            | `ls [flags] [PATH]`                              | `ls(path?)`                                                           |
+| `head-n-file`       | `head [-N] FILE`                                 | `read(path, limit?)`                                                  |
+| `grep-search`       | `grep/rg/egrep/fgrep PAT [FILE ...]`             | `fff_grep(patterns, within, …)` — multi-path emits `within: string[]` |
+| `find-name-glob`    | `find PATH -name GLOB`                           | `fff_find_files(query, glob)`                                         |
+| `fd-search`         | `fd PAT [PATH]`                                  | `fff_find_files(query, within?)`                                      |
+| `sed-range-print`   | `sed -n 'N,Mp' FILE`                             | `read(path, offset, limit)`                                           |
+| `cat-sed-range`     | `cat FILE \| sed -n 'N,Mp'`                      | `read(path, offset, limit)`                                           |
+| `cat-grep`          | `cat FILE \| grep PAT`                           | `fff_grep(patterns, within, …)`                                       |
+| `find-xargs-cat`    | `find PATH \| head -1 \| xargs cat [\| head -N]` | `read(path, limit?)`                                                  |
+| `<recognizer>+head` | any of the above `\| head -N`                    | same target, with `limit: N`                                          |
 
 ## Adding a recognizer
 
@@ -79,10 +79,12 @@ All changes live in `bash-rewrite.ts`:
 - **New prefix** (absolute path, shell builtin, env-var, …) — extend `FIRST_TOKEN_PATTERN` (gate) and `normalizeStageFirstToken` (per-stage) together.
 
 Recognizer naming — kebab-case, two schemes:
+
 - **Single-source** — end with the source tool: `grep-search`, `cat-file`, `sed-range-print`.
 - **Pipeline composition** — join the two stages with `-`: `cat-grep`, `cat-sed-range`. Do **not** use `+head`-style suffixes here; `+head` is reserved for the automatic append of a trailing `| head -N` limit.
 
 Tests in `bash-rewrite.test.ts` — always cover:
+
 1. Happy path (correct `tool`, `params`, `recognizer`).
 2. At least one negative case that must still pass through.
 3. `cd X && <new-shape>` prefix composition if the shape can appear after a `cd`.
