@@ -952,6 +952,8 @@ describe('multi-edit extension', () => {
 
       expect(result.isError).not.toBe(true);
       expect(result.content[0]?.text).toContain('partially applied 2 of 3 operations');
+      expect(result.content[0]?.text).toContain('Failed details:');
+      expect(result.content[0]?.text).toContain('- op-0002 update missing.txt: File not found:');
       expect(result.details.execution.partial).toBe(true);
       expect(result.details.execution.appliedRows.map((row: any) => row.path)).toEqual([
         'a.txt',
@@ -960,8 +962,86 @@ describe('multi-edit extension', () => {
       expect(result.details.execution.failedRows.map((row: any) => row.path)).toEqual([
         'missing.txt',
       ]);
+      expect(result.details.execution.failedDiagnostics).toEqual([
+        expect.objectContaining({
+          opId: 'op-0002',
+          path: 'missing.txt',
+          diagnostic: expect.stringContaining('File not found:'),
+        }),
+      ]);
       await expect(readFile(join(cwd, 'a.txt'), 'utf8')).resolves.toBe('new a\n');
       await expect(readFile(join(cwd, 'b.txt'), 'utf8')).resolves.toBe('new b\n');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test('apply_patch reports failed and skipped diagnostics when a later op is blocked', async () => {
+    const tool = getApplyPatchTool();
+    const cwd = await mkdtemp(join(tmpdir(), 'multi-edit-partial-skipped-'));
+
+    try {
+      await writeFile(join(cwd, 'b.txt'), 'old b\nshared b\n', 'utf8');
+      await writeFile(join(cwd, 'c.txt'), 'old c\n', 'utf8');
+      const begin = '*** Begin ' + 'Patch';
+      const end = '*** End ' + 'Patch';
+
+      const result = await tool.execute(
+        'call-partial-skipped',
+        {
+          patch: `${begin}
+*** Update File: b.txt
+*** FindReplaceOnce:
+<<<<<<< SEARCH
+not in b
+======= REPLACE
+new b
+>>>>>>> REPLACE
+*** Update File: b.txt
+*** FindReplaceOnce:
+<<<<<<< SEARCH
+shared b
+======= REPLACE
+shared b should skip
+>>>>>>> REPLACE
+*** Update File: c.txt
+@@
+-old c
++new c
+${end}`,
+        },
+        undefined,
+        undefined,
+        { cwd, state: {} },
+      );
+
+      expect(result.isError).not.toBe(true);
+      expect(result.content[0]?.text).toContain('partially applied 1 of 3 operations');
+      expect(result.content[0]?.text).toContain('Failed details:');
+      expect(result.content[0]?.text).toContain(
+        '- op-0001 update b.txt: No match for expected lines "not in b"',
+      );
+      expect(result.content[0]?.text).toContain('nearest line 1 is "old b"');
+      expect(result.content[0]?.text).toContain('Skipped details:');
+      expect(result.content[0]?.text).toContain(
+        '- op-0002 update b.txt: skipped because an earlier failed operation touched b.txt.',
+      );
+      expect(result.details.execution.failedDiagnostics).toEqual([
+        expect.objectContaining({
+          opId: 'op-0001',
+          path: 'b.txt',
+          diagnostic: expect.stringContaining('No match for expected lines "not in b"'),
+        }),
+      ]);
+      expect(result.details.execution.skippedDiagnostics).toEqual([
+        expect.objectContaining({
+          opId: 'op-0002',
+          path: 'b.txt',
+          diagnostic: 'skipped because an earlier failed operation touched b.txt.',
+        }),
+      ]);
+      await expect(readFile(join(cwd, 'b.txt'), 'utf8')).resolves.toBe('old b\nshared b\n');
+      await expect(readFile(join(cwd, 'c.txt'), 'utf8')).resolves.toBe('new c\n');
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

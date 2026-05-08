@@ -385,9 +385,20 @@ function markRowsInProgress(rows: PatchPreviewRow[]): PatchPreviewRow[] {
   return rows.map((row) => ({ ...row, state: 'committing' }));
 }
 
+type PartialPatchMetadata = NonNullable<Awaited<ReturnType<typeof buildPatchPlan>>['patch']>;
+type PartialPatchStatus = PartialPatchMetadata['statuses'][number];
+
+type PartialPatchDiagnostic = {
+  opId: string;
+  status: 'failed' | 'skipped';
+  kind: PartialPatchStatus['kind'];
+  path: string;
+  diagnostic: string;
+};
+
 function applyPartialPlanRows(
   rows: PatchPreviewRow[],
-  partial: NonNullable<Awaited<ReturnType<typeof buildPatchPlan>>['patch']> | undefined,
+  partial: PartialPatchMetadata | undefined,
 ): PatchPreviewRow[] {
   if (!partial) {
     return rows.map((row) => ({ ...row, state: 'applied' as const }));
@@ -403,13 +414,78 @@ function applyPartialPlanRows(
   });
 }
 
-function formatPartialPatchSummary(
-  total: number,
-  appliedRows: PatchPreviewRow[],
-  failedRows: PatchPreviewRow[],
-  skippedRows: PatchPreviewRow[],
-  recovery: { mustReadFiles: string[]; mustNotReadFiles: string[] },
-): string {
+function truncateDiagnosticSnippet(text: string): string {
+  const compact = text.replace(/\n/g, '\\n');
+  return compact.length > 120 ? `${compact.slice(0, 117)}...` : compact;
+}
+
+function quoteDiagnosticSnippet(lines: readonly string[] | undefined): string {
+  const text = (lines ?? []).join('\n').trimEnd();
+  return JSON.stringify(truncateDiagnosticSnippet(text || '<empty>'));
+}
+
+function diagnosticForStatus(status: PartialPatchStatus): string {
+  if (status.status === 'skipped') {
+    return `skipped because an earlier failed operation touched ${status.path}.`;
+  }
+
+  const failure = status.failure;
+  if (failure?.kind === 'context-not-found') {
+    const expected = `No match for expected lines ${quoteDiagnosticSnippet(failure.expectedLines)}`;
+    const near = failure.nearestMatch;
+    if (near && near.actualLines.length > 0) {
+      const pct = Math.round(near.score * 100);
+      return `${expected}; nearest line ${near.startLine} is ${quoteDiagnosticSnippet(near.actualLines)} (${pct}% similar).`;
+    }
+    return `${expected}.`;
+  }
+  if (failure?.kind === 'anchor-not-found') {
+    const anchor = `Anchor not found ${quoteDiagnosticSnippet(failure.anchor ? [failure.anchor] : [])}`;
+    const nearby = failure.nearbyIdentifiers?.[0];
+    if (nearby) {
+      return `${anchor}; nearest identifier line ${nearby.line} is ${quoteDiagnosticSnippet([nearby.text])}.`;
+    }
+    return `${anchor}.`;
+  }
+
+  return status.error ?? 'failed';
+}
+
+function buildPartialPatchDiagnostics(
+  partial: PartialPatchMetadata | undefined,
+  statusKind: 'failed' | 'skipped',
+): PartialPatchDiagnostic[] {
+  if (!partial) return [];
+
+  return partial.statuses
+    .filter((status) => status.status === statusKind)
+    .map((status) => ({
+      opId: status.opId,
+      status: statusKind,
+      kind: status.kind,
+      path: status.path,
+      diagnostic: diagnosticForStatus(status),
+    }));
+}
+
+function formatPartialPatchDiagnostics(
+  heading: string,
+  diagnostics: PartialPatchDiagnostic[],
+): string[] {
+  if (diagnostics.length === 0) return [];
+  return [
+    heading,
+    ...diagnostics.map(
+      (diagnostic) =>
+        `- ${diagnostic.opId} ${diagnostic.kind} ${diagnostic.path}: ${diagnostic.diagnostic}`,
+    ),
+  ];
+}
+
+function formatPartialPatchSummary(total: number, partial: PartialPatchMetadata): string {
+  const { appliedRows, failedRows, skippedRows, recoveryInstructions: recovery } = partial;
+  const failedDiagnostics = buildPartialPatchDiagnostics(partial, 'failed');
+  const skippedDiagnostics = buildPartialPatchDiagnostics(partial, 'skipped');
   const lines = [`apply_patch partially applied ${appliedRows.length} of ${total} operations.`];
   if (failedRows.length > 0) {
     lines.push(`Failed: ${failedRows.map((row) => row.path).join(', ')}`);
@@ -422,6 +498,8 @@ function formatPartialPatchSummary(
   if (appliedRows.length > 0) {
     lines.push(`Applied: ${appliedRows.map((row) => row.path).join(', ')}`);
   }
+  lines.push(...formatPartialPatchDiagnostics('Failed details:', failedDiagnostics));
+  lines.push(...formatPartialPatchDiagnostics('Skipped details:', skippedDiagnostics));
   if (recovery.mustReadFiles.length > 0) {
     lines.push(
       `Recovery: read failed/skipped files before retrying: ${recovery.mustReadFiles.join(', ')}.`,
@@ -612,13 +690,7 @@ async function executePatch(
     }
 
     const text = plan.patch?.partial
-      ? formatPartialPatchSummary(
-          commitRows.length,
-          plan.patch.appliedRows,
-          plan.patch.failedRows,
-          plan.patch.skippedRows,
-          plan.patch.recoveryInstructions,
-        )
+      ? formatPartialPatchSummary(commitRows.length, plan.patch)
       : (commit.summaryText ?? `Applied patch with ${commit.rows.length} operation(s).`);
 
     return {
@@ -642,6 +714,8 @@ async function executePatch(
           appliedRows: plan.patch?.appliedRows ?? operationRows,
           failedRows: plan.patch?.failedRows ?? [],
           skippedRows: plan.patch?.skippedRows ?? [],
+          failedDiagnostics: buildPartialPatchDiagnostics(plan.patch, 'failed'),
+          skippedDiagnostics: buildPartialPatchDiagnostics(plan.patch, 'skipped'),
           recoveryInstructions: plan.patch?.recoveryInstructions,
         },
       },
