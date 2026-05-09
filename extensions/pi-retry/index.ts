@@ -19,9 +19,11 @@ import {
   getPendingRecovery,
   handleRecoveryAbort,
   handleRefusalRecovery,
+  hasAwaitableRecovery,
   registerPatchedSession,
   type RetryRecoveryMessageDetails,
   resolveRecoveryOnAssistantMessage,
+  waitForRecoveryOutcome,
   unregisterPatchedSession,
 } from './runtime';
 
@@ -44,6 +46,7 @@ const SESSION_MANAGER_PATCHED = Symbol.for('pi-retry.session-manager.patched');
 const REFUSAL_DISABLE_ENV_VAR = 'PI_RETRY_REFUSAL_RECOVERY_DISABLED';
 const DEFAULT_CORE_RETRY_BASE_DELAY_MS = 2000;
 const DEFAULT_CORE_RETRY_MAX_RETRIES = 3;
+const PROMPT_RECOVERY_TIMEOUT_MS = 120_000;
 const RECOVERY_DISPATCH_IDLE_POLL_DELAY_MS = 100;
 
 export interface PatchInstallResult {
@@ -789,6 +792,7 @@ export async function installAgentSessionPatch(
     }
 
     const originalIsRetryableError = proto._isRetryableError;
+    const originalPrompt = proto.prompt;
 
     if ('function' !== typeof originalIsRetryableError) {
       patchFailureReason = 'AgentSession._isRetryableError is not available';
@@ -806,6 +810,28 @@ export async function installAgentSessionPatch(
         originalIsRetryableError.call(this, message) || isExtraRetryableAssistantError(message),
       );
     };
+
+    if ('function' === typeof originalPrompt) {
+      proto.prompt = async function patchedPrompt(...args: unknown[]) {
+        try {
+          return await originalPrompt.apply(this, args);
+        } catch (error) {
+          const sessionId = this?.sessionManager?.getSessionId?.();
+          if (!hasAwaitableRecovery(sessionId)) {
+            throw error;
+          }
+
+          const outcome = await waitForRecoveryOutcome(sessionId, {
+            timeoutMs: PROMPT_RECOVERY_TIMEOUT_MS,
+          });
+          if (outcome.ok) {
+            return undefined;
+          }
+
+          throw error;
+        }
+      };
+    }
 
     Object.defineProperty(proto, PATCHED, {
       value: true,
@@ -991,6 +1017,12 @@ export function createPiRetryExtension(
         return;
       }
 
+      const shouldDispatchImmediately =
+        !ctx.hasUI &&
+        'error' === event.message.stopReason &&
+        'string' === typeof event.message.errorMessage &&
+        classifyRetryableProviderError(event.message.errorMessage) !== undefined;
+
       await handleRefusalRecovery({
         event: { messages: [event.message] },
         ctx,
@@ -1001,7 +1033,7 @@ export function createPiRetryExtension(
             { customType: PI_RETRY_RECOVERY_CUSTOM_TYPE, content, display: false, details },
             { triggerTurn: true },
           ),
-        dispatchMode: 'pending',
+        dispatchMode: shouldDispatchImmediately ? 'immediate' : 'pending',
       });
     });
 

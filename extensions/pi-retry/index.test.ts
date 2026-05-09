@@ -160,6 +160,10 @@ function makeFakeAgentSessionModule() {
       return 'overloaded_error' === message.errorMessage;
     }
 
+    async prompt(_text: string) {
+      throw new Error('original retryable prompt failure');
+    }
+
     _emit(event: unknown) {
       this.emitCalls.push(event);
       return event;
@@ -394,6 +398,23 @@ describe('pi-retry patch installation', () => {
 
     expect(loader).toHaveBeenCalledTimes(1);
     expect(session.baseClassifierCalls).toHaveLength(2);
+  });
+
+  test('patches prompt to suppress retryable prompt failures after awaitable recovery succeeds', async () => {
+    const fakeModule = makeFakeAgentSessionModule();
+    const loader = vi.fn().mockResolvedValue(fakeModule);
+
+    vi.spyOn(runtime, 'hasAwaitableRecovery').mockReturnValue(true);
+    vi.spyOn(runtime, 'waitForRecoveryOutcome').mockResolvedValue({ ok: true });
+
+    await installAgentSessionPatch(loader);
+
+    const session = new fakeModule.AgentSession();
+
+    await expect(session.prompt('Do the thing')).resolves.toBeUndefined();
+    expect(runtime.waitForRecoveryOutcome).toHaveBeenCalledWith('session-1', {
+      timeoutMs: expect.any(Number),
+    });
   });
 
   test('patches SessionManager getTree to hide historical retry recovery nodes', async () => {
@@ -1718,6 +1739,36 @@ describe('pi-retry extension runtime', () => {
     );
 
     expect(harness.sendUserMessageCalls).toEqual([]);
+  });
+
+  test('turn_end dispatches retryable provider errors immediately in headless sessions', async () => {
+    const fakeModule = makeFakeAgentSessionModule();
+    const harness = await createExtensionHarness(async () => fakeModule);
+
+    harness.ctx.hasUI = false;
+
+    const handleRefusalRecoverySpy = vi
+      .spyOn(runtime, 'handleRefusalRecovery')
+      .mockResolvedValue(undefined);
+
+    await getHandler(harness.handlers, 'turn_end')(
+      {
+        type: 'turn_end',
+        message: {
+          role: 'assistant',
+          stopReason: 'error',
+          errorMessage:
+            '400 The encrypted content for item rs_123 could not be verified. Reason: Encrypted content could not be decrypted or parsed.',
+          content: [],
+        },
+        toolResults: [],
+      },
+      harness.ctx,
+    );
+
+    expect(handleRefusalRecoverySpy).toHaveBeenCalledWith(
+      expect.objectContaining({ dispatchMode: 'immediate' }),
+    );
   });
 
   test('agent_end dispatches a pending recovery once the session becomes idle', async () => {

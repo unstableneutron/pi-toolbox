@@ -112,6 +112,13 @@ interface RetryableTerminalLeaf {
 
 type RecoveryPhase = 'queued' | 'sent' | 'reviewing';
 
+export type RecoveryOutcome = { ok: true } | { ok: false; reason: string };
+
+interface AwaitableRecovery {
+  promise: Promise<RecoveryOutcome>;
+  resolve: (outcome: RecoveryOutcome) => void;
+}
+
 interface ActiveRecovery {
   kind: PendingRecovery['kind'];
   phase: RecoveryPhase;
@@ -132,6 +139,8 @@ interface RefusalRecoveryProgress {
 
 interface SessionRuntimeState {
   activeRecovery?: ActiveRecovery;
+  awaitableRecovery?: AwaitableRecovery;
+  lastRecoveryOutcome?: RecoveryOutcome;
   refusalProgress?: RefusalRecoveryProgress;
   session?: PatchedSessionLike;
 }
@@ -293,6 +302,8 @@ function pruneSessionState(sessionId: string): void {
 
   if (
     state.activeRecovery === undefined &&
+    state.awaitableRecovery === undefined &&
+    state.lastRecoveryOutcome === undefined &&
     state.refusalProgress === undefined &&
     state.session === undefined
   ) {
@@ -419,6 +430,84 @@ function setActiveRecovery(sessionId: string, recovery: ActiveRecovery | undefin
   pruneSessionState(sessionId);
 }
 
+function resolveAwaitableRecovery(sessionId: string, outcome: RecoveryOutcome): boolean {
+  const state = stateBySessionId.get(sessionId);
+  const awaitable = state?.awaitableRecovery;
+  if (!state || !awaitable) {
+    return false;
+  }
+
+  state.awaitableRecovery = undefined;
+  state.lastRecoveryOutcome = outcome;
+  awaitable.resolve(outcome);
+  pruneSessionState(sessionId);
+  return true;
+}
+
+export function beginAwaitableRecovery(sessionId: string): void {
+  resolveAwaitableRecovery(sessionId, {
+    ok: false,
+    reason: 'superseded-by-new-recovery',
+  });
+
+  let resolve!: (outcome: RecoveryOutcome) => void;
+  const promise = new Promise<RecoveryOutcome>((next) => {
+    resolve = next;
+  });
+
+  const state = getOrCreateSessionState(sessionId);
+  state.lastRecoveryOutcome = undefined;
+  state.awaitableRecovery = { promise, resolve };
+}
+
+export function hasAwaitableRecovery(sessionId: string | undefined): boolean {
+  if (!sessionId) {
+    return false;
+  }
+
+  const state = stateBySessionId.get(sessionId);
+  return state?.awaitableRecovery !== undefined || state?.lastRecoveryOutcome !== undefined;
+}
+
+export async function waitForRecoveryOutcome(
+  sessionId: string,
+  options?: { timeoutMs?: number },
+): Promise<RecoveryOutcome> {
+  const state = stateBySessionId.get(sessionId);
+  if (state?.lastRecoveryOutcome) {
+    const outcome = state.lastRecoveryOutcome;
+    state.lastRecoveryOutcome = undefined;
+    pruneSessionState(sessionId);
+    return outcome;
+  }
+
+  const awaitable = state?.awaitableRecovery;
+  if (!awaitable) {
+    return { ok: false, reason: 'no-awaitable-recovery' };
+  }
+
+  const timeoutMs = options?.timeoutMs;
+  if (timeoutMs === undefined || timeoutMs <= 0) {
+    return awaitable.promise;
+  }
+
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<RecoveryOutcome>((resolve) => {
+    timeout = setTimeout(() => {
+      resolveAwaitableRecovery(sessionId, { ok: false, reason: 'timeout' });
+      resolve({ ok: false, reason: 'timeout' });
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([awaitable.promise, timeoutPromise]);
+  } finally {
+    if (timeout !== undefined) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
 function applyActiveRecoveryStatus(sessionId: string, ui: RecoveryUi | undefined): void {
   if (!ui) {
     return;
@@ -501,6 +590,10 @@ function getRecoveryMessageKind(message: string): RecoveryMessageKind {
 export function clearRuntimeState(): void {
   for (const sessionId of successStatusTimeoutBySessionId.keys()) {
     cancelScheduledSuccessStatusClear(sessionId);
+  }
+
+  for (const sessionId of stateBySessionId.keys()) {
+    resolveAwaitableRecovery(sessionId, { ok: false, reason: 'runtime-cleared' });
   }
 
   stateBySessionId.clear();
@@ -633,6 +726,7 @@ function clearRecoveryState(sessionId: string): void {
     return;
   }
 
+  resolveAwaitableRecovery(sessionId, { ok: false, reason: 'recovery-cleared' });
   state.activeRecovery = undefined;
   state.refusalProgress = undefined;
   pruneSessionState(sessionId);
@@ -974,6 +1068,7 @@ export function resolveRecoveryOnAssistantMessage(
   }
 
   const ui = createRecoveryUi(ctx);
+  resolveAwaitableRecovery(sessionId, { ok: true });
   clearRecoveryState(sessionId);
   ui.setStatus(RETRY_SUCCESS_STATUS);
   scheduleSuccessStatusClear(sessionId, ui);
@@ -1155,6 +1250,9 @@ export async function handleRefusalRecovery(input: {
 
     if ('immediate' === dispatchMode) {
       const sentRecovery: ActiveRecovery = { ...queuedRecovery, phase: 'sent' };
+      if ('retryable-error' === sentRecovery.kind) {
+        beginAwaitableRecovery(sessionId);
+      }
       setActiveRecovery(sessionId, sentRecovery);
       applyActiveRecoveryStatus(sessionId, ui);
       try {

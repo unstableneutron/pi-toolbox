@@ -17,6 +17,7 @@ import {
   resolveRecoveryOnAssistantMessage,
   registerPatchedSession,
   sanitizeEncryptedReasoningOnCurrentBranch,
+  waitForRecoveryOutcome,
 } from './runtime';
 
 function createDispatchUi(statusCalls: (string | undefined)[]) {
@@ -1751,6 +1752,35 @@ describe('handleRefusalRecovery', () => {
 });
 
 describe('resolveRecoveryOnAssistantMessage', () => {
+  test('keeps a successful awaitable recovery outcome until prompt observes it', async () => {
+    const { session, sessionManager } = createFakeErrorSession();
+    const ctx = {
+      cwd: process.cwd(),
+      hasUI: false,
+      sessionManager,
+      ui: createDispatchUi([]),
+    } as any;
+
+    await handleRefusalRecovery({
+      event: { messages: [sessionManager.getEntries().at(-1)?.message] },
+      ctx,
+      patchedSession: session as any,
+      reviewRewrite: vi.fn(),
+      sendUserMessage: vi.fn(),
+      dispatchMode: 'immediate',
+    });
+
+    expect(
+      resolveRecoveryOnAssistantMessage(ctx, {
+        role: 'assistant',
+        stopReason: 'stop',
+        content: [{ type: 'text', text: 'Recovered answer' }],
+      }),
+    ).toBe(true);
+
+    await expect(waitForRecoveryOutcome('session-1')).resolves.toEqual({ ok: true });
+  });
+
   test('shows recovery success when assistant output resumes after a sent recovery', async () => {
     vi.useFakeTimers();
 
