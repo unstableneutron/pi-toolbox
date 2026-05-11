@@ -98,7 +98,7 @@ interface TodoSettings {
   gcDays: number;
 }
 
-type KeybindingLike = KeybindingsManager;
+type KeybindingMatcher = KeybindingsManager;
 
 const TodoParams = Type.Object({
   action: StringEnum([
@@ -266,7 +266,7 @@ class TodoSelectorComponent extends Container implements Focusable {
   private onCancelCallback: () => void;
   private tui: TUI;
   private theme: Theme;
-  private keybindings: KeybindingLike;
+  private keybindings: KeybindingMatcher;
   private headerText: Text;
   private hintText: Text;
   private currentSessionId?: string;
@@ -283,7 +283,7 @@ class TodoSelectorComponent extends Container implements Focusable {
   constructor(
     tui: TUI,
     theme: Theme,
-    keybindings: KeybindingLike,
+    keybindings: KeybindingMatcher,
     todos: TodoFrontMatter[],
     onSelect: (todo: TodoFrontMatter) => void,
     onCancel: () => void,
@@ -574,12 +574,12 @@ class TodoDetailOverlayComponent {
   private viewHeight = 0;
   private totalLines = 0;
   private onAction: (action: TodoOverlayAction) => void;
-  private keybindings: KeybindingLike;
+  private keybindings: KeybindingMatcher;
 
   constructor(
     tui: TUI,
     theme: Theme,
-    keybindings: KeybindingLike,
+    keybindings: KeybindingMatcher,
     todo: TodoRecord,
     onAction: (action: TodoOverlayAction) => void,
   ) {
@@ -1792,7 +1792,9 @@ export default function todosExtension(pi: ExtensionAPI) {
       }
 
       let nextPrompt: string | null = null;
+      let rootTui: TUI | null = null;
       await ctx.ui.custom<void>((tui, theme, keybindings, done) => {
+        rootTui = tui;
         let selector: TodoSelectorComponent | null = null;
         let actionMenu: TodoActionMenuComponent | null = null;
         let deleteConfirm: TodoDeleteConfirmComponent | null = null;
@@ -2048,6 +2050,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 
       if (nextPrompt) {
         ctx.ui.setEditorText(nextPrompt);
+        (rootTui as TUI | null)?.requestRender();
       }
     },
   });
