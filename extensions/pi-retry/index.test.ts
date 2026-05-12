@@ -1573,6 +1573,85 @@ describe('pi-retry extension runtime', () => {
     ]);
   });
 
+  test('retry command confirms and continues from a stranded tool-result leaf', async () => {
+    const fakeModule = makeFakeAgentSessionModule();
+    const harness = await createExtensionHarness(async () => fakeModule);
+
+    harness.ctx.sessionManager.getLeafId = () => 'tool-result-grep';
+    harness.ctx.sessionManager.getEntries = () => [
+      {
+        id: 'user-1',
+        type: 'message',
+        message: { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+      },
+      {
+        id: 'assistant-tool-use',
+        parentId: 'user-1',
+        type: 'message',
+        message: {
+          role: 'assistant',
+          stopReason: 'toolUse',
+          content: [
+            { type: 'text', text: 'I’ll inspect this.' },
+            { type: 'toolCall', id: 'call_read|provider-id-1', name: 'read' },
+            { type: 'toolCall', id: 'call_grep|provider-id-2', name: 'grep' },
+          ],
+        },
+      },
+      {
+        id: 'tool-result-read',
+        parentId: 'assistant-tool-use',
+        type: 'message',
+        message: {
+          role: 'toolResult',
+          toolCallId: 'call_read|provider-id-1',
+          content: [{ type: 'text', text: 'file contents' }],
+        },
+      },
+      {
+        id: 'tool-result-grep',
+        parentId: 'tool-result-read',
+        type: 'message',
+        message: {
+          role: 'toolResult',
+          toolCallId: 'call_grep|provider-id-2',
+          content: [{ type: 'text', text: 'grep output' }],
+        },
+      },
+    ];
+    harness.ctx.ui.confirm = vi.fn().mockResolvedValue(true);
+
+    const retryCommand = harness.commands.get('retry');
+    if (!retryCommand) {
+      throw new Error('Missing retry command');
+    }
+
+    await retryCommand.handler('', harness.ctx);
+
+    expect(harness.ctx.ui.confirm).toHaveBeenCalledWith(
+      'pi-retry: Stranded tool results detected',
+      'This session appears to have stopped after tool results were returned. Send Continue now?',
+    );
+    expect(harness.sendMessageCalls).toEqual([
+      {
+        message: expect.objectContaining({
+          customType: 'pi-retry-recovery',
+          content: 'Continue.',
+          display: false,
+          details: {
+            version: 1,
+            displayHint: 'linear-replacement',
+            kind: 'stranded-tool-results',
+            messageKind: 'continue',
+            attempt: 1,
+            expectedLeafId: 'tool-result-grep',
+          },
+        }),
+        options: { triggerTurn: true },
+      },
+    ]);
+  });
+
   test('retry command does not treat an aborted leaf as retryable', async () => {
     const fakeModule = makeFakeAgentSessionModule();
     const harness = await createExtensionHarness(async () => fakeModule);
@@ -1952,6 +2031,136 @@ describe('pi-retry extension runtime', () => {
         options: { triggerTurn: true },
       },
     ]);
+  });
+
+  test('agent_end queues recovery when the session strands after returned tool results', async () => {
+    vi.useFakeTimers();
+
+    const fakeModule = makeFakeAgentSessionModule();
+    const harness = await createExtensionHarness(async () => fakeModule);
+
+    harness.ctx.isIdle = () => false;
+    harness.ctx.sessionManager.getLeafId = () => 'tool-result-grep';
+    harness.ctx.sessionManager.getEntries = () => [
+      {
+        id: 'user-1',
+        type: 'message',
+        message: { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+      },
+      {
+        id: 'assistant-tool-use',
+        parentId: 'user-1',
+        type: 'message',
+        message: {
+          role: 'assistant',
+          stopReason: 'toolUse',
+          content: [
+            { type: 'text', text: 'I’ll inspect this.' },
+            { type: 'toolCall', id: 'call_read|provider-id-1', name: 'read' },
+            { type: 'toolCall', id: 'call_grep|provider-id-2', name: 'grep' },
+          ],
+        },
+      },
+      {
+        id: 'tool-result-read',
+        parentId: 'assistant-tool-use',
+        type: 'message',
+        message: {
+          role: 'toolResult',
+          toolCallId: 'call_read|provider-id-1',
+          content: [{ type: 'text', text: 'file contents' }],
+        },
+      },
+      {
+        id: 'tool-result-grep',
+        parentId: 'tool-result-read',
+        type: 'message',
+        message: {
+          role: 'toolResult',
+          toolCallId: 'call_grep|provider-id-2',
+          content: [{ type: 'text', text: 'grep output' }],
+        },
+      },
+    ];
+
+    await getHandler(harness.handlers, 'agent_end')(
+      { type: 'agent_end', messages: [] },
+      harness.ctx,
+    );
+
+    expect(harness.sendMessageCalls).toEqual([]);
+    expect(harness.statusCalls).toContainEqual({
+      key: 'pi-retry',
+      text: '↻ Stranded tool results detected; retrying with Continue...',
+    });
+
+    harness.ctx.isIdle = () => true;
+    await vi.runAllTimersAsync();
+
+    expect(harness.sendMessageCalls).toEqual([
+      {
+        message: {
+          customType: 'pi-retry-recovery',
+          content: 'Continue.',
+          display: false,
+          details: {
+            version: 1,
+            displayHint: 'linear-replacement',
+            kind: 'stranded-tool-results',
+            messageKind: 'continue',
+            attempt: 1,
+            expectedLeafId: 'tool-result-grep',
+          },
+        },
+        options: { triggerTurn: true },
+      },
+    ]);
+  });
+
+  test('agent_end does not queue stranded tool-result recovery when recovery is disabled', async () => {
+    vi.useFakeTimers();
+
+    process.env.PI_RETRY_REFUSAL_RECOVERY_DISABLED = '1';
+    const fakeModule = makeFakeAgentSessionModule();
+    const harness = await createExtensionHarness(async () => fakeModule);
+
+    harness.ctx.sessionManager.getLeafId = () => 'tool-result-read';
+    harness.ctx.sessionManager.getEntries = () => [
+      {
+        id: 'user-1',
+        type: 'message',
+        message: { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+      },
+      {
+        id: 'assistant-tool-use',
+        parentId: 'user-1',
+        type: 'message',
+        message: {
+          role: 'assistant',
+          stopReason: 'toolUse',
+          content: [{ type: 'toolCall', id: 'call_read|provider-id-1', name: 'read' }],
+        },
+      },
+      {
+        id: 'tool-result-read',
+        parentId: 'assistant-tool-use',
+        type: 'message',
+        message: {
+          role: 'toolResult',
+          toolCallId: 'call_read|provider-id-1',
+          content: [{ type: 'text', text: 'file contents' }],
+        },
+      },
+    ];
+
+    await getHandler(harness.handlers, 'agent_end')(
+      { type: 'agent_end', messages: [] },
+      harness.ctx,
+    );
+    await vi.runAllTimersAsync();
+
+    expect(harness.statusCalls).toEqual([]);
+    expect(harness.sendMessageCalls).toEqual([]);
   });
 
   test('agent_end post-idle dispatch replaces queued status with waiting status', async () => {

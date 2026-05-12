@@ -126,6 +126,69 @@ function createFakeAbortedSession(options?: {
   return { sessionManager, entries, session: { sessionManager } };
 }
 
+function createFakeStrandedToolResultSession(options?: {
+  includeAllResults?: boolean;
+  includeUnexpectedResult?: boolean;
+}) {
+  const includeAllResults = options?.includeAllResults ?? true;
+  const entries = [
+    {
+      id: 'user-1',
+      parentId: undefined,
+      type: 'message',
+      message: { role: 'user', content: [{ type: 'text', text: 'Investigate this session' }] },
+    },
+    {
+      id: 'assistant-tool-use',
+      parentId: 'user-1',
+      type: 'message',
+      message: {
+        role: 'assistant',
+        stopReason: 'toolUse',
+        content: [
+          { type: 'text', text: 'I’ll inspect the files.' },
+          { type: 'toolCall', id: 'call_read|provider-id-1', name: 'read' },
+          { type: 'toolCall', id: 'call_grep|provider-id-2', name: 'grep' },
+        ],
+      },
+    },
+    {
+      id: 'tool-result-read',
+      parentId: 'assistant-tool-use',
+      type: 'message',
+      message: {
+        role: 'toolResult',
+        toolCallId: 'call_read|provider-id-1',
+        content: [{ type: 'text', text: 'file contents' }],
+      },
+    },
+    ...(includeAllResults
+      ? [
+          {
+            id: 'tool-result-grep',
+            parentId: 'tool-result-read',
+            type: 'message',
+            message: {
+              role: 'toolResult',
+              toolCallId: options?.includeUnexpectedResult
+                ? 'call_unexpected|provider-id-3'
+                : 'call_grep|provider-id-2',
+              content: [{ type: 'text', text: 'grep output' }],
+            },
+          },
+        ]
+      : []),
+  ] as any[];
+
+  return {
+    sessionManager: {
+      getSessionId: () => 'session-1',
+      getLeafId: () => (includeAllResults ? 'tool-result-grep' : 'tool-result-read'),
+      getEntries: () => entries,
+    },
+  };
+}
+
 function createSessionWithTrailingCustomLeaf(assistantMessage: {
   stopReason: 'stop' | 'error';
   content?: unknown;
@@ -615,6 +678,30 @@ describe('sanitizeEncryptedReasoningOnCurrentBranch', () => {
 });
 
 describe('detectRetryableTerminalLeaf', () => {
+  test('detects a stranded tool-result leaf after all assistant tool calls returned', () => {
+    const { sessionManager } = createFakeStrandedToolResultSession();
+
+    expect(detectRetryableTerminalLeaf(sessionManager as any)).toMatchObject({
+      kind: 'stranded-tool-results',
+      entryId: 'tool-result-grep',
+      parentEntryId: 'assistant-tool-use',
+    });
+  });
+
+  test('does not detect stranded tool results until every assistant tool call returned', () => {
+    const { sessionManager } = createFakeStrandedToolResultSession({ includeAllResults: false });
+
+    expect(detectRetryableTerminalLeaf(sessionManager as any)).toBeUndefined();
+  });
+
+  test('does not detect stranded tool results when a tool result has no matching tool call', () => {
+    const { sessionManager } = createFakeStrandedToolResultSession({
+      includeUnexpectedResult: true,
+    });
+
+    expect(detectRetryableTerminalLeaf(sessionManager as any)).toBeUndefined();
+  });
+
   test('walks backward from a trailing custom leaf to the nearest terminal assistant refusal', () => {
     const { sessionManager } = createSessionWithTrailingCustomLeaf({
       stopReason: 'stop',

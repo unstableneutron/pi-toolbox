@@ -8,6 +8,7 @@ import {
 
 import {
   PI_RETRY_RECOVERY_CUSTOM_TYPE,
+  buildRecoveryStatus,
   buildRetryableLeafPrompt,
   branchLatestAssistantErrorOutOfMainPath,
   classifyRetryableProviderError,
@@ -21,6 +22,7 @@ import {
   handleRefusalRecovery,
   hasAwaitableRecovery,
   registerPatchedSession,
+  setPendingRecovery,
   type RetryRecoveryMessageDetails,
   resolveRecoveryOnAssistantMessage,
   waitForRecoveryOutcome,
@@ -339,7 +341,8 @@ function parseRetryRecoveryDetails(value: unknown): RetryRecoveryMessageDetails 
   if (
     candidate.kind !== 'empty-stop' &&
     candidate.kind !== 'refusal' &&
-    candidate.kind !== 'retryable-error'
+    candidate.kind !== 'retryable-error' &&
+    candidate.kind !== 'stranded-tool-results'
   ) {
     return undefined;
   }
@@ -903,6 +906,27 @@ export function createPiRetryExtension(
         }
       }
 
+      if ('stranded-tool-results' === candidate.kind) {
+        const details: RetryRecoveryMessageDetails = {
+          version: 1,
+          displayHint: 'linear-replacement',
+          kind: candidate.kind,
+          messageKind: 'continue',
+          attempt: 1,
+          expectedLeafId: candidate.entryId,
+        };
+        pi.sendMessage(
+          {
+            customType: PI_RETRY_RECOVERY_CUSTOM_TYPE,
+            content: 'Continue.',
+            display: false,
+            details,
+          },
+          { triggerTurn: true },
+        );
+        return true;
+      }
+
       await handleRefusalRecovery({
         event: { messages: [candidate.message] },
         ctx,
@@ -1066,6 +1090,30 @@ export function createPiRetryExtension(
 
     pi.on('agent_end', async (event, ctx) => {
       const sessionId = ctx.sessionManager.getSessionId();
+      if (!getPendingRecovery(sessionId) && !refusalRecoveryDisabled()) {
+        const candidate = detectRetryableTerminalLeaf(ctx.sessionManager as any);
+        if ('stranded-tool-results' === candidate?.kind) {
+          const details: RetryRecoveryMessageDetails = {
+            version: 1,
+            displayHint: 'linear-replacement',
+            kind: candidate.kind,
+            messageKind: 'continue',
+            attempt: 1,
+            expectedLeafId: candidate.entryId,
+          };
+          setPendingRecovery(sessionId, {
+            kind: candidate.kind,
+            message: 'Continue.',
+            expectedLeafId: candidate.entryId,
+            details,
+          });
+          const queuedRecovery = getQueuedRecovery(sessionId);
+          if (queuedRecovery && ctx.hasUI) {
+            ctx.ui.setStatus(STATUS_KEY, buildRecoveryStatus(queuedRecovery));
+          }
+        }
+      }
+
       if (getPendingRecovery(sessionId)) {
         schedulePendingRecoveryDispatch(sessionId, ctx, pi);
       }

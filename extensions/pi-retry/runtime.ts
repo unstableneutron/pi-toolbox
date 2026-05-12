@@ -21,6 +21,8 @@ const CONTINUE_RETRY_MESSAGE = 'Continue.';
 const CONTINUE_RETRY_STATUS = '↻ Refusal detected; retrying...';
 const EMPTY_RESPONSE_RETRY_STATUS = '↻ Empty assistant response; retrying with Continue...';
 const RETRYABLE_ERROR_CONTINUE_STATUS = '↻ Retryable error detected; retrying with Continue...';
+const STRANDED_TOOL_RESULTS_CONTINUE_STATUS =
+  '↻ Stranded tool results detected; retrying with Continue...';
 const CONTINUE_SENT_WAITING_STATUS = '↻ Continue sent; waiting for recovery...';
 const REWRITE_SENT_WAITING_STATUS = '↻ Rewrite sent; waiting for recovery...';
 const RETRY_SUCCESS_STATUS = '✓ Recovered; continuing...';
@@ -97,7 +99,7 @@ export interface RetryRecoveryMessageDetails {
 }
 
 export interface PendingRecovery {
-  kind: 'empty-stop' | 'refusal' | 'retryable-error';
+  kind: 'empty-stop' | 'refusal' | 'retryable-error' | 'stranded-tool-results';
   message: string;
   expectedLeafId?: string;
   details?: RetryRecoveryMessageDetails;
@@ -365,6 +367,10 @@ function getRecoveryAttemptLimit(
     return MAX_EMPTY_RESPONSE_CONTINUE_ATTEMPTS;
   }
 
+  if ('stranded-tool-results' === recovery.kind) {
+    return 1;
+  }
+
   if ('refusal' !== recovery.kind) {
     return 1;
   }
@@ -422,6 +428,8 @@ export function buildRecoveryStatus(recovery: ActiveRecovery): string {
       return `${EMPTY_RESPONSE_RETRY_STATUS}${suffix}`;
     case 'retryable-error':
       return `${RETRYABLE_ERROR_CONTINUE_STATUS}${suffix}`;
+    case 'stranded-tool-results':
+      return `${STRANDED_TOOL_RESULTS_CONTINUE_STATUS}${suffix}`;
     default:
       return `${CONTINUE_RETRY_STATUS}${suffix}`;
   }
@@ -1082,22 +1090,99 @@ export function resolveRecoveryOnAssistantMessage(
   return true;
 }
 
-function getNearestTerminalAssistantMessageEntry(sessionManager: SessionManagerLike | undefined) {
+type SessionEntry = ReturnType<NonNullable<SessionManagerLike['getEntries']>>[number];
+
+function getBranchEntries(sessionManager: SessionManagerLike | undefined): SessionEntry[] {
   const leafId = sessionManager?.getLeafId?.();
   const entries = sessionManager?.getEntries?.() ?? [];
   if (!leafId || 0 === entries.length) {
-    return undefined;
+    return [];
   }
 
   const entriesById = new Map(entries.map((entry) => [entry.id, entry]));
+  const branch: SessionEntry[] = [];
   let currentEntry = entriesById.get(leafId);
 
   while (currentEntry) {
-    if (isTerminalAssistantMessageEntry(currentEntry)) {
-      return currentEntry;
+    branch.push(currentEntry);
+    currentEntry = currentEntry.parentId ? entriesById.get(currentEntry.parentId) : undefined;
+  }
+
+  return branch;
+}
+
+function getNearestTerminalAssistantMessageEntry(
+  sessionManager: SessionManagerLike | undefined,
+): SessionEntry | undefined {
+  return getBranchEntries(sessionManager).find(isTerminalAssistantMessageEntry);
+}
+
+function getToolCallIds(entry: SessionEntry | undefined): Set<string> {
+  const content = entry?.message?.content;
+  if (!Array.isArray(content)) {
+    return new Set();
+  }
+
+  const ids = new Set<string>();
+  for (const part of content as Array<{ type?: unknown; id?: unknown }>) {
+    if ('toolCall' === part?.type && 'string' === typeof part.id) {
+      ids.add(part.id.split('|', 1)[0]);
+    }
+  }
+  return ids;
+}
+
+function getToolResultCallId(entry: SessionEntry): string | undefined {
+  const toolCallId = (entry.message as { toolCallId?: unknown } | undefined)?.toolCallId;
+  return 'string' === typeof toolCallId && toolCallId.trim().length > 0
+    ? toolCallId.split('|', 1)[0]
+    : undefined;
+}
+
+function detectStrandedToolResultsLeaf(
+  sessionManager: SessionManagerLike | undefined,
+): RetryableTerminalLeaf | undefined {
+  const branch = getBranchEntries(sessionManager);
+  if (branch.length === 0 || 'toolResult' !== branch[0]?.message?.role) {
+    return undefined;
+  }
+
+  const returnedToolCallIds = new Set<string>();
+  for (const entry of branch) {
+    if ('toolResult' === entry.message?.role) {
+      const toolCallId = getToolResultCallId(entry);
+      if (!toolCallId) {
+        return undefined;
+      }
+      returnedToolCallIds.add(toolCallId);
+      continue;
     }
 
-    currentEntry = currentEntry.parentId ? entriesById.get(currentEntry.parentId) : undefined;
+    if ('assistant' !== entry.message?.role || 'toolUse' !== entry.message?.stopReason) {
+      return undefined;
+    }
+
+    const expectedToolCallIds = getToolCallIds(entry);
+    if (expectedToolCallIds.size === 0 || expectedToolCallIds.size !== returnedToolCallIds.size) {
+      return undefined;
+    }
+
+    for (const toolCallId of returnedToolCallIds) {
+      if (!expectedToolCallIds.has(toolCallId)) {
+        return undefined;
+      }
+    }
+
+    return {
+      kind: 'stranded-tool-results',
+      entryId: branch[0]?.id,
+      parentEntryId: entry.id,
+      message: {
+        role: 'assistant',
+        stopReason: 'stranded-tool-results',
+        content: [],
+      },
+    };
   }
 
   return undefined;
@@ -1106,6 +1191,11 @@ function getNearestTerminalAssistantMessageEntry(sessionManager: SessionManagerL
 export function detectRetryableTerminalLeaf(
   sessionManager: SessionManagerLike | undefined,
 ): RetryableTerminalLeaf | undefined {
+  const strandedToolResultsLeaf = detectStrandedToolResultsLeaf(sessionManager);
+  if (strandedToolResultsLeaf) {
+    return strandedToolResultsLeaf;
+  }
+
   const leafEntry = getNearestTerminalAssistantMessageEntry(sessionManager);
   const message = leafEntry?.message;
   if (!message || 'assistant' !== message.role) {
@@ -1171,6 +1261,12 @@ export function buildRetryableLeafPrompt(candidate: RetryableTerminalLeaf): {
       return {
         title: 'pi-retry: Retryable error detected',
         message: 'This session appears to have stopped on a retryable error. Send Continue now?',
+      };
+    case 'stranded-tool-results':
+      return {
+        title: 'pi-retry: Stranded tool results detected',
+        message:
+          'This session appears to have stopped after tool results were returned. Send Continue now?',
       };
   }
 }

@@ -6,6 +6,7 @@ It handles:
 
 - refusals
 - empty assistant stops
+- stranded tool-result leaves
 - retryable terminal assistant errors
 - manual retry via `/retry`
 - resume/startup/reload prompts for retryable leaves
@@ -28,7 +29,7 @@ pi -e /absolute/path/to/extensions/pi-retry
 
 ### Live recovery
 
-When a terminal assistant turn ends in a retryable state, `pi-retry`:
+When a run reaches a retryable terminal state, `pi-retry`:
 
 1. classifies the terminal leaf
 2. records pending recovery intent
@@ -90,6 +91,12 @@ Assistant stop message whose visible text matches the refusal heuristics in `ref
 ### Retryable terminal error
 
 Assistant terminal error whose `errorMessage` matches the retryable provider classifier.
+
+### Stranded tool results
+
+A branch whose leaf is a `toolResult` after every tool call from the nearest assistant
+`toolUse` message has returned. `pi-retry` sends `Continue.` from that leaf instead of
+branching, so the next model call sees the completed tool results.
 
 ## Configuration
 
