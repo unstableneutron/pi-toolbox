@@ -99,6 +99,14 @@ describe('pi-retry extra provider classification', () => {
     ).toBe('providerServerError');
   });
 
+  test('classifies Bedrock tool-result/tool-use count mismatch as retryable', () => {
+    expect(
+      classifyRetryableProviderError(
+        'Error: 400 litellm.BadRequestError: BedrockException - {"message":"The number of toolResult blocks at messages.198.content exceeds the number of toolUse blocks of previous turn."}. Received Model Group=global.anthropic.claude-opus-4-6-v1 Available Model Group Fallbacks=None',
+      ),
+    ).toBe('providerServerError');
+  });
+
   test('classifies peak-load provisioned-throughput failures as retryable', () => {
     expect(
       classifyRetryableProviderError(
@@ -643,6 +651,146 @@ describe('pi-retry patch installation', () => {
 
     expect(result).toEqual({
       messages: [messages[0], messages[1], firstToolResult],
+    });
+  });
+
+  test('preserves multiple tool results that match the previous assistant tool calls', async () => {
+    const fakeModule = makeFakeAgentSessionModule();
+    const loader = vi.fn().mockResolvedValue(fakeModule);
+
+    const { handlers, ctx } = await createExtensionHarness(loader);
+
+    (ctx.sessionManager as any).getBranch = () => [
+      { id: 'user-1', parentId: null, type: 'message' },
+      { id: 'assistant-1', parentId: 'user-1', type: 'message' },
+      { id: 'result-1', parentId: 'assistant-1', type: 'message' },
+      { id: 'result-2', parentId: 'result-1', type: 'message' },
+    ];
+    (ctx.sessionManager as any).getLeafId = () => 'result-2';
+
+    const contextHandler = getHandler(handlers, 'context');
+    const firstToolResult = {
+      role: 'toolResult',
+      toolCallId: 'call_one|fc_one',
+      toolName: 'read',
+      content: [{ type: 'text', text: 'first output' }],
+    };
+    const secondToolResult = {
+      role: 'toolResult',
+      toolCallId: 'call_two|fc_two',
+      toolName: 'bash',
+      content: [{ type: 'text', text: 'second output' }],
+    };
+    const messages = [
+      { role: 'user', content: [{ type: 'text', text: 'Do the thing' }] },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'toolCall', id: 'call_one|fc_one', name: 'read', arguments: {} },
+          { type: 'toolCall', id: 'call_two|fc_two', name: 'bash', arguments: {} },
+        ],
+      },
+      firstToolResult,
+      secondToolResult,
+    ];
+
+    const result = await contextHandler({ type: 'context', messages }, ctx);
+
+    expect(result).toBeUndefined();
+  });
+
+  test('filters tool results that exceed the previous assistant tool calls', async () => {
+    const fakeModule = makeFakeAgentSessionModule();
+    const loader = vi.fn().mockResolvedValue(fakeModule);
+
+    const { handlers, ctx } = await createExtensionHarness(loader);
+
+    (ctx.sessionManager as any).getBranch = () => [
+      { id: 'user-1', parentId: null, type: 'message' },
+      { id: 'assistant-old', parentId: 'user-1', type: 'message' },
+      { id: 'assistant-current', parentId: 'assistant-old', type: 'message' },
+      { id: 'result-old', parentId: 'assistant-current', type: 'message' },
+      { id: 'result-current', parentId: 'result-old', type: 'message' },
+    ];
+    (ctx.sessionManager as any).getLeafId = () => 'result-current';
+
+    const contextHandler = getHandler(handlers, 'context');
+    const staleToolResult = {
+      role: 'toolResult',
+      toolCallId: 'call_old|fc_old',
+      toolName: 'read',
+      content: [{ type: 'text', text: 'stale output' }],
+    };
+    const currentToolResult = {
+      role: 'toolResult',
+      toolCallId: 'call_current|fc_current',
+      toolName: 'bash',
+      content: [{ type: 'text', text: 'current output' }],
+    };
+    const messages = [
+      { role: 'user', content: [{ type: 'text', text: 'Do the thing' }] },
+      {
+        role: 'assistant',
+        content: [{ type: 'toolCall', id: 'call_old|fc_old', name: 'read', arguments: {} }],
+      },
+      {
+        role: 'assistant',
+        content: [{ type: 'toolCall', id: 'call_current|fc_current', name: 'bash', arguments: {} }],
+      },
+      staleToolResult,
+      currentToolResult,
+    ];
+
+    const result = await contextHandler({ type: 'context', messages }, ctx);
+
+    expect(result).toEqual({
+      messages: [messages[0], messages[1], messages[2], currentToolResult],
+    });
+  });
+
+  test('filters non-adjacent tool results after another assistant turn', async () => {
+    const fakeModule = makeFakeAgentSessionModule();
+    const loader = vi.fn().mockResolvedValue(fakeModule);
+
+    const { handlers, ctx } = await createExtensionHarness(loader);
+
+    (ctx.sessionManager as any).getBranch = () => [
+      { id: 'user-1', parentId: null, type: 'message' },
+      { id: 'assistant-1', parentId: 'user-1', type: 'message' },
+      { id: 'result-1', parentId: 'assistant-1', type: 'message' },
+      { id: 'assistant-2', parentId: 'result-1', type: 'message' },
+      { id: 'stale-result', parentId: 'assistant-2', type: 'message' },
+    ];
+    (ctx.sessionManager as any).getLeafId = () => 'stale-result';
+
+    const contextHandler = getHandler(handlers, 'context');
+    const validToolResult = {
+      role: 'toolResult',
+      toolCallId: 'call_once|fc_once',
+      toolName: 'read',
+      content: [{ type: 'text', text: 'valid output' }],
+    };
+    const staleToolResult = {
+      role: 'toolResult',
+      toolCallId: 'call_once|fc_once',
+      toolName: 'read',
+      content: [{ type: 'text', text: 'stale output' }],
+    };
+    const messages = [
+      { role: 'user', content: [{ type: 'text', text: 'Do the thing' }] },
+      {
+        role: 'assistant',
+        content: [{ type: 'toolCall', id: 'call_once|fc_once', name: 'read', arguments: {} }],
+      },
+      validToolResult,
+      { role: 'assistant', content: [{ type: 'text', text: 'Intermediate answer' }] },
+      staleToolResult,
+    ];
+
+    const result = await contextHandler({ type: 'context', messages }, ctx);
+
+    expect(result).toEqual({
+      messages: [messages[0], messages[1], validToolResult, messages[3]],
     });
   });
 

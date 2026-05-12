@@ -228,20 +228,30 @@ function normalizeToolCallId(value: unknown): string | undefined {
   return value.split('|', 1)[0];
 }
 
-function rememberOpenToolCallId(openToolCallIds: Set<string>, value: unknown): void {
+function rememberToolCallId(toolCallIds: Set<string>, value: unknown): void {
   const normalized = normalizeToolCallId(value);
   if (!normalized) {
     return;
   }
-  openToolCallIds.add(normalized);
+  toolCallIds.add(normalized);
 }
 
 function messageContentParts(message: Record<string, unknown>): Array<Record<string, unknown>> {
   return Array.isArray(message.content) ? (message.content as Array<Record<string, unknown>>) : [];
 }
 
+function getAssistantToolCallIds(message: Record<string, unknown>): Set<string> {
+  const toolCallIds = new Set<string>();
+  for (const part of messageContentParts(message)) {
+    if (part.type === 'toolCall') {
+      rememberToolCallId(toolCallIds, part.id);
+    }
+  }
+  return toolCallIds;
+}
+
 function filterOrphanToolResults(sessionContext: SessionContextLike): SessionContextLike {
-  const openToolCallIds = new Set<string>();
+  let expectedToolCallIds: Set<string> | undefined;
   let changed = false;
   const filteredMessages: Array<Record<string, unknown>> = [];
 
@@ -251,25 +261,27 @@ function filterOrphanToolResults(sessionContext: SessionContextLike): SessionCon
         (message as { toolCallId?: unknown }).toolCallId,
       );
       const hasMatchingToolCall =
-        normalizedToolCallId !== undefined && openToolCallIds.has(normalizedToolCallId);
+        normalizedToolCallId !== undefined && expectedToolCallIds?.has(normalizedToolCallId);
 
       if (!hasMatchingToolCall) {
         changed = true;
         continue;
       }
 
-      openToolCallIds.delete(normalizedToolCallId);
+      expectedToolCallIds?.delete(normalizedToolCallId);
+      filteredMessages.push(message);
+      continue;
     }
 
     filteredMessages.push(message);
 
     if (message.role === 'assistant') {
-      for (const part of messageContentParts(message)) {
-        if (part.type === 'toolCall') {
-          rememberOpenToolCallId(openToolCallIds, part.id);
-        }
-      }
+      const toolCallIds = getAssistantToolCallIds(message);
+      expectedToolCallIds = toolCallIds.size > 0 ? toolCallIds : undefined;
+      continue;
     }
+
+    expectedToolCallIds = undefined;
   }
 
   return changed ? { ...sessionContext, messages: filteredMessages } : sessionContext;

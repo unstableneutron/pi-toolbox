@@ -261,6 +261,13 @@ export function classifyRetryableProviderError(
     return 'providerServerError';
   }
 
+  if (
+    text.includes('number of toolresult blocks') &&
+    text.includes('exceeds the number of tooluse blocks')
+  ) {
+    return 'providerServerError';
+  }
+
   return undefined;
 }
 
