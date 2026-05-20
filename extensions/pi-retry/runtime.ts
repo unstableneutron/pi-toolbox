@@ -114,7 +114,7 @@ interface RetryableTerminalLeaf {
 
 type RecoveryPhase = 'queued' | 'sent' | 'reviewing';
 
-export type RecoveryOutcome = { ok: true } | { ok: false; reason: string };
+type RecoveryOutcome = { ok: true } | { ok: false; reason: string };
 
 interface AwaitableRecovery {
   promise: Promise<RecoveryOutcome>;
@@ -459,7 +459,7 @@ function resolveAwaitableRecovery(sessionId: string, outcome: RecoveryOutcome): 
   return true;
 }
 
-export function beginAwaitableRecovery(sessionId: string): void {
+function beginAwaitableRecovery(sessionId: string): void {
   resolveAwaitableRecovery(sessionId, {
     ok: false,
     reason: 'superseded-by-new-recovery',
@@ -652,10 +652,6 @@ export function getPendingRecovery(sessionId: string): PendingRecovery | undefin
   };
 }
 
-/**
- * Accessed dynamically from tests via `(runtime as any).setPendingRecovery?.()`.
- * @lintignore
- */
 export function setPendingRecovery(sessionId: string, recovery: PendingRecovery): void {
   const messageKind = getRecoveryMessageKind(recovery.message);
   setActiveRecovery(sessionId, {

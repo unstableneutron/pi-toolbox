@@ -2018,11 +2018,11 @@ describe('pi-retry extension runtime', () => {
     expect(harness.sendUserMessageCalls).toEqual([]);
     expect(harness.sendMessageCalls).toEqual([]);
 
-    await vi.advanceTimersByTimeAsync(249);
+    await vi.runOnlyPendingTimersAsync();
     expect(harness.sendMessageCalls).toEqual([]);
 
     harness.ctx.isIdle = () => true;
-    await vi.advanceTimersByTimeAsync(1);
+    await vi.runAllTimersAsync();
 
     expect(harness.sendUserMessageCalls).toEqual([]);
     expect(harness.sendMessageCalls).toEqual([
@@ -2163,6 +2163,57 @@ describe('pi-retry extension runtime', () => {
     expect(harness.sendMessageCalls).toEqual([]);
   });
 
+  test('agent_end clears extension recovery when core will retry', async () => {
+    vi.useFakeTimers();
+
+    const fakeModule = makeFakeAgentSessionModule();
+    const harness = await createExtensionHarness(async () => fakeModule);
+    const branchSpy = vi.fn();
+
+    harness.ctx.isIdle = () => true;
+    harness.ctx.sessionManager.branch = branchSpy;
+    harness.ctx.sessionManager.getLeafId = () => 'assistant-error-1';
+    harness.ctx.sessionManager.getEntries = () => [
+      { id: 'user-1', type: 'message', message: { role: 'user' } },
+      {
+        id: 'assistant-error-1',
+        parentId: 'user-1',
+        type: 'message',
+        message: {
+          role: 'assistant',
+          stopReason: 'error',
+          errorMessage: 'overloaded_error',
+        },
+      },
+    ];
+    (runtime as any).setPendingRecovery?.('session-1', {
+      kind: 'retryable-error',
+      message: 'Continue.',
+    });
+    harness.ctx.ui.setStatus('pi-retry', '↻ Retryable error detected; retrying with Continue...');
+
+    await getHandler(harness.handlers, 'agent_end')(
+      {
+        type: 'agent_end',
+        willRetry: true,
+        messages: [
+          {
+            role: 'assistant',
+            stopReason: 'error',
+            errorMessage: 'overloaded_error',
+            content: [],
+          },
+        ],
+      },
+      harness.ctx,
+    );
+    await vi.runAllTimersAsync();
+
+    expect(harness.sendMessageCalls).toEqual([]);
+    expect(harness.statusCalls.at(-1)).toEqual({ key: 'pi-retry', text: undefined });
+    expect(branchSpy).toHaveBeenCalledWith('user-1');
+  });
+
   test('agent_end post-idle dispatch replaces queued status with waiting status', async () => {
     vi.useFakeTimers();
 
@@ -2182,7 +2233,7 @@ describe('pi-retry extension runtime', () => {
     );
 
     harness.ctx.isIdle = () => true;
-    await vi.advanceTimersByTimeAsync(250);
+    await vi.runAllTimersAsync();
 
     expect(harness.sendUserMessageCalls).toEqual([]);
     expect(harness.sendMessageCalls).toEqual([

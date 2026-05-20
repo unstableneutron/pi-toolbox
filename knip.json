@@ -8,6 +8,10 @@
       "project": ["extensions/**/*.ts", "scripts/**/*.ts", "tests/**/*.ts"]
     },
     "extensions/*": {
+      "entry": ["index.ts"],
+      "project": ["**/*.ts"]
+    },
+    "extensions/pi-fff-search": {
       "entry": ["index.ts", "scripts/*.ts"],
       "project": ["**/*.ts"]
     }

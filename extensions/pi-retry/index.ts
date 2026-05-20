@@ -867,6 +867,9 @@ export async function installAgentSessionPatch(
 
 export function resetPiRetryTestState(): void {
   uiBySessionId.clear();
+  for (const sessionId of recoveryDispatchTimerBySessionId.keys()) {
+    cancelScheduledRecoveryDispatch(sessionId);
+  }
   for (const sessionId of abortListenerBySessionId.keys()) {
     unbindAbortListener(sessionId);
   }
@@ -1089,33 +1092,41 @@ export function createPiRetryExtension(
     });
 
     pi.on('agent_end', async (event, ctx) => {
+      bindStatusUi(ctx);
+      stashSessionReference(ctx);
       const sessionId = ctx.sessionManager.getSessionId();
-      if (!getPendingRecovery(sessionId) && !refusalRecoveryDisabled()) {
-        const candidate = detectRetryableTerminalLeaf(ctx.sessionManager as any);
-        if ('stranded-tool-results' === candidate?.kind) {
-          const details: RetryRecoveryMessageDetails = {
-            version: 1,
-            displayHint: 'linear-replacement',
-            kind: candidate.kind,
-            messageKind: 'continue',
-            attempt: 1,
-            expectedLeafId: candidate.entryId,
-          };
-          setPendingRecovery(sessionId, {
-            kind: candidate.kind,
-            message: 'Continue.',
-            expectedLeafId: candidate.entryId,
-            details,
-          });
-          const queuedRecovery = getQueuedRecovery(sessionId);
-          if (queuedRecovery && ctx.hasUI) {
-            ctx.ui.setStatus(STATUS_KEY, buildRecoveryStatus(queuedRecovery));
+      const willRetry = (event as unknown as { willRetry?: unknown }).willRetry === true;
+
+      if (willRetry) {
+        clearRecoveryForSession(sessionId);
+      } else {
+        if (!getPendingRecovery(sessionId) && !refusalRecoveryDisabled()) {
+          const candidate = detectRetryableTerminalLeaf(ctx.sessionManager as any);
+          if ('stranded-tool-results' === candidate?.kind) {
+            const details: RetryRecoveryMessageDetails = {
+              version: 1,
+              displayHint: 'linear-replacement',
+              kind: candidate.kind,
+              messageKind: 'continue',
+              attempt: 1,
+              expectedLeafId: candidate.entryId,
+            };
+            setPendingRecovery(sessionId, {
+              kind: candidate.kind,
+              message: 'Continue.',
+              expectedLeafId: candidate.entryId,
+              details,
+            });
+            const queuedRecovery = getQueuedRecovery(sessionId);
+            if (queuedRecovery && ctx.hasUI) {
+              ctx.ui.setStatus(STATUS_KEY, buildRecoveryStatus(queuedRecovery));
+            }
           }
         }
-      }
 
-      if (getPendingRecovery(sessionId)) {
-        schedulePendingRecoveryDispatch(sessionId, ctx, pi);
+        if (getPendingRecovery(sessionId)) {
+          schedulePendingRecoveryDispatch(sessionId, ctx, pi);
+        }
       }
 
       // Branch the failed leaf out of the main path BEFORE the core's

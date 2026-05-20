@@ -156,35 +156,35 @@ describe('multi-edit extension', () => {
       'stack multiple @@ context headers when needed',
     );
     expect(tools[1].promptGuidelines).toContain(
-      'Use the exact patch envelope: *** Begin Patch ... *** End Patch.',
+      'Use apply_patch with the exact patch envelope: *** Begin Patch ... *** End Patch.',
     );
     expect(tools[1].promptGuidelines).toContain(
-      'The patch value must be raw patch text only: no Markdown fences, no prose, no commentary.',
+      'For apply_patch, the patch value must be raw patch text only: no Markdown fences, no prose, no commentary.',
     );
     expect(tools[1].promptGuidelines).toContain(
-      'A rename-only patch may use *** Update File: plus *** Move to: with no @@ hunks.',
+      'For apply_patch, a rename-only patch may use *** Update File: plus *** Move to: with no @@ hunks.',
     );
     expect(tools[1].promptGuidelines).toContain(
-      'Do not use git/unified diff syntax such as diff --git, ---, +++, or line-number hunks.',
+      'For apply_patch, do not use git/unified diff syntax such as diff --git, ---, +++, or line-number hunks.',
     );
     expect(tools[1].promptGuidelines).toContain(
-      'Inside *** Update File: blocks, prefer *** FindReplaceOnce: for nearly every edit. Paste the exact text to change into SEARCH and what it should become into REPLACE. Delimiters: <<<<<<< SEARCH / ======= REPLACE / >>>>>>> REPLACE, each on its own line.',
+      'In apply_patch *** Update File: blocks, prefer *** FindReplaceOnce: for nearly every edit. Paste the exact text to change into SEARCH and what it should become into REPLACE. Delimiters: <<<<<<< SEARCH / ======= REPLACE / >>>>>>> REPLACE, each on its own line.',
     );
     expect(tools[1].promptGuidelines).toContain(
-      'Use *** FindReplaceAll: only when you deliberately want every whole-line occurrence replaced. Verify the reported match count.',
+      'Use apply_patch *** FindReplaceAll: only when you deliberately want every whole-line occurrence replaced. Verify the reported match count.',
     );
     expect(tools[1].promptGuidelines).toContain(
-      'Use @@ hunks only when you need several coordinated -/+ changes in close proximity that would be awkward to split into separate FindReplaceOnce blocks. Do not reach for @@ for simple single-block rewrites.',
+      'Use apply_patch @@ hunks only when you need several coordinated -/+ changes in close proximity that would be awkward to split into separate FindReplaceOnce blocks. Do not reach for @@ for simple single-block rewrites.',
     );
     expect(tools[1].promptGuidelines).toContain(
-      '@@ is a bare marker on its own line. Line numbers are ignored (no @@ -10,7 +10,7 @@). There is no hunk separator — do not insert bare *** lines between chunks.',
+      'In apply_patch, @@ is a bare marker on its own line. Line numbers are ignored (no @@ -10,7 +10,7 @@). There is no hunk separator — do not insert bare *** lines between chunks.',
     );
     // @@ context label is WHOLE-LINE and preserved as context.
     expect(tools[1].promptGuidelines.some((g: string) => g.includes('WHOLE-LINE match'))).toBe(
       true,
     );
     expect(tools[1].promptGuidelines).toContain(
-      'All chunks in one *** Update File: block match against the original file state, not against prior chunks within the same block. Split dependent edits into separate blocks or separate apply_patch calls.',
+      'In apply_patch, all chunks in one *** Update File: block match against the original file state, not against prior chunks within the same block. Split dependent edits into separate blocks or separate apply_patch calls.',
     );
     expect(tools[1].promptGuidelines).toContain(
       'apply_patch may partially apply independent operations. If a partial result reports failed or skipped files, read those files before retrying and avoid rereading applied files unless a specific dependency requires it.',
