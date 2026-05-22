@@ -1,6 +1,6 @@
 {
   "name": "pi-toolbox",
-  "version": "0.9.10",
+  "version": "0.9.11",
   "private": true,
   "description": "My own pi-toolbox of extensions, skills, prompts, and subagent templates.",
   "license": "MIT",
@@ -49,7 +49,14 @@
       "@earendil-works/pi-ai": "$@earendil-works/pi-ai",
       "@earendil-works/pi-coding-agent": "$@earendil-works/pi-coding-agent",
       "@earendil-works/pi-tui": "$@earendil-works/pi-tui"
-    }
+    },
+    "onlyBuiltDependencies": [
+      "@google/genai",
+      "esbuild",
+      "fff-router",
+      "koffi",
+      "protobufjs"
+    ]
   },
   "pi": {
     "extensions": [
