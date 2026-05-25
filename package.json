@@ -1,6 +1,6 @@
 {
   "name": "pi-toolbox",
-  "version": "0.9.11",
+  "version": "0.9.12",
   "private": true,
   "description": "My own pi-toolbox of extensions, skills, prompts, and subagent templates.",
   "license": "MIT",
@@ -17,10 +17,10 @@
   },
   "devDependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1027.0",
-    "@earendil-works/pi-agent-core": "0.75.4",
-    "@earendil-works/pi-ai": "0.75.4",
-    "@earendil-works/pi-coding-agent": "0.75.4",
-    "@earendil-works/pi-tui": "0.75.4",
+    "@earendil-works/pi-agent-core": "0.75.5",
+    "@earendil-works/pi-ai": "0.75.5",
+    "@earendil-works/pi-coding-agent": "0.75.5",
+    "@earendil-works/pi-tui": "0.75.5",
     "@types/node": "^24.3.0",
     "knip": "^6.3.1",
     "oxfmt": "^0.44.0",
