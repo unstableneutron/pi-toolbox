@@ -2214,6 +2214,56 @@ describe('pi-retry extension runtime', () => {
     expect(branchSpy).toHaveBeenCalledWith('user-1');
   });
 
+  test('agent_end infers core retry for retryable provider errors without willRetry', async () => {
+    vi.useFakeTimers();
+
+    const fakeModule = makeFakeAgentSessionModule();
+    const harness = await createExtensionHarness(async () => fakeModule);
+    const branchSpy = vi.fn();
+
+    harness.ctx.isIdle = () => true;
+    harness.ctx.sessionManager.branch = branchSpy;
+    harness.ctx.sessionManager.getLeafId = () => 'assistant-error-1';
+    harness.ctx.sessionManager.getEntries = () => [
+      { id: 'user-1', type: 'message', message: { role: 'user' } },
+      {
+        id: 'assistant-error-1',
+        parentId: 'user-1',
+        type: 'message',
+        message: {
+          role: 'assistant',
+          stopReason: 'error',
+          errorMessage: 'Unknown error (no error details in response)',
+        },
+      },
+    ];
+    (runtime as any).setPendingRecovery?.('session-1', {
+      kind: 'retryable-error',
+      message: 'Continue.',
+    });
+    harness.ctx.ui.setStatus('pi-retry', '↻ Retryable error detected; retrying with Continue...');
+
+    await getHandler(harness.handlers, 'agent_end')(
+      {
+        type: 'agent_end',
+        messages: [
+          {
+            role: 'assistant',
+            stopReason: 'error',
+            errorMessage: 'Unknown error (no error details in response)',
+            content: [],
+          },
+        ],
+      },
+      harness.ctx,
+    );
+    await vi.runAllTimersAsync();
+
+    expect(harness.sendMessageCalls).toEqual([]);
+    expect(harness.statusCalls.at(-1)).toEqual({ key: 'pi-retry', text: undefined });
+    expect(branchSpy).toHaveBeenCalledWith('user-1');
+  });
+
   test('agent_end post-idle dispatch replaces queued status with waiting status', async () => {
     vi.useFakeTimers();
 

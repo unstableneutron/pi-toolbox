@@ -130,6 +130,37 @@ function isLikelyCoreRetryableError(message: AssistantErrorLike): boolean {
   );
 }
 
+function getFinalAssistantMessage(
+  messages: Array<Record<string, unknown>>,
+): Record<string, unknown> | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role === 'assistant') {
+      return messages[i];
+    }
+  }
+  return undefined;
+}
+
+function shouldTreatAsCoreWillRetry(
+  event: { willRetry?: unknown },
+  ctx: ExtensionContext,
+  lastAssistant: Record<string, unknown> | undefined,
+): boolean {
+  if (event.willRetry === true) {
+    return true;
+  }
+  if (event.willRetry === false) {
+    return false;
+  }
+
+  const settings = getCoreRetrySettings(ctx.cwd);
+  if (settings.enabled === false || settings.maxRetries <= 0) {
+    return false;
+  }
+
+  return Boolean(lastAssistant && isBranchableRetryableError(lastAssistant as AssistantErrorLike));
+}
+
 function isBranchableRetryableError(message: AssistantErrorLike): boolean {
   return isExtraRetryableAssistantError(message) || isLikelyCoreRetryableError(message);
 }
@@ -157,12 +188,13 @@ function hasUserVisibleAssistantOutput(content: unknown): boolean {
   });
 }
 
-type CoreRetrySettingsLike = { baseDelayMs: number; maxRetries: number };
+type CoreRetrySettingsLike = { enabled?: boolean; baseDelayMs: number; maxRetries: number };
 
 function getCoreRetrySettings(cwd: string | undefined): CoreRetrySettingsLike {
   try {
     const settings = SettingsManager.create(cwd ?? process.cwd(), getAgentDir()).getRetrySettings();
     return {
+      enabled: settings.enabled,
       baseDelayMs: settings.baseDelayMs,
       maxRetries: settings.maxRetries,
     };
@@ -1095,7 +1127,14 @@ export function createPiRetryExtension(
       bindStatusUi(ctx);
       stashSessionReference(ctx);
       const sessionId = ctx.sessionManager.getSessionId();
-      const willRetry = (event as unknown as { willRetry?: unknown }).willRetry === true;
+      const messages =
+        (event as unknown as { messages?: Array<Record<string, unknown>> }).messages ?? [];
+      const lastAssistant = getFinalAssistantMessage(messages);
+      const willRetry = shouldTreatAsCoreWillRetry(
+        event as unknown as { willRetry?: unknown },
+        ctx,
+        lastAssistant,
+      );
 
       if (willRetry) {
         clearRecoveryForSession(sessionId);
@@ -1137,15 +1176,6 @@ export function createPiRetryExtension(
       // The retry's new message therefore lands as a sibling of the error
       // rather than a child of it, preserving the same session-tree shape
       // the old `_emit` prototype patch produced.
-      const messages =
-        (event as unknown as { messages?: Array<Record<string, unknown>> }).messages ?? [];
-      let lastAssistant: Record<string, unknown> | undefined;
-      for (let i = messages.length - 1; i >= 0; i--) {
-        if (messages[i]?.role === 'assistant') {
-          lastAssistant = messages[i];
-          break;
-        }
-      }
       if (!lastAssistant) {
         return;
       }
