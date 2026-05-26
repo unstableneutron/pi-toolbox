@@ -3893,9 +3893,9 @@ describe('bash-rewrite pretty rendering', () => {
 
   test('renderBashRewriteResult delegates to read native renderer for routedVia=bash-to-read', () => {
     // With rewriteToParams present, read's own renderResult is invoked so
-    // the TUI shows the same syntax-highlighted file view the user would
-    // see if they'd called read directly. The rendered output contains
-    // file contents (rather than a null passthrough to the bash renderer).
+    // the expanded TUI shows the same syntax-highlighted file view the user
+    // would see if they'd called read directly. Native read results are
+    // collapsed until expanded, so this assertion uses expanded mode.
     const result = {
       content: [{ type: 'text', text: 'export const x = 1;' }],
       details: {
@@ -3903,7 +3903,7 @@ describe('bash-rewrite pretty rendering', () => {
         rewriteToParams: { path: 'src/foo.ts' },
       },
     };
-    const rendered = renderBashRewriteResult(result, { expanded: false, isPartial: false }, theme, {
+    const rendered = renderBashRewriteResult(result, { expanded: true, isPartial: false }, theme, {
       cwd: '/repo',
     });
     expect(rendered).not.toBeNull();
