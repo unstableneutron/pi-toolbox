@@ -129,6 +129,7 @@ function createFakeAbortedSession(options?: {
 function createFakeStrandedToolResultSession(options?: {
   includeAllResults?: boolean;
   includeUnexpectedResult?: boolean;
+  markAllResultsTerminating?: boolean;
 }) {
   const includeAllResults = options?.includeAllResults ?? true;
   const entries = [
@@ -160,6 +161,7 @@ function createFakeStrandedToolResultSession(options?: {
         role: 'toolResult',
         toolCallId: 'call_read|provider-id-1',
         content: [{ type: 'text', text: 'file contents' }],
+        ...(options?.markAllResultsTerminating ? { piRetry: { terminate: true } } : {}),
       },
     },
     ...(includeAllResults
@@ -174,6 +176,7 @@ function createFakeStrandedToolResultSession(options?: {
                 ? 'call_unexpected|provider-id-3'
                 : 'call_grep|provider-id-2',
               content: [{ type: 'text', text: 'grep output' }],
+              ...(options?.markAllResultsTerminating ? { piRetry: { terminate: true } } : {}),
             },
           },
         ]
@@ -697,6 +700,14 @@ describe('detectRetryableTerminalLeaf', () => {
   test('does not detect stranded tool results when a tool result has no matching tool call', () => {
     const { sessionManager } = createFakeStrandedToolResultSession({
       includeUnexpectedResult: true,
+    });
+
+    expect(detectRetryableTerminalLeaf(sessionManager as any)).toBeUndefined();
+  });
+
+  test('does not detect stranded tool results when every result intentionally terminated', () => {
+    const { sessionManager } = createFakeStrandedToolResultSession({
+      markAllResultsTerminating: true,
     });
 
     expect(detectRetryableTerminalLeaf(sessionManager as any)).toBeUndefined();

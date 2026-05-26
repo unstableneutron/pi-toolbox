@@ -97,6 +97,7 @@ const linearizedTreeCache = new WeakMap<object, LinearizedTreeCacheEntry>();
 const uiBySessionId = new Map<string, StatusUi>();
 const recoveryDispatchTimerBySessionId = new Map<string, ReturnType<typeof setTimeout>>();
 const abortListenerBySessionId = new Map<string, { signal: AbortSignal; onAbort: () => void }>();
+const terminatingToolCallIdsBySessionId = new Map<string, Set<string>>();
 
 let patchInstallPromise: Promise<PatchInstallResult> | undefined;
 let patchFailureReason: string | undefined;
@@ -260,6 +261,47 @@ function normalizeToolCallId(value: unknown): string | undefined {
     return undefined;
   }
   return value.split('|', 1)[0];
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return 'object' === typeof value && value !== null
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function getTerminatingToolCallIds(sessionId: string): Set<string> {
+  let toolCallIds = terminatingToolCallIdsBySessionId.get(sessionId);
+  if (!toolCallIds) {
+    toolCallIds = new Set<string>();
+    terminatingToolCallIdsBySessionId.set(sessionId, toolCallIds);
+  }
+  return toolCallIds;
+}
+
+function rememberTerminatingToolCall(sessionId: string, toolCallId: unknown): void {
+  const normalizedToolCallId = normalizeToolCallId(toolCallId);
+  if (!normalizedToolCallId) {
+    return;
+  }
+  getTerminatingToolCallIds(sessionId).add(normalizedToolCallId);
+}
+
+function isTerminatingToolResult(sessionId: string, message: Record<string, unknown>): boolean {
+  const normalizedToolCallId = normalizeToolCallId(message.toolCallId);
+  return (
+    normalizedToolCallId !== undefined &&
+    getTerminatingToolCallIds(sessionId).has(normalizedToolCallId)
+  );
+}
+
+function markTerminatingToolResultMessage(
+  message: Record<string, unknown>,
+): Record<string, unknown> {
+  const piRetry = asRecord(message.piRetry) ?? {};
+  if (true === piRetry.terminate) {
+    return message;
+  }
+  return { ...message, piRetry: { ...piRetry, terminate: true } };
 }
 
 function rememberToolCallId(toolCallIds: Set<string>, value: unknown): void {
@@ -905,6 +947,7 @@ export function resetPiRetryTestState(): void {
   for (const sessionId of abortListenerBySessionId.keys()) {
     unbindAbortListener(sessionId);
   }
+  terminatingToolCallIdsBySessionId.clear();
   clearRuntimeState();
   patchInstallPromise = undefined;
   patchFailureReason = undefined;
@@ -1108,7 +1151,24 @@ export function createPiRetryExtension(
       });
     });
 
+    pi.on('tool_execution_end', async (event, ctx) => {
+      if (true !== (event as { result?: { terminate?: unknown } }).result?.terminate) {
+        return;
+      }
+      rememberTerminatingToolCall(ctx.sessionManager.getSessionId(), event.toolCallId);
+    });
+
     pi.on('message_end', async (event, ctx) => {
+      const message = event.message as unknown as Record<string, unknown>;
+      if ('toolResult' === message.role) {
+        if (isTerminatingToolResult(ctx.sessionManager.getSessionId(), message)) {
+          return {
+            message: markTerminatingToolResultMessage(message) as unknown as typeof event.message,
+          };
+        }
+        return;
+      }
+
       if (!Array.isArray((event.message as { content?: unknown }).content)) {
         return;
       }

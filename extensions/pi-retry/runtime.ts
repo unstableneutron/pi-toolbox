@@ -1135,6 +1135,15 @@ function getToolResultCallId(entry: SessionEntry): string | undefined {
     : undefined;
 }
 
+function isTerminatingToolResultEntry(entry: SessionEntry): boolean {
+  const marker = (entry.message as { piRetry?: unknown } | undefined)?.piRetry;
+  return (
+    'object' === typeof marker &&
+    marker !== null &&
+    true === (marker as { terminate?: unknown }).terminate
+  );
+}
+
 function detectStrandedToolResultsLeaf(
   sessionManager: SessionManagerLike | undefined,
 ): RetryableTerminalLeaf | undefined {
@@ -1144,6 +1153,7 @@ function detectStrandedToolResultsLeaf(
   }
 
   const returnedToolCallIds = new Set<string>();
+  const returnedToolResultEntries: SessionEntry[] = [];
   for (const entry of branch) {
     if ('toolResult' === entry.message?.role) {
       const toolCallId = getToolResultCallId(entry);
@@ -1151,6 +1161,7 @@ function detectStrandedToolResultsLeaf(
         return undefined;
       }
       returnedToolCallIds.add(toolCallId);
+      returnedToolResultEntries.push(entry);
       continue;
     }
 
@@ -1167,6 +1178,10 @@ function detectStrandedToolResultsLeaf(
       if (!expectedToolCallIds.has(toolCallId)) {
         return undefined;
       }
+    }
+
+    if (returnedToolResultEntries.every(isTerminatingToolResultEntry)) {
+      return undefined;
     }
 
     return {

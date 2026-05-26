@@ -1573,6 +1573,46 @@ describe('pi-retry extension runtime', () => {
     ]);
   });
 
+  test('marks terminating tool results before persistence', async () => {
+    const fakeModule = makeFakeAgentSessionModule();
+    const harness = await createExtensionHarness(async () => fakeModule);
+
+    const toolExecutionEnd = getHandler(harness.handlers, 'tool_execution_end');
+    await toolExecutionEnd(
+      {
+        type: 'tool_execution_end',
+        toolCallId: 'call_done|provider-id-1',
+        toolName: 'done',
+        result: { content: [{ type: 'text', text: 'done' }], terminate: true },
+        isError: false,
+      },
+      harness.ctx,
+    );
+
+    const messageEnd = getHandler(harness.handlers, 'message_end');
+    const result = await (messageEnd as any)(
+      {
+        type: 'message_end',
+        message: {
+          role: 'toolResult',
+          toolCallId: 'call_done|provider-id-1',
+          toolName: 'done',
+          content: [{ type: 'text', text: 'done' }],
+          isError: false,
+        },
+      },
+      harness.ctx,
+    );
+
+    expect(result).toEqual({
+      message: expect.objectContaining({
+        role: 'toolResult',
+        toolCallId: 'call_done|provider-id-1',
+        piRetry: { terminate: true },
+      }),
+    });
+  });
+
   test('retry command confirms and continues from a stranded tool-result leaf', async () => {
     const fakeModule = makeFakeAgentSessionModule();
     const harness = await createExtensionHarness(async () => fakeModule);
