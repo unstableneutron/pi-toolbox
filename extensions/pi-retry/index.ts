@@ -48,6 +48,7 @@ const SESSION_MANAGER_PATCHED = Symbol.for('pi-retry.session-manager.patched');
 const REFUSAL_DISABLE_ENV_VAR = 'PI_RETRY_REFUSAL_RECOVERY_DISABLED';
 const DEFAULT_CORE_RETRY_BASE_DELAY_MS = 2000;
 const DEFAULT_CORE_RETRY_MAX_RETRIES = 3;
+const DEFAULT_COMPACTION_EXTRA_RETRIES = 2;
 const PROMPT_RECOVERY_TIMEOUT_MS = 120_000;
 const RECOVERY_DISPATCH_IDLE_POLL_DELAY_MS = 100;
 
@@ -187,6 +188,29 @@ function hasUserVisibleAssistantOutput(content: unknown): boolean {
     }
     return false;
   });
+}
+
+type CompactionEndEventLike = {
+  type?: unknown;
+  result?: unknown;
+  aborted?: unknown;
+  errorMessage?: unknown;
+};
+
+function isCompactionEndEvent(event: unknown): event is CompactionEndEventLike {
+  return Boolean(
+    event && 'object' === typeof event && 'compaction_end' === (event as { type?: unknown }).type,
+  );
+}
+
+function isRetryableCompactionFailure(event: CompactionEndEventLike | undefined): boolean {
+  return Boolean(
+    event &&
+    true !== event.aborted &&
+    event.result === undefined &&
+    'string' === typeof event.errorMessage &&
+    classifyRetryableProviderError(event.errorMessage) !== undefined,
+  );
 }
 
 type CoreRetrySettingsLike = { enabled?: boolean; baseDelayMs: number; maxRetries: number };
@@ -882,6 +906,7 @@ export async function installAgentSessionPatch(
 
     const originalIsRetryableError = proto._isRetryableError;
     const originalPrompt = proto.prompt;
+    const originalRunAutoCompaction = proto._runAutoCompaction;
 
     if ('function' !== typeof originalIsRetryableError) {
       patchFailureReason = 'AgentSession._isRetryableError is not available';
@@ -918,6 +943,48 @@ export async function installAgentSessionPatch(
           }
 
           throw error;
+        }
+      };
+    }
+
+    if ('function' === typeof originalRunAutoCompaction) {
+      proto._runAutoCompaction = async function patchedRunAutoCompaction(...args: unknown[]) {
+        let retriesRemaining = DEFAULT_COMPACTION_EXTRA_RETRIES;
+
+        while (true) {
+          const originalEmit = this?._emit;
+          let compactionEndEvent: CompactionEndEventLike | undefined;
+
+          if ('function' === typeof originalEmit) {
+            this._emit = function patchedCompactionRetryEmit(
+              event: unknown,
+              ...emitArgs: unknown[]
+            ) {
+              if (isCompactionEndEvent(event)) {
+                compactionEndEvent = event;
+              }
+              return originalEmit.call(this, event, ...emitArgs);
+            };
+          }
+
+          let result;
+          try {
+            result = await originalRunAutoCompaction.apply(this, args);
+          } finally {
+            if ('function' === typeof originalEmit) {
+              this._emit = originalEmit;
+            }
+          }
+
+          if (
+            false !== result ||
+            retriesRemaining <= 0 ||
+            !isRetryableCompactionFailure(compactionEndEvent)
+          ) {
+            return result;
+          }
+
+          retriesRemaining -= 1;
         }
       };
     }

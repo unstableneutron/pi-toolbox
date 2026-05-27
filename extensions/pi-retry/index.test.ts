@@ -162,10 +162,26 @@ function makeFakeAgentSessionModule() {
 
     public emitCalls: unknown[] = [];
     public baseClassifierCalls: unknown[] = [];
+    public compactionAttempts = 0;
+    public compactionOutcomes: Array<{ result: boolean; errorMessage?: string }> = [];
 
     _isRetryableError(message: { role?: string; stopReason?: string; errorMessage?: string }) {
       this.baseClassifierCalls.push(message);
       return 'overloaded_error' === message.errorMessage;
+    }
+
+    async _runAutoCompaction(reason: string, willRetry: boolean) {
+      const outcome = this.compactionOutcomes[this.compactionAttempts] ?? { result: true };
+      this.compactionAttempts += 1;
+      this._emit({
+        type: 'compaction_end',
+        reason,
+        result: outcome.result ? { summary: 'ok' } : undefined,
+        aborted: false,
+        willRetry: outcome.result ? willRetry : false,
+        errorMessage: outcome.errorMessage,
+      });
+      return outcome.result;
     }
 
     async prompt(_text: string) {
@@ -423,6 +439,84 @@ describe('pi-retry patch installation', () => {
     expect(runtime.waitForRecoveryOutcome).toHaveBeenCalledWith('session-1', {
       timeoutMs: expect.any(Number),
     });
+  });
+
+  test('retries retryable compaction failures twice before returning a later success', async () => {
+    const fakeModule = makeFakeAgentSessionModule();
+    const loader = vi.fn().mockResolvedValue(fakeModule);
+
+    await installAgentSessionPatch(loader);
+
+    const session = new fakeModule.AgentSession();
+    session.compactionOutcomes = [
+      {
+        result: false,
+        errorMessage:
+          'Context overflow recovery failed: Turn prefix summarization failed: Unknown error (no error details in response)',
+      },
+      {
+        result: false,
+        errorMessage:
+          'Context overflow recovery failed: Turn prefix summarization failed: Unknown error (no error details in response)',
+      },
+      { result: true },
+    ];
+
+    await expect(session._runAutoCompaction('overflow', true)).resolves.toBe(true);
+
+    expect(session.compactionAttempts).toBe(3);
+  });
+
+  test('stops compaction retries after the original attempt plus two retry attempts', async () => {
+    const fakeModule = makeFakeAgentSessionModule();
+    const loader = vi.fn().mockResolvedValue(fakeModule);
+
+    await installAgentSessionPatch(loader);
+
+    const session = new fakeModule.AgentSession();
+    session.compactionOutcomes = [
+      {
+        result: false,
+        errorMessage:
+          'Context overflow recovery failed: Turn prefix summarization failed: Unknown error (no error details in response)',
+      },
+      {
+        result: false,
+        errorMessage:
+          'Context overflow recovery failed: Turn prefix summarization failed: Unknown error (no error details in response)',
+      },
+      {
+        result: false,
+        errorMessage:
+          'Context overflow recovery failed: Turn prefix summarization failed: Unknown error (no error details in response)',
+      },
+      { result: true },
+    ];
+
+    await expect(session._runAutoCompaction('overflow', true)).resolves.toBe(false);
+
+    expect(session.compactionAttempts).toBe(3);
+  });
+
+  test('does not retry non-retryable compaction failures', async () => {
+    const fakeModule = makeFakeAgentSessionModule();
+    const loader = vi.fn().mockResolvedValue(fakeModule);
+
+    await installAgentSessionPatch(loader);
+
+    const session = new fakeModule.AgentSession();
+    session.compactionOutcomes = [
+      {
+        result: false,
+        errorMessage:
+          'Auto-compaction failed: First kept entry has no UUID - session may need migration',
+      },
+      { result: true },
+    ];
+
+    await expect(session._runAutoCompaction('threshold', false)).resolves.toBe(false);
+
+    expect(session.compactionAttempts).toBe(1);
   });
 
   test('patches SessionManager getTree to hide historical retry recovery nodes', async () => {
