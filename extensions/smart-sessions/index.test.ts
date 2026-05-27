@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -5,13 +6,44 @@ import { join } from 'node:path';
 import { wrapTextWithAnsi } from '@earendil-works/pi-tui';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
-const { completeSimpleMock, getAgentDirMock } = vi.hoisted(() => ({
-  completeSimpleMock: vi.fn(),
-  getAgentDirMock: vi.fn(),
-}));
+const { completeSimpleMock, createConnectionMock, getAgentDirMock, herdrRequests } = vi.hoisted(
+  () => {
+    const herdrRequests: Array<Record<string, any>> = [];
+    const createConnectionMock = vi.fn((_socketPath: string) => {
+      const socket = new EventEmitter() as EventEmitter & {
+        destroy: () => void;
+        write: (line: string) => void;
+      };
+      socket.destroy = vi.fn();
+      socket.write = (line: string) => {
+        const request = JSON.parse(line.trim()) as Record<string, any>;
+        herdrRequests.push(request);
+        queueMicrotask(() => {
+          socket.emit(
+            'data',
+            Buffer.from(JSON.stringify({ id: request.id, result: { type: 'ok' } }) + '\n'),
+          );
+        });
+      };
+      queueMicrotask(() => socket.emit('connect'));
+      return socket;
+    });
+
+    return {
+      completeSimpleMock: vi.fn(),
+      createConnectionMock,
+      getAgentDirMock: vi.fn(),
+      herdrRequests,
+    };
+  },
+);
 
 vi.mock('@earendil-works/pi-ai', () => ({
   completeSimple: completeSimpleMock,
+}));
+
+vi.mock('node:net', () => ({
+  createConnection: createConnectionMock,
 }));
 
 vi.mock('@earendil-works/pi-coding-agent', async () => {
@@ -298,11 +330,78 @@ describe('smart-sessions rolling summary', () => {
     getAgentDirMock.mockReturnValue(tempAgentDir);
     vi.useRealTimers();
     completeSimpleMock.mockReset();
+    createConnectionMock.mockClear();
+    herdrRequests.length = 0;
+    delete process.env.HERDR_ENV;
+    delete process.env.HERDR_SOCKET_PATH;
+    delete process.env.HERDR_PANE_ID;
   });
 
   afterEach(() => {
     rmSync(tempAgentDir, { recursive: true, force: true });
+    delete process.env.HERDR_ENV;
+    delete process.env.HERDR_SOCKET_PATH;
+    delete process.env.HERDR_PANE_ID;
     vi.restoreAllMocks();
+  });
+
+  test('does not report a Herdr pane title outside Herdr', async () => {
+    completeSimpleMock.mockResolvedValue(
+      assistantResponse(
+        JSON.stringify({
+          shortTitle: 'Smart summary',
+          longTitle: 'Persist rolling smart sessions sidecar state',
+          shortSummary: 'Need user approval on overwrite only summary history',
+          summaryBullets: ['Blocked: waiting on overwrite confirmation.'],
+          timelineItems: ['Asked whether to keep only current and previous summaries.'],
+        }),
+      ) as any,
+    );
+
+    const harness = createHarness({ hasUI: true });
+    await harness.getCommand('summarize')({}, harness.ctx);
+    await vi.waitFor(() => expect(completeSimpleMock).toHaveBeenCalledTimes(1));
+
+    expect(createConnectionMock).not.toHaveBeenCalled();
+    expect(herdrRequests).toEqual([]);
+  });
+
+  test('reports the short summary title to Herdr pane metadata when running inside Herdr', async () => {
+    process.env.HERDR_ENV = '1';
+    process.env.HERDR_SOCKET_PATH = '/tmp/smart-sessions-herdr.sock';
+    process.env.HERDR_PANE_ID = 'pane-123';
+
+    completeSimpleMock.mockResolvedValue(
+      assistantResponse(
+        JSON.stringify({
+          shortTitle: 'Smart summary',
+          longTitle: 'Persist rolling smart sessions sidecar state',
+          shortSummary: 'Need user approval on overwrite only summary history',
+          summaryBullets: ['Blocked: waiting on overwrite confirmation.'],
+          timelineItems: ['Asked whether to keep only current and previous summaries.'],
+        }),
+      ) as any,
+    );
+
+    const harness = createHarness({ hasUI: true });
+    await harness.getCommand('summarize')({}, harness.ctx);
+
+    await vi.waitFor(() => expect(herdrRequests).toHaveLength(1));
+    expect(createConnectionMock).toHaveBeenCalledWith('/tmp/smart-sessions-herdr.sock');
+    expect(herdrRequests[0]).toMatchObject({
+      method: 'pane.report_metadata',
+      params: {
+        pane_id: 'pane-123',
+        source: 'pi-toolbox:smart-sessions:title',
+        applies_to_source: 'herdr:pi',
+        title: 'Smart summary',
+      },
+    });
+    expect(herdrRequests[0]?.params?.seq).toEqual(expect.any(Number));
+    expect(harness.appendedEntries).toContainEqual({
+      customType: 'smart-sessions/window-name',
+      data: { windowName: herdrRequests[0]?.params?.title },
+    });
   });
 
   test('writes rolling summary state on summarize and uses long title for session naming', async () => {

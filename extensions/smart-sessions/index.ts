@@ -1,4 +1,5 @@
 import { writeSync } from 'node:fs';
+import { createConnection } from 'node:net';
 
 import {
   BorderedLoader,
@@ -24,6 +25,8 @@ import { generateRollingSummary } from './unified-summary';
 
 const DISABLE_ENV_VAR = 'PI_SMART_SESSIONS_DISABLED';
 const ENTRY_TYPE_WINDOW = 'smart-sessions/window-name';
+const HERDR_TITLE_SOURCE = 'pi-toolbox:smart-sessions:title';
+const HERDR_PI_SOURCE = 'herdr:pi';
 const INLINE_SUMMARY_WIDGET_KEY = 'smart-sessions/summary-ready';
 const AUTO_SUMMARY_MIN_WORK_MS = 5 * 60_000;
 const AUTO_SUMMARY_IDLE_MS = 60_000;
@@ -31,6 +34,8 @@ const AUTO_SUMMARY_FALLBACK_IDLE_MS = 5 * 60_000;
 const AUTO_SUMMARY_MIN_TURNS = 1;
 const MAX_ROLLING_REWRITE_COUNT = 12;
 const EXIT_SUMMARY_STATE_KEY = '__PI_SMART_SESSIONS_EXIT_SUMMARY_STATE__';
+
+let herdrTitleSeq = Date.now() * 1000;
 
 const SUMMARY_MARKDOWN_THEME = {
   heading: (text: string) => `\x1b[1;36m${text}\x1b[0m`,
@@ -176,7 +181,69 @@ function renameTerminalTitle(name: string): void {
   process.stdout.write(`\x1b]0;${name}\x07`);
 }
 
+function herdrPaneTitleTarget(): { socketPath: string; paneId: string } | undefined {
+  if (process.env.HERDR_ENV !== '1') return undefined;
+
+  const socketPath = process.env.HERDR_SOCKET_PATH?.trim();
+  const paneId = process.env.HERDR_PANE_ID?.trim();
+  if (!socketPath || !paneId) return undefined;
+
+  return { socketPath, paneId };
+}
+
+function nextHerdrTitleSeq(): number {
+  herdrTitleSeq += 1;
+  return herdrTitleSeq;
+}
+
+function sendHerdrPaneTitle(socketPath: string, request: unknown): Promise<void> {
+  return new Promise((resolve) => {
+    let done = false;
+    let socket: ReturnType<typeof createConnection> | undefined;
+    const finish = () => {
+      if (done) return;
+
+      done = true;
+      socket?.destroy();
+      resolve();
+    };
+
+    try {
+      socket = createConnection(socketPath);
+    } catch {
+      finish();
+      return;
+    }
+
+    socket.on('error', finish);
+    socket.on('connect', () => socket?.write(`${JSON.stringify(request)}\n`));
+    socket.on('data', finish);
+    socket.on('end', finish);
+    const timeout = setTimeout(finish, 500);
+    timeout.unref?.();
+  });
+}
+
+function reportHerdrPaneTitle(title: string): void {
+  const target = herdrPaneTitleTarget();
+  if (!target) return;
+
+  const seq = nextHerdrTitleSeq();
+  void sendHerdrPaneTitle(target.socketPath, {
+    id: `${HERDR_TITLE_SOURCE}:${seq}`,
+    method: 'pane.report_metadata',
+    params: {
+      pane_id: target.paneId,
+      source: HERDR_TITLE_SOURCE,
+      applies_to_source: HERDR_PI_SOURCE,
+      title,
+      seq,
+    },
+  });
+}
+
 async function applyWindowName(pi: ExtensionAPI, name: string): Promise<void> {
+  reportHerdrPaneTitle(name);
   if (await renameTmuxWindow(pi, name)) return;
   if (await renameZellijTab(pi, name)) return;
   renameTerminalTitle(name);
