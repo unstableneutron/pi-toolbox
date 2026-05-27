@@ -610,7 +610,7 @@ describe('split commands', () => {
     expect(harness.notify).toHaveBeenCalledWith('split-fork requires interactive mode', 'error');
   });
 
-  test('split-fork launches Herdr by splitting the focused pane and running the wrapper', async () => {
+  test('split-fork launches Herdr by splitting the focused pane above Herdr mobile width', async () => {
     const harness = createCommandHarness({ code: 0, stdout: '', stderr: '' });
     harness.exec.mockReset();
     harness.exec
@@ -636,6 +636,7 @@ describe('split commands', () => {
 
     await registerPiNativeSplit(harness.pi, {
       HERDR_ENV: '1',
+      COLUMNS: '65',
       SHELL: '/bin/zsh',
     } as NodeJS.ProcessEnv);
 
@@ -662,6 +663,115 @@ describe('split commands', () => {
     expect(harness.notify).toHaveBeenCalledWith(
       expect.stringContaining('Forked new session: pi --session '),
       'info',
+    );
+  });
+
+  test('split-fork launches Herdr in a new tab at Herdr mobile width', async () => {
+    const harness = createCommandHarness({ code: 0, stdout: '', stderr: '' });
+    harness.exec.mockReset();
+    harness.exec
+      .mockResolvedValueOnce({
+        code: 0,
+        stdout: JSON.stringify({
+          result: {
+            type: 'pane_list',
+            panes: [
+              { pane_id: '1-1', focused: false, workspace_id: 'w-1' },
+              { pane_id: '1-2', focused: true, workspace_id: 'w-1' },
+            ],
+          },
+        }),
+        stderr: '',
+      })
+      .mockResolvedValueOnce({
+        code: 0,
+        stdout: JSON.stringify({
+          result: { type: 'tab_created', root_pane: { pane_id: '1-3' } },
+        }),
+        stderr: '',
+      })
+      .mockResolvedValueOnce({ code: 0, stdout: '', stderr: '' });
+
+    await registerPiNativeSplit(harness.pi, {
+      HERDR_ENV: '1',
+      COLUMNS: '64',
+      SHELL: '/bin/zsh',
+    } as NodeJS.ProcessEnv);
+
+    const handler = getRegisteredHandler(harness.registerCommand, 'split-fork');
+    await handler('', harness.ctx);
+
+    expect(harness.exec).toHaveBeenNthCalledWith(1, 'herdr', ['pane', 'list']);
+    expect(harness.exec).toHaveBeenNthCalledWith(2, 'herdr', [
+      'tab',
+      'create',
+      '--workspace',
+      'w-1',
+      '--cwd',
+      harness.ctx.cwd,
+      '--no-focus',
+    ]);
+    expect(harness.exec).toHaveBeenNthCalledWith(3, 'herdr', [
+      'pane',
+      'run',
+      '1-3',
+      expect.stringContaining(getLauncherScriptPath()),
+    ]);
+    expect(harness.exec).not.toHaveBeenCalledWith(
+      'herdr',
+      expect.arrayContaining(['pane', 'split']),
+    );
+    expect(harness.notify).toHaveBeenCalledWith(
+      expect.stringContaining('Forked new session: pi --session '),
+      'info',
+    );
+  });
+
+  test('split-fork cleans up prompt temp files when Herdr tab creation fails', async () => {
+    const harness = createCommandHarness({ code: 0, stdout: '', stderr: '' });
+    harness.exec.mockReset();
+    harness.exec
+      .mockResolvedValueOnce({
+        code: 0,
+        stdout: JSON.stringify({
+          result: {
+            type: 'pane_list',
+            panes: [{ pane_id: '1-2', focused: true, workspace_id: 'w-1' }],
+          },
+        }),
+        stderr: '',
+      })
+      .mockResolvedValueOnce({ code: 1, stdout: '', stderr: 'tab create failed' });
+
+    const promptDirs: string[] = [];
+    const originalMkdtempSync = fs.mkdtempSync;
+    vi.spyOn(fs, 'mkdtempSync').mockImplementation((prefix: string) => {
+      const dir = originalMkdtempSync(prefix);
+      if (prefix.startsWith(path.join(os.tmpdir(), 'pi-native-split-'))) {
+        promptDirs.push(dir);
+      }
+      return dir;
+    });
+
+    await registerPiNativeSplit(harness.pi, {
+      HERDR_ENV: '1',
+      COLUMNS: '64',
+      SHELL: '/bin/zsh',
+    } as NodeJS.ProcessEnv);
+
+    const handler = getRegisteredHandler(harness.registerCommand, 'split-fork');
+    await handler('cleanup me', harness.ctx);
+
+    expect(promptDirs).toHaveLength(1);
+    expect(fs.existsSync(promptDirs[0]!)).toBe(false);
+    expect(harness.exec).toHaveBeenCalledTimes(2);
+    expect(harness.notify).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to launch herdr:'),
+      'error',
+    );
+    expect(harness.notify).toHaveBeenCalledWith(
+      expect.stringContaining('Startup prompt/command was not delivered.'),
+      'warning',
     );
   });
 

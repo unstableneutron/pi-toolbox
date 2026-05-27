@@ -62,6 +62,8 @@ Files involved:
 export type SupportedTerminal = 'ghostty' | 'kitty' | 'herdr';
 
 const EMPTY_LAUNCH_VALUE = '__PI_NATIVE_SPLIT_EMPTY__';
+// Match Herdr's MOBILE_WIDTH_THRESHOLD from src/ui/mobile.rs.
+const HERDR_MOBILE_WIDTH_THRESHOLD = 64;
 
 function shellQuote(value: string): string {
   if (value.length === 0) return "''";
@@ -398,6 +400,12 @@ type LaunchResult = { code: number; stdout?: string; stderr?: string };
 type HerdrPaneInfo = {
   pane_id?: unknown;
   focused?: unknown;
+  workspace_id?: unknown;
+};
+
+type FocusedHerdrPane = {
+  paneId: string;
+  workspaceId?: string;
 };
 
 function parseJsonResponse(stdout: string | undefined, context: string): unknown {
@@ -415,7 +423,7 @@ function getHerdrErrorMessage(response: unknown): string | undefined {
   return typeof error?.message === 'string' ? error.message : JSON.stringify(error);
 }
 
-function parseFocusedHerdrPaneId(stdout: string | undefined): string {
+function parseFocusedHerdrPane(stdout: string | undefined): FocusedHerdrPane {
   const response = parseJsonResponse(stdout, 'herdr pane list');
   const errorMessage = getHerdrErrorMessage(response);
   if (errorMessage) throw new Error(`herdr pane list failed: ${errorMessage}`);
@@ -430,7 +438,12 @@ function parseFocusedHerdrPaneId(stdout: string | undefined): string {
     throw new Error('herdr pane list did not include a focused pane');
   }
 
-  return focusedPane.pane_id;
+  const workspaceId =
+    typeof focusedPane.workspace_id === 'string' && focusedPane.workspace_id.length > 0
+      ? focusedPane.workspace_id
+      : undefined;
+
+  return { paneId: focusedPane.pane_id, workspaceId };
 }
 
 function parseCreatedHerdrPaneId(stdout: string | undefined): string {
@@ -446,11 +459,46 @@ function parseCreatedHerdrPaneId(stdout: string | undefined): string {
   return paneId;
 }
 
+function parseCreatedHerdrTabRootPaneId(stdout: string | undefined): string {
+  const response = parseJsonResponse(stdout, 'herdr tab create');
+  const errorMessage = getHerdrErrorMessage(response);
+  if (errorMessage) throw new Error(`herdr tab create failed: ${errorMessage}`);
+
+  const paneId = (response as { result?: { root_pane?: { pane_id?: unknown } } }).result?.root_pane
+    ?.pane_id;
+  if (typeof paneId !== 'string' || paneId.length === 0) {
+    throw new Error('herdr tab create did not return result.root_pane.pane_id');
+  }
+
+  return paneId;
+}
+
+function parsePositiveInteger(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function getTerminalColumns(env: NodeJS.ProcessEnv): number | undefined {
+  const envColumns = parsePositiveInteger(env.COLUMNS);
+  if (envColumns !== undefined) return envColumns;
+
+  const stdoutColumns = process.stdout.columns;
+  return Number.isInteger(stdoutColumns) && stdoutColumns > 0 ? stdoutColumns : undefined;
+}
+
+function shouldCreateHerdrTab(env: NodeJS.ProcessEnv): boolean {
+  const columns = getTerminalColumns(env);
+  return columns !== undefined && columns <= HERDR_MOBILE_WIDTH_THRESHOLD;
+}
+
 async function launchHerdr(
   pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
   sessionFile: string | undefined,
   prompt: string,
+  env: NodeJS.ProcessEnv,
 ) {
   const launch = buildLaunchWrapperArgs(ctx.cwd, sessionFile, prompt);
   const wrapperCommand = launch.argv.map(shellQuote).join(' ');
@@ -462,23 +510,41 @@ async function launchHerdr(
       return listResult;
     }
 
-    const focusedPaneId = parseFocusedHerdrPaneId(listResult.stdout);
-    const splitResult = await pi.exec('herdr', [
-      'pane',
-      'split',
-      focusedPaneId,
-      '--direction',
-      'right',
-      '--cwd',
-      ctx.cwd,
-      '--no-focus',
-    ]);
-    if (splitResult.code !== 0) {
-      cleanupPromptTempPath(launch.promptFile);
-      return splitResult;
-    }
+    const focusedPane = parseFocusedHerdrPane(listResult.stdout);
+    let newPaneId: string;
 
-    const newPaneId = parseCreatedHerdrPaneId(splitResult.stdout);
+    if (shouldCreateHerdrTab(env)) {
+      const createArgs = ['tab', 'create'];
+      if (focusedPane.workspaceId) {
+        createArgs.push('--workspace', focusedPane.workspaceId);
+      }
+      createArgs.push('--cwd', ctx.cwd, '--no-focus');
+
+      const tabResult = await pi.exec('herdr', createArgs);
+      if (tabResult.code !== 0) {
+        cleanupPromptTempPath(launch.promptFile);
+        return tabResult;
+      }
+
+      newPaneId = parseCreatedHerdrTabRootPaneId(tabResult.stdout);
+    } else {
+      const splitResult = await pi.exec('herdr', [
+        'pane',
+        'split',
+        focusedPane.paneId,
+        '--direction',
+        'right',
+        '--cwd',
+        ctx.cwd,
+        '--no-focus',
+      ]);
+      if (splitResult.code !== 0) {
+        cleanupPromptTempPath(launch.promptFile);
+        return splitResult;
+      }
+
+      newPaneId = parseCreatedHerdrPaneId(splitResult.stdout);
+    }
     const runResult = await pi.exec('herdr', ['pane', 'run', newPaneId, wrapperCommand]);
     if (runResult.code !== 0) {
       cleanupPromptTempPath(launch.promptFile);
@@ -513,7 +579,7 @@ async function launchSessionInTerminal(
     }
 
     if (terminal === 'herdr') {
-      return await launchHerdr(pi, ctx, sessionFile, prompt);
+      return await launchHerdr(pi, ctx, sessionFile, prompt, env);
     }
 
     return await launchKitty(pi, ctx, sessionFile, prompt, env);
