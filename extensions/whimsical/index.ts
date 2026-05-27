@@ -1,5 +1,14 @@
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
-import type { Model } from '@earendil-works/pi-ai';
+import {
+  createAssistantMessageEventStream,
+  getApiProviders,
+  registerApiProvider,
+  type ApiProvider,
+  type AssistantMessageEventStream,
+  type Model,
+  type ProviderResponse,
+  type SimpleStreamOptions,
+} from '@earendil-works/pi-ai';
 
 const messages = [
   // Short
@@ -642,12 +651,35 @@ type AssistantErrorLikeMessage = {
 
 const STATUS_KEY = 'whimsical';
 const LONG_RUN_STATUS_THRESHOLD_MS = 30_000;
+const TRANSPORT_WRAPPED_STREAM_SIMPLE = Symbol.for(
+  'whimsical.transport-indicator.wrapped-stream-simple',
+);
+const TRANSPORT_OBSERVER_STATE = Symbol.for('whimsical.transport-indicator.observer-state');
+
+export type EffectiveTransport = 'ws' | 'sse' | 'post';
+
+export interface TransportObservation {
+  api: string;
+  model: Model<any>;
+  transport: EffectiveTransport;
+}
+
+type TransportObserver = (observation: TransportObservation) => void;
+
+type TransportObserverState = {
+  observe?: TransportObserver;
+};
+
+type TransportWrappedStreamSimple = ApiProvider<any>['streamSimple'] & {
+  [TRANSPORT_WRAPPED_STREAM_SIMPLE]?: true;
+};
 
 export interface WorkingMessageState {
   turnCount: number;
   toolCount: number;
   lastModelTarget: string | undefined;
   lastCustomBaseUrl: CustomBaseUrlDisplay | undefined;
+  lastTransport: EffectiveTransport | undefined;
 }
 
 export function createWorkingMessageState(): WorkingMessageState {
@@ -656,6 +688,7 @@ export function createWorkingMessageState(): WorkingMessageState {
     toolCount: 0,
     lastModelTarget: undefined,
     lastCustomBaseUrl: undefined,
+    lastTransport: undefined,
   };
 }
 
@@ -705,6 +738,17 @@ export function recordProviderRequest(
     toolCount: state.toolCount,
     lastModelTarget: modelTarget,
     lastCustomBaseUrl: customBaseUrl,
+    lastTransport: undefined,
+  };
+}
+
+export function recordProviderTransport(
+  state: WorkingMessageState,
+  transport: EffectiveTransport,
+): WorkingMessageState {
+  return {
+    ...state,
+    lastTransport: transport,
   };
 }
 
@@ -741,6 +785,191 @@ function formatBaseUrlLabel(
 
   const label = variant === 'working' ? customBaseUrl.workingLabel : customBaseUrl.statusLabel;
   return clickable ? wrapHyperlink(customBaseUrl.fullUrl, label) : label;
+}
+
+function getTransportObserverState(): TransportObserverState {
+  const globalWithState = globalThis as typeof globalThis & {
+    [TRANSPORT_OBSERVER_STATE]?: TransportObserverState;
+  };
+
+  globalWithState[TRANSPORT_OBSERVER_STATE] ??= {};
+  return globalWithState[TRANSPORT_OBSERVER_STATE];
+}
+
+export function classifyHttpTransport(headers: Record<string, string>): EffectiveTransport {
+  const contentType = Object.entries(headers).find(
+    ([name]) => name.toLowerCase() === 'content-type',
+  )?.[1];
+
+  return contentType?.toLowerCase().includes('text/event-stream') ? 'sse' : 'post';
+}
+
+const TRANSPORT_OBSERVED_APIS = new Set([
+  'amazon-bedrock',
+  'anthropic-messages',
+  'azure-openai-responses',
+  'bedrock-converse-stream',
+  'google-generative-ai',
+  'google-vertex',
+  'mistral-conversations',
+  'openai-codex-responses',
+  'openai-completions',
+  'openai-responses',
+]);
+
+function isWebSocketCapableApi(api: string): boolean {
+  return api === 'openai-codex-responses';
+}
+
+function shouldInstallTransportWrapper(api: string): boolean {
+  return TRANSPORT_OBSERVED_APIS.has(api);
+}
+
+function shouldInferWebSocketTransport(
+  api: string,
+  options: SimpleStreamOptions | undefined,
+): boolean {
+  return isWebSocketCapableApi(api) && options?.transport !== 'sse';
+}
+
+function observeTransport(
+  observe: TransportObserver,
+  observation: TransportObservation,
+  currentTransport: EffectiveTransport | undefined,
+): EffectiveTransport {
+  if (currentTransport) {
+    return currentTransport;
+  }
+
+  try {
+    observe(observation);
+  } catch {
+    // Transport indicators are best-effort UI metadata. Never let observer
+    // failures interfere with provider streaming.
+  }
+
+  return observation.transport;
+}
+
+export function createTransportObserverStream(
+  sourceStream: AssistantMessageEventStream,
+  onFirstEvent: () => void,
+): AssistantMessageEventStream {
+  const proxy = createAssistantMessageEventStream();
+
+  void (async () => {
+    let sawFirstEvent = false;
+
+    try {
+      for await (const event of sourceStream) {
+        if (!sawFirstEvent) {
+          sawFirstEvent = true;
+          onFirstEvent();
+        }
+
+        proxy.push(event);
+      }
+    } finally {
+      proxy.end();
+    }
+  })();
+
+  return proxy;
+}
+
+export function wrapApiProviderForTransportIndicators<TProvider extends ApiProvider<any>>(
+  provider: TProvider,
+  observe: TransportObserver = (observation) => getTransportObserverState().observe?.(observation),
+): TProvider {
+  const originalStreamSimple = provider.streamSimple as TransportWrappedStreamSimple;
+
+  if (originalStreamSimple[TRANSPORT_WRAPPED_STREAM_SIMPLE]) {
+    return provider;
+  }
+
+  const wrappedStreamSimple: TransportWrappedStreamSimple = function wrappedWhimsicalStreamSimple(
+    model,
+    context,
+    options,
+  ) {
+    let detectedTransport: EffectiveTransport | undefined;
+    const reportTransport = (transport: EffectiveTransport): void => {
+      detectedTransport = observeTransport(
+        observe,
+        { api: provider.api, model, transport },
+        detectedTransport,
+      );
+    };
+    const originalOnResponse = options?.onResponse;
+    const wrappedOptions: SimpleStreamOptions = {
+      ...options,
+      onResponse: async (response: ProviderResponse, responseModel: Model<any>) => {
+        reportTransport(classifyHttpTransport(response.headers));
+        await originalOnResponse?.(response, responseModel);
+      },
+    };
+    const sourceStream = originalStreamSimple.call(provider, model, context, wrappedOptions);
+
+    if (!shouldInferWebSocketTransport(provider.api, options)) {
+      return sourceStream;
+    }
+
+    return createTransportObserverStream(sourceStream, () => {
+      if (!detectedTransport) {
+        reportTransport('ws');
+      }
+    });
+  };
+
+  Object.defineProperty(wrappedStreamSimple, TRANSPORT_WRAPPED_STREAM_SIMPLE, {
+    value: true,
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
+
+  return {
+    ...provider,
+    streamSimple: wrappedStreamSimple,
+  };
+}
+
+function installTransportIndicatorProviderPatch(observe: TransportObserver): void {
+  getTransportObserverState().observe = observe;
+
+  for (const provider of getApiProviders()) {
+    if (!shouldInstallTransportWrapper(provider.api)) {
+      continue;
+    }
+
+    const wrappedProvider = wrapApiProviderForTransportIndicators(provider);
+    if (wrappedProvider.streamSimple !== provider.streamSimple) {
+      registerApiProvider(wrappedProvider);
+    }
+  }
+}
+
+function formatTransportLabel(transport: EffectiveTransport | undefined): string | undefined {
+  if (!transport) {
+    return undefined;
+  }
+
+  return transport.toUpperCase();
+}
+
+function formatTransportViaLabel(
+  state: WorkingMessageState,
+  clickable: boolean,
+  variant: 'status' | 'working',
+): string | undefined {
+  const transportLabel = formatTransportLabel(state.lastTransport);
+  const baseUrlLabel = formatBaseUrlLabel(state.lastCustomBaseUrl, clickable, variant);
+
+  if (transportLabel && baseUrlLabel) {
+    return `${transportLabel} via ${baseUrlLabel}`;
+  }
+
+  return transportLabel ?? (baseUrlLabel ? `via ${baseUrlLabel}` : undefined);
 }
 
 function formatWorkingMessageMetrics(state: WorkingMessageState): string | undefined {
@@ -792,14 +1021,14 @@ function buildCompletionStatus(
   }
 
   const elapsedLabel = formatElapsedLabel(elapsedMs);
-  const baseUrlLabel = formatBaseUrlLabel(state.lastCustomBaseUrl, false, 'working');
+  const transportViaLabel = formatTransportViaLabel(state, false, 'working');
   const metricsLabel = formatWorkingMessageMetrics(state);
 
   return [
     errorLabel ? `× ${errorLabel}` : '✓ Completed',
     metricsLabel,
     elapsedLabel ? `in ${elapsedLabel}` : undefined,
-    baseUrlLabel ? `via ${baseUrlLabel}` : undefined,
+    transportViaLabel,
   ]
     .filter((value): value is string => Boolean(value))
     .join(' ');
@@ -811,11 +1040,10 @@ export function buildWorkingMessage(
   elapsedMs?: number,
 ): string {
   const elapsedLabel = formatElapsedLabel(elapsedMs);
-  const baseUrlLabel = formatBaseUrlLabel(state.lastCustomBaseUrl, true, 'working');
   const parts = [
     formatWorkingMessageMetrics(state),
     elapsedLabel,
-    baseUrlLabel ? `via ${baseUrlLabel}` : undefined,
+    formatTransportViaLabel(state, true, 'working'),
   ].filter((value): value is string => Boolean(value));
 
   return parts.length > 0 ? `${whimsy} · ${parts.join(' · ')}` : whimsy;
@@ -883,7 +1111,9 @@ export default function (pi: ExtensionAPI) {
       .replace(/\bin\s+([0-9][^ ]*)/, (_match, elapsed: string) => {
         return `${theme.fg('dim', 'in')} ${theme.fg('accent', elapsed)}`;
       })
-      .replace(/(via\s+.+)$/, (_match, via: string) => theme.fg('muted', via));
+      .replace(/((?:(?:WS|SSE|POST)\s+)?via\s+.+)$/, (_match, via: string) =>
+        theme.fg('muted', via),
+      );
 
     ctx.ui.setStatus(STATUS_KEY, colorized);
   };
@@ -917,6 +1147,13 @@ export default function (pi: ExtensionAPI) {
       updateWorkingMessage(workingMessageCtx);
     }, 100);
   };
+
+  installTransportIndicatorProviderPatch((observation) => {
+    workingMessageState = recordProviderTransport(workingMessageState, observation.transport);
+    if (workingMessageCtx) {
+      updateWorkingMessage(workingMessageCtx);
+    }
+  });
 
   const clearState = (): void => {
     clearTicker();

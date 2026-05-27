@@ -1,13 +1,17 @@
-import type { Model } from '@earendil-works/pi-ai';
+import { createAssistantMessageEventStream } from '@earendil-works/pi-ai';
+import type { AssistantMessage, Model } from '@earendil-works/pi-ai';
 
 import { afterEach, describe, expect, test, vi } from 'vitest';
 
 import whimsical, {
   buildWorkingMessage,
+  classifyHttpTransport,
   createWorkingMessageState,
   recordProviderRequest,
+  recordProviderTransport,
   recordToolExecutionStart,
   recordTurnStart,
+  wrapApiProviderForTransportIndicators,
 } from './index';
 
 function makeModel(overrides: Partial<Model<any>> = {}): Model<any> {
@@ -38,18 +42,32 @@ function makeLongProxyModel(): Model<any> {
   });
 }
 
-function makeAssistantErrorMessage(errorMessage: string): any {
+function makeAssistantMessage(overrides: Partial<AssistantMessage> = {}): AssistantMessage {
   return {
     role: 'assistant',
     content: [],
     api: 'openai-responses',
     provider: 'openai',
     model: 'gpt-5',
-    usage: { input: 0, output: 0, total: 0 },
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: 'stop',
+    timestamp: Date.now(),
+    ...overrides,
+  };
+}
+
+function makeAssistantErrorMessage(errorMessage: string): AssistantMessage {
+  return makeAssistantMessage({
     stopReason: 'error',
     errorMessage,
-    timestamp: Date.now(),
-  };
+  });
 }
 
 function makeTheme() {
@@ -157,6 +175,45 @@ describe('working-message helpers', () => {
     expect(buildWorkingMessage(whimsy, state, 4_325_000)).toBe(
       `Whimming... · 1h12m5s · via ${hyperlink('https://proxy.example/v1', 'proxy.example')}`,
     );
+  });
+
+  test('renders effective transport before custom base urls', () => {
+    const whimsy = 'Whimming...';
+
+    let state = createWorkingMessageState();
+    state = recordTurnStart(state);
+    state = recordProviderRequest(state, makeLongProxyModel());
+    state = recordProviderTransport(state, 'ws');
+
+    expect(buildWorkingMessage(whimsy, state, 12_400)).toBe(
+      `Whimming... · 12.4s · WS via ${hyperlink(
+        'https://proxy.example.com/api/v2/proxy/experimental/azure_openai/openai/v1',
+        'proxy.example.com',
+      )}`,
+    );
+  });
+
+  test('renders effective transport without a custom base url', () => {
+    const whimsy = 'Whimming...';
+
+    let state = createWorkingMessageState();
+    state = recordTurnStart(state);
+    state = recordProviderRequest(state, makeModel({ baseUrl: 'https://api.openai.com/v1' }));
+    state = recordProviderTransport(state, 'sse');
+
+    expect(buildWorkingMessage(whimsy, state)).toBe('Whimming... · SSE');
+  });
+
+  test('clears stale transport when a later provider request starts', () => {
+    const whimsy = 'Whimming...';
+
+    let state = createWorkingMessageState();
+    state = recordTurnStart(state);
+    state = recordProviderRequest(state, makeModel());
+    state = recordProviderTransport(state, 'post');
+    state = recordProviderRequest(state, makeModel({ baseUrl: 'https://api.openai.com/v1' }));
+
+    expect(buildWorkingMessage(whimsy, state)).toBe('Whimming...');
   });
 
   test('reduces valid custom base urls to the host in working messages', () => {
@@ -301,6 +358,173 @@ describe('working-message helpers', () => {
 
     expect(message).toBe('Whimming... · via proxy.example');
     expect(message).not.toContain('\u001B]8;;');
+  });
+});
+
+describe('transport indicator provider wrapper', () => {
+  test.each([
+    [{ 'content-type': 'text/event-stream; charset=utf-8' }, 'sse'],
+    [{ 'Content-Type': 'TEXT/EVENT-STREAM' }, 'sse'],
+    [{ 'content-type': 'application/json' }, 'post'],
+    [{}, 'post'],
+  ] as const)('classifies HTTP headers %o as %s', (headers, expected) => {
+    expect(classifyHttpTransport(headers)).toBe(expected);
+  });
+
+  test('reports SSE from HTTP response headers and preserves original onResponse', async () => {
+    const observations: string[] = [];
+    const originalOnResponse = vi.fn();
+    const model = makeModel({ api: 'openai-responses' });
+    const provider = wrapApiProviderForTransportIndicators(
+      {
+        api: 'openai-responses',
+        stream: vi.fn() as any,
+        streamSimple(_model: Model<any>, _context: any, options?: any) {
+          const stream = createAssistantMessageEventStream();
+          queueMicrotask(async () => {
+            await options?.onResponse?.(
+              { status: 200, headers: { 'content-type': 'text/event-stream; charset=utf-8' } },
+              model,
+            );
+            stream.push({ type: 'done', reason: 'stop', message: makeAssistantMessage() });
+          });
+          return stream;
+        },
+      },
+      (observation) => observations.push(observation.transport),
+    );
+
+    const stream = provider.streamSimple(model, {} as any, { onResponse: originalOnResponse });
+
+    await expect(stream.result()).resolves.toMatchObject({ stopReason: 'stop' });
+    expect(observations).toEqual(['sse']);
+    expect(originalOnResponse).toHaveBeenCalledWith(
+      { status: 200, headers: { 'content-type': 'text/event-stream; charset=utf-8' } },
+      model,
+    );
+  });
+
+  test('reports POST from non-SSE HTTP response headers', async () => {
+    const observations: string[] = [];
+    const model = makeModel({ api: 'openai-responses' });
+    const provider = wrapApiProviderForTransportIndicators(
+      {
+        api: 'openai-responses',
+        stream: vi.fn() as any,
+        streamSimple(_model: Model<any>, _context: any, options?: any) {
+          const stream = createAssistantMessageEventStream();
+          queueMicrotask(async () => {
+            await options?.onResponse?.(
+              { status: 200, headers: { 'content-type': 'application/json' } },
+              model,
+            );
+            stream.push({ type: 'done', reason: 'stop', message: makeAssistantMessage() });
+          });
+          return stream;
+        },
+      },
+      (observation) => observations.push(observation.transport),
+    );
+
+    const stream = provider.streamSimple(model, {} as any, {});
+
+    await expect(stream.result()).resolves.toMatchObject({ stopReason: 'stop' });
+    expect(observations).toEqual(['post']);
+  });
+
+  test('infers WebSocket for Codex streams that emit before any HTTP response', async () => {
+    const observations: string[] = [];
+    const model = makeModel({ api: 'openai-codex-responses', provider: 'openai-codex' });
+    const provider = wrapApiProviderForTransportIndicators(
+      {
+        api: 'openai-codex-responses',
+        stream: vi.fn() as any,
+        streamSimple(_model: Model<any>, _context: any, _options?: any) {
+          const stream = createAssistantMessageEventStream();
+          queueMicrotask(() => {
+            const message = makeAssistantMessage({ api: 'openai-codex-responses' });
+            stream.push({ type: 'start', partial: message });
+            stream.push({ type: 'done', reason: 'stop', message });
+          });
+          return stream;
+        },
+      },
+      (observation) => observations.push(observation.transport),
+    );
+
+    const stream = provider.streamSimple(model, {} as any, { transport: 'auto' });
+
+    await expect(stream.result()).resolves.toMatchObject({ api: 'openai-codex-responses' });
+    expect(observations).toEqual(['ws']);
+  });
+
+  test('does not infer WebSocket when Codex transport is forced to SSE', async () => {
+    const observations: string[] = [];
+    const model = makeModel({ api: 'openai-codex-responses', provider: 'openai-codex' });
+    const provider = wrapApiProviderForTransportIndicators(
+      {
+        api: 'openai-codex-responses',
+        stream: vi.fn() as any,
+        streamSimple(_model: Model<any>, _context: any, _options?: any) {
+          const stream = createAssistantMessageEventStream();
+          queueMicrotask(() => {
+            const message = makeAssistantMessage({ api: 'openai-codex-responses' });
+            stream.push({ type: 'start', partial: message });
+            stream.push({ type: 'done', reason: 'stop', message });
+          });
+          return stream;
+        },
+      },
+      (observation) => observations.push(observation.transport),
+    );
+
+    const stream = provider.streamSimple(model, {} as any, { transport: 'sse' });
+
+    await expect(stream.result()).resolves.toMatchObject({ api: 'openai-codex-responses' });
+    expect(observations).toEqual([]);
+  });
+
+  test('HTTP response wins over Codex WebSocket inference when fallback happens first', async () => {
+    const observations: string[] = [];
+    const model = makeModel({ api: 'openai-codex-responses', provider: 'openai-codex' });
+    const provider = wrapApiProviderForTransportIndicators(
+      {
+        api: 'openai-codex-responses',
+        stream: vi.fn() as any,
+        streamSimple(_model: Model<any>, _context: any, options?: any) {
+          const stream = createAssistantMessageEventStream();
+          queueMicrotask(async () => {
+            await options?.onResponse?.(
+              { status: 200, headers: { 'content-type': 'text/event-stream' } },
+              model,
+            );
+            const message = makeAssistantMessage({ api: 'openai-codex-responses' });
+            stream.push({ type: 'start', partial: message });
+            stream.push({ type: 'done', reason: 'stop', message });
+          });
+          return stream;
+        },
+      },
+      (observation) => observations.push(observation.transport),
+    );
+
+    const stream = provider.streamSimple(model, {} as any, { transport: 'auto' });
+
+    await expect(stream.result()).resolves.toMatchObject({ api: 'openai-codex-responses' });
+    expect(observations).toEqual(['sse']);
+  });
+
+  test('does not wrap an already wrapped provider again', () => {
+    const provider = {
+      api: 'openai-responses',
+      stream: vi.fn() as any,
+      streamSimple: vi.fn() as any,
+    };
+
+    const wrapped = wrapApiProviderForTransportIndicators(provider, vi.fn());
+    const wrappedAgain = wrapApiProviderForTransportIndicators(wrapped, vi.fn());
+
+    expect(wrappedAgain.streamSimple).toBe(wrapped.streamSimple);
   });
 });
 
