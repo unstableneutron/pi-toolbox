@@ -397,6 +397,7 @@ function rewriteNoopToolResult(message: unknown, pending: PendingNoopToolResult)
     ...message,
     content: [{ type: 'text', text: pending.message }],
     details: mergeNoopDetails(message.details, pending),
+    isError: false,
   };
 }
 

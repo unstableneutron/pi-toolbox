@@ -167,7 +167,7 @@ describe('tool-call-rewrite extension', () => {
           reason: 'same-response-duplicate',
         },
       },
-      isError: true,
+      isError: false,
     });
   });
 
@@ -398,7 +398,7 @@ describe('tool-call-rewrite extension', () => {
           reason: 'same-turn-duplicate',
         },
       },
-      isError: true,
+      isError: false,
     });
   });
 
@@ -593,7 +593,7 @@ describe('tool-call-rewrite extension', () => {
           reason: 'same-turn-duplicate',
         },
       },
-      isError: true,
+      isError: false,
     });
   });
 });
