@@ -179,6 +179,35 @@ describe('parsePatch', () => {
 
     expect(operations).toEqual([{ kind: 'delete', path: 'old.txt' }]);
   });
+
+  test('normalizes quoted and @-prefixed patch paths', () => {
+    const operations = parsePatch(
+      [
+        '*** Begin Patch',
+        '*** Add File: @"quoted/new.txt"',
+        '+hello',
+        "*** Update File: @'src/app.ts'",
+        "*** Move to: @'src/renamed.ts'",
+        '@@',
+        '-old',
+        '+new',
+        '*** Delete File: @obsolete.txt',
+        '*** End Patch',
+      ].join('\n'),
+    );
+
+    expect(operations).toEqual([
+      { kind: 'add', path: 'quoted/new.txt', contents: 'hello\n' },
+      {
+        kind: 'update',
+        path: 'src/app.ts',
+        moveTo: 'src/renamed.ts',
+        chunks: [expect.objectContaining({ oldLines: ['old'], newLines: ['new'] })],
+      },
+      { kind: 'delete', path: 'obsolete.txt' },
+    ]);
+  });
+
   test('parses multiple @@ anchors for a single update hunk', () => {
     const operations = parsePatch(
       [
@@ -659,6 +688,23 @@ describe('applyPatchOperations', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  test('rejects hunk deletions that only match after trimming leading whitespace', async () => {
+    const workspace = createVirtualWorkspace('/repo', {
+      '/repo/test.py': 'print("x")\n',
+    });
+    const operations = parsePatch(`*** Begin Patch
+*** Update File: test.py
+@@
+-    print("x")
++    print("y")
+*** End Patch`);
+
+    await expect(applyPatchOperations(operations, workspace, '/repo')).rejects.toThrow(
+      /Failed to find expected lines in test\.py/,
+    );
+    await expect(workspace.readText('/repo/test.py')).resolves.toBe('print("x")\n');
   });
 
   test('moves files without changing contents', async () => {

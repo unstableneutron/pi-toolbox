@@ -40,6 +40,7 @@ export interface UpdateChunk {
   addedLines: number;
   removedLines: number;
   modifiedBytes: number;
+  oldLineKinds?: Array<'context' | 'delete'>;
   // Phase 2: FindReplace flags. `mustBeUnique` means the SEARCH must
   // match exactly once; 0 or 2+ matches fail. Only set for chunks
   // parsed from a `*** FindReplaceOnce:` section.
@@ -570,8 +571,26 @@ const FIND_REPLACE_COMPACT_DIVIDER_RE = /^=======REPLACE[ \t]*$/;
 const FIND_REPLACE_BARE_DIVIDER = '=======';
 const FIND_REPLACE_END_MARKER = '>>>>>>> REPLACE';
 
+function normalizePatchPathText(filePath: string): string {
+  let normalized = filePath.trim();
+  if (normalized.startsWith('@')) {
+    normalized = normalized.slice(1).trim();
+  }
+
+  const first = normalized[0];
+  const last = normalized[normalized.length - 1];
+  if ((first === '"' || first === "'") && last === first) {
+    normalized = normalized.slice(1, -1);
+  }
+
+  if (normalized.startsWith('@')) {
+    normalized = normalized.slice(1).trim();
+  }
+  return normalized;
+}
+
 function resolvePatchPath(cwd: string, filePath: string): string {
-  const trimmed = filePath.trim();
+  const trimmed = normalizePatchPathText(filePath);
   if (!trimmed) throw new Error('Patch path cannot be empty');
   return isAbsolute(trimmed) ? resolvePath(trimmed) : resolvePath(cwd, trimmed);
 }
@@ -1060,6 +1079,50 @@ function validateQuoteStyleMatch(
   return { newLines: result.replaceLines };
 }
 
+function assertNoLeadingWhitespaceOnlyDeletedLineMatch(
+  filePath: string,
+  chunk: UpdateChunk,
+  pattern: string[],
+  fileRegion: string[],
+  startLine: number,
+): void {
+  if (chunk.source !== 'hunk' || !chunk.oldLineKinds) return;
+  if (!chunk.oldLineKinds.every((kind) => kind === 'delete')) return;
+
+  for (let i = 0; i < pattern.length; i++) {
+    if (chunk.oldLineKinds[i] !== 'delete') continue;
+    const expected = pattern[i] ?? '';
+    const actual = fileRegion[i] ?? '';
+    if (expected === actual) continue;
+    if (expected.trim() !== actual.trim()) continue;
+    if (leadingWhitespace(expected) === leadingWhitespace(actual)) continue;
+
+    throw new PatchContextMatchError({
+      kind: 'context-not-found',
+      filePath,
+      searchedFrom: 0,
+      expectedLines: pattern,
+      nearestMatch: {
+        startLine,
+        score: 1,
+        tierTried: 'trim',
+        actualLines: fileRegion,
+        marginBefore: [],
+        marginAfter: [],
+        perLineSignals: pattern.map((line, index) => ({
+          patternIndex: index,
+          matched: index !== i,
+          tier: index === i ? undefined : bestTierForPair(fileRegion[index] ?? '', line),
+          expected: line,
+          actual: fileRegion[index],
+        })),
+      },
+      chunkSource: chunk.source,
+      chunkNewLines: chunk.newLines,
+    });
+  }
+}
+
 function deriveUpdatedNormalizedContent(
   filePath: string,
   normalizedContent: string,
@@ -1247,8 +1310,15 @@ function deriveUpdatedNormalizedContent(
         chunkNewLines: newSlice,
       });
     }
+    const fileRegion = originalLines.slice(found.startIndex, found.startIndex + pattern.length);
+    assertNoLeadingWhitespaceOnlyDeletedLineMatch(
+      filePath,
+      chunk,
+      pattern,
+      fileRegion,
+      found.startIndex + 1,
+    );
     if (found.tier === 'quoteStyle') {
-      const fileRegion = originalLines.slice(found.startIndex, found.startIndex + pattern.length);
       const translated = validateQuoteStyleMatch(pattern, fileRegion, newSlice);
       if (!translated) {
         const sampling = originalLines.length > LARGE_FILE_SAMPLING_THRESHOLD;
@@ -1273,7 +1343,6 @@ function deriveUpdatedNormalizedContent(
       // the REPLACE lines verbatim they keep the PATCH's indent,
       // which is wrong — they should adopt the file's indent so the
       // edit is structurally correct.
-      const fileRegion = originalLines.slice(found.startIndex, found.startIndex + pattern.length);
       newSlice = reindentReplaceLines(pattern, fileRegion, newSlice);
     }
     replacements.push([found.startIndex, pattern.length, [...newSlice]]);
@@ -1372,6 +1441,7 @@ function parseUpdateChunk(
   }
 
   const oldLines: string[] = [];
+  const oldLineKinds: Array<'context' | 'delete'> = [];
   const newLines: string[] = [];
   let addedLines = 0;
   let removedLines = 0;
@@ -1391,6 +1461,7 @@ function parseUpdateChunk(
     if (parsed > 0 && (trimmed.startsWith('@@') || trimmed.startsWith('*** '))) break;
     if (raw.length === 0) {
       oldLines.push('');
+      oldLineKinds.push('context');
       newLines.push('');
       parsed++;
       i++;
@@ -1400,9 +1471,11 @@ function parseUpdateChunk(
     const body = raw.slice(1);
     if (marker === ' ') {
       oldLines.push(body);
+      oldLineKinds.push('context');
       newLines.push(body);
     } else if (marker === '-') {
       oldLines.push(body);
+      oldLineKinds.push('delete');
       removedLines++;
       modifiedBytes += Buffer.byteLength(body, 'utf8');
     } else if (marker === '+') {
@@ -1431,6 +1504,7 @@ function parseUpdateChunk(
       addedLines,
       removedLines,
       modifiedBytes,
+      oldLineKinds,
     },
     nextIndex: i,
   };
@@ -1441,7 +1515,7 @@ function parsePathFromHeader(
   prefix: string,
   mode: 'strict' | 'streaming' = 'strict',
 ): string {
-  const path = line.slice(prefix.length).trim();
+  const path = normalizePatchPathText(line.slice(prefix.length));
   if (!path) {
     if (mode === 'strict') {
       throw new Error(`Patch header '${prefix.trim()}' must include a path`);
