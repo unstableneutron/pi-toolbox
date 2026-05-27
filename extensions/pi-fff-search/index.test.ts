@@ -1223,6 +1223,81 @@ describe('pi-fff-search extension', () => {
     expect(result.text).toBe('base_path: /repo\n\nrouter.ts\ncoordinator.ts');
   });
 
+  test('repairs common fff_grep alias fields before validation', async () => {
+    const ensureDaemonRunning = vi.fn(async () => {});
+    const callPublicToolOverHttp = vi.fn(async () => ({
+      ok: true as const,
+      value: {
+        mode: 'compact' as const,
+        base_path: '/repo/src',
+        next_cursor: null,
+        items: [{ path: 'app.ts', line: 1, text: 'createRouter()' }],
+      },
+    }));
+
+    await forwardToolCall({
+      toolName: 'fff_grep',
+      params: {
+        query: 'createRouter',
+        path: 'src',
+        glob: '*.ts',
+        exclude_paths: '["node_modules"]',
+        case_sensitive: false,
+      },
+      cwd: '/repo',
+      ensureDaemonRunning,
+      callPublicToolOverHttp,
+    });
+
+    expect(callPublicToolOverHttp).toHaveBeenCalledWith({
+      tool: 'fff_grep',
+      patterns: ['createRouter'],
+      literal: true,
+      within: ['/repo/src'],
+      glob: '*.ts',
+      caseSensitive: false,
+      extensions: [],
+      excludePaths: ['node_modules'],
+      contextLines: 0,
+      limit: 20,
+      cursor: null,
+      outputMode: 'compact',
+    });
+  });
+
+  test('repairs bare fff_find_files strings to query objects', async () => {
+    const ensureDaemonRunning = vi.fn(async () => {});
+    const callPublicToolOverHttp = vi.fn(async () => ({
+      ok: true as const,
+      value: {
+        mode: 'compact' as const,
+        base_path: '/repo',
+        next_cursor: null,
+        items: [{ path: 'router.ts' }],
+      },
+    }));
+
+    await forwardToolCall({
+      toolName: 'fff_find_files',
+      params: '**/*router*.ts' as unknown as Record<string, unknown>,
+      cwd: '/repo',
+      ensureDaemonRunning,
+      callPublicToolOverHttp,
+    });
+
+    expect(callPublicToolOverHttp).toHaveBeenCalledWith({
+      tool: 'fff_find_files',
+      query: 'router',
+      within: ['/repo'],
+      glob: '**/*router*.ts',
+      extensions: [],
+      excludePaths: [],
+      limit: 20,
+      cursor: null,
+      outputMode: 'compact',
+    });
+  });
+
   test('builtin grep override uses fff first and returns builtin-style grep output', async () => {
     const ensureDaemonRunning = vi.fn(async () => {});
     const callPublicToolOverHttp = vi.fn(async () => ({

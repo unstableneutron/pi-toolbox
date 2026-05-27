@@ -794,6 +794,140 @@ function buildFffFindParamsFromBuiltin(
   return params;
 }
 
+function parseJsonStringifiedArray(value: unknown): unknown {
+  if (typeof value !== 'string') {
+    return value;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed.startsWith('[') || !trimmed.endsWith(']')) {
+    return value;
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    return Array.isArray(parsed) ? parsed : value;
+  } catch {
+    return value;
+  }
+}
+
+function coerceStringArray(value: unknown): unknown {
+  const parsed = parseJsonStringifiedArray(value);
+  return typeof parsed === 'string' ? [parsed] : parsed;
+}
+
+function firstAliasValue(params: Record<string, unknown>, aliases: readonly string[]): unknown {
+  for (const alias of aliases) {
+    const value = params[alias];
+    if (value !== undefined && value !== null && value !== '') {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function copyAlias(
+  target: Record<string, unknown>,
+  source: Record<string, unknown>,
+  canonical: string,
+  aliases: readonly string[],
+): void {
+  if (target[canonical] !== undefined && target[canonical] !== null && target[canonical] !== '') {
+    return;
+  }
+
+  const value = firstAliasValue(source, aliases);
+  if (value !== undefined) {
+    target[canonical] = value;
+  }
+}
+
+function deleteAliasKeys(target: Record<string, unknown>, aliases: readonly string[]): void {
+  for (const alias of aliases) {
+    delete target[alias];
+  }
+}
+
+function normalizeFffToolParams(
+  toolName: PublicToolName,
+  rawParams: unknown,
+): Record<string, unknown> {
+  if (typeof rawParams === 'string') {
+    if (toolName === 'fff_grep') {
+      return { patterns: [rawParams], literal: true };
+    }
+
+    if (toolName === 'fff_find_files') {
+      const glob = GLOB_META_PATTERN.test(rawParams) ? rawParams : undefined;
+      return {
+        query: deriveFindQueryFromPattern(rawParams) ?? rawParams,
+        ...(glob ? { glob } : {}),
+      };
+    }
+  }
+
+  if (rawParams === null || typeof rawParams !== 'object' || Array.isArray(rawParams)) {
+    return rawParams as Record<string, unknown>;
+  }
+
+  const source = rawParams as Record<string, unknown>;
+  const normalized: Record<string, unknown> = { ...source };
+
+  if (toolName === 'fff_grep') {
+    const patternAliases = ['pattern', 'query', 'search', 'q', 'text'];
+    const regexAliases = ['regex', 'expression'];
+    copyAlias(normalized, source, 'patterns', patternAliases);
+    const regexAlias = firstAliasValue(source, regexAliases);
+    if (normalized.patterns === undefined && regexAlias !== undefined) {
+      normalized.patterns = regexAlias;
+      normalized.literal = false;
+    }
+    if (normalized.literal === undefined) {
+      normalized.literal = regexAlias !== undefined ? false : true;
+    }
+    normalized.patterns = coerceStringArray(normalized.patterns);
+    deleteAliasKeys(normalized, [...patternAliases, ...regexAliases]);
+  } else if (toolName === 'fff_find_files') {
+    const queryAliases = ['pattern', 'search', 'q', 'text'];
+    copyAlias(normalized, source, 'query', queryAliases);
+    if (typeof normalized.query === 'string' && normalized.glob === undefined) {
+      const query = normalized.query;
+      if (GLOB_META_PATTERN.test(query)) {
+        normalized.glob = query;
+        normalized.query = deriveFindQueryFromPattern(query) ?? query;
+      }
+    }
+    deleteAliasKeys(normalized, queryAliases);
+  }
+
+  const withinAliases = ['path', 'directory', 'dir', 'folder', 'cwd'];
+  const globAliases = ['file_pattern', 'filePattern'];
+  const excludeAliases = ['excludePaths', 'exclude', 'excludePath'];
+  const caseAliases = ['caseSensitive'];
+  const contextAliases = ['contextLines', 'context'];
+  const outputAliases = ['outputMode'];
+  copyAlias(normalized, source, 'within', withinAliases);
+  copyAlias(normalized, source, 'glob', globAliases);
+  copyAlias(normalized, source, 'exclude_paths', excludeAliases);
+  copyAlias(normalized, source, 'case_sensitive', caseAliases);
+  copyAlias(normalized, source, 'context_lines', contextAliases);
+  copyAlias(normalized, source, 'output_mode', outputAliases);
+  deleteAliasKeys(normalized, [
+    ...withinAliases,
+    ...globAliases,
+    ...excludeAliases,
+    ...caseAliases,
+    ...contextAliases,
+    ...outputAliases,
+  ]);
+
+  normalized.extensions = coerceStringArray(normalized.extensions);
+  normalized.exclude_paths = coerceStringArray(normalized.exclude_paths);
+
+  return normalized;
+}
+
 function normalizeRequestedPath(value: string): string {
   return value.replace(/^@/, '').replace(/\\/g, '/').replace(/^\.\//, '');
 }
@@ -2443,9 +2577,10 @@ export async function forwardToolCall(args: {
     publicRequest: PublicToolRequest;
   }) => Promise<RunLocalFallbackResult>;
 }): Promise<{ text: string; details: Record<string, unknown> }> {
+  const repairedParams = normalizeFffToolParams(args.toolName, args.params);
   const resolvedWithin = await resolveWithinFromCaller({
     callerCwd: args.cwd,
-    within: typeof args.params.within === 'string' ? args.params.within : null,
+    within: typeof repairedParams.within === 'string' ? repairedParams.within : null,
   });
   if (!resolvedWithin.ok) {
     throw new Error(resolvedWithin.error.message);
@@ -2454,12 +2589,12 @@ export async function forwardToolCall(args: {
   const rewrittenBroadWithin = isBroadWithinScope(resolvedWithin.value.resolvedWithin)
     ? rewriteBroadWithinFromGlob({
         resolvedWithin: resolvedWithin.value.resolvedWithin,
-        params: args.params,
+        params: repairedParams,
       })
     : null;
   const effectiveResolvedWithin =
     rewrittenBroadWithin?.resolvedWithin ?? resolvedWithin.value.resolvedWithin;
-  const effectiveParams = rewrittenBroadWithin?.params ?? args.params;
+  const effectiveParams = rewrittenBroadWithin?.params ?? repairedParams;
 
   const normalized = normalizePublicToolInput(args.toolName, {
     ...effectiveParams,

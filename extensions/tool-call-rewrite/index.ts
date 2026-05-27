@@ -130,6 +130,199 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function firstAliasValue(input: Record<string, unknown>, aliases: readonly string[]): unknown {
+  for (const alias of aliases) {
+    const value = input[alias];
+    if (value !== undefined && value !== null && value !== '') return value;
+  }
+  return undefined;
+}
+
+function copyAlias(
+  target: Record<string, unknown>,
+  source: Record<string, unknown>,
+  canonical: string,
+  aliases: readonly string[],
+  rules: string[],
+): void {
+  if (target[canonical] !== undefined && target[canonical] !== null && target[canonical] !== '') {
+    return;
+  }
+
+  const value = firstAliasValue(source, aliases);
+  if (value === undefined) return;
+  target[canonical] = value;
+  rules.push(`${aliases.join('|')}→${canonical}`);
+}
+
+function deleteAliasKeys(target: Record<string, unknown>, aliases: readonly string[]): void {
+  for (const alias of aliases) delete target[alias];
+}
+
+function tryParseJsonArray(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  const trimmed = value.trim();
+  if (!trimmed.startsWith('[') || !trimmed.endsWith(']')) return value;
+  try {
+    const parsed = JSON.parse(trimmed);
+    return Array.isArray(parsed) ? parsed : value;
+  } catch {
+    return value;
+  }
+}
+
+function coerceStringArray(value: unknown): unknown {
+  const parsed = tryParseJsonArray(value);
+  return typeof parsed === 'string' ? [parsed] : parsed;
+}
+
+function repairFffGrepInput(input: unknown): { input: unknown; rules: string[] } {
+  if (typeof input === 'string') {
+    return { input: { patterns: [input], literal: true }, rules: ['root-string→patterns'] };
+  }
+  if (!isRecord(input)) return { input, rules: [] };
+
+  const rules: string[] = [];
+  const repaired = { ...input };
+  const patternAliases = ['pattern', 'query', 'search', 'q', 'text'];
+  const regexAliases = ['regex', 'expression'];
+  copyAlias(repaired, input, 'patterns', patternAliases, rules);
+  const regexAlias = firstAliasValue(input, regexAliases);
+  if (repaired.patterns === undefined && regexAlias !== undefined) {
+    repaired.patterns = regexAlias;
+    repaired.literal = false;
+    rules.push(`${regexAliases.join('|')}→patterns`);
+  }
+  if (rules.length > 0 && repaired.literal === undefined) {
+    repaired.literal = regexAlias !== undefined ? false : true;
+  }
+  repaired.patterns = coerceStringArray(repaired.patterns);
+  deleteAliasKeys(repaired, [...patternAliases, ...regexAliases]);
+  repairCommonSearchInput(input, repaired, rules);
+  return { input: repaired, rules };
+}
+
+function repairFffFindInput(input: unknown): { input: unknown; rules: string[] } {
+  if (typeof input === 'string') {
+    return { input: { query: input }, rules: ['root-string→query'] };
+  }
+  if (!isRecord(input)) return { input, rules: [] };
+
+  const rules: string[] = [];
+  const repaired = { ...input };
+  const queryAliases = ['pattern', 'search', 'q', 'text'];
+  copyAlias(repaired, input, 'query', queryAliases, rules);
+  deleteAliasKeys(repaired, queryAliases);
+  repairCommonSearchInput(input, repaired, rules);
+  return { input: repaired, rules };
+}
+
+function repairCommonSearchInput(
+  source: Record<string, unknown>,
+  target: Record<string, unknown>,
+  rules: string[],
+): void {
+  const withinAliases = ['path', 'directory', 'dir', 'folder', 'cwd'];
+  const excludeAliases = ['excludePaths', 'exclude', 'excludePath'];
+  copyAlias(target, source, 'within', withinAliases, rules);
+  copyAlias(target, source, 'exclude_paths', excludeAliases, rules);
+  copyAlias(target, source, 'case_sensitive', ['caseSensitive'], rules);
+  copyAlias(target, source, 'context_lines', ['contextLines', 'context'], rules);
+  copyAlias(target, source, 'output_mode', ['outputMode'], rules);
+  target.extensions = coerceStringArray(target.extensions);
+  target.exclude_paths = coerceStringArray(target.exclude_paths);
+  deleteAliasKeys(target, [
+    ...withinAliases,
+    ...excludeAliases,
+    'caseSensitive',
+    'contextLines',
+    'context',
+    'outputMode',
+  ]);
+}
+
+function repairEditObject(
+  input: Record<string, unknown>,
+  rules: string[],
+): Record<string, unknown> {
+  const repaired = { ...input };
+  for (const [key, value] of Object.entries(repaired)) {
+    if (value === null || value === undefined) delete repaired[key];
+  }
+  const pathAliases = [
+    'filePath',
+    'absolutePath',
+    'file_path',
+    'filepath',
+    'pathname',
+    'target_file',
+    'targetFile',
+  ];
+  const oldAliases = [
+    'oldValue',
+    'old_string',
+    'oldString',
+    'old',
+    'old_str',
+    'oldStr',
+    'from',
+    'search',
+  ];
+  const newAliases = [
+    'newValue',
+    'new_string',
+    'newString',
+    'new',
+    'new_str',
+    'newStr',
+    'to',
+    'replace',
+  ];
+  copyAlias(repaired, input, 'path', pathAliases, rules);
+  copyAlias(repaired, input, 'oldText', oldAliases, rules);
+  copyAlias(repaired, input, 'newText', newAliases, rules);
+  deleteAliasKeys(repaired, [...pathAliases, ...oldAliases, ...newAliases]);
+  return repaired;
+}
+
+function repairEditInput(input: unknown): { input: unknown; rules: string[] } {
+  if (typeof input === 'string' && input.trimStart().startsWith('*** Begin Patch')) {
+    return { input: { patch: input }, rules: ['root-string→patch'] };
+  }
+  if (!isRecord(input)) return { input, rules: [] };
+
+  const rules: string[] = [];
+  const repaired = repairEditObject(input, rules);
+  repaired.edits = tryParseJsonArray(repaired.edits);
+  repaired.multi = tryParseJsonArray(repaired.multi);
+  if (Array.isArray(repaired.edits)) {
+    repaired.edits = repaired.edits.map((item) =>
+      isRecord(item) ? repairEditObject(item, rules) : item,
+    );
+  }
+  if (Array.isArray(repaired.multi)) {
+    repaired.multi = repaired.multi.map((item) =>
+      isRecord(item) ? repairEditObject(item, rules) : item,
+    );
+  }
+  return { input: repaired, rules };
+}
+
+export function repairToolCallInput(
+  toolName: string,
+  input: unknown,
+): { input: unknown; rules: string[]; changed: boolean } {
+  const repaired =
+    toolName === 'fff_grep'
+      ? repairFffGrepInput(input)
+      : toolName === 'fff_find_files'
+        ? repairFffFindInput(input)
+        : toolName === 'edit'
+          ? repairEditInput(input)
+          : { input, rules: [] };
+  return { ...repaired, changed: repaired.rules.length > 0 };
+}
+
 function dedupeParallelToolUses(input: unknown): {
   input: unknown;
   changed: boolean;
@@ -329,6 +522,12 @@ export default function toolCallRewrite(pi: ExtensionAPI, options: ToolCallRewri
   });
 
   pi.on('tool_call', async (event, ctx) => {
+    const repairedInput = repairToolCallInput(event.toolName, event.input);
+    if (repairedInput.changed) {
+      event.input = repairedInput.input as typeof event.input;
+      setStatus(ctx, `Rewrote tool input: ${repairedInput.rules.join(', ')}`);
+    }
+
     const dedupedInput = dedupeParallelToolUses(event.input);
     if (dedupedInput.changed && isRecord(event.input) && isRecord(dedupedInput.input)) {
       (event.input as Record<string, unknown>).tool_uses = dedupedInput.input.tool_uses;

@@ -129,6 +129,52 @@ describe('dedupeAssistantToolCalls', () => {
 });
 
 describe('tool-call-rewrite extension', () => {
+  test('repairs fff and edit tool-call aliases before execution', async () => {
+    const handlers = new Map<string, Function>();
+    const pi = {
+      on: vi.fn((name: string, handler: Function) => {
+        handlers.set(name, handler);
+      }),
+    } as any;
+    const ctx = {
+      sessionManager: {
+        getLeafId: () => 'assistant-1',
+      },
+      ui: {
+        setStatus: vi.fn(),
+      },
+    } as any;
+
+    registerToolCallRewrite(pi, { maxSeen: 128 });
+    const toolCall = handlers.get('tool_call');
+    expect(toolCall).toBeDefined();
+
+    const grepEvent = {
+      toolName: 'fff_grep',
+      toolCallId: 'call-1',
+      input: { query: 'createRouter', path: 'src', caseSensitive: false },
+    };
+    await toolCall!(grepEvent, ctx);
+    expect(grepEvent.input).toEqual({
+      patterns: ['createRouter'],
+      literal: true,
+      within: 'src',
+      case_sensitive: false,
+    });
+
+    const editEvent = {
+      toolName: 'edit',
+      toolCallId: 'call-2',
+      input: { filePath: 'src/app.ts', old_string: 'foo', new_string: 'bar' },
+    };
+    await toolCall!(editEvent, ctx);
+    expect(editEvent.input).toEqual({ path: 'src/app.ts', oldText: 'foo', newText: 'bar' });
+    expect(ctx.ui.setStatus).toHaveBeenCalledWith(
+      'tool-call-rewrite',
+      expect.stringContaining('Rewrote tool input'),
+    );
+  });
+
   test('blocks duplicate tool_call events using the current session leaf as scope', async () => {
     const handlers = new Map<string, Function>();
     const pi = {

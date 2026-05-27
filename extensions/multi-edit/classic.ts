@@ -136,26 +136,147 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-export function normalizeClassicParams(input: unknown): NormalizedParams {
-  if (!isObject(input)) {
+function isPatchPayloadString(value: string): boolean {
+  return value.trimStart().startsWith('*** Begin Patch');
+}
+
+function tryParseJsonArray(value: unknown): unknown {
+  if (typeof value !== 'string') {
+    return value;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed.startsWith('[') || !trimmed.endsWith(']')) {
+    return value;
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    return Array.isArray(parsed) ? parsed : value;
+  } catch {
+    return value;
+  }
+}
+
+function firstAliasValue(input: Record<string, unknown>, aliases: readonly string[]): unknown {
+  for (const alias of aliases) {
+    const value = input[alias];
+    if (value !== undefined && value !== null && value !== '') {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function copyAlias(
+  target: Record<string, unknown>,
+  source: Record<string, unknown>,
+  canonical: string,
+  aliases: readonly string[],
+): void {
+  if (target[canonical] !== undefined && target[canonical] !== null && target[canonical] !== '') {
+    return;
+  }
+
+  const value = firstAliasValue(source, aliases);
+  if (value !== undefined) {
+    target[canonical] = value;
+  }
+}
+
+function repairClassicEditObject(input: Record<string, unknown>): Record<string, unknown> {
+  const repaired = { ...input };
+  for (const [key, value] of Object.entries(repaired)) {
+    if (value === null || value === undefined) {
+      delete repaired[key];
+    }
+  }
+
+  copyAlias(repaired, input, 'path', [
+    'filePath',
+    'absolutePath',
+    'file_path',
+    'filepath',
+    'pathname',
+    'target_file',
+    'targetFile',
+  ]);
+  copyAlias(repaired, input, 'oldText', [
+    'oldValue',
+    'old_string',
+    'oldString',
+    'old',
+    'old_str',
+    'oldStr',
+    'from',
+    'search',
+  ]);
+  copyAlias(repaired, input, 'newText', [
+    'newValue',
+    'new_string',
+    'newString',
+    'new',
+    'new_str',
+    'newStr',
+    'to',
+    'replace',
+  ]);
+
+  return repaired;
+}
+
+function repairClassicParamsInput(input: unknown): unknown {
+  if (typeof input === 'string' && isPatchPayloadString(input)) {
+    return { patch: input };
+  }
+
+  if (!isObject(input) || Array.isArray(input)) {
+    return input;
+  }
+
+  const repaired = repairClassicEditObject(input);
+  repaired.edits = tryParseJsonArray(repaired.edits);
+  repaired.multi = tryParseJsonArray(repaired.multi);
+
+  if (Array.isArray(repaired.edits)) {
+    repaired.edits = repaired.edits.map((item) =>
+      isObject(item) && !Array.isArray(item) ? repairClassicEditObject(item) : item,
+    );
+  }
+
+  if (Array.isArray(repaired.multi)) {
+    repaired.multi = repaired.multi.map((item) =>
+      isObject(item) && !Array.isArray(item) ? repairClassicEditObject(item) : item,
+    );
+  }
+
+  return repaired;
+}
+
+export function normalizeClassicParams(rawInput: unknown): NormalizedParams {
+  const repairedInput = repairClassicParamsInput(rawInput);
+  if (!isObject(repairedInput)) {
     throw new Error('Invalid edit input.');
   }
 
-  if (typeof input.patch === 'string') {
+  const params = repairedInput;
+
+  if (typeof params.patch === 'string') {
     const hasOtherClassicFields =
-      input.path !== undefined ||
-      input.oldText !== undefined ||
-      input.newText !== undefined ||
-      input.multi !== undefined ||
-      input.edits !== undefined;
+      params.path !== undefined ||
+      params.oldText !== undefined ||
+      params.newText !== undefined ||
+      params.multi !== undefined ||
+      params.edits !== undefined;
     if (hasOtherClassicFields) {
       throw new Error(
         'The `patch` parameter is mutually exclusive with path/edits/oldText/newText/multi.',
       );
     }
-    return { mode: 'patch', patch: input.patch };
+    return { mode: 'patch', patch: params.patch };
   }
 
+  const input = params;
   const topLevelPath = typeof input.path === 'string' ? input.path : undefined;
   const edits: ClassicEditItem[] = [];
 

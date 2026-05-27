@@ -67,6 +67,41 @@ describe('normalizeClassicParams', () => {
       patch: '*** Begin Patch\n*** End Patch',
     });
   });
+
+  test('repairs common edit aliases into canonical fields', () => {
+    const normalized = normalizeClassicParams({
+      filePath: 'src/app.ts',
+      old_string: 'foo',
+      new_string: 'bar',
+    });
+
+    expect(normalized.mode).toBe('classic');
+    if (normalized.mode !== 'classic') {
+      throw new Error('Expected classic mode');
+    }
+    expect(normalized.edits).toEqual([{ path: 'src/app.ts', oldText: 'foo', newText: 'bar' }]);
+  });
+
+  test('repairs JSON-stringified edit arrays and drops optional null fields', () => {
+    const normalized = normalizeClassicParams({
+      path: 'src/app.ts',
+      edits: '[{"old":"foo","new":"bar","path":null}]',
+    });
+
+    expect(normalized.mode).toBe('classic');
+    if (normalized.mode !== 'classic') {
+      throw new Error('Expected classic mode');
+    }
+    expect(normalized.edits).toEqual([{ path: 'src/app.ts', oldText: 'foo', newText: 'bar' }]);
+  });
+
+  test('repairs bare patch payload strings but rejects ambiguous bare strings', () => {
+    expect(normalizeClassicParams('*** Begin Patch\n*** End Patch')).toEqual({
+      mode: 'patch',
+      patch: '*** Begin Patch\n*** End Patch',
+    });
+    expect(() => normalizeClassicParams('replace foo with bar')).toThrow('Invalid edit input.');
+  });
 });
 
 describe('applyClassicEditsToText', () => {
