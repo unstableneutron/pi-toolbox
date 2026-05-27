@@ -95,7 +95,7 @@ Custom extensions built in this repo:
 - `skill-shortcut` — skill autocomplete in the editor.
 - `smart-sessions` — rolling-summary sessions.
 - `todos` — file-based todo tool.
-- `web-search` — Parallel Web search/fetch (requires `PARALLEL_API_KEY`).
+- `web-search` — Parallel Web search/fetch with SDK primary and free Search MCP fallback.
 - `whimsical` — loading messages.
 
 Reference configs for npm-installed pi packages live in [`extensions-config/`](./extensions-config/README.md), synced on demand with `mise run sync-extension-configs`:
