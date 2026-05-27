@@ -59,7 +59,7 @@ Files involved:
 ## Task
 [Clear description of what to do next based on user's goal]`;
 
-export type SupportedTerminal = 'ghostty' | 'kitty';
+export type SupportedTerminal = 'ghostty' | 'kitty' | 'herdr';
 
 const EMPTY_LAUNCH_VALUE = '__PI_NATIVE_SPLIT_EMPTY__';
 
@@ -71,6 +71,10 @@ function shellQuote(value: string): string {
 export function detectTerminal(
   env: NodeJS.ProcessEnv = process.env,
 ): SupportedTerminal | undefined {
+  if (env.HERDR_ENV === '1') {
+    return 'herdr';
+  }
+
   const termProgram = env.TERM_PROGRAM?.toLowerCase() || '';
   const term = env.TERM?.toLowerCase() || '';
 
@@ -391,6 +395,102 @@ async function launchKitty(
 
 type LaunchResult = { code: number; stdout?: string; stderr?: string };
 
+type HerdrPaneInfo = {
+  pane_id?: unknown;
+  focused?: unknown;
+};
+
+function parseJsonResponse(stdout: string | undefined, context: string): unknown {
+  try {
+    return JSON.parse(stdout || '');
+  } catch (error) {
+    throw new Error(`${context} returned invalid JSON: ${formatThrownLaunchError(error)}`);
+  }
+}
+
+function getHerdrErrorMessage(response: unknown): string | undefined {
+  if (!response || typeof response !== 'object' || !('error' in response)) return undefined;
+
+  const error = (response as { error?: { message?: unknown } }).error;
+  return typeof error?.message === 'string' ? error.message : JSON.stringify(error);
+}
+
+function parseFocusedHerdrPaneId(stdout: string | undefined): string {
+  const response = parseJsonResponse(stdout, 'herdr pane list');
+  const errorMessage = getHerdrErrorMessage(response);
+  if (errorMessage) throw new Error(`herdr pane list failed: ${errorMessage}`);
+
+  const panes = (response as { result?: { panes?: HerdrPaneInfo[] } }).result?.panes;
+  if (!Array.isArray(panes)) {
+    throw new Error('herdr pane list did not return result.panes');
+  }
+
+  const focusedPane = panes.find((pane) => pane && pane.focused === true);
+  if (typeof focusedPane?.pane_id !== 'string' || focusedPane.pane_id.length === 0) {
+    throw new Error('herdr pane list did not include a focused pane');
+  }
+
+  return focusedPane.pane_id;
+}
+
+function parseCreatedHerdrPaneId(stdout: string | undefined): string {
+  const response = parseJsonResponse(stdout, 'herdr pane split');
+  const errorMessage = getHerdrErrorMessage(response);
+  if (errorMessage) throw new Error(`herdr pane split failed: ${errorMessage}`);
+
+  const paneId = (response as { result?: { pane?: { pane_id?: unknown } } }).result?.pane?.pane_id;
+  if (typeof paneId !== 'string' || paneId.length === 0) {
+    throw new Error('herdr pane split did not return result.pane.pane_id');
+  }
+
+  return paneId;
+}
+
+async function launchHerdr(
+  pi: ExtensionAPI,
+  ctx: ExtensionCommandContext,
+  sessionFile: string | undefined,
+  prompt: string,
+) {
+  const launch = buildLaunchWrapperArgs(ctx.cwd, sessionFile, prompt);
+  const wrapperCommand = launch.argv.map(shellQuote).join(' ');
+
+  try {
+    const listResult = await pi.exec('herdr', ['pane', 'list']);
+    if (listResult.code !== 0) {
+      cleanupPromptTempPath(launch.promptFile);
+      return listResult;
+    }
+
+    const focusedPaneId = parseFocusedHerdrPaneId(listResult.stdout);
+    const splitResult = await pi.exec('herdr', [
+      'pane',
+      'split',
+      focusedPaneId,
+      '--direction',
+      'right',
+      '--cwd',
+      ctx.cwd,
+      '--no-focus',
+    ]);
+    if (splitResult.code !== 0) {
+      cleanupPromptTempPath(launch.promptFile);
+      return splitResult;
+    }
+
+    const newPaneId = parseCreatedHerdrPaneId(splitResult.stdout);
+    const runResult = await pi.exec('herdr', ['pane', 'run', newPaneId, wrapperCommand]);
+    if (runResult.code !== 0) {
+      cleanupPromptTempPath(launch.promptFile);
+    }
+
+    return runResult;
+  } catch (error) {
+    cleanupPromptTempPath(launch.promptFile);
+    throw error;
+  }
+}
+
 function formatThrownLaunchError(error: unknown): string {
   if (error instanceof Error && error.message) {
     return error.message;
@@ -410,6 +510,10 @@ async function launchSessionInTerminal(
   try {
     if (terminal === 'ghostty') {
       return await launchGhostty(pi, ctx, sessionFile, prompt);
+    }
+
+    if (terminal === 'herdr') {
+      return await launchHerdr(pi, ctx, sessionFile, prompt);
     }
 
     return await launchKitty(pi, ctx, sessionFile, prompt, env);

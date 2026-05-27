@@ -147,6 +147,15 @@ describe('detectTerminal', () => {
     ).toBe('kitty');
   });
 
+  test('returns herdr when running inside a Herdr pane', () => {
+    expect(
+      detectTerminal({
+        HERDR_ENV: '1',
+        TERM_PROGRAM: 'iTerm.app',
+      } as NodeJS.ProcessEnv),
+    ).toBe('herdr');
+  });
+
   test('returns undefined for unsupported terminals', () => {
     expect(detectTerminal({ TERM_PROGRAM: 'iTerm.app' } as NodeJS.ProcessEnv)).toBeUndefined();
   });
@@ -159,6 +168,32 @@ describe('command registration', () => {
     await registerPiNativeSplit(pi, {
       TERM_PROGRAM: 'kitty',
       KITTY_WINDOW_ID: '1',
+    } as NodeJS.ProcessEnv);
+
+    expect(pi.registerCommand).toHaveBeenCalledWith(
+      'split-fork',
+      expect.objectContaining({ handler: expect.any(Function) }),
+    );
+    expect(pi.registerCommand).toHaveBeenCalledWith(
+      'split-resume',
+      expect.objectContaining({ handler: expect.any(Function) }),
+    );
+    expect(pi.registerCommand).toHaveBeenCalledWith(
+      'split-handoff',
+      expect.objectContaining({ handler: expect.any(Function) }),
+    );
+    expect(pi.registerCommand).toHaveBeenCalledWith(
+      'split-tree',
+      expect.objectContaining({ handler: expect.any(Function) }),
+    );
+  });
+
+  test('registers split commands when running inside Herdr', async () => {
+    const pi = { registerCommand: vi.fn() } as any;
+
+    await registerPiNativeSplit(pi, {
+      HERDR_ENV: '1',
+      TERM_PROGRAM: 'iTerm.app',
     } as NodeJS.ProcessEnv);
 
     expect(pi.registerCommand).toHaveBeenCalledWith(
@@ -575,6 +610,102 @@ describe('split commands', () => {
     expect(harness.notify).toHaveBeenCalledWith('split-fork requires interactive mode', 'error');
   });
 
+  test('split-fork launches Herdr by splitting the focused pane and running the wrapper', async () => {
+    const harness = createCommandHarness({ code: 0, stdout: '', stderr: '' });
+    harness.exec.mockReset();
+    harness.exec
+      .mockResolvedValueOnce({
+        code: 0,
+        stdout: JSON.stringify({
+          result: {
+            type: 'pane_list',
+            panes: [
+              { pane_id: '1-1', focused: false },
+              { pane_id: '1-2', focused: true },
+            ],
+          },
+        }),
+        stderr: '',
+      })
+      .mockResolvedValueOnce({
+        code: 0,
+        stdout: JSON.stringify({ result: { type: 'pane_info', pane: { pane_id: '1-3' } } }),
+        stderr: '',
+      })
+      .mockResolvedValueOnce({ code: 0, stdout: '', stderr: '' });
+
+    await registerPiNativeSplit(harness.pi, {
+      HERDR_ENV: '1',
+      SHELL: '/bin/zsh',
+    } as NodeJS.ProcessEnv);
+
+    const handler = getRegisteredHandler(harness.registerCommand, 'split-fork');
+    await handler('', harness.ctx);
+
+    expect(harness.exec).toHaveBeenNthCalledWith(1, 'herdr', ['pane', 'list']);
+    expect(harness.exec).toHaveBeenNthCalledWith(2, 'herdr', [
+      'pane',
+      'split',
+      '1-2',
+      '--direction',
+      'right',
+      '--cwd',
+      harness.ctx.cwd,
+      '--no-focus',
+    ]);
+    expect(harness.exec).toHaveBeenNthCalledWith(3, 'herdr', [
+      'pane',
+      'run',
+      '1-3',
+      expect.stringContaining(getLauncherScriptPath()),
+    ]);
+    expect(harness.notify).toHaveBeenCalledWith(
+      expect.stringContaining('Forked new session: pi --session '),
+      'info',
+    );
+  });
+
+  test('split-fork cleans up prompt temp files when Herdr run fails', async () => {
+    const harness = createCommandHarness({ code: 0, stdout: '', stderr: '' });
+    harness.exec.mockReset();
+    harness.exec
+      .mockResolvedValueOnce({
+        code: 0,
+        stdout: JSON.stringify({
+          result: { type: 'pane_list', panes: [{ pane_id: '1-2', focused: true }] },
+        }),
+        stderr: '',
+      })
+      .mockResolvedValueOnce({
+        code: 0,
+        stdout: JSON.stringify({ result: { type: 'pane_info', pane: { pane_id: '1-3' } } }),
+        stderr: '',
+      })
+      .mockResolvedValueOnce({ code: 1, stdout: '', stderr: 'pane not found' });
+
+    await registerPiNativeSplit(harness.pi, {
+      HERDR_ENV: '1',
+      SHELL: '/bin/zsh',
+    } as NodeJS.ProcessEnv);
+
+    const handler = getRegisteredHandler(harness.registerCommand, 'split-fork');
+    await handler('cleanup me', harness.ctx);
+
+    const runCommand = String(harness.exec.mock.calls[2][1][3]);
+    const promptFile = extractPromptFilePath(runCommand);
+    expect(promptFile).toBeDefined();
+    expect(fs.existsSync(promptFile!)).toBe(false);
+    expect(fs.existsSync(path.dirname(promptFile!))).toBe(false);
+    expect(harness.notify).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to launch herdr:'),
+      'error',
+    );
+    expect(harness.notify).toHaveBeenCalledWith(
+      expect.stringContaining('Startup prompt/command was not delivered.'),
+      'warning',
+    );
+  });
+
   test('split-resume launches the selected session in Kitty', async () => {
     const harness = createCommandHarness({ code: 0, stdout: '', stderr: '' });
     harness.custom.mockResolvedValue('/tmp/sessions/resume-target.jsonl');
@@ -821,5 +952,56 @@ describe('split commands', () => {
       expect.stringContaining('Startup prompt/command was not delivered.'),
       'warning',
     );
+  });
+
+  test('split-tree opens the current session in Herdr and submits /tree', async () => {
+    const harness = createCommandHarness({ code: 0, stdout: '', stderr: '' });
+    harness.exec.mockReset();
+    harness.exec
+      .mockResolvedValueOnce({
+        code: 0,
+        stdout: JSON.stringify({
+          result: { type: 'pane_list', panes: [{ pane_id: '1-2', focused: true }] },
+        }),
+        stderr: '',
+      })
+      .mockResolvedValueOnce({
+        code: 0,
+        stdout: JSON.stringify({ result: { type: 'pane_info', pane: { pane_id: '1-3' } } }),
+        stderr: '',
+      })
+      .mockResolvedValueOnce({ code: 0, stdout: '', stderr: '' });
+
+    await registerPiNativeSplit(harness.pi, {
+      HERDR_ENV: '1',
+      SHELL: '/bin/zsh',
+    } as NodeJS.ProcessEnv);
+
+    const handler = getRegisteredHandler(harness.registerCommand, 'split-tree');
+    await handler('', harness.ctx);
+
+    expect(harness.exec).toHaveBeenNthCalledWith(1, 'herdr', ['pane', 'list']);
+    expect(harness.exec).toHaveBeenNthCalledWith(2, 'herdr', [
+      'pane',
+      'split',
+      '1-2',
+      '--direction',
+      'right',
+      '--cwd',
+      harness.ctx.cwd,
+      '--no-focus',
+    ]);
+    expect(harness.exec).toHaveBeenNthCalledWith(3, 'herdr', [
+      'pane',
+      'run',
+      '1-3',
+      expect.stringContaining(getLauncherScriptPath()),
+    ]);
+
+    const runCommand = String(harness.exec.mock.calls[2][1][3]);
+    const promptFile = extractPromptFilePath(runCommand);
+    expect(promptFile).toBeDefined();
+    expect(fs.readFileSync(promptFile!, 'utf8')).toBe('/tree');
+    fs.rmSync(path.dirname(promptFile!), { recursive: true, force: true });
   });
 });
