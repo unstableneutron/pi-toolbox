@@ -2167,6 +2167,68 @@ describe('pi-retry extension runtime', () => {
     ]);
   });
 
+  test('successful threshold compaction after length truncation queues continuation on compaction leaf', async () => {
+    vi.useFakeTimers();
+
+    const fakeModule = makeFakeAgentSessionModule();
+    const harness = await createExtensionHarness(async () => fakeModule);
+
+    let leafId = 'assistant-length';
+    harness.ctx.sessionManager.getLeafId = () => leafId;
+
+    await getHandler(harness.handlers, 'turn_end')(
+      {
+        type: 'turn_end',
+        message: {
+          role: 'assistant',
+          stopReason: 'length',
+          content: [{ type: 'thinking', thinking: '' }],
+        },
+        toolResults: [],
+      },
+      harness.ctx,
+    );
+
+    expect(harness.sendMessageCalls).toEqual([]);
+
+    leafId = 'compaction-1';
+    await getHandler(harness.handlers, 'session_compact')(
+      {
+        type: 'session_compact',
+        compactionEntry: { id: 'compaction-1' },
+      },
+      harness.ctx,
+    );
+    await vi.runAllTimersAsync();
+
+    expect(harness.sendMessageCalls).toEqual([
+      {
+        message: {
+          customType: 'pi-retry-recovery',
+          content: 'Continue from where you were cut off. Do not repeat prior content.',
+          display: false,
+          details: {
+            version: 1,
+            displayHint: 'linear-replacement',
+            kind: 'length-truncated',
+            messageKind: 'continue',
+            attempt: 1,
+            expectedLeafId: 'compaction-1',
+            replacement: {
+              supersedesEntryId: 'assistant-length',
+              parentEntryId: 'compaction-1',
+            },
+          },
+        },
+        options: { triggerTurn: true },
+      },
+    ]);
+    expect(harness.statusCalls).toContainEqual({
+      key: 'pi-retry',
+      text: '↻ Length-truncated response detected; continuing after compaction...',
+    });
+  });
+
   test('agent_end queues recovery when the session strands after returned tool results', async () => {
     vi.useFakeTimers();
 

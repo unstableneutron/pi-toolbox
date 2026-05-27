@@ -8,6 +8,7 @@ It handles:
 - empty assistant stops
 - stranded tool-result leaves
 - retryable terminal assistant errors
+- length-truncated responses after successful compaction
 - manual retry via `/retry`
 - resume/startup/reload prompts for retryable leaves
 
@@ -91,6 +92,17 @@ Assistant stop message whose visible text matches the refusal heuristics in `ref
 ### Retryable terminal error
 
 Assistant terminal error whose `errorMessage` matches the retryable provider classifier.
+
+### Length-truncated response after compaction
+
+Assistant message with `stopReason: "length"` and no tool calls. If Pi successfully compacts
+immediately afterward, `pi-retry` sends a hidden continuation message from the compaction leaf:
+
+```text
+Continue from where you were cut off. Do not repeat prior content.
+```
+
+This is limited to one automatic continuation attempt per uninterrupted recovery sequence.
 
 ### Stranded tool results
 

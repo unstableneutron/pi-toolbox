@@ -7,6 +7,7 @@ import {
 } from '@earendil-works/pi-coding-agent';
 
 import {
+  LENGTH_TRUNCATION_CONTINUE_MESSAGE,
   PI_RETRY_RECOVERY_CUSTOM_TYPE,
   buildRecoveryStatus,
   buildRetryableLeafPrompt,
@@ -49,6 +50,7 @@ const REFUSAL_DISABLE_ENV_VAR = 'PI_RETRY_REFUSAL_RECOVERY_DISABLED';
 const DEFAULT_CORE_RETRY_BASE_DELAY_MS = 2000;
 const DEFAULT_CORE_RETRY_MAX_RETRIES = 3;
 const DEFAULT_COMPACTION_EXTRA_RETRIES = 2;
+const LENGTH_TRUNCATION_MAX_RECOVERY_ATTEMPTS = 1;
 const PROMPT_RECOVERY_TIMEOUT_MS = 120_000;
 const RECOVERY_DISPATCH_IDLE_POLL_DELAY_MS = 100;
 
@@ -99,6 +101,8 @@ const uiBySessionId = new Map<string, StatusUi>();
 const recoveryDispatchTimerBySessionId = new Map<string, ReturnType<typeof setTimeout>>();
 const abortListenerBySessionId = new Map<string, { signal: AbortSignal; onAbort: () => void }>();
 const terminatingToolCallIdsBySessionId = new Map<string, Set<string>>();
+const pendingLengthTruncationBySessionId = new Map<string, { failedEntryId?: string }>();
+const lengthTruncationRecoveryAttemptsBySessionId = new Map<string, number>();
 
 let patchInstallPromise: Promise<PatchInstallResult> | undefined;
 let patchFailureReason: string | undefined;
@@ -188,6 +192,27 @@ function hasUserVisibleAssistantOutput(content: unknown): boolean {
     }
     return false;
   });
+}
+
+function hasAssistantToolCall(content: unknown): boolean {
+  if (!Array.isArray(content)) {
+    return false;
+  }
+  return content.some((part) =>
+    Boolean(part && 'object' === typeof part && (part as { type?: unknown }).type === 'toolCall'),
+  );
+}
+
+function isLengthTruncatedAssistantMessage(message: unknown): boolean {
+  if (!message || 'object' !== typeof message) {
+    return false;
+  }
+  const candidate = message as Record<string, unknown>;
+  return Boolean(
+    candidate.role === 'assistant' &&
+    candidate.stopReason === 'length' &&
+    !hasAssistantToolCall(candidate.content),
+  );
 }
 
 type CompactionEndEventLike = {
@@ -438,6 +463,7 @@ function parseRetryRecoveryDetails(value: unknown): RetryRecoveryMessageDetails 
 
   if (
     candidate.kind !== 'empty-stop' &&
+    candidate.kind !== 'length-truncated' &&
     candidate.kind !== 'refusal' &&
     candidate.kind !== 'retryable-error' &&
     candidate.kind !== 'stranded-tool-results'
@@ -711,6 +737,14 @@ function unbindAbortListener(sessionId: string | undefined): void {
   abortListenerBySessionId.delete(sessionId);
 }
 
+function clearLengthTruncationRecoveryForSession(sessionId: string | undefined): void {
+  if (!sessionId) {
+    return;
+  }
+  pendingLengthTruncationBySessionId.delete(sessionId);
+  lengthTruncationRecoveryAttemptsBySessionId.delete(sessionId);
+}
+
 function clearRecoveryForSession(
   sessionId: string | undefined,
   options?: { removeBinding?: boolean; cancelDispatch?: boolean },
@@ -722,6 +756,7 @@ function clearRecoveryForSession(
   if (options?.cancelDispatch ?? true) {
     cancelScheduledRecoveryDispatch(sessionId);
   }
+  clearLengthTruncationRecoveryForSession(sessionId);
   handleRecoveryAbort(sessionId);
   clearStatusForSession(sessionId, options?.removeBinding ?? false);
 }
@@ -1015,6 +1050,8 @@ export function resetPiRetryTestState(): void {
     unbindAbortListener(sessionId);
   }
   terminatingToolCallIdsBySessionId.clear();
+  pendingLengthTruncationBySessionId.clear();
+  lengthTruncationRecoveryAttemptsBySessionId.clear();
   clearRuntimeState();
   patchInstallPromise = undefined;
   patchFailureReason = undefined;
@@ -1132,6 +1169,74 @@ export function createPiRetryExtension(
       registerPatchedSession({ sessionManager: ctx.sessionManager as any });
     };
 
+    const rememberLengthTruncationCandidate = (ctx: ExtensionContext): void => {
+      const sessionId = ctx.sessionManager.getSessionId();
+      pendingLengthTruncationBySessionId.set(sessionId, {
+        failedEntryId: ctx.sessionManager.getLeafId() ?? undefined,
+      });
+    };
+
+    const queueLengthTruncationRecoveryAfterCompaction = (
+      event: { compactionEntry?: { id?: unknown } },
+      ctx: ExtensionContext,
+    ): void => {
+      const sessionId = ctx.sessionManager.getSessionId();
+      const pending = pendingLengthTruncationBySessionId.get(sessionId);
+      if (!pending) {
+        return;
+      }
+
+      pendingLengthTruncationBySessionId.delete(sessionId);
+      if (refusalRecoveryDisabled()) {
+        return;
+      }
+
+      const currentAttempts = lengthTruncationRecoveryAttemptsBySessionId.get(sessionId) ?? 0;
+      if (currentAttempts >= LENGTH_TRUNCATION_MAX_RECOVERY_ATTEMPTS) {
+        if (ctx.hasUI) {
+          ctx.ui.notify('pi-retry stopped length-truncation recovery after one attempt', 'warning');
+        }
+        return;
+      }
+
+      const compactionLeafId =
+        'string' === typeof event.compactionEntry?.id
+          ? event.compactionEntry.id
+          : ctx.sessionManager.getLeafId();
+      if (!compactionLeafId) {
+        return;
+      }
+
+      const nextAttempt = currentAttempts + 1;
+      lengthTruncationRecoveryAttemptsBySessionId.set(sessionId, nextAttempt);
+
+      const details: RetryRecoveryMessageDetails = {
+        version: 1,
+        displayHint: 'linear-replacement',
+        kind: 'length-truncated',
+        messageKind: 'continue',
+        attempt: nextAttempt,
+        expectedLeafId: compactionLeafId,
+        replacement: {
+          supersedesEntryId: pending.failedEntryId,
+          parentEntryId: compactionLeafId,
+        },
+      };
+
+      setPendingRecovery(sessionId, {
+        kind: 'length-truncated',
+        message: LENGTH_TRUNCATION_CONTINUE_MESSAGE,
+        expectedLeafId: compactionLeafId,
+        details,
+      });
+
+      const queuedRecovery = getQueuedRecovery(sessionId);
+      if (queuedRecovery && ctx.hasUI) {
+        ctx.ui.setStatus(STATUS_KEY, buildRecoveryStatus(queuedRecovery));
+      }
+      schedulePendingRecoveryDispatch(sessionId, ctx, pi);
+    };
+
     pi.on('session_start', async (event, ctx) => {
       bindStatusUi(ctx);
       stashSessionReference(ctx);
@@ -1158,6 +1263,13 @@ export function createPiRetryExtension(
       clearRecoveryForSession(ctx.sessionManager.getSessionId());
     });
 
+    pi.on('session_compact', async (event, ctx) => {
+      bindStatusUi(ctx);
+      stashSessionReference(ctx);
+      maybeWarnAboutPatchFailure(ctx);
+      queueLengthTruncationRecoveryAfterCompaction(event as any, ctx);
+    });
+
     pi.on('before_agent_start', async (_event, ctx) => {
       bindStatusUi(ctx);
       stashSessionReference(ctx);
@@ -1173,15 +1285,29 @@ export function createPiRetryExtension(
     });
 
     pi.on('turn_end', async (event, ctx) => {
-      if (
-        'assistant' !== event.message?.role ||
-        !['stop', 'error'].includes(event.message?.stopReason ?? '')
-      ) {
+      if ('assistant' !== event.message?.role) {
         return;
       }
 
+      const sessionId = ctx.sessionManager.getSessionId();
       const hasToolResults = 0 < (event.toolResults?.length ?? 0);
       const hasPendingMessages = ctx.hasPendingMessages();
+
+      if (isLengthTruncatedAssistantMessage(event.message)) {
+        if (!hasToolResults && !hasPendingMessages && !refusalRecoveryDisabled()) {
+          rememberLengthTruncationCandidate(ctx);
+        }
+        return;
+      }
+
+      if (hasUserVisibleAssistantOutput(event.message?.content)) {
+        clearLengthTruncationRecoveryForSession(sessionId);
+      }
+
+      if (!['stop', 'error'].includes(event.message?.stopReason ?? '')) {
+        return;
+      }
+
       const isToolBackedEmptyStop =
         hasToolResults &&
         'stop' === event.message?.stopReason &&

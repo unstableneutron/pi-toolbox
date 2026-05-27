@@ -18,8 +18,12 @@ const DEFAULT_REFUSAL_REWRITE_ATTEMPTS = 2;
 const MAX_EMPTY_RESPONSE_CONTINUE_ATTEMPTS = 3;
 const DEFAULT_CORE_RETRY_MAX_RETRIES = 3;
 const CONTINUE_RETRY_MESSAGE = 'Continue.';
+export const LENGTH_TRUNCATION_CONTINUE_MESSAGE =
+  'Continue from where you were cut off. Do not repeat prior content.';
 const CONTINUE_RETRY_STATUS = '↻ Refusal detected; retrying...';
 const EMPTY_RESPONSE_RETRY_STATUS = '↻ Empty assistant response; retrying with Continue...';
+const LENGTH_TRUNCATION_CONTINUE_STATUS =
+  '↻ Length-truncated response detected; continuing after compaction...';
 const RETRYABLE_ERROR_CONTINUE_STATUS = '↻ Retryable error detected; retrying with Continue...';
 const STRANDED_TOOL_RESULTS_CONTINUE_STATUS =
   '↻ Stranded tool results detected; retrying with Continue...';
@@ -99,7 +103,7 @@ export interface RetryRecoveryMessageDetails {
 }
 
 export interface PendingRecovery {
-  kind: 'empty-stop' | 'refusal' | 'retryable-error' | 'stranded-tool-results';
+  kind: 'empty-stop' | 'length-truncated' | 'refusal' | 'retryable-error' | 'stranded-tool-results';
   message: string;
   expectedLeafId?: string;
   details?: RetryRecoveryMessageDetails;
@@ -352,7 +356,9 @@ export function formatRecoveryAttemptSuffix(attempt: number, maxAttempts: number
 
 function isContinueRecoveryMessage(message: string): boolean {
   return (
-    CONTINUE_RETRY_MESSAGE === message || STOCK_REFUSAL_CONTINUE_MESSAGES.includes(message as any)
+    CONTINUE_RETRY_MESSAGE === message ||
+    LENGTH_TRUNCATION_CONTINUE_MESSAGE === message ||
+    STOCK_REFUSAL_CONTINUE_MESSAGES.includes(message as any)
   );
 }
 
@@ -367,7 +373,7 @@ function getRecoveryAttemptLimit(
     return MAX_EMPTY_RESPONSE_CONTINUE_ATTEMPTS;
   }
 
-  if ('stranded-tool-results' === recovery.kind) {
+  if ('length-truncated' === recovery.kind || 'stranded-tool-results' === recovery.kind) {
     return 1;
   }
 
@@ -426,6 +432,8 @@ export function buildRecoveryStatus(recovery: ActiveRecovery): string {
   switch (recovery.kind) {
     case 'empty-stop':
       return `${EMPTY_RESPONSE_RETRY_STATUS}${suffix}`;
+    case 'length-truncated':
+      return `${LENGTH_TRUNCATION_CONTINUE_STATUS}${suffix}`;
     case 'retryable-error':
       return `${RETRYABLE_ERROR_CONTINUE_STATUS}${suffix}`;
     case 'stranded-tool-results':
@@ -1262,6 +1270,12 @@ export function buildRetryableLeafPrompt(candidate: RetryableTerminalLeaf): {
         title: 'pi-retry: Empty response detected',
         message:
           'This session appears to have stopped on an empty assistant response. Send Continue now?',
+      };
+    case 'length-truncated':
+      return {
+        title: 'pi-retry: Length-truncated response detected',
+        message:
+          'This session appears to have stopped because the response hit the output limit. Send Continue now?',
       };
     case 'refusal':
       return {
