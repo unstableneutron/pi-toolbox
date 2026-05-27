@@ -2,7 +2,6 @@ import { describe, expect, test, vi } from 'vitest';
 
 import {
   createToolCallRewriteState,
-  dedupeAssistantToolCalls,
   default as registerToolCallRewrite,
   recordToolCall,
   stableJson,
@@ -53,81 +52,6 @@ describe('recordToolCall', () => {
   });
 });
 
-describe('dedupeAssistantToolCalls', () => {
-  test('removes duplicate top-level tool calls from the same assistant message', () => {
-    const message = {
-      role: 'assistant',
-      content: [
-        { type: 'text', text: 'I’ll inspect.' },
-        {
-          type: 'toolCall',
-          id: 'call-1',
-          name: 'read',
-          arguments: { path: 'a.ts', offset: 1, limit: 20 },
-        },
-        {
-          type: 'toolCall',
-          id: 'call-2',
-          name: 'read',
-          arguments: { limit: 20, offset: 1, path: 'a.ts' },
-        },
-        {
-          type: 'toolCall',
-          id: 'call-3',
-          name: 'read',
-          arguments: { path: 'b.ts', offset: 1, limit: 20 },
-        },
-      ],
-    } as any;
-
-    const result = dedupeAssistantToolCalls(message);
-
-    expect(result.changed).toBe(true);
-    expect(result.message.content.map((part: any) => part.id).filter(Boolean)).toEqual([
-      'call-1',
-      'call-3',
-    ]);
-  });
-
-  test('removes duplicate nested multi_tool_use.parallel tool_uses', () => {
-    const message = {
-      role: 'assistant',
-      content: [
-        {
-          type: 'toolCall',
-          id: 'call-wrapper',
-          name: 'multi_tool_use.parallel',
-          arguments: {
-            tool_uses: [
-              {
-                recipient_name: 'functions.read',
-                parameters: { path: 'a.ts', offset: 1, limit: 20 },
-              },
-              {
-                recipient_name: 'functions.read',
-                parameters: { limit: 20, offset: 1, path: 'a.ts' },
-              },
-              {
-                recipient_name: 'functions.read',
-                parameters: { path: 'b.ts', offset: 1, limit: 20 },
-              },
-            ],
-          },
-        },
-      ],
-    } as any;
-
-    const result = dedupeAssistantToolCalls(message);
-
-    expect(result.changed).toBe(true);
-    expect(result.message.content).toHaveLength(1);
-    expect(result.message.content[0].arguments.tool_uses).toEqual([
-      { recipient_name: 'functions.read', parameters: { path: 'a.ts', offset: 1, limit: 20 } },
-      { recipient_name: 'functions.read', parameters: { path: 'b.ts', offset: 1, limit: 20 } },
-    ]);
-  });
-});
-
 describe('tool-call-rewrite extension', () => {
   test('repairs fff and edit tool-call aliases before execution', async () => {
     const handlers = new Map<string, Function>();
@@ -175,7 +99,7 @@ describe('tool-call-rewrite extension', () => {
     );
   });
 
-  test('blocks duplicate tool_call events using the current session leaf as scope', async () => {
+  test('turns same-response duplicate tool_call events into no-op results', async () => {
     const handlers = new Map<string, Function>();
     const pi = {
       on: vi.fn((name: string, handler: Function) => {
@@ -198,19 +122,56 @@ describe('tool-call-rewrite extension', () => {
 
     registerToolCallRewrite(pi, { maxSeen: 128 });
     const toolCall = handlers.get('tool_call');
+    const messageEnd = handlers.get('message_end');
     expect(toolCall).toBeDefined();
+    expect(messageEnd).toBeDefined();
 
     await toolCall!(event, ctx);
     const blocked = await toolCall!({ ...event, toolCallId: 'call-2' }, ctx);
 
     expect(blocked).toEqual({
       block: true,
-      reason:
-        'Blocked duplicate tool call: bash with identical arguments already appeared in this assistant response.',
+      reason: 'Deduped: duplicate tool call skipped.',
+    });
+
+    const rewritten = await messageEnd!(
+      {
+        type: 'message_end',
+        message: {
+          role: 'toolResult',
+          toolCallId: 'call-2',
+          toolName: 'bash',
+          content: [{ type: 'text', text: 'Tool execution was blocked' }],
+          details: { existing: true },
+          isError: true,
+        },
+      },
+      ctx,
+    );
+
+    expect(rewritten.message).toMatchObject({
+      role: 'toolResult',
+      toolCallId: 'call-2',
+      toolName: 'bash',
+      content: [
+        {
+          type: 'text',
+          text: 'Deduped: duplicate tool call skipped.',
+        },
+      ],
+      details: {
+        existing: true,
+        toolCallRewrite: {
+          deduped: true,
+          matchingToolCallId: 'call-1',
+          reason: 'same-response-duplicate',
+        },
+      },
+      isError: true,
     });
   });
 
-  test('rewrites same-message duplicate tool calls before execution', async () => {
+  test('does not remove same-message duplicate tool calls at message_end', async () => {
     const handlers = new Map<string, Function>();
     const pi = {
       on: vi.fn((name: string, handler: Function) => {
@@ -244,12 +205,82 @@ describe('tool-call-rewrite extension', () => {
       ctx,
     );
 
-    expect(result.message.content).toEqual([
-      { type: 'toolCall', id: 'call-1', name: 'read', arguments: { path: 'a.ts' } },
-    ]);
+    expect(result).toBeUndefined();
   });
 
-  test('does not no-op calls from a previous multi-call batch unless they are strictly adjacent', async () => {
+  test('does not prune or rewrite duplicate multi_tool_use.parallel entries', async () => {
+    const handlers = new Map<string, Function>();
+    const pi = {
+      on: vi.fn((name: string, handler: Function) => {
+        handlers.set(name, handler);
+      }),
+    } as any;
+    const ctx = {
+      sessionManager: {
+        getLeafId: () => 'assistant-1',
+      },
+      ui: {
+        setStatus: vi.fn(),
+      },
+    } as any;
+    const input = {
+      tool_uses: [
+        {
+          recipient_name: 'functions.read',
+          parameters: { path: 'a.ts', offset: 1, limit: 20 },
+        },
+        {
+          recipient_name: 'functions.read',
+          parameters: { limit: 20, offset: 1, path: 'a.ts' },
+        },
+        {
+          recipient_name: 'functions.read',
+          parameters: { path: 'b.ts', offset: 1, limit: 20 },
+        },
+      ],
+    };
+
+    registerToolCallRewrite(pi, { maxSeen: 128 });
+    const toolCall = handlers.get('tool_call');
+    const messageEnd = handlers.get('message_end');
+    expect(toolCall).toBeDefined();
+    expect(messageEnd).toBeDefined();
+
+    await expect(
+      toolCall!(
+        {
+          toolName: 'multi_tool_use.parallel',
+          toolCallId: 'call-wrapper',
+          input,
+        },
+        ctx,
+      ),
+    ).resolves.toBeUndefined();
+    expect(input.tool_uses).toEqual([
+      { recipient_name: 'functions.read', parameters: { path: 'a.ts', offset: 1, limit: 20 } },
+      { recipient_name: 'functions.read', parameters: { limit: 20, offset: 1, path: 'a.ts' } },
+      { recipient_name: 'functions.read', parameters: { path: 'b.ts', offset: 1, limit: 20 } },
+    ]);
+
+    await expect(
+      messageEnd!(
+        {
+          type: 'message_end',
+          message: {
+            role: 'toolResult',
+            toolCallId: 'call-wrapper',
+            toolName: 'multi_tool_use.parallel',
+            content: [{ type: 'text', text: 'parallel results' }],
+            details: { existing: true },
+            isError: false,
+          },
+        },
+        ctx,
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  test('dedupes cacheable calls from previous tool-call groups across model continuation turns', async () => {
     const handlers = new Map<string, Function>();
     const pi = {
       on: vi.fn((name: string, handler: Function) => {
@@ -268,8 +299,12 @@ describe('tool-call-rewrite extension', () => {
     registerToolCallRewrite(pi, { maxSeen: 128 });
     const toolCall = handlers.get('tool_call');
     const messageEnd = handlers.get('message_end');
+    const turnStart = handlers.get('turn_start');
+    const turnEnd = handlers.get('turn_end');
     expect(toolCall).toBeDefined();
     expect(messageEnd).toBeDefined();
+    expect(turnStart).toBeDefined();
+    expect(turnEnd).toBeDefined();
 
     await messageEnd!(
       {
@@ -308,6 +343,9 @@ describe('tool-call-rewrite extension', () => {
       );
     }
 
+    await turnEnd!({ type: 'turn_end' }, ctx);
+    await turnStart!({ type: 'turn_start' }, ctx);
+
     ctx.sessionManager.getLeafId = () => 'assistant-2';
     await messageEnd!(
       {
@@ -316,7 +354,6 @@ describe('tool-call-rewrite extension', () => {
           role: 'assistant',
           content: [
             { type: 'toolCall', id: 'call-a-again', name: 'read', arguments: { path: 'a.ts' } },
-            { type: 'toolCall', id: 'call-b-again', name: 'read', arguments: { path: 'b.ts' } },
           ],
         },
       },
@@ -325,13 +362,155 @@ describe('tool-call-rewrite extension', () => {
 
     await expect(
       toolCall!({ toolName: 'read', toolCallId: 'call-a-again', input: { path: 'a.ts' } }, ctx),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({
+      block: true,
+      reason: 'Deduped: duplicate tool call skipped.',
+    });
+
+    const rewritten = await messageEnd!(
+      {
+        type: 'message_end',
+        message: {
+          role: 'toolResult',
+          toolCallId: 'call-a-again',
+          toolName: 'read',
+          content: [{ type: 'text', text: 'Tool execution was blocked' }],
+          isError: true,
+        },
+      },
+      ctx,
+    );
+
+    expect(rewritten.message).toMatchObject({
+      role: 'toolResult',
+      toolCallId: 'call-a-again',
+      toolName: 'read',
+      content: [
+        {
+          type: 'text',
+          text: 'Deduped: duplicate tool call skipped.',
+        },
+      ],
+      details: {
+        toolCallRewrite: {
+          deduped: true,
+          matchingToolCallId: 'call-a',
+          reason: 'same-turn-duplicate',
+        },
+      },
+      isError: true,
+    });
+  });
+
+  test('does not dedupe non-cacheable tools across assistant groups', async () => {
+    const handlers = new Map<string, Function>();
+    const pi = {
+      on: vi.fn((name: string, handler: Function) => {
+        handlers.set(name, handler);
+      }),
+    } as any;
+    const ctx = {
+      sessionManager: {
+        getLeafId: () => 'assistant-1',
+      },
+      ui: {
+        setStatus: vi.fn(),
+      },
+    } as any;
+
+    registerToolCallRewrite(pi, { maxSeen: 128 });
+    const toolCall = handlers.get('tool_call');
+    const messageEnd = handlers.get('message_end');
+    expect(toolCall).toBeDefined();
+    expect(messageEnd).toBeDefined();
+
+    await toolCall!(
+      { toolName: 'bash', toolCallId: 'call-1', input: { command: 'npm test' } },
+      ctx,
+    );
+    await messageEnd!(
+      {
+        type: 'message_end',
+        message: {
+          role: 'toolResult',
+          toolCallId: 'call-1',
+          toolName: 'bash',
+          content: [{ type: 'text', text: 'passed' }],
+          isError: false,
+        },
+      },
+      ctx,
+    );
+
+    ctx.sessionManager.getLeafId = () => 'assistant-2';
     await expect(
-      toolCall!({ toolName: 'read', toolCallId: 'call-b-again', input: { path: 'b.ts' } }, ctx),
+      toolCall!({ toolName: 'bash', toolCallId: 'call-2', input: { command: 'npm test' } }, ctx),
     ).resolves.toBeUndefined();
   });
 
-  test('turns an adjacent duplicate tool call into a compact successful no-op result', async () => {
+  test('clears same-turn cache after a non-cacheable tool result', async () => {
+    const handlers = new Map<string, Function>();
+    const pi = {
+      on: vi.fn((name: string, handler: Function) => {
+        handlers.set(name, handler);
+      }),
+    } as any;
+    const ctx = {
+      sessionManager: {
+        getLeafId: () => 'assistant-1',
+      },
+      ui: {
+        setStatus: vi.fn(),
+      },
+    } as any;
+
+    registerToolCallRewrite(pi, { maxSeen: 128 });
+    const toolCall = handlers.get('tool_call');
+    const messageEnd = handlers.get('message_end');
+    expect(toolCall).toBeDefined();
+    expect(messageEnd).toBeDefined();
+
+    await toolCall!({ toolName: 'read', toolCallId: 'read-1', input: { path: 'a.ts' } }, ctx);
+    await messageEnd!(
+      {
+        type: 'message_end',
+        message: {
+          role: 'toolResult',
+          toolCallId: 'read-1',
+          toolName: 'read',
+          content: [{ type: 'text', text: 'before' }],
+          isError: false,
+        },
+      },
+      ctx,
+    );
+
+    ctx.sessionManager.getLeafId = () => 'assistant-2';
+    await toolCall!(
+      { toolName: 'bash', toolCallId: 'bash-1', input: { command: 'touch a.ts' } },
+      ctx,
+    );
+    await messageEnd!(
+      {
+        type: 'message_end',
+        message: {
+          role: 'toolResult',
+          toolCallId: 'bash-1',
+          toolName: 'bash',
+          content: [{ type: 'text', text: 'mutated' }],
+          isError: false,
+        },
+      },
+      ctx,
+    );
+
+    ctx.sessionManager.getLeafId = () => 'assistant-3';
+    await expect(
+      toolCall!({ toolName: 'read', toolCallId: 'read-2', input: { path: 'a.ts' } }, ctx),
+    ).resolves.toBeUndefined();
+  });
+
+  test('turns an adjacent cacheable duplicate into a same-turn no-op result', async () => {
     const handlers = new Map<string, Function>();
     const pi = {
       on: vi.fn((name: string, handler: Function) => {
@@ -378,7 +557,7 @@ describe('tool-call-rewrite extension', () => {
     );
     expect(blocked).toEqual({
       block: true,
-      reason: 'Deduped: identical tool call already ran immediately before.',
+      reason: 'Deduped: duplicate tool call skipped.',
     });
 
     const rewritten = await messageEnd!(
@@ -403,18 +582,18 @@ describe('tool-call-rewrite extension', () => {
       content: [
         {
           type: 'text',
-          text: 'Deduped: identical tool call already ran immediately before.',
+          text: 'Deduped: duplicate tool call skipped.',
         },
       ],
       details: {
         existing: true,
         toolCallRewrite: {
           deduped: true,
-          fromToolCallId: 'call-1',
-          reason: 'adjacent-duplicate',
+          matchingToolCallId: 'call-1',
+          reason: 'same-turn-duplicate',
         },
       },
-      isError: false,
+      isError: true,
     });
   });
 });

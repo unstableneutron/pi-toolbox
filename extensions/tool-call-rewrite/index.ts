@@ -12,20 +12,23 @@ export type RecentToolCall = {
   toolName: string;
 };
 
+export type PendingNoopReason = 'same-response-duplicate' | 'same-turn-duplicate';
+
 export type PendingNoopToolResult = RecentToolCall & {
-  fromToolCallId: string;
-  reason: 'adjacent-duplicate';
+  matchingToolCallId: string;
+  reason: PendingNoopReason;
+  message: string;
 };
 
 export type ToolCallRewriteState = {
   currentScopeId?: string;
   fallbackTurn: number;
   maxSeen: number;
-  seen: Set<string>;
+  seenToolCalls: Map<string, RecentToolCall>;
   order: string[];
+  sameTurnSeenToolCalls: Map<string, RecentToolCall>;
+  sameTurnOrder: string[];
   activeToolCalls: Map<string, RecentToolCall>;
-  assistantToolCallCounts: Map<string, number>;
-  lastCompletedToolCall?: RecentToolCall;
   pendingNoopToolResults: Map<string, PendingNoopToolResult>;
 };
 
@@ -33,10 +36,21 @@ export type ToolCallRecordResult = {
   duplicate: boolean;
   scopeChanged: boolean;
   signature: string;
+  existing?: RecentToolCall;
 };
 
 const DEFAULT_MAX_SEEN = 128;
-const ADJACENT_DUPLICATE_REASON = 'Deduped: identical tool call already ran immediately before.';
+const DEDUPED_TOOL_CALL_MESSAGE = 'Deduped: duplicate tool call skipped.';
+const CROSS_GROUP_CACHEABLE_TOOLS = new Set([
+  'read',
+  'grep',
+  'find',
+  'ls',
+  'fff_grep',
+  'fff_find_files',
+  'web_search',
+  'web_fetch',
+]);
 
 export function stableJson(value: unknown): string {
   if (value === null) return 'null';
@@ -63,40 +77,36 @@ export function createToolCallSignature(toolName: string, input: unknown): strin
   return createHash('sha256').update(toolName).update('\0').update(stableJson(input)).digest('hex');
 }
 
-function stringValue(value: unknown): string {
-  return typeof value === 'string' ? value : '';
-}
-
-export function createParallelToolUseSignature(toolUse: unknown): string {
-  if (!isRecord(toolUse)) return createToolCallSignature('unknown', toolUse);
-  return createToolCallSignature(stringValue(toolUse.recipient_name), toolUse.parameters);
-}
-
 export function createToolCallRewriteState(
   options: ToolCallRewriteOptions = {},
 ): ToolCallRewriteState {
   return {
     fallbackTurn: 0,
     maxSeen: Math.max(1, options.maxSeen ?? DEFAULT_MAX_SEEN),
-    seen: new Set<string>(),
+    seenToolCalls: new Map<string, RecentToolCall>(),
     order: [],
+    sameTurnSeenToolCalls: new Map<string, RecentToolCall>(),
+    sameTurnOrder: [],
     activeToolCalls: new Map<string, RecentToolCall>(),
-    assistantToolCallCounts: new Map<string, number>(),
     pendingNoopToolResults: new Map<string, PendingNoopToolResult>(),
   };
 }
 
 export function clearToolCallRewriteScope(state: ToolCallRewriteState, scopeId?: string) {
   state.currentScopeId = scopeId;
-  state.seen.clear();
+  state.seenToolCalls.clear();
   state.order = [];
+}
+
+function clearSameTurnToolCalls(state: ToolCallRewriteState) {
+  state.sameTurnSeenToolCalls.clear();
+  state.sameTurnOrder = [];
 }
 
 export function clearToolCallRewriteState(state: ToolCallRewriteState, scopeId?: string) {
   clearToolCallRewriteScope(state, scopeId);
+  clearSameTurnToolCalls(state);
   state.activeToolCalls.clear();
-  state.assistantToolCallCounts.clear();
-  state.lastCompletedToolCall = undefined;
   state.pendingNoopToolResults.clear();
 }
 
@@ -105,25 +115,57 @@ export function recordToolCall(
   scopeId: string,
   toolName: string,
   input: unknown,
+  toolCallId = '',
 ): ToolCallRecordResult {
+  const scopeChanged = ensureToolCallScope(state, scopeId);
+
+  const signature = createToolCallSignature(toolName, input);
+  const existing = state.seenToolCalls.get(signature);
+  if (existing) {
+    return { duplicate: true, scopeChanged, signature, existing };
+  }
+
+  rememberToolCall(state.seenToolCalls, state.order, state.maxSeen, {
+    signature,
+    toolCallId,
+    toolName,
+  });
+
+  return { duplicate: false, scopeChanged, signature };
+}
+
+function ensureToolCallScope(state: ToolCallRewriteState, scopeId: string): boolean {
   const scopeChanged = state.currentScopeId !== scopeId;
   if (scopeChanged) {
     clearToolCallRewriteScope(state, scopeId);
   }
+  return scopeChanged;
+}
 
-  const signature = createToolCallSignature(toolName, input);
-  if (state.seen.has(signature)) {
-    return { duplicate: true, scopeChanged, signature };
+function rememberToolCall(
+  seen: Map<string, RecentToolCall>,
+  order: string[],
+  maxSeen: number,
+  toolCall: RecentToolCall,
+) {
+  seen.set(toolCall.signature, toolCall);
+  order.push(toolCall.signature);
+  while (order.length > maxSeen) {
+    const oldest = order.shift();
+    if (oldest) seen.delete(oldest);
   }
+}
 
-  state.seen.add(signature);
-  state.order.push(signature);
-  while (state.order.length > state.maxSeen) {
-    const oldest = state.order.shift();
-    if (oldest) state.seen.delete(oldest);
-  }
+function rememberSameTurnToolCall(state: ToolCallRewriteState, toolCall: RecentToolCall) {
+  rememberToolCall(state.sameTurnSeenToolCalls, state.sameTurnOrder, state.maxSeen, toolCall);
+}
 
-  return { duplicate: false, scopeChanged, signature };
+function isCrossGroupCacheableTool(toolName: string): boolean {
+  return CROSS_GROUP_CACHEABLE_TOOLS.has(toolName);
+}
+
+function isSuccessfulToolResult(message: unknown): boolean {
+  return !isRecord(message) || message.isError !== true;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -323,99 +365,14 @@ export function repairToolCallInput(
   return { ...repaired, changed: repaired.rules.length > 0 };
 }
 
-function dedupeParallelToolUses(input: unknown): {
-  input: unknown;
-  changed: boolean;
-  removedAll: boolean;
-} {
-  if (!isRecord(input) || !Array.isArray(input.tool_uses)) {
-    return { input, changed: false, removedAll: false };
-  }
-
-  const seen = new Set<string>();
-  const toolUses = [];
-  let changed = false;
-
-  for (const toolUse of input.tool_uses) {
-    const signature = createParallelToolUseSignature(toolUse);
-    if (seen.has(signature)) {
-      changed = true;
-      continue;
-    }
-    seen.add(signature);
-    toolUses.push(toolUse);
-  }
-
-  if (!changed) return { input, changed: false, removedAll: false };
-  return {
-    input: { ...input, tool_uses: toolUses },
-    changed: true,
-    removedAll: toolUses.length === 0,
-  };
-}
-
-function normalizeToolCallPart(part: Record<string, unknown>): {
-  changed: boolean;
-  part?: Record<string, unknown>;
-} {
-  const deduped = dedupeParallelToolUses(part.arguments);
-  if (deduped.removedAll) return { changed: true };
-  if (!deduped.changed) return { changed: false, part };
-  return { changed: true, part: { ...part, arguments: deduped.input } };
-}
-
-export function dedupeAssistantToolCalls(message: unknown): { changed: boolean; message: any } {
-  if (!isRecord(message) || message.role !== 'assistant' || !Array.isArray(message.content)) {
-    return { changed: false, message };
-  }
-
-  const seen = new Set<string>();
-  const content = [];
-  let changed = false;
-
-  for (const part of message.content) {
-    if (!isRecord(part) || part.type !== 'toolCall') {
-      content.push(part);
-      continue;
-    }
-
-    const normalized = normalizeToolCallPart(part);
-    if (!normalized.part) {
-      changed = true;
-      continue;
-    }
-    if (normalized.changed) changed = true;
-
-    const signature = createToolCallSignature(
-      stringValue(normalized.part.name),
-      normalized.part.arguments,
-    );
-    if (seen.has(signature)) {
-      changed = true;
-      continue;
-    }
-    seen.add(signature);
-    content.push(normalized.part);
-  }
-
-  if (!changed) return { changed: false, message };
-  return { changed: true, message: { ...message, content } };
-}
-
-function countTopLevelToolCalls(message: unknown): number {
-  if (!isRecord(message) || !Array.isArray(message.content)) return 0;
-  return message.content.filter((part) => isRecord(part) && part.type === 'toolCall').length;
-}
-
 function getToolResultCallId(message: unknown): string | undefined {
   if (!isRecord(message)) return undefined;
   const toolCallId = message.toolCallId;
   return typeof toolCallId === 'string' && toolCallId.length > 0 ? toolCallId : undefined;
 }
 
-function getToolResultName(message: unknown): string {
-  if (!isRecord(message)) return '';
-  return typeof message.toolName === 'string' ? message.toolName : '';
+function existingToolCallRewrite(details: Record<string, unknown>): Record<string, unknown> {
+  return isRecord(details.toolCallRewrite) ? details.toolCallRewrite : {};
 }
 
 function mergeNoopDetails(
@@ -426,8 +383,9 @@ function mergeNoopDetails(
   return {
     ...base,
     toolCallRewrite: {
+      ...existingToolCallRewrite(base),
       deduped: true,
-      fromToolCallId: pending.fromToolCallId,
+      matchingToolCallId: pending.matchingToolCallId,
       reason: pending.reason,
     },
   };
@@ -437,9 +395,8 @@ function rewriteNoopToolResult(message: unknown, pending: PendingNoopToolResult)
   if (!isRecord(message)) return message;
   return {
     ...message,
-    content: [{ type: 'text', text: ADJACENT_DUPLICATE_REASON }],
+    content: [{ type: 'text', text: pending.message }],
     details: mergeNoopDetails(message.details, pending),
-    isError: false,
   };
 }
 
@@ -490,14 +447,13 @@ export default function toolCallRewrite(pi: ExtensionAPI, options: ToolCallRewri
     clearToolCallRewriteState(state);
   });
 
-  pi.on('message_end', async (event, ctx) => {
-    if (event.message.role === 'assistant') {
-      const result = dedupeAssistantToolCalls(event.message);
-      const scopeId = getToolCallScopeId(state, ctx);
-      state.assistantToolCallCounts.set(scopeId, countTopLevelToolCalls(result.message));
-      if (!result.changed) return;
-      return { message: result.message };
+  pi.on('message_end', async (event, _ctx) => {
+    if (event.message.role === 'user') {
+      clearToolCallRewriteState(state);
+      return;
     }
+
+    if (event.message.role === 'assistant') return;
 
     if (event.message.role !== 'toolResult') return;
 
@@ -507,18 +463,20 @@ export default function toolCallRewrite(pi: ExtensionAPI, options: ToolCallRewri
     const pendingNoop = state.pendingNoopToolResults.get(toolCallId);
     if (pendingNoop) {
       state.pendingNoopToolResults.delete(toolCallId);
-      state.lastCompletedToolCall = {
-        signature: pendingNoop.signature,
-        toolCallId,
-        toolName: getToolResultName(event.message) || pendingNoop.toolName,
-      };
       return { message: rewriteNoopToolResult(event.message, pendingNoop) };
     }
 
     const active = state.activeToolCalls.get(toolCallId);
     if (!active) return;
     state.activeToolCalls.delete(toolCallId);
-    state.lastCompletedToolCall = active;
+
+    if (!isCrossGroupCacheableTool(active.toolName)) {
+      clearSameTurnToolCalls(state);
+      return;
+    }
+    if (isSuccessfulToolResult(event.message)) {
+      rememberSameTurnToolCall(state, active);
+    }
   });
 
   pi.on('tool_call', async (event, ctx) => {
@@ -528,38 +486,39 @@ export default function toolCallRewrite(pi: ExtensionAPI, options: ToolCallRewri
       setStatus(ctx, `Rewrote tool input: ${repairedInput.rules.join(', ')}`);
     }
 
-    const dedupedInput = dedupeParallelToolUses(event.input);
-    if (dedupedInput.changed && isRecord(event.input) && isRecord(dedupedInput.input)) {
-      (event.input as Record<string, unknown>).tool_uses = dedupedInput.input.tool_uses;
-    }
-
     const scopeId = getToolCallScopeId(state, ctx);
+    ensureToolCallScope(state, scopeId);
     const signature = createToolCallSignature(event.toolName, event.input);
-    const assistantToolCallCount = state.assistantToolCallCounts.get(scopeId);
-    const adjacentDuplicate =
-      state.lastCompletedToolCall?.signature === signature &&
-      (assistantToolCallCount === undefined || assistantToolCallCount === 1);
-
-    if (adjacentDuplicate && state.lastCompletedToolCall) {
+    const sameTurnExisting = isCrossGroupCacheableTool(event.toolName)
+      ? state.sameTurnSeenToolCalls.get(signature)
+      : undefined;
+    if (sameTurnExisting) {
       state.pendingNoopToolResults.set(event.toolCallId, {
         signature,
         toolCallId: event.toolCallId,
         toolName: event.toolName,
-        fromToolCallId: state.lastCompletedToolCall.toolCallId,
-        reason: 'adjacent-duplicate',
+        matchingToolCallId: sameTurnExisting.toolCallId,
+        reason: 'same-turn-duplicate',
+        message: DEDUPED_TOOL_CALL_MESSAGE,
       });
-      setStatus(ctx, ADJACENT_DUPLICATE_REASON);
-      return { block: true, reason: ADJACENT_DUPLICATE_REASON };
+      setStatus(ctx, DEDUPED_TOOL_CALL_MESSAGE);
+      return { block: true, reason: DEDUPED_TOOL_CALL_MESSAGE };
     }
 
-    const record = recordToolCall(state, scopeId, event.toolName, event.input);
+    const record = recordToolCall(state, scopeId, event.toolName, event.input, event.toolCallId);
     if (record.duplicate) {
-      const reason = `Blocked duplicate tool call: ${event.toolName} with identical arguments already appeared in this assistant response.`;
-      setStatus(ctx, reason);
-      return { block: true, reason };
+      state.pendingNoopToolResults.set(event.toolCallId, {
+        signature: record.signature,
+        toolCallId: event.toolCallId,
+        toolName: event.toolName,
+        matchingToolCallId: record.existing?.toolCallId ?? '',
+        reason: 'same-response-duplicate',
+        message: DEDUPED_TOOL_CALL_MESSAGE,
+      });
+      setStatus(ctx, DEDUPED_TOOL_CALL_MESSAGE);
+      return { block: true, reason: DEDUPED_TOOL_CALL_MESSAGE };
     }
 
-    state.lastCompletedToolCall = undefined;
     state.activeToolCalls.set(event.toolCallId, {
       signature: record.signature,
       toolCallId: event.toolCallId,

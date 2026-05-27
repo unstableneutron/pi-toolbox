@@ -1,6 +1,6 @@
 {
   "name": "pi-toolbox",
-  "version": "0.10.3",
+  "version": "0.10.4",
   "private": true,
   "description": "My own pi-toolbox of extensions, skills, prompts, and subagent templates.",
   "license": "MIT",
