@@ -1,14 +1,14 @@
 [tasks.check]
 description = "Auto-fix lint and formatting in place; fail loudly on anything that can't be fixed."
-run = "pnpm run check"
+run = "scripts/pm.ts run check"
 
 [tasks.test]
 description = "Run the vitest suite."
-run = "pnpm run test"
+run = "scripts/pm.ts run test"
 
 [tasks.knip]
 description = "Audit unused exports, types, and dependencies. Advisory only — does not auto-fix."
-run = "pnpm run knip"
+run = "scripts/pm.ts run knip"
 
 [tasks.sync-extension-configs]
 description = "Diff JSON configs in extensions-config/ against ~/.pi/agent/extensions/; pass --apply for interactive per-file sync."

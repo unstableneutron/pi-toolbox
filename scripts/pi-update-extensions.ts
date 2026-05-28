@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   existsSync,
   readFileSync,
@@ -9,6 +9,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -69,6 +70,12 @@ export type ApplyPatchResult = {
   packageRoot: string;
   version: string;
   patchPath?: string;
+};
+
+export type PackageManagerCommand = {
+  command: string;
+  args: string[];
+  source: 'settings' | 'aube' | 'pnpm';
 };
 
 export type InstalledPackage = {
@@ -185,23 +192,183 @@ export function buildPiCodingAgentResolverReplacement(): string {
   ].join('\n');
 }
 
-export function findGlobalPnpmPackagePath(
-  packageName: string,
-  options: { cwd?: string } = {},
-): string | undefined {
+function getDefaultPiSettingsPath(): string {
+  return join(homedir(), '.pi', 'agent', 'settings.json');
+}
+
+export function readConfiguredNpmCommand(
+  options: { settingsPath?: string } = {},
+): string[] | undefined {
+  const settingsPath = options.settingsPath ?? getDefaultPiSettingsPath();
+  if (!existsSync(settingsPath)) return undefined;
+
+  const settings = JSON.parse(readFileSync(settingsPath, 'utf8')) as { npmCommand?: unknown };
+  if (settings.npmCommand === undefined) return undefined;
+  if (!Array.isArray(settings.npmCommand)) {
+    throw new Error(`Invalid npmCommand in ${settingsPath}: expected an array of strings`);
+  }
+  if (!settings.npmCommand.every((entry) => typeof entry === 'string')) {
+    throw new Error(`Invalid npmCommand in ${settingsPath}: expected an array of strings`);
+  }
+  return [...settings.npmCommand];
+}
+
+function toPackageManagerCommand(
+  commandParts: readonly string[] | undefined,
+  source: PackageManagerCommand['source'],
+): PackageManagerCommand | undefined {
+  if (!commandParts || commandParts.length === 0) return undefined;
+  const [command, ...args] = commandParts;
+  if (!command?.trim()) {
+    throw new Error('Invalid package manager command: first entry must be a non-empty command');
+  }
+  return { command, args, source };
+}
+
+function defaultIsCommandAvailable(command: string, cwd: string): boolean {
+  const result = spawnSync(command, ['--version'], { cwd, stdio: 'ignore' });
+  return !result.error;
+}
+
+export function getPackageManagerCommandCandidates(
+  options: {
+    cwd?: string;
+    settingsPath?: string;
+    isCommandAvailable?: (command: string) => boolean;
+  } = {},
+): PackageManagerCommand[] {
   const cwd = options.cwd ?? process.cwd();
+  const isCommandAvailable =
+    options.isCommandAvailable ?? ((command) => defaultIsCommandAvailable(command, cwd));
+  const candidates = [
+    toPackageManagerCommand(
+      readConfiguredNpmCommand({ settingsPath: options.settingsPath }),
+      'settings',
+    ),
+    isCommandAvailable('aube')
+      ? ({ command: 'aube', args: [], source: 'aube' } as const)
+      : undefined,
+    { command: 'pnpm', args: [], source: 'pnpm' } as const,
+  ].filter((candidate): candidate is PackageManagerCommand => !!candidate);
+
+  const seen = new Set<string>();
+  return candidates.filter((candidate) => {
+    const key = [candidate.command, ...candidate.args].join('\0');
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+export function resolvePackageManagerCommand(
+  options: {
+    cwd?: string;
+    settingsPath?: string;
+    isCommandAvailable?: (command: string) => boolean;
+  } = {},
+): PackageManagerCommand {
+  return (
+    getPackageManagerCommandCandidates(options)[0] ?? { command: 'pnpm', args: [], source: 'pnpm' }
+  );
+}
+
+function formatCommandPart(part: string): string {
+  return /^[A-Za-z0-9_@%+=:,./-]+$/.test(part) ? part : JSON.stringify(part);
+}
+
+export function formatPackageManagerCommand(
+  packageManager: PackageManagerCommand,
+  args: readonly string[] = [],
+): string {
+  return [packageManager.command, ...packageManager.args, ...args].map(formatCommandPart).join(' ');
+}
+
+function readPackageName(packageRoot: string): string | undefined {
   try {
-    const globalRoot = execFileSync('pnpm', ['root', '-g'], {
-      cwd,
-      encoding: 'utf8',
-    }).trim();
-    if (!globalRoot) return undefined;
-    const packagePath = join(globalRoot, packageName);
-    if (!existsSync(packagePath)) return undefined;
-    return realpathSync(packagePath);
+    const packageJsonPath = join(packageRoot, 'package.json');
+    if (!existsSync(packageJsonPath)) return undefined;
+    const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf8')) as { name?: string };
+    return packageJson.name;
   } catch {
     return undefined;
   }
+}
+
+function findPackagePathFromGlobalList(
+  packageName: string,
+  packageManager: PackageManagerCommand,
+  cwd: string,
+): string | undefined {
+  try {
+    const output = execFileSync(
+      packageManager.command,
+      [...packageManager.args, 'list', '-g', '--depth', '0', '--json'],
+      { cwd, encoding: 'utf8' },
+    );
+    const entries = JSON.parse(output) as Array<{
+      name?: string;
+      path?: string;
+      dependencies?: Record<string, { path?: string }>;
+    }>;
+
+    for (const entry of entries) {
+      const dependencyPath = entry.dependencies?.[packageName]?.path;
+      if (dependencyPath && existsSync(dependencyPath)) {
+        return realpathSync(dependencyPath);
+      }
+
+      if (entry.name !== packageName || !entry.path) continue;
+      const nestedPackagePath = join(entry.path, 'node_modules', packageName);
+      if (existsSync(nestedPackagePath)) {
+        return realpathSync(nestedPackagePath);
+      }
+      if (readPackageName(entry.path) === packageName) {
+        return realpathSync(entry.path);
+      }
+    }
+  } catch {
+    // Ignore list parsing and command failures; callers try other strategies.
+  }
+  return undefined;
+}
+
+export function findGlobalPackagePath(
+  packageName: string,
+  options: {
+    cwd?: string;
+    settingsPath?: string;
+    isCommandAvailable?: (command: string) => boolean;
+    packageManagerCommand?: PackageManagerCommand;
+  } = {},
+): string | undefined {
+  const cwd = options.cwd ?? process.cwd();
+  const packageManagers = options.packageManagerCommand
+    ? [options.packageManagerCommand]
+    : getPackageManagerCommandCandidates(options);
+
+  for (const packageManager of packageManagers) {
+    try {
+      const globalRoot = execFileSync(
+        packageManager.command,
+        [...packageManager.args, 'root', '-g'],
+        {
+          cwd,
+          encoding: 'utf8',
+        },
+      ).trim();
+      if (globalRoot) {
+        const packagePath = join(globalRoot, packageName);
+        if (existsSync(packagePath)) return realpathSync(packagePath);
+      }
+    } catch {
+      // Try the global list fallback below.
+    }
+
+    const listedPackagePath = findPackagePathFromGlobalList(packageName, packageManager, cwd);
+    if (listedPackagePath) return listedPackagePath;
+  }
+
+  return undefined;
 }
 
 export function isPiCodingAgentResolverPatchApplied(packageRoot: string): boolean {
@@ -215,10 +382,10 @@ export async function applyPiCodingAgentResolverPatch(
 ): Promise<ApplyPatchResult> {
   const packageRoot =
     options.packageRoot ??
-    findGlobalPnpmPackagePath(PI_CODING_AGENT_PACKAGE_NAME, { cwd: options.cwd });
+    findGlobalPackagePath(PI_CODING_AGENT_PACKAGE_NAME, { cwd: options.cwd });
   if (!packageRoot) {
     throw new Error(
-      `Could not locate installed ${PI_CODING_AGENT_PACKAGE_NAME} via 'pnpm root -g'`,
+      `Could not locate installed ${PI_CODING_AGENT_PACKAGE_NAME} via configured package manager, aube, or pnpm`,
     );
   }
 
@@ -327,9 +494,11 @@ export async function applyPiMermaidPatch(
   options: { dryRun?: boolean; packageRoot?: string; cwd?: string } = {},
 ): Promise<ApplyPatchResult> {
   const packageRoot =
-    options.packageRoot ?? findGlobalPnpmPackagePath(PI_MERMAID_PACKAGE_NAME, { cwd: options.cwd });
+    options.packageRoot ?? findGlobalPackagePath(PI_MERMAID_PACKAGE_NAME, { cwd: options.cwd });
   if (!packageRoot) {
-    throw new Error(`Could not locate installed ${PI_MERMAID_PACKAGE_NAME} via 'pnpm root -g'`);
+    throw new Error(
+      `Could not locate installed ${PI_MERMAID_PACKAGE_NAME} via configured package manager, aube, or pnpm`,
+    );
   }
 
   const version = getPackageVersion(packageRoot) ?? 'unknown';
@@ -443,10 +612,10 @@ export async function applyPiContinuousLearningPatch(
 ): Promise<ApplyPatchResult> {
   const packageRoot =
     options.packageRoot ??
-    findGlobalPnpmPackagePath(PI_CONTINUOUS_LEARNING_PACKAGE_NAME, { cwd: options.cwd });
+    findGlobalPackagePath(PI_CONTINUOUS_LEARNING_PACKAGE_NAME, { cwd: options.cwd });
   if (!packageRoot) {
     throw new Error(
-      `Could not locate installed ${PI_CONTINUOUS_LEARNING_PACKAGE_NAME} via 'pnpm root -g'`,
+      `Could not locate installed ${PI_CONTINUOUS_LEARNING_PACKAGE_NAME} via configured package manager, aube, or pnpm`,
     );
   }
 
@@ -539,15 +708,18 @@ function getLocalDevDependencyVersion(packageName: string, cwd: string): string 
     // Fall through to try global
   }
 
-  // Try global pnpm store
+  // Try globally installed packages using the configured package manager first,
+  // then aube (when available), then pnpm.
   try {
-    const globalPath = execFileSync('pnpm', ['root', '-g'], { encoding: 'utf8', cwd }).trim();
-    const globalPackageJsonPath = join(globalPath, packageName, 'package.json');
-    if (existsSync(globalPackageJsonPath)) {
-      const packageJson = JSON.parse(readFileSync(globalPackageJsonPath, 'utf8')) as {
-        version?: string;
-      };
-      return packageJson.version;
+    const globalPackagePath = findGlobalPackagePath(packageName, { cwd });
+    if (globalPackagePath) {
+      const globalPackageJsonPath = join(globalPackagePath, 'package.json');
+      if (existsSync(globalPackageJsonPath)) {
+        const packageJson = JSON.parse(readFileSync(globalPackageJsonPath, 'utf8')) as {
+          version?: string;
+        };
+        return packageJson.version;
+      }
     }
   } catch {
     // Ignore errors
@@ -864,7 +1036,8 @@ export async function runPiUpdate(options: { dryRun?: boolean } = {}): Promise<v
 //   2. Extracts its own version + its @mariozechner/* dep ranges.
 //   3. Rewrites the agent workspace root package.json devDependencies to
 //      those exact versions.
-//   4. Runs `pnpm install` so node_modules reflects the change.
+//   4. Runs the configured package manager's install command so node_modules
+//      reflects the change.
 // ---------------------------------------------------------------------------
 
 function stripRangePrefix(spec: string): string {
@@ -876,10 +1049,10 @@ function readGlobalPiCodingAgentPackageJson(): {
   path: string;
   json: { dependencies?: Record<string, string>; peerDependencies?: Record<string, string> };
 } {
-  const packageRoot = findGlobalPnpmPackagePath(PI_CODING_AGENT_PACKAGE_NAME);
+  const packageRoot = findGlobalPackagePath(PI_CODING_AGENT_PACKAGE_NAME);
   if (!packageRoot) {
     throw new Error(
-      `Could not locate globally installed ${PI_CODING_AGENT_PACKAGE_NAME} via 'pnpm root -g'.`,
+      `Could not locate globally installed ${PI_CODING_AGENT_PACKAGE_NAME} via configured package manager, aube, or pnpm.`,
     );
   }
   const packageJsonPath = join(packageRoot, 'package.json');
@@ -975,7 +1148,11 @@ export async function syncDevDependenciesWithGlobalPi(
   }
 
   writeDepSyncToPackageJson(packageJsonPath, changes);
-  execFileSync('pnpm', ['install'], { stdio: 'inherit', cwd });
+  const packageManager = resolvePackageManagerCommand({ cwd });
+  execFileSync(packageManager.command, [...packageManager.args, 'install'], {
+    stdio: 'inherit',
+    cwd,
+  });
   return { status: 'updated', changes, piCodingAgentVersion };
 }
 

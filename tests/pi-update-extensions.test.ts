@@ -9,10 +9,14 @@ import {
   applyPiMermaidPatch,
   buildPiCodingAgentResolverReplacement,
   compareVersions,
+  formatPackageManagerCommand,
+  getPackageManagerCommandCandidates,
   isPiCodingAgentResolverPatchApplied,
   isPiContinuousLearningPatchApplied,
   isPiMermaidPatchApplied,
   parsePiListOutput,
+  readConfiguredNpmCommand,
+  resolvePackageManagerCommand,
 } from '../scripts/pi-update-extensions.ts';
 
 const tempDirs: string[] = [];
@@ -58,6 +62,83 @@ describe('compareVersions', () => {
     expect(compareVersions('0.12.2', '0.12.2')).toBe(0);
     expect(compareVersions('0.12.3', '0.12.2')).toBeGreaterThan(0);
     expect(compareVersions('0.11.9', '0.12.2')).toBeLessThan(0);
+  });
+});
+
+describe('package manager command resolution', () => {
+  it('uses npmCommand from pi settings before other package managers', () => {
+    const dir = makeTempDir('pi-settings-');
+    const settingsPath = join(dir, 'settings.json');
+    writeFileSync(
+      settingsPath,
+      JSON.stringify({ npmCommand: ['mise', 'exec', 'node@22', '--', 'npm'] }),
+    );
+
+    expect(readConfiguredNpmCommand({ settingsPath })).toEqual([
+      'mise',
+      'exec',
+      'node@22',
+      '--',
+      'npm',
+    ]);
+    expect(
+      getPackageManagerCommandCandidates({
+        settingsPath,
+        isCommandAvailable: () => true,
+      }).slice(0, 2),
+    ).toEqual([
+      { command: 'mise', args: ['exec', 'node@22', '--', 'npm'], source: 'settings' },
+      { command: 'aube', args: [], source: 'aube' },
+    ]);
+  });
+
+  it('prefers aube over pnpm when settings do not configure npmCommand', () => {
+    const dir = makeTempDir('pi-settings-');
+    const settingsPath = join(dir, 'missing-settings.json');
+
+    expect(
+      resolvePackageManagerCommand({
+        settingsPath,
+        isCommandAvailable: (command) => command === 'aube',
+      }),
+    ).toEqual({ command: 'aube', args: [], source: 'aube' });
+  });
+
+  it('falls back to pnpm when settings are unset and aube is unavailable', () => {
+    const dir = makeTempDir('pi-settings-');
+    const settingsPath = join(dir, 'missing-settings.json');
+
+    expect(
+      resolvePackageManagerCommand({
+        settingsPath,
+        isCommandAvailable: () => false,
+      }),
+    ).toEqual({ command: 'pnpm', args: [], source: 'pnpm' });
+  });
+
+  it('deduplicates aube when settings already point at aube', () => {
+    const dir = makeTempDir('pi-settings-');
+    const settingsPath = join(dir, 'settings.json');
+    writeFileSync(settingsPath, JSON.stringify({ npmCommand: ['aube'] }));
+
+    expect(
+      getPackageManagerCommandCandidates({
+        settingsPath,
+        isCommandAvailable: (command) => command === 'aube',
+      }),
+    ).toEqual([
+      { command: 'aube', args: [], source: 'settings' },
+      { command: 'pnpm', args: [], source: 'pnpm' },
+    ]);
+  });
+
+  it('formats wrapper commands for display', () => {
+    expect(
+      formatPackageManagerCommand(
+        { command: 'mise', args: ['exec', 'node@22', '--', 'npm'], source: 'settings' },
+        ['install', '@scope/pkg name'],
+      ),
+    ).toBe('mise exec node@22 -- npm install "@scope/pkg name"');
   });
 });
 
