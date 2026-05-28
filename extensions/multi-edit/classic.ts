@@ -1,3 +1,5 @@
+import { structuredPatch, type StructuredPatchHunk } from 'diff';
+
 export interface ClassicEditItem {
   path: string;
   oldText: string;
@@ -60,76 +62,54 @@ export function normalizeForFuzzyMatch(text: string): string {
   );
 }
 
+function formatHunkRange(start: number, lines: number): string {
+  return lines === 1 ? `${start}` : `${start},${lines}`;
+}
+
+function formatStructuredHunk(hunk: StructuredPatchHunk): string[] {
+  return [
+    `@@ -${formatHunkRange(hunk.oldStart, hunk.oldLines)} +${formatHunkRange(
+      hunk.newStart,
+      hunk.newLines,
+    )} @@`,
+    ...hunk.lines,
+  ];
+}
+
+function findFirstChangedLineFromHunks(hunks: StructuredPatchHunk[]): number | undefined {
+  for (const hunk of hunks) {
+    let newLine = hunk.newStart;
+    for (const line of hunk.lines) {
+      if (line.startsWith('+')) {
+        return newLine;
+      }
+      if (line.startsWith('-')) {
+        return newLine;
+      }
+      if (line.startsWith(' ')) {
+        newLine += 1;
+      }
+    }
+  }
+  return undefined;
+}
+
 export function generateDiffString(
   oldContent: string,
   newContent: string,
   contextLines = 4,
 ): { diff: string; firstChangedLine: number | undefined } {
-  const oldLines = oldContent.split('\n');
-  const newLines = newContent.split('\n');
-  if (oldLines[oldLines.length - 1] === '') oldLines.pop();
-  if (newLines[newLines.length - 1] === '') newLines.pop();
-
-  let prefix = 0;
-  while (
-    prefix < oldLines.length &&
-    prefix < newLines.length &&
-    oldLines[prefix] === newLines[prefix]
-  ) {
-    prefix++;
+  const patch = structuredPatch('', '', oldContent, newContent, undefined, undefined, {
+    context: contextLines,
+  });
+  if (patch.hunks.length === 0) {
+    return { diff: '', firstChangedLine: undefined };
   }
 
-  let oldSuffix = oldLines.length - 1;
-  let newSuffix = newLines.length - 1;
-  while (
-    oldSuffix >= prefix &&
-    newSuffix >= prefix &&
-    oldLines[oldSuffix] === newLines[newSuffix]
-  ) {
-    oldSuffix--;
-    newSuffix--;
-  }
-
-  const firstChangedLine =
-    prefix + 1 <= Math.max(oldLines.length, newLines.length) ? prefix + 1 : undefined;
-  const output: string[] = [];
-  const maxLineNum = Math.max(oldLines.length, newLines.length, 1);
-  const lineNumWidth = String(maxLineNum).length;
-
-  const contextStart = Math.max(0, prefix - contextLines);
-  const contextEndOld = Math.min(oldLines.length, oldSuffix + 1 + contextLines);
-  const contextEndNew = Math.min(newLines.length, newSuffix + 1 + contextLines);
-
-  for (let i = contextStart; i < prefix; i++) {
-    output.push(` ${String(i + 1).padStart(lineNumWidth, ' ')} ${oldLines[i]}`);
-  }
-
-  if (contextStart > 0) {
-    output.unshift(` ${''.padStart(lineNumWidth, ' ')} ...`);
-  }
-
-  for (let i = prefix; i <= oldSuffix; i++) {
-    output.push(`-${String(i + 1).padStart(lineNumWidth, ' ')} ${oldLines[i]}`);
-  }
-  for (let i = prefix; i <= newSuffix; i++) {
-    output.push(`+${String(i + 1).padStart(lineNumWidth, ' ')} ${newLines[i]}`);
-  }
-
-  const suffixCount = Math.min(
-    contextLines,
-    oldLines.length - (oldSuffix + 1),
-    newLines.length - (newSuffix + 1),
-  );
-  for (let i = 0; i < suffixCount; i++) {
-    const oldIndex = oldSuffix + 1 + i;
-    output.push(` ${String(oldIndex + 1).padStart(lineNumWidth, ' ')} ${oldLines[oldIndex]}`);
-  }
-
-  if (contextEndOld < oldLines.length || contextEndNew < newLines.length) {
-    output.push(` ${''.padStart(lineNumWidth, ' ')} ...`);
-  }
-
-  return { diff: output.join('\n'), firstChangedLine };
+  return {
+    diff: patch.hunks.flatMap(formatStructuredHunk).join('\n'),
+    firstChangedLine: findFirstChangedLineFromHunks(patch.hunks),
+  };
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

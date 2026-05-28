@@ -1,6 +1,6 @@
 {
   "name": "pi-toolbox",
-  "version": "0.10.7",
+  "version": "0.11.0",
   "private": true,
   "description": "My own pi-toolbox of extensions, skills, prompts, and subagent templates.",
   "license": "MIT",
@@ -13,14 +13,15 @@
     "knip:fix:files": "knip --fix --allow-remove-files && oxfmt -c .oxfmtrc.json ."
   },
   "dependencies": {
+    "diff": ">=8.0.0",
     "parallel-web": "^0.3.2"
   },
   "devDependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1027.0",
-    "@earendil-works/pi-agent-core": "0.75.5",
-    "@earendil-works/pi-ai": "0.75.5",
-    "@earendil-works/pi-coding-agent": "0.75.5",
-    "@earendil-works/pi-tui": "0.75.5",
+    "@earendil-works/pi-agent-core": "0.76.0",
+    "@earendil-works/pi-ai": "0.76.0",
+    "@earendil-works/pi-coding-agent": "0.76.0",
+    "@earendil-works/pi-tui": "0.76.0",
     "@types/node": "^24.3.0",
     "knip": "^6.3.1",
     "oxfmt": "^0.44.0",

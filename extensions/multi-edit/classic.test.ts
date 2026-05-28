@@ -3,6 +3,7 @@ import { describe, expect, test } from 'vitest';
 import {
   applyClassicEditsToText,
   detectLineEnding,
+  generateDiffString,
   normalizeClassicParams,
   normalizeForFuzzyMatch,
   stripBom,
@@ -144,6 +145,23 @@ describe('applyClassicEditsToText', () => {
     ]);
 
     expect(result.content).toBe('const title = "hi";\n');
+  });
+});
+
+describe('generateDiffString', () => {
+  test('renders far-apart edits as separate hunks without unchanged middle', () => {
+    const before = `${Array.from({ length: 40 }, (_, index) => `line ${index + 1}`).join('\n')}\n`;
+    const afterLines = before.trimEnd().split('\n');
+    afterLines[1] = 'line 2 changed';
+    afterLines[37] = 'line 38 changed';
+
+    const result = generateDiffString(before, `${afterLines.join('\n')}\n`, 2);
+
+    expect(result.firstChangedLine).toBe(2);
+    expect(result.diff.match(/^@@ /gm)).toHaveLength(2);
+    expect(result.diff).toContain('line 2 changed');
+    expect(result.diff).toContain('line 38 changed');
+    expect(result.diff).not.toContain('line 20');
   });
 });
 

@@ -69,8 +69,9 @@ describe('commitMutationPlan', () => {
     const result = await commitMutationPlan(plan, workspace, { rollbackOnFailure: true });
 
     expect(result.ok).toBe(true);
-    expect(result.diff).toContain('-1 alpha');
-    expect(result.diff).toContain('+1 beta');
+    expect(result.diff).toContain('@@ -1 +1 @@');
+    expect(result.diff).toContain('-alpha');
+    expect(result.diff).toContain('+beta');
   });
 
   test('rejects obvious metadata mismatches without reading file contents up front', async () => {
