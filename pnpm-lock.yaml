@@ -5,15 +5,19 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  '@earendil-works/pi-ai': 0.76.0
-  '@earendil-works/pi-coding-agent': 0.76.0
-  '@earendil-works/pi-tui': 0.76.0
+  '@earendil-works/pi-ai': 0.77.0
+  '@earendil-works/pi-coding-agent': 0.77.0
+  '@earendil-works/pi-tui': 0.77.0
 
 time:
-  '@earendil-works/pi-agent-core@0.76.0': 2026-05-27T20:03:40.762Z
-  '@earendil-works/pi-ai@0.76.0': 2026-05-27T20:03:51.992Z
-  '@earendil-works/pi-coding-agent@0.76.0': 2026-05-27T20:03:58.034Z
-  '@earendil-works/pi-tui@0.76.0': 2026-05-27T20:04:00.612Z
+  '@earendil-works/pi-agent-core@0.75.5': 2026-05-23T10:06:28.981Z
+  '@earendil-works/pi-agent-core@0.77.0': 2026-05-28T22:48:59.046Z
+  '@earendil-works/pi-ai@0.77.0': 2026-05-28T22:48:53.272Z
+  '@earendil-works/pi-coding-agent@0.77.0': 2026-05-28T22:49:11.206Z
+  '@earendil-works/pi-tui@0.77.0': 2026-05-28T22:49:04.807Z
+  '@types/picomatch@4.0.3': 2026-04-03T00:13:45.392Z
+  '@types/shell-quote@1.7.5': 2023-11-21T01:03:41.617Z
+  shell-quote@1.8.4: 2026-05-22T13:13:48.633Z
 
 importers:
 
@@ -30,17 +34,17 @@ importers:
         specifier: ^3.1027.0
         version: 3.1033.0
       '@earendil-works/pi-agent-core':
-        specifier: 0.76.0
-        version: 0.76.0(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
+        specifier: 0.77.0
+        version: 0.77.0(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
       '@earendil-works/pi-ai':
-        specifier: 0.76.0
-        version: 0.76.0(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
+        specifier: 0.77.0
+        version: 0.77.0(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
       '@earendil-works/pi-coding-agent':
-        specifier: 0.76.0
-        version: 0.76.0(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
+        specifier: 0.77.0
+        version: 0.77.0(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
       '@earendil-works/pi-tui':
-        specifier: 0.76.0
-        version: 0.76.0
+        specifier: 0.77.0
+        version: 0.77.0
       '@types/node':
         specifier: ^24.3.0
         version: 24.12.2
@@ -79,17 +83,17 @@ importers:
         version: 4.0.4
       shell-quote:
         specifier: ^1.8.3
-        version: 1.8.3
+        version: 1.8.4
     devDependencies:
       '@earendil-works/pi-agent-core':
         specifier: ^0.75.4
-        version: 0.75.4(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
+        version: 0.75.5(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
       '@earendil-works/pi-coding-agent':
         specifier: ^0.75.4
-        version: 0.76.0(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
+        version: 0.77.0(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
       '@earendil-works/pi-tui':
         specifier: ^0.75.4
-        version: 0.76.0
+        version: 0.77.0
       '@types/node':
         specifier: ^24.3.0
         version: 24.12.2
@@ -122,10 +126,10 @@ importers:
     devDependencies:
       '@earendil-works/pi-ai':
         specifier: ^0.75.4
-        version: 0.76.0(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
+        version: 0.77.0(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
       '@earendil-works/pi-coding-agent':
         specifier: ^0.75.4
-        version: 0.76.0(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
+        version: 0.77.0(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
       '@types/node':
         specifier: ^24.3.0
         version: 24.12.2
@@ -149,10 +153,10 @@ importers:
     devDependencies:
       '@earendil-works/pi-ai':
         specifier: ^0.75.4
-        version: 0.76.0(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
+        version: 0.77.0(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
       '@earendil-works/pi-coding-agent':
         specifier: ^0.75.4
-        version: 0.76.0(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
+        version: 0.77.0(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
       '@types/node':
         specifier: ^24.3.0
         version: 24.12.2
@@ -404,26 +408,26 @@ packages:
     resolution: {integrity: sha512-JiDShH45zKHWyGe4ZNVRrCjBz8Nh9TMmZG1kh4QTK8hCBTWBi8Da+i7s1fJw7/lYpM4ccepSNfqzZ/QvABBi5g==}
     engines: {node: '>=6.9.0'}
 
-  '@earendil-works/pi-agent-core@0.75.4':
-    resolution: {integrity: sha512-cGYbysb4EqUf0B28OeqFq2ppm1XF3bYBOP71q9dv38yf/UJfzMjiXBeNelrcio+QWIoVrW+xzYm7sMzYIUc9Og==}
+  '@earendil-works/pi-agent-core@0.75.5':
+    resolution: {integrity: sha512-LHygOgsW2pgXKb3IkXkOAeZPovHr9VF+EixgXVsDNuB4jmhEOXgshy/zksZ7slkUAx10OQ9W1Ed/2jsnhd1NqA==}
     engines: {node: '>=22.19.0'}
 
-  '@earendil-works/pi-agent-core@0.76.0':
-    resolution: {integrity: sha512-gNfR+ScnyAKr/13K8129svRBwO48jIK4jBHZRLaj3l4inKRkCRyCGs6hZnyQCYeiVNbBt1Jcjvb7osss44Q9xw==}
+  '@earendil-works/pi-agent-core@0.77.0':
+    resolution: {integrity: sha512-l/mYLJPjpgiPDmcfnFIGdOBqICkWaf8IawCdAbae5guBrPXg+Z0o84l9OuHyRJPOb8RfedeGg8DtSnq8t7grOg==}
     engines: {node: '>=22.19.0'}
 
-  '@earendil-works/pi-ai@0.76.0':
-    resolution: {integrity: sha512-RO/L80iTxkK/nM2s5IVuirjH04UBsVzFfAT0qVcP/VwtDe9pjpqL+BVqb3XTyfitTD9tBo/hQuKmagN8Ep5qZA==}
-    engines: {node: '>=22.19.0'}
-    hasBin: true
-
-  '@earendil-works/pi-coding-agent@0.76.0':
-    resolution: {integrity: sha512-vTnKbgw1rDQq2MD+vcWgyYvEPMV4mMb07tZZMS7FOvlS5t/jzIX9smC+k97YGpfl8dT+L9Uj+MYyvYSBXVaEHw==}
+  '@earendil-works/pi-ai@0.77.0':
+    resolution: {integrity: sha512-H21BrQDPf3ydaeBmS5maNDHxUGFMiKBF/n3WnE+OTWloIZSayeL+/NVEgG3aKQw8fZL6HAMYAGpUIVJgFuKtnw==}
     engines: {node: '>=22.19.0'}
     hasBin: true
 
-  '@earendil-works/pi-tui@0.76.0':
-    resolution: {integrity: sha512-TWQEWqc38gVRYr/VTrlfePQPpJk938gNNLL1xuv0M+9cTkVr880/Q3baZQrxKoLrmN/MmVx7TyR8knYZGxTqqg==}
+  '@earendil-works/pi-coding-agent@0.77.0':
+    resolution: {integrity: sha512-huS+k+dhQRR9PlTK7crLfeSRUw3a96V6JYfP0ZH3Zkko/m10gsYk8dKQmwScSy5Dll516pXorz19BURfD6S2qQ==}
+    engines: {node: '>=22.19.0'}
+    hasBin: true
+
+  '@earendil-works/pi-tui@0.77.0':
+    resolution: {integrity: sha512-QV/eYtcT3hM9pJjLCkjUFOUmgAm4GPzJ0K4kofVq9+BGU7wNJVzflTO4VY2tYpaI4VSo6A5Hsuw00wY/CDmY/Q==}
     engines: {node: '>=22.19.0'}
 
   '@esbuild/darwin-arm64@0.27.7':
@@ -552,22 +556,22 @@ packages:
   '@jridgewell/sourcemap-codec@1.5.5':
     resolution: {integrity: sha512-cYQ9310grqxueWbl+WuIUIaiUaDcj7WOq5fVhEljNVgRfOUhY9fy2zTvfoqWsnebh8Sl70VScFbICvJnLKB0Og==}
 
-  '@mariozechner/clipboard-darwin-arm64@0.3.6':
-    resolution: {integrity: sha512-HjaisYCAbHi/1+N1yDAQHc8ZXGffufIUT5NSOSVR3f3AuMDusxTtnbK8tZ7JFDkShua1oNGZoNwQHsc8MPtE0Q==}
+  '@mariozechner/clipboard-darwin-arm64@0.3.9':
+    resolution: {integrity: sha512-BfgV7vCEWZwJwZJw03r6bP5+tf0iI/ANuQYCxi9RNn7FrWB3yzGuMKCrNLRl6V761vXRdL8+OqZ0wd4TqlsNOQ==}
     engines: {node: '>= 10'}
     os:
     - darwin
     cpu:
     - arm64
 
-  '@mariozechner/clipboard-darwin-universal@0.3.6':
-    resolution: {integrity: sha512-8BWtPjOtJOJoykml3w0fx0zRrfWP31mXrJwfoA7xzNprkZw1uolCNfgmjDiVBseoKjp16EGITz7bN+61qn8dWA==}
+  '@mariozechner/clipboard-darwin-universal@0.3.9':
+    resolution: {integrity: sha512-BGGR4iA9Z2shAjI65eI5xtyb3LYNlDW9X3gxKxDbqtbnREohsrqznov6zpKoIrsRWpzlYVEdKphS7ksJ0/ndSQ==}
     engines: {node: '>= 10'}
     os:
     - darwin
 
-  '@mariozechner/clipboard-linux-arm64-gnu@0.3.6':
-    resolution: {integrity: sha512-5JFf5rGofrm+V29HNF+wLthXphHdQpMbKDUYJ5tML6/Z5DLlLOV/9Ak4kDPtYyZ+Dzf+kAusE0VsFg4+tfP1IA==}
+  '@mariozechner/clipboard-linux-arm64-gnu@0.3.9':
+    resolution: {integrity: sha512-g59OkUGP2DDfCOIKypHeYgv2M55u/cKvXa5dSxFbEJ34XvIQMdcVmpKCkGUro3ZgefXiGVdwguvTMQGpHWzIXw==}
     engines: {node: '>= 10'}
     os:
     - linux
@@ -576,8 +580,8 @@ packages:
     libc:
     - glibc
 
-  '@mariozechner/clipboard-linux-arm64-musl@0.3.6':
-    resolution: {integrity: sha512-JlVjxxw0GbGC0djXYWRIqyteO3J1KZ/QG3udlEFaOD5TLOM1FnmXXAPDQBqr+aBVr720ef9K00dirYnJ0LDCtw==}
+  '@mariozechner/clipboard-linux-arm64-musl@0.3.9':
+    resolution: {integrity: sha512-AGuJdgKsmJdm4Pych7kv3sqe591ERRaAHW3xjLooiFzn8J+PxUyof++7YZrB5Y5tpnTO+K18Og3taj2NpluCRQ==}
     engines: {node: '>= 10'}
     os:
     - linux
@@ -586,8 +590,8 @@ packages:
     libc:
     - musl
 
-  '@mariozechner/clipboard-linux-x64-gnu@0.3.6':
-    resolution: {integrity: sha512-trtPwcNLW37irwQCJLtCxLw757jjJZk3TSnY/MU9bhtWtA3K9b/eLW0e4RGhUXDoFRds9opNWWaUDuFLa8dm0w==}
+  '@mariozechner/clipboard-linux-x64-gnu@0.3.9':
+    resolution: {integrity: sha512-WORrMLd6EpElEME7JRKfSaY34nW1P5LbdgK5YNCS1ncG2LqmITsSMEJ8nh2mpvxb3TxqbOOKgY7k9eMJYlW9Mw==}
     engines: {node: '>= 10'}
     os:
     - linux
@@ -596,8 +600,8 @@ packages:
     libc:
     - glibc
 
-  '@mariozechner/clipboard-linux-x64-musl@0.3.6':
-    resolution: {integrity: sha512-WfnzIvOCCWQiN0MmltCEo6cLceUDbYe+I7xyFZjaps5A+2Op/M2CY7Rey+C4ucQhrvmpoHmTSFgY9ODWk7snoA==}
+  '@mariozechner/clipboard-linux-x64-musl@0.3.9':
+    resolution: {integrity: sha512-/DHn+1DrfL6oRaPPWXaOKvonFFrni666fxd+zFqiQEfvBH0tsHVWjq9iqBk0oDp0qaPA72lIMy5BptxISBEhZQ==}
     engines: {node: '>= 10'}
     os:
     - linux
@@ -606,24 +610,24 @@ packages:
     libc:
     - musl
 
-  '@mariozechner/clipboard-win32-arm64-msvc@0.3.6':
-    resolution: {integrity: sha512-+8+1aHYsBPUjmW3otmWlg+Hijt0iJvoBBs5e0mxFeUd4gDaKMB8Bn6x7c6KVtscg7E5j5NFXnwQqNSIAO4p8zQ==}
+  '@mariozechner/clipboard-win32-arm64-msvc@0.3.9':
+    resolution: {integrity: sha512-O5FHD3ErkMwMhNzAfu3ggy0ug4z7btZuoQgwwxlzPrwV2bxlD6WDpqBY4NCgICAgZdDKdp+loUEKVAVt8aYnhQ==}
     engines: {node: '>= 10'}
     os:
     - win32
     cpu:
     - arm64
 
-  '@mariozechner/clipboard-win32-x64-msvc@0.3.6':
-    resolution: {integrity: sha512-S4xfPmERC8ZkiLHe3vekZCjdDwNEETCuvCgQK2kP6/TnvmUkq1y2Pk+DjM4t8uh9KMX9bH4zs5ePcKa8GTXmfg==}
+  '@mariozechner/clipboard-win32-x64-msvc@0.3.9':
+    resolution: {integrity: sha512-ihQC3EufqEY81vhXBgVBtK4prL+wc62zJsSvxrgz7K1hsdt6OObz6v9p3Rn1OG3GJksTTKMJF0u/guMISHPhSA==}
     engines: {node: '>= 10'}
     os:
     - win32
     cpu:
     - x64
 
-  '@mariozechner/clipboard@0.3.6':
-    resolution: {integrity: sha512-MXdtr+6+ntlIVHdrZYuZNQydu6o8yZswFJ2Ln81j2O/Y9B/LDHvEaIm95xWNPkjGTWriSOeLnQJRFs6dYb60bg==}
+  '@mariozechner/clipboard@0.3.9':
+    resolution: {integrity: sha512-ABnA53mdfkGZwOFUdZNv2S0CWGO/EIuPj8Vv9xmBFmSYg/qFc7ihO6q5FcQjvoE67kZpWkEc4AhD6B/os04yuA==}
     engines: {node: '>= 10'}
 
   '@mistralai/mistralai@2.2.1':
@@ -1303,16 +1307,16 @@ packages:
   '@vitest/utils@3.2.4':
     resolution: {integrity: sha512-fB2V0JFrQSMsCo9HiSq3Ezpdv4iYaXRG1Sx8edX3MwxfyNn83mKiGzOcH+Fkxt4MHxr3y42fQi1oeAInqgX2QA==}
 
-  '@yuuang/ffi-rs-darwin-arm64@1.3.1':
-    resolution: {integrity: sha512-YlnTMIyzfW3mAULC5ZA774nzQfFlYXM0rrfq/8ZzWt+IMbYk55a++jrI+6JeKV+1EqlDS3TFBEFtjdBNG94KzQ==}
+  '@yuuang/ffi-rs-darwin-arm64@1.3.2':
+    resolution: {integrity: sha512-kRdgPaOM6TfuC5wHUwstlatk4HNie2lwSLJWQL2LiAUIJ7+96CoiWUNVhwBcFrhdfxhnWenYS6F668CV0vit8Q==}
     engines: {node: '>= 12'}
     os:
     - darwin
     cpu:
     - arm64
 
-  '@yuuang/ffi-rs-linux-arm64-gnu@1.3.1':
-    resolution: {integrity: sha512-J2PwqviycZxaEVA0Bwv38LqGDGSB9A1DPN4iYginYJZSvTvKW8kh7Tis0HbZrX1YDKnY8hi3lt0N0tCTNPDH5Q==}
+  '@yuuang/ffi-rs-linux-arm64-gnu@1.3.2':
+    resolution: {integrity: sha512-gWFO6xufUK9lPYUqDvKa6IR243dPqdetgl9Q7HrZWaDu7wLo06QQrosw8QTzndafQnOcBKm6LoLujmGCfTgJOA==}
     engines: {node: '>= 12'}
     os:
     - linux
@@ -1321,8 +1325,8 @@ packages:
     libc:
     - glibc
 
-  '@yuuang/ffi-rs-linux-arm64-musl@1.3.1':
-    resolution: {integrity: sha512-Hn1W1hBPssTaqikU1Bqp1XUdDdOgbnYVIOtR++LVx66hhrtjf/xrIUQOhTm+NmOFDG16JUKXe1skfM4gpaqYwg==}
+  '@yuuang/ffi-rs-linux-arm64-musl@1.3.2':
+    resolution: {integrity: sha512-lejvOSqypPziQH5rzfkDlJ6e92qhWbDutE9ttOO6z5I2k83zoh9iZhZWhaXSU5VqgQpcshRkrbtXb9gy1ft5dA==}
     engines: {node: '>= 12'}
     os:
     - linux
@@ -1331,8 +1335,8 @@ packages:
     libc:
     - musl
 
-  '@yuuang/ffi-rs-linux-x64-gnu@1.3.1':
-    resolution: {integrity: sha512-kW6e+oCYZPvpH2ppPsffA18e1aLowtmWTRjVlyHtY04g/nQDepQvDUkkcvInh9fW5jLna7PjHvktW1tVgYIj2A==}
+  '@yuuang/ffi-rs-linux-x64-gnu@1.3.2':
+    resolution: {integrity: sha512-s8VCFazaJKmgY2hgMTpWk4TtBY/zy5ovbaGgwyY0FvBD0YvyhcET4IrMsDJpHhFVTPCYfKZ1dN45clD/YiFp6g==}
     engines: {node: '>= 12'}
     os:
     - linux
@@ -1341,8 +1345,8 @@ packages:
     libc:
     - glibc
 
-  '@yuuang/ffi-rs-linux-x64-musl@1.3.1':
-    resolution: {integrity: sha512-HTwblAzruUS16nQPrez3ozvEHm1Xxh8J8w7rZYrpmAcNl1hzyOT8z/hY70M9Rt9fOqQ4Ovgor9qVy/U3ZJo0ZA==}
+  '@yuuang/ffi-rs-linux-x64-musl@1.3.2':
+    resolution: {integrity: sha512-Ahr5chfKZKWUik20bEZRug+be57LZ2yYrtolyjSRoo7A4ZniBUHBZUNWm6TD6i0CJayqyxWeVk/XiaABD8bY0w==}
     engines: {node: '>= 12'}
     os:
     - linux
@@ -1351,16 +1355,16 @@ packages:
     libc:
     - glibc
 
-  '@yuuang/ffi-rs-win32-arm64-msvc@1.3.1':
-    resolution: {integrity: sha512-WeZkGl2BP1U4tRhEQH+FXLQS52N8obp74smK5AAGOfzPAT1pHkq6+dVkC1QCSIt7dHJs7SPtlnQw+5DkdZYlWA==}
+  '@yuuang/ffi-rs-win32-arm64-msvc@1.3.2':
+    resolution: {integrity: sha512-yhpLcj0qel5VNlpzxPZfNmi7+rEX8444QHjUP6WWLxdRfqPllROu/Cp3OpkBpw3BLdxfcDhWkjWMD5QsJN0Pvg==}
     engines: {node: '>= 12'}
     os:
     - win32
     cpu:
     - arm64
 
-  '@yuuang/ffi-rs-win32-ia32-msvc@1.3.1':
-    resolution: {integrity: sha512-rNGgMeCH5mdeHiMiJgt7wWXovZ+FHEfXhU9p4zZBH4n8M1/QnEsRUwlapISPLpILSGpoYS6iBuq9/fUlZY8Mhg==}
+  '@yuuang/ffi-rs-win32-ia32-msvc@1.3.2':
+    resolution: {integrity: sha512-BFVSbdtg/7mJBw5kQFOPKFiA+SF7z3240HpzHN81Umm4Bp4dWkyx0msYn8+Q7/BBJiLQ4F6bi3Nftk58YA9r9w==}
     engines: {node: '>= 12'}
     os:
     - win32
@@ -1368,8 +1372,8 @@ packages:
     - x64
     - ia32
 
-  '@yuuang/ffi-rs-win32-x64-msvc@1.3.1':
-    resolution: {integrity: sha512-dr2LcLD2CXo2a7BktlOpV68QhayqiI112KxIJC9tBgQO/Dkdg4CPsdqmvzzLhFo64iC5RLl2BT7M5lJImrfUWw==}
+  '@yuuang/ffi-rs-win32-x64-msvc@1.3.2':
+    resolution: {integrity: sha512-ZL5MJ76n2rjwGo26kCWW7wK6QT/cee00Rx8pfW79pz6vM6jqfhoE7zTnwFiw4aOQUes9+HUc5DeeJ3z+Vb9oLg==}
     engines: {node: '>= 12'}
     os:
     - win32
@@ -1611,8 +1615,8 @@ packages:
   fff-router@https://github.com/unstableneutron/fff-router.git#049cc199944a95b956cafa2f5086198074bcc26d:
     resolution: {integrity: sha512-/UQOBknomj4DpvsNMf8f3SZls9+zXD8t0EtTKU6E6foDe69tVOI2EyIgJ2UExA/xsF9MbD+tlybHg4yp4nu7JQ==, gitHosted: true, commit: 049cc199944a95b956cafa2f5086198074bcc26d, repo: https://github.com/unstableneutron/fff-router.git, type: git}
 
-  ffi-rs@1.3.1:
-    resolution: {integrity: sha512-ZyNXL9fnclnZV+waQmWB9JrfbIEyxQa1OWtMrHOrAgcC04PgP5hBMG5TdhVN8N4uT/eul8zCFMVnJUukAFFlXA==}
+  ffi-rs@1.3.2:
+    resolution: {integrity: sha512-4s8dX9VbBw/jd5NOuE3EJRqXaIVdjMyiumeeDzrOhtjQRwp6Bz2za7iksWXTnvTQKV/tTdm1s1w7mObe92zPjQ==}
 
   finalhandler@2.1.1:
     resolution: {integrity: sha512-S8KoZgRZN+a5rNwqTxlZZePjT/4cnm0ROV70LedRHZ0p8u9fRID0hJUZQpkKLzro8LfmC8sx23bY6tVNxv8pQA==}
@@ -2035,8 +2039,8 @@ packages:
     resolution: {integrity: sha512-7++dFhtcx3353uBaq8DDR4NuxBetBzC7ZQOhmTQInHEd6bSrXdiEyzCvG07Z44UYdLShWUyXt5M/yhz8ekcb1A==}
     engines: {node: '>=8'}
 
-  shell-quote@1.8.3:
-    resolution: {integrity: sha512-ObmnIF4hXNg1BqhnHmgbDETF8dLPCggZWBjkQfhZpbszZnYur5DUljTcCHii5LC3J5E0yeO/1LIMyH+UvHQgyw==}
+  shell-quote@1.8.4:
+    resolution: {integrity: sha512-VsC6n6vz1ihYYyZZwX7YZSF5l5x36ca17OC+a69h94YqB7X6XLwf+5MOgynYir2SLFUbl8gIYvBo8K8RoNQ6bQ==}
     engines: {node: '>= 0.4'}
 
   side-channel-list@1.0.1:
@@ -2670,12 +2674,12 @@ snapshots:
       '@aws-sdk/core': 3.974.2
       '@aws-sdk/types': 3.973.8
       '@aws-sdk/util-arn-parser': 3.972.3
-      '@smithy/core': 3.23.16
+      '@smithy/core': 3.24.3
       '@smithy/node-config-provider': 4.3.14
       '@smithy/protocol-http': 5.3.14
       '@smithy/signature-v4': 5.3.14
       '@smithy/smithy-client': 4.12.12
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       '@smithy/util-config-provider': 4.2.2
       '@smithy/util-middleware': 4.2.14
       '@smithy/util-stream': 4.5.24
@@ -2789,7 +2793,7 @@ snapshots:
       '@aws-sdk/types': 3.973.8
       '@smithy/protocol-http': 5.3.14
       '@smithy/signature-v4': 5.3.14
-      '@smithy/types': 4.14.1
+      '@smithy/types': 4.14.2
       tslib: 2.8.1
 
   '@aws-sdk/signature-v4-multi-region@3.996.27':
@@ -2891,28 +2895,21 @@ snapshots:
 
   '@babel/runtime@7.29.2': {}
 
-  '@earendil-works/pi-agent-core@0.75.4(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)':
+  '@earendil-works/pi-agent-core@0.75.5(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)':
     dependencies:
-      '@earendil-works/pi-ai': 0.76.0(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
-      ignore: 7.0.5
-      typebox: 1.1.38
-      yaml: 2.9.0
-    transitivePeerDependencies:
-    - '@modelcontextprotocol/sdk'
-    - bufferutil
-    - supports-color
-    - utf-8-validate
-    - ws
-    - zod
-
-  '@earendil-works/pi-agent-core@0.76.0(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)':
-    dependencies:
-      '@earendil-works/pi-ai': 0.76.0(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
+      '@earendil-works/pi-ai': 0.77.0(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
       ignore: 7.0.5
       typebox: 1.1.38
       yaml: 2.9.0
 
-  '@earendil-works/pi-ai@0.76.0(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)':
+  '@earendil-works/pi-agent-core@0.77.0(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)':
+    dependencies:
+      '@earendil-works/pi-ai': 0.77.0(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
+      ignore: 7.0.5
+      typebox: 1.1.38
+      yaml: 2.9.0
+
+  '@earendil-works/pi-ai@0.77.0(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)':
     dependencies:
       '@anthropic-ai/sdk': 0.91.1(zod@4.3.6)
       '@aws-sdk/client-bedrock-runtime': 3.1048.0
@@ -2925,11 +2922,11 @@ snapshots:
       partial-json: 0.1.7
       typebox: 1.1.38
 
-  '@earendil-works/pi-coding-agent@0.76.0(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)':
+  '@earendil-works/pi-coding-agent@0.77.0(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)':
     dependencies:
-      '@earendil-works/pi-agent-core': 0.76.0(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
-      '@earendil-works/pi-ai': 0.76.0(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
-      '@earendil-works/pi-tui': 0.76.0
+      '@earendil-works/pi-agent-core': 0.77.0(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
+      '@earendil-works/pi-ai': 0.77.0(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
+      '@earendil-works/pi-tui': 0.77.0
       '@silvia-odwyer/photon-node': 0.3.4
       chalk: 5.6.2
       cross-spawn: 7.0.6
@@ -2945,9 +2942,9 @@ snapshots:
       undici: 8.3.0
       yaml: 2.9.0
     optionalDependencies:
-      '@mariozechner/clipboard': 0.3.6
+      '@mariozechner/clipboard': 0.3.9
 
-  '@earendil-works/pi-tui@0.76.0':
+  '@earendil-works/pi-tui@0.77.0':
     dependencies:
       get-east-asian-width: 1.6.0
       marked: 15.0.12
@@ -2967,30 +2964,23 @@ snapshots:
   '@esbuild/win32-x64@0.27.7':
     optional: true
 
-  '@ff-labs/fff-bin-darwin-arm64@0.5.2':
-    optional: true
+  '@ff-labs/fff-bin-darwin-arm64@0.5.2': {}
 
-  '@ff-labs/fff-bin-linux-arm64-gnu@0.5.2':
-    optional: true
+  '@ff-labs/fff-bin-linux-arm64-gnu@0.5.2': {}
 
-  '@ff-labs/fff-bin-linux-arm64-musl@0.5.2':
-    optional: true
+  '@ff-labs/fff-bin-linux-arm64-musl@0.5.2': {}
 
-  '@ff-labs/fff-bin-linux-x64-gnu@0.5.2':
-    optional: true
+  '@ff-labs/fff-bin-linux-x64-gnu@0.5.2': {}
 
-  '@ff-labs/fff-bin-linux-x64-musl@0.5.2':
-    optional: true
+  '@ff-labs/fff-bin-linux-x64-musl@0.5.2': {}
 
-  '@ff-labs/fff-bin-win32-arm64@0.5.2':
-    optional: true
+  '@ff-labs/fff-bin-win32-arm64@0.5.2': {}
 
-  '@ff-labs/fff-bin-win32-x64@0.5.2':
-    optional: true
+  '@ff-labs/fff-bin-win32-x64@0.5.2': {}
 
   '@ff-labs/fff-node@0.5.2':
     dependencies:
-      ffi-rs: 1.3.1
+      ffi-rs: 1.3.2
     optionalDependencies:
       '@ff-labs/fff-bin-darwin-arm64': 0.5.2
       '@ff-labs/fff-bin-linux-arm64-gnu': 0.5.2
@@ -3019,41 +3009,32 @@ snapshots:
 
   '@jridgewell/sourcemap-codec@1.5.5': {}
 
-  '@mariozechner/clipboard-darwin-arm64@0.3.6':
-    optional: true
+  '@mariozechner/clipboard-darwin-arm64@0.3.9': {}
 
-  '@mariozechner/clipboard-darwin-universal@0.3.6':
-    optional: true
+  '@mariozechner/clipboard-darwin-universal@0.3.9': {}
 
-  '@mariozechner/clipboard-linux-arm64-gnu@0.3.6':
-    optional: true
+  '@mariozechner/clipboard-linux-arm64-gnu@0.3.9': {}
 
-  '@mariozechner/clipboard-linux-arm64-musl@0.3.6':
-    optional: true
+  '@mariozechner/clipboard-linux-arm64-musl@0.3.9': {}
 
-  '@mariozechner/clipboard-linux-x64-gnu@0.3.6':
-    optional: true
+  '@mariozechner/clipboard-linux-x64-gnu@0.3.9': {}
 
-  '@mariozechner/clipboard-linux-x64-musl@0.3.6':
-    optional: true
+  '@mariozechner/clipboard-linux-x64-musl@0.3.9': {}
 
-  '@mariozechner/clipboard-win32-arm64-msvc@0.3.6':
-    optional: true
+  '@mariozechner/clipboard-win32-arm64-msvc@0.3.9': {}
 
-  '@mariozechner/clipboard-win32-x64-msvc@0.3.6':
-    optional: true
+  '@mariozechner/clipboard-win32-x64-msvc@0.3.9': {}
 
-  '@mariozechner/clipboard@0.3.6':
+  '@mariozechner/clipboard@0.3.9':
     optionalDependencies:
-      '@mariozechner/clipboard-darwin-arm64': 0.3.6
-      '@mariozechner/clipboard-darwin-universal': 0.3.6
-      '@mariozechner/clipboard-linux-arm64-gnu': 0.3.6
-      '@mariozechner/clipboard-linux-arm64-musl': 0.3.6
-      '@mariozechner/clipboard-linux-x64-gnu': 0.3.6
-      '@mariozechner/clipboard-linux-x64-musl': 0.3.6
-      '@mariozechner/clipboard-win32-arm64-msvc': 0.3.6
-      '@mariozechner/clipboard-win32-x64-msvc': 0.3.6
-    optional: true
+      '@mariozechner/clipboard-darwin-arm64': 0.3.9
+      '@mariozechner/clipboard-darwin-universal': 0.3.9
+      '@mariozechner/clipboard-linux-arm64-gnu': 0.3.9
+      '@mariozechner/clipboard-linux-arm64-musl': 0.3.9
+      '@mariozechner/clipboard-linux-x64-gnu': 0.3.9
+      '@mariozechner/clipboard-linux-x64-musl': 0.3.9
+      '@mariozechner/clipboard-win32-arm64-msvc': 0.3.9
+      '@mariozechner/clipboard-win32-x64-msvc': 0.3.9
 
   '@mistralai/mistralai@2.2.1(zod@4.3.6)':
     dependencies:
@@ -3647,29 +3628,21 @@ snapshots:
       loupe: 3.2.1
       tinyrainbow: 2.0.0
 
-  '@yuuang/ffi-rs-darwin-arm64@1.3.1':
-    optional: true
+  '@yuuang/ffi-rs-darwin-arm64@1.3.2': {}
 
-  '@yuuang/ffi-rs-linux-arm64-gnu@1.3.1':
-    optional: true
+  '@yuuang/ffi-rs-linux-arm64-gnu@1.3.2': {}
 
-  '@yuuang/ffi-rs-linux-arm64-musl@1.3.1':
-    optional: true
+  '@yuuang/ffi-rs-linux-arm64-musl@1.3.2': {}
 
-  '@yuuang/ffi-rs-linux-x64-gnu@1.3.1':
-    optional: true
+  '@yuuang/ffi-rs-linux-x64-gnu@1.3.2': {}
 
-  '@yuuang/ffi-rs-linux-x64-musl@1.3.1':
-    optional: true
+  '@yuuang/ffi-rs-linux-x64-musl@1.3.2': {}
 
-  '@yuuang/ffi-rs-win32-arm64-msvc@1.3.1':
-    optional: true
+  '@yuuang/ffi-rs-win32-arm64-msvc@1.3.2': {}
 
-  '@yuuang/ffi-rs-win32-ia32-msvc@1.3.1':
-    optional: true
+  '@yuuang/ffi-rs-win32-ia32-msvc@1.3.2': {}
 
-  '@yuuang/ffi-rs-win32-x64-msvc@1.3.1':
-    optional: true
+  '@yuuang/ffi-rs-win32-x64-msvc@1.3.2': {}
 
   accepts@2.0.0:
     dependencies:
@@ -3915,16 +3888,16 @@ snapshots:
       picomatch: 4.0.4
       zod: 4.3.6
 
-  ffi-rs@1.3.1:
+  ffi-rs@1.3.2:
     optionalDependencies:
-      '@yuuang/ffi-rs-darwin-arm64': 1.3.1
-      '@yuuang/ffi-rs-linux-arm64-gnu': 1.3.1
-      '@yuuang/ffi-rs-linux-arm64-musl': 1.3.1
-      '@yuuang/ffi-rs-linux-x64-gnu': 1.3.1
-      '@yuuang/ffi-rs-linux-x64-musl': 1.3.1
-      '@yuuang/ffi-rs-win32-arm64-msvc': 1.3.1
-      '@yuuang/ffi-rs-win32-ia32-msvc': 1.3.1
-      '@yuuang/ffi-rs-win32-x64-msvc': 1.3.1
+      '@yuuang/ffi-rs-darwin-arm64': 1.3.2
+      '@yuuang/ffi-rs-linux-arm64-gnu': 1.3.2
+      '@yuuang/ffi-rs-linux-arm64-musl': 1.3.2
+      '@yuuang/ffi-rs-linux-x64-gnu': 1.3.2
+      '@yuuang/ffi-rs-linux-x64-musl': 1.3.2
+      '@yuuang/ffi-rs-win32-arm64-msvc': 1.3.2
+      '@yuuang/ffi-rs-win32-ia32-msvc': 1.3.2
+      '@yuuang/ffi-rs-win32-x64-msvc': 1.3.2
 
   finalhandler@2.1.1:
     dependencies:
@@ -4395,7 +4368,7 @@ snapshots:
 
   shebang-regex@3.0.0: {}
 
-  shell-quote@1.8.3: {}
+  shell-quote@1.8.4: {}
 
   side-channel-list@1.0.1:
     dependencies:
