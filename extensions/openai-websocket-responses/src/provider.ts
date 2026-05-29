@@ -79,7 +79,7 @@ export function createOpenAIWebSocketResponsesStream(
         const settings = settingsProvider();
         const requestHeaders = buildRequestHeaders(model, options);
         const websocketHeaders = buildWebSocketHeaders(model, options);
-        const url = resolveWebSocketResponsesUrl(model, settings);
+        const url = resolveWebSocketResponsesUrl(model, settings, websocketHeaders);
         if (!websocketHeaders.has('authorization'))
           throw new Error(`Missing Authorization header for ${url}`);
 

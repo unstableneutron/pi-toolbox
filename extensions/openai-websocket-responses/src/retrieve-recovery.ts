@@ -147,10 +147,15 @@ export async function recoverResponseByRetrieve(request: {
   let emittedText = request.emittedText;
   let emittedSyntheticDeltas = 0;
   let lastError: string | undefined;
+  const url = resolveRetrieveResponseUrl(
+    request.model,
+    request.settings,
+    request.responseId,
+    request.headers,
+  );
 
   while (Date.now() <= deadline) {
     if (request.signal?.aborted) throw new Error('Request was aborted');
-    const url = resolveRetrieveResponseUrl(request.model, request.settings, request.responseId);
     const response = await fetchImpl(url, {
       method: 'GET',
       headers: request.headers,

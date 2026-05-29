@@ -204,11 +204,49 @@ describe('URL and header helpers', () => {
     );
   });
 
-  it('omits query params with unresolved templates', () => {
+  it('resolves query param header templates from merged runtime request headers', () => {
+    const settings = normalizeSettings({
+      request: {
+        queryParams: {
+          deployment: '${model.id}',
+          region: '${headers.x-azure-region}',
+          bucket: '${headers.x-azure-resource-bucket}',
+        },
+      },
+    });
+    const model = makeModel({ headers: undefined });
+    const headers = new Headers({
+      'x-azure-region': 'global',
+      'x-azure-resource-bucket': 'internal-productivity',
+    });
+
+    expect(resolveWebSocketResponsesUrl(model, settings, headers)).toBe(
+      'wss://llm-fusion-hub.example/api/v2/proxy/experimental/azure_openai/openai/v1/responses?api-version=preview&deployment=gpt-5.5-nomoderation&region=global&bucket=internal-productivity',
+    );
+    expect(resolveRetrieveResponseUrl(model, settings, 'resp_123', headers)).toBe(
+      'https://llm-fusion-hub.example/api/v2/proxy/experimental/azure_openai/openai/v1/responses/resp_123?api-version=preview&deployment=gpt-5.5-nomoderation&region=global&bucket=internal-productivity',
+    );
+  });
+
+  it('throws when query param templates reference missing headers', () => {
     const settings = normalizeSettings({
       request: {
         queryParams: {
           deployment: '${headers.x-missing-deployment}',
+        },
+      },
+    });
+
+    expect(() => resolveWebSocketResponsesUrl(makeModel(), settings)).toThrow(
+      'Missing header "x-missing-deployment" referenced by query param "deployment"',
+    );
+  });
+
+  it('omits query params with unresolved non-header templates', () => {
+    const settings = normalizeSettings({
+      request: {
+        queryParams: {
+          missing: '${unknown.value}',
           model: '${model.id}',
           static: 'ok',
         },
