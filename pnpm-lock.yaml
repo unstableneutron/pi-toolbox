@@ -65,6 +65,9 @@ importers:
 
   extensions/openai-websocket-responses:
     dependencies:
+      partial-json:
+        specifier: ^0.1.7
+        version: 0.1.7
       ws:
         specifier: ^8.18.3
         version: 8.20.0

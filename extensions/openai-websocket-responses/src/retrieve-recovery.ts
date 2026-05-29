@@ -64,6 +64,53 @@ function parseArguments(value: unknown): Record<string, any> {
   }
 }
 
+function reasoningIdFromSignature(signature: string | undefined): string | undefined {
+  if (!signature) return undefined;
+  try {
+    const parsed = JSON.parse(signature) as { id?: unknown };
+    return typeof parsed.id === 'string' ? parsed.id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function reasoningText(item: Record<string, any>): string {
+  return (Array.isArray(item.summary) ? item.summary : [])
+    .map((part) => part?.text)
+    .filter((text): text is string => typeof text === 'string')
+    .join('\n\n');
+}
+
+function emitRecoveredReasoningItems(
+  response: Record<string, any>,
+  output: AssistantMessage,
+  stream: AssistantMessageEventStream,
+): void {
+  const items = Array.isArray(response.output) ? response.output : [];
+  const existingReasoningIds = new Set(
+    output.content
+      .filter((block) => block.type === 'thinking')
+      .map((block) => reasoningIdFromSignature(block.thinkingSignature))
+      .filter((id): id is string => typeof id === 'string'),
+  );
+
+  for (const item of items) {
+    if (item?.type !== 'reasoning' || typeof item.id !== 'string') continue;
+    if (existingReasoningIds.has(item.id)) continue;
+    const block = {
+      type: 'thinking' as const,
+      thinking: reasoningText(item),
+      thinkingSignature: JSON.stringify(item),
+    };
+    const firstTextIndex = output.content.findIndex((content) => content.type === 'text');
+    const contentIndex = firstTextIndex >= 0 ? firstTextIndex : output.content.length;
+    output.content.splice(contentIndex, 0, block as AssistantMessage['content'][number]);
+    stream.push({ type: 'thinking_start', contentIndex, partial: output });
+    stream.push({ type: 'thinking_end', contentIndex, content: block.thinking, partial: output });
+    existingReasoningIds.add(item.id);
+  }
+}
+
 function emitRecoveredToolCalls(
   response: Record<string, any>,
   output: AssistantMessage,
@@ -180,17 +227,18 @@ export async function recoverResponseByRetrieve(request: {
     if (snapshotText && !snapshotText.startsWith(emittedText)) {
       throw new Error('Retrieve recovery diverged from already emitted text');
     }
-    if (snapshotText && request.settings.recovery.emitSyntheticDeltas) {
-      const delta = snapshotText.slice(emittedText.length);
-      if (delta) {
-        appendSyntheticTextDelta(request.output, request.stream, delta);
-        emittedText = snapshotText;
-        emittedSyntheticDeltas++;
-      }
-    }
 
     const status = typeof snapshot.status === 'string' ? snapshot.status : undefined;
     if (status === 'completed') {
+      emitRecoveredReasoningItems(snapshot, request.output, request.stream);
+      if (snapshotText && request.settings.recovery.emitSyntheticDeltas) {
+        const delta = snapshotText.slice(emittedText.length);
+        if (delta) {
+          appendSyntheticTextDelta(request.output, request.stream, delta);
+          emittedText = snapshotText;
+          emittedSyntheticDeltas++;
+        }
+      }
       emitRecoveredToolCalls(snapshot, request.output, request.stream);
       if (snapshotText || request.output.content.some((block) => block.type === 'text')) {
         const { index, block } = ensureTextBlock(request.output, request.stream);
@@ -211,6 +259,14 @@ export async function recoverResponseByRetrieve(request: {
         id: snapshot.id ?? request.responseId,
       });
       return { response: snapshot, recoveredText: snapshotText, emittedSyntheticDeltas };
+    }
+    if (snapshotText && request.settings.recovery.emitSyntheticDeltas) {
+      const delta = snapshotText.slice(emittedText.length);
+      if (delta) {
+        appendSyntheticTextDelta(request.output, request.stream, delta);
+        emittedText = snapshotText;
+        emittedSyntheticDeltas++;
+      }
     }
     if (isTerminalStatus(status)) throw new Error(responseErrorMessage(snapshot));
 

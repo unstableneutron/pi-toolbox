@@ -451,6 +451,180 @@ describe('Responses adapter and retrieve recovery', () => {
     ]);
   });
 
+  it('keeps interleaved output items separate by output_index', async () => {
+    const model = makeModel();
+    const output = makeAssistantMessage(model);
+    const stream = createAssistantMessageEventStream();
+
+    await processResponsesEvents(
+      events(
+        { type: 'response.created', response: { id: 'resp_interleaved' } },
+        {
+          type: 'response.output_item.added',
+          output_index: 0,
+          item: { type: 'message', id: 'msg_a' },
+        },
+        {
+          type: 'response.content_part.added',
+          output_index: 0,
+          content_index: 0,
+          part: { type: 'output_text', text: '' },
+        },
+        {
+          type: 'response.output_item.added',
+          output_index: 1,
+          item: { type: 'message', id: 'msg_b' },
+        },
+        {
+          type: 'response.content_part.added',
+          output_index: 1,
+          content_index: 0,
+          part: { type: 'output_text', text: '' },
+        },
+        { type: 'response.output_text.delta', output_index: 0, content_index: 0, delta: 'A' },
+        { type: 'response.output_text.delta', output_index: 1, content_index: 0, delta: 'B' },
+        {
+          type: 'response.output_item.done',
+          output_index: 0,
+          item: { type: 'message', id: 'msg_a', content: [{ type: 'output_text', text: 'A' }] },
+        },
+        {
+          type: 'response.output_item.done',
+          output_index: 1,
+          item: { type: 'message', id: 'msg_b', content: [{ type: 'output_text', text: 'B' }] },
+        },
+        { type: 'response.completed', response: { id: 'resp_interleaved', status: 'completed' } },
+      ),
+      output,
+      stream,
+      model,
+    );
+
+    expect(output.content).toEqual([
+      expect.objectContaining({
+        type: 'text',
+        text: 'A',
+        textSignature: JSON.stringify({ v: 1, id: 'msg_a' }),
+      }),
+      expect.objectContaining({
+        type: 'text',
+        text: 'B',
+        textSignature: JSON.stringify({ v: 1, id: 'msg_b' }),
+      }),
+    ]);
+  });
+
+  it('preserves text phase in replay input', () => {
+    const model = makeModel();
+    const output = makeAssistantMessage(model);
+    output.content.push({
+      type: 'text',
+      text: 'commentary text',
+      textSignature: JSON.stringify({ v: 1, id: 'msg_phase', phase: 'commentary' }),
+    });
+
+    expect(buildResponsesBody(model, { messages: [output] }).input).toEqual([
+      expect.objectContaining({ type: 'message', id: 'msg_phase', phase: 'commentary' }),
+    ]);
+  });
+
+  it('omits failed assistant messages from replay input', () => {
+    const model = makeModel();
+    const failed = makeAssistantMessage(model);
+    failed.stopReason = 'error';
+    failed.content.push({ type: 'text', text: 'partial failure' });
+
+    expect(buildResponsesBody(model, { messages: [failed] }).input).toEqual([]);
+  });
+
+  it('adds synthetic error tool results for unmatched assistant tool calls', () => {
+    const model = makeModel();
+    const assistant = makeAssistantMessage(model);
+    assistant.content.push({
+      type: 'toolCall',
+      id: 'call_1|fc_1',
+      name: 'read',
+      arguments: { path: 'a' },
+    });
+
+    expect(
+      buildResponsesBody(model, {
+        messages: [assistant, { role: 'user', content: 'continue', timestamp: 2 }],
+      }).input,
+    ).toEqual([
+      expect.objectContaining({ type: 'function_call', call_id: 'call_1', id: 'fc_1' }),
+      { type: 'function_call_output', call_id: 'call_1', output: 'No result provided' },
+      { role: 'user', content: [{ type: 'input_text', text: 'continue' }] },
+    ]);
+  });
+
+  it('maps response.incomplete terminal events to length stop reason', async () => {
+    const model = makeModel();
+    const output = makeAssistantMessage(model);
+    const stream = createAssistantMessageEventStream();
+
+    await processResponsesEvents(
+      events({
+        type: 'response.incomplete',
+        response: { id: 'resp_incomplete', status: 'incomplete' },
+      }),
+      output,
+      stream,
+      model,
+    );
+
+    expect(output.responseId).toBe('resp_incomplete');
+    expect(output.stopReason).toBe('length');
+  });
+
+  it('recovers reasoning items from retrieve snapshots for later continuation', async () => {
+    const model = makeModel();
+    const settings = normalizeSettings({ recovery: { pollIntervalMs: 1, timeoutMs: 20 } });
+    const output = makeAssistantMessage(model);
+    const stream = createAssistantMessageEventStream();
+    const reasoningItem = { type: 'reasoning', id: 'rs_recovered', summary: [] };
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            id: 'resp_reasoning_recovered',
+            status: 'completed',
+            output: [
+              reasoningItem,
+              {
+                type: 'message',
+                id: 'msg_recovered',
+                content: [{ type: 'output_text', text: 'Recovered' }],
+              },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+    );
+
+    await recoverResponseByRetrieve({
+      model,
+      settings,
+      responseId: 'resp_reasoning_recovered',
+      headers: new Headers(),
+      emittedText: '',
+      output,
+      stream,
+      fetchImpl,
+    });
+
+    expect(output.content[0]).toEqual(
+      expect.objectContaining({
+        type: 'thinking',
+        thinkingSignature: JSON.stringify(reasoningItem),
+      }),
+    );
+    expect(assistantMessageToResponseItems(output)).toEqual([
+      reasoningItem,
+      expect.objectContaining({ type: 'message', id: 'msg_recovered' }),
+    ]);
+  });
+
   it('processes text and function call Responses events', async () => {
     const model = makeModel();
     const output = makeAssistantMessage(model);
