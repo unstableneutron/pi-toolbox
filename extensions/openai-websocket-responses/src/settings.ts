@@ -19,7 +19,6 @@ export interface OpenAIWebSocketResponsesSettings {
     notFoundGraceMs: number;
     emitSyntheticDeltas: boolean;
   };
-  registerSmokeProvider: boolean;
 }
 
 const DEFAULT_SETTINGS: OpenAIWebSocketResponsesSettings = {
@@ -39,7 +38,6 @@ const DEFAULT_SETTINGS: OpenAIWebSocketResponsesSettings = {
     notFoundGraceMs: 5000,
     emitSyntheticDeltas: true,
   },
-  registerSmokeProvider: true,
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -58,6 +56,68 @@ function booleanValue(value: unknown, fallback: boolean): boolean {
 
 function nonNegativeNumber(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+function stripJsonComments(source: string): string {
+  let result = '';
+  let inString = false;
+  let escaped = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+
+  for (let index = 0; index < source.length; index++) {
+    const char = source[index]!;
+    const next = source[index + 1];
+
+    if (inLineComment) {
+      if (char === '\n' || char === '\r') {
+        inLineComment = false;
+        result += char;
+      }
+      continue;
+    }
+
+    if (inBlockComment) {
+      if (char === '*' && next === '/') {
+        inBlockComment = false;
+        index++;
+      } else if (char === '\n' || char === '\r') {
+        result += char;
+      }
+      continue;
+    }
+
+    if (inString) {
+      result += char;
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      result += char;
+      continue;
+    }
+    if (char === '/' && next === '/') {
+      inLineComment = true;
+      index++;
+      continue;
+    }
+    if (char === '/' && next === '*') {
+      inBlockComment = true;
+      index++;
+      continue;
+    }
+    result += char;
+  }
+
+  return result;
 }
 
 function queryParams(value: unknown): Record<string, string> {
@@ -118,10 +178,6 @@ export function normalizeSettings(raw: unknown): OpenAIWebSocketResponsesSetting
         DEFAULT_SETTINGS.recovery.emitSyntheticDeltas,
       ),
     },
-    registerSmokeProvider: booleanValue(
-      root.registerSmokeProvider,
-      DEFAULT_SETTINGS.registerSmokeProvider,
-    ),
   };
 }
 
@@ -130,8 +186,11 @@ export function readOpenAIWebSocketResponsesSettings(
 ): OpenAIWebSocketResponsesSettings {
   if (!existsSync(settingsPath)) return normalizeSettings(undefined);
   try {
-    const parsed = JSON.parse(readFileSync(settingsPath, 'utf8')) as Record<string, unknown>;
-    return normalizeSettings(parsed.openaiWebSocketResponses);
+    const parsed = JSON.parse(stripJsonComments(readFileSync(settingsPath, 'utf8'))) as Record<
+      string,
+      unknown
+    >;
+    return normalizeSettings(parsed.openaiWebsocketResponses ?? parsed.openaiWebSocketResponses);
   } catch {
     return normalizeSettings(undefined);
   }

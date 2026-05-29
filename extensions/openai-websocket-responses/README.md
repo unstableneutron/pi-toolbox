@@ -15,7 +15,7 @@ Configure the extension in `~/.pi/agent/settings.json`:
 
 ```json
 {
-  "openaiWebSocketResponses": {
+  "openaiWebsocketResponses": {
     "patch": {
       "enabled": true,
       "apis": ["openai-responses"],
@@ -25,7 +25,10 @@ Configure the extension in `~/.pi/agent/settings.json`:
     },
     "request": {
       "queryParams": {
-        "api-version": "preview"
+        "api-version": "preview",
+        "deployment": "gpt-5.5-nomoderation",
+        "region": "global",
+        "azure-resource-bucket": "internal-productivity"
       }
     },
     "websocket": {
@@ -39,11 +42,22 @@ Configure the extension in `~/.pi/agent/settings.json`:
       "timeoutMs": 30000,
       "notFoundGraceMs": 5000,
       "emitSyntheticDeltas": true
-    },
-    "registerSmokeProvider": true
+    }
   }
 }
 ```
+
+Defaults: `patch.enabled` is `false`; `patch.apis` is
+`["openai-responses"]`; `patch.providers`, `patch.providerModels`, and
+`patch.excludeProviderModels` are empty arrays; `request.queryParams` is empty;
+WebSocket defaults are `retries: 2`, `connectTimeoutMs: 15000`, and
+`idleTimeoutMs: 0`; recovery defaults are shown above. Keep `providerModels`
+narrow when `request.queryParams` contains deployment-specific values.
+
+For the current Azure/LFM WSS route, `api-version` alone is not enough: the
+handshake also needs `deployment`, `region`, and `azure-resource-bucket` as
+explicit URL query params. The same routing values should remain in model
+headers for HTTP compatibility and downstream routing.
 
 Only `request.queryParams` adds URL query params. Azure routing values such as
 `x-azure-region`, `x-azure-resource-bucket`, and `x-azure-deployment` remain
@@ -83,12 +97,14 @@ it does not share Pi's built-in `openai-codex-responses` cache.
   preconnect may open an idle socket, but semantic warmup needs the exact next
   input and is not safe by default around tool calls.
 
-## Temporary smoke test
+## Smoke test
+
+With `facade/gpt-5.5-nomoderation` left as an `openai-responses` model and the
+patch config above enabled:
 
 ```bash
-pi --no-session --no-tools --no-skills --no-extensions \
-  -e /Users/thinh_nguyen/Projects/personal/pi-toolbox/extensions/openai-websocket-responses \
+pi --no-session --no-tools --no-skills \
   --mode json \
-  --model 'facade-ws/gpt-5.5-nomoderation:medium' \
+  --model 'facade/gpt-5.5-nomoderation:medium' \
   -p 'Reply with exactly OK.'
 ```

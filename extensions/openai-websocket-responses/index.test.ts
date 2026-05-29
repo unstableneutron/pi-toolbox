@@ -1,3 +1,7 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import {
   createAssistantMessageEventStream,
   type AssistantMessage,
@@ -23,7 +27,7 @@ import {
   extractResponseOutputText,
   processResponsesEvents,
 } from './src/responses-adapter.ts';
-import { normalizeSettings } from './src/settings.ts';
+import { normalizeSettings, readOpenAIWebSocketResponsesSettings } from './src/settings.ts';
 import { resolveRetrieveResponseUrl, resolveWebSocketResponsesUrl } from './src/urls.ts';
 import {
   closeAllCachedWebSockets,
@@ -92,6 +96,60 @@ describe('settings and patch matching', () => {
         emitSyntheticDeltas: true,
       },
     });
+  });
+
+  it('reads the openaiWebsocketResponses key from commented settings JSON', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'openai-websocket-settings-'));
+    const path = join(dir, 'settings.json');
+    try {
+      writeFileSync(
+        path,
+        `{
+          // New public key: Websocket, not WebSocket.
+          "openaiWebsocketResponses": {
+            "patch": {
+              "enabled": true,
+              "providerModels": ["facade/gpt-5.5-nomoderation"]
+            },
+            "request": {
+              "queryParams": {
+                "api-version": "preview"
+              }
+            }
+          }
+        }`,
+      );
+
+      const settings = readOpenAIWebSocketResponsesSettings(path);
+      expect(settings).toMatchObject({
+        patch: { enabled: true, providerModels: ['facade/gpt-5.5-nomoderation'] },
+        request: { queryParams: { 'api-version': 'preview' } },
+      });
+      expect(settings).not.toHaveProperty('registerSmokeProvider');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the old openaiWebSocketResponses key as a compatibility alias', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'openai-websocket-settings-'));
+    const path = join(dir, 'settings.json');
+    try {
+      writeFileSync(
+        path,
+        JSON.stringify({
+          openaiWebSocketResponses: {
+            patch: { enabled: true, providers: ['facade'] },
+          },
+        }),
+      );
+
+      expect(readOpenAIWebSocketResponsesSettings(path)).toMatchObject({
+        patch: { enabled: true, providers: ['facade'] },
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('matches provider/model globs and honors exclusions', () => {
