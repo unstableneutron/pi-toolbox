@@ -26,7 +26,7 @@ Configure the extension in `~/.pi/agent/settings.json`:
     "request": {
       "queryParams": {
         "api-version": "preview",
-        "deployment": "gpt-5.5-nomoderation",
+        "deployment": "${model.id}",
         "region": "global",
         "azure-resource-bucket": "internal-productivity"
       }
@@ -54,10 +54,19 @@ WebSocket defaults are `retries: 2`, `connectTimeoutMs: 15000`, and
 `idleTimeoutMs: 0`; recovery defaults are shown above. Keep `providerModels`
 narrow when `request.queryParams` contains deployment-specific values.
 
-For the current Azure/LFM WSS route, `api-version` alone is not enough: the
-handshake also needs `deployment`, `region`, and `azure-resource-bucket` as
-explicit URL query params. The same routing values should remain in model
-headers for HTTP compatibility and downstream routing.
+For the current Azure/LFM WSS route, `api-version` alone is not enough. The
+handshake also needs Azure routing values in URL query params. Use `${model.id}`
+to derive the deployment per model without hardcoding every deployment. Template
+values are resolved on each request.
+
+Supported query-param template variables:
+
+- `${headers.<name>}`: a model header, matched case-insensitively
+- `${model.id}`
+- `${model.name}`
+- `${model.provider}`
+
+If a template cannot be resolved, that query param is omitted.
 
 Only `request.queryParams` adds URL query params. Azure routing values such as
 `x-azure-region`, `x-azure-resource-bucket`, and `x-azure-deployment` remain

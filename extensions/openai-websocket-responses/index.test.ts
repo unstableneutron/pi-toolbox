@@ -184,6 +184,42 @@ describe('URL and header helpers', () => {
     );
   });
 
+  it('resolves query param templates from model metadata and headers', () => {
+    const settings = normalizeSettings({
+      request: {
+        queryParams: {
+          deployment: '${headers.X-Azure-Deployment}',
+          region: '${headers.x-azure-region}',
+          bucket: '${headers.x-azure-resource-bucket}',
+          model: '${model.id}',
+          provider: '${model.provider}',
+          label: 'static-${model.name}',
+        },
+      },
+    });
+    const model = makeModel({ name: 'GPT 5.5' });
+
+    expect(resolveWebSocketResponsesUrl(model, settings)).toBe(
+      'wss://llm-fusion-hub.example/api/v2/proxy/experimental/azure_openai/openai/v1/responses?api-version=preview&deployment=gpt-5.5-nomoderation&region=global&bucket=internal-productivity&model=gpt-5.5-nomoderation&provider=facade&label=static-GPT+5.5',
+    );
+  });
+
+  it('omits query params with unresolved templates', () => {
+    const settings = normalizeSettings({
+      request: {
+        queryParams: {
+          deployment: '${headers.x-missing-deployment}',
+          model: '${model.id}',
+          static: 'ok',
+        },
+      },
+    });
+
+    expect(resolveWebSocketResponsesUrl(makeModel(), settings)).toBe(
+      'wss://llm-fusion-hub.example/api/v2/proxy/experimental/azure_openai/openai/v1/responses?api-version=preview&model=gpt-5.5-nomoderation&static=ok',
+    );
+  });
+
   it('merges request headers and strips only WSS transport headers', () => {
     const model = makeModel({
       headers: { accept: 'application/json', 'x-azure-deployment': 'gpt-5.5' },
