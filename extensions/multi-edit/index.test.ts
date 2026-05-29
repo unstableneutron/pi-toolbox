@@ -241,6 +241,38 @@ describe('multi-edit extension', () => {
     expect(result.systemPrompt).not.toContain('copy/write commands');
   });
 
+  test('disables edit and write for Claude Opus 4 family models', async () => {
+    const handlers = new Map<string, Function[]>();
+    let activeTools: string[] = ['read', 'edit', 'write', 'apply_patch'];
+    const allTools = activeTools.map((name) => ({ name }));
+    const pi = {
+      registerTool() {},
+      on(event: string, handler: Function) {
+        handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+      },
+      getAllTools() {
+        return allTools;
+      },
+      setActiveTools(names: string[]) {
+        activeTools = [...names];
+      },
+    } as any;
+
+    multiEditExtension(pi);
+
+    const beforeAgentStart = handlers.get('before_agent_start')?.[0];
+    expect(beforeAgentStart).toBeTypeOf('function');
+    if (!beforeAgentStart) {
+      throw new Error('Expected before_agent_start handler');
+    }
+    await beforeAgentStart(
+      { systemPrompt: 'BASE' },
+      { model: { id: 'global.anthropic.claude-opus-4-8', provider: 'devai' } },
+    );
+
+    expect(activeTools).toEqual(['read', 'apply_patch']);
+  });
+
   test('keeps edit and write enabled for non-target models', async () => {
     const handlers = new Map<string, Function[]>();
     let activeTools: string[] = ['read', 'edit', 'write', 'apply_patch'];
