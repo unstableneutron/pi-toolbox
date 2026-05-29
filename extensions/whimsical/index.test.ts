@@ -1,4 +1,3 @@
-import { createAssistantMessageEventStream } from '@earendil-works/pi-ai';
 import type { AssistantMessage, Model } from '@earendil-works/pi-ai';
 
 import { afterEach, describe, expect, test, vi } from 'vitest';
@@ -13,7 +12,6 @@ import whimsical, {
   recordToolExecutionStart,
   recordTurnStart,
   shouldShowWhimsy,
-  wrapApiProviderForTransportIndicators,
 } from './index';
 
 function makeModel(overrides: Partial<Model<any>> = {}): Model<any> {
@@ -212,7 +210,7 @@ describe('working-message helpers', () => {
     let state = createWorkingMessageState();
     state = recordTurnStart(state);
     state = recordProviderRequest(state, makeModel());
-    state = recordProviderTransport(state, 'post');
+    state = recordProviderTransport(state, 'sse');
     state = recordProviderRequest(state, makeModel({ baseUrl: 'https://api.openai.com/v1' }));
 
     expect(buildWorkingMessage(whimsy, state)).toBe('Whimming...');
@@ -401,233 +399,16 @@ describe('whimsy width gating', () => {
   });
 });
 
-describe('transport indicator provider wrapper', () => {
+describe('transport classification', () => {
   test.each([
-    [{ 'content-type': 'text/event-stream; charset=utf-8' }, 'sse'],
-    [{ 'Content-Type': 'TEXT/EVENT-STREAM' }, 'sse'],
-    [{ 'content-type': 'application/json' }, 'post'],
-    [{}, 'post'],
-  ] as const)('classifies HTTP headers %o as %s', (headers, expected) => {
-    expect(classifyHttpTransport(headers)).toBe(expected);
-  });
-
-  test('reports SSE from HTTP response headers and preserves original onResponse', async () => {
-    const observations: string[] = [];
-    const originalOnResponse = vi.fn();
-    const model = makeModel({ api: 'openai-responses' });
-    const provider = wrapApiProviderForTransportIndicators(
-      {
-        api: 'openai-responses',
-        stream: vi.fn() as any,
-        streamSimple(_model: Model<any>, _context: any, options?: any) {
-          const stream = createAssistantMessageEventStream();
-          queueMicrotask(async () => {
-            await options?.onResponse?.(
-              { status: 200, headers: { 'content-type': 'text/event-stream; charset=utf-8' } },
-              model,
-            );
-            stream.push({ type: 'done', reason: 'stop', message: makeAssistantMessage() });
-          });
-          return stream;
-        },
-      },
-      (observation) => observations.push(observation.transport),
-    );
-
-    const stream = provider.streamSimple(model, {} as any, { onResponse: originalOnResponse });
-
-    await expect(stream.result()).resolves.toMatchObject({ stopReason: 'stop' });
-    expect(observations).toEqual(['sse']);
-    expect(originalOnResponse).toHaveBeenCalledWith(
-      { status: 200, headers: { 'content-type': 'text/event-stream; charset=utf-8' } },
-      model,
-    );
-  });
-
-  test('reports POST from non-SSE HTTP response headers', async () => {
-    const observations: string[] = [];
-    const model = makeModel({ api: 'openai-responses' });
-    const provider = wrapApiProviderForTransportIndicators(
-      {
-        api: 'openai-responses',
-        stream: vi.fn() as any,
-        streamSimple(_model: Model<any>, _context: any, options?: any) {
-          const stream = createAssistantMessageEventStream();
-          queueMicrotask(async () => {
-            await options?.onResponse?.(
-              { status: 200, headers: { 'content-type': 'application/json' } },
-              model,
-            );
-            stream.push({ type: 'done', reason: 'stop', message: makeAssistantMessage() });
-          });
-          return stream;
-        },
-      },
-      (observation) => observations.push(observation.transport),
-    );
-
-    const stream = provider.streamSimple(model, {} as any, {});
-
-    await expect(stream.result()).resolves.toMatchObject({ stopReason: 'stop' });
-    expect(observations).toEqual(['post']);
-  });
-
-  test('infers WebSocket for Codex streams that emit before any HTTP response', async () => {
-    const observations: string[] = [];
-    const model = makeModel({ api: 'openai-codex-responses', provider: 'openai-codex' });
-    const provider = wrapApiProviderForTransportIndicators(
-      {
-        api: 'openai-codex-responses',
-        stream: vi.fn() as any,
-        streamSimple(_model: Model<any>, _context: any, _options?: any) {
-          const stream = createAssistantMessageEventStream();
-          queueMicrotask(() => {
-            const message = makeAssistantMessage({ api: 'openai-codex-responses' });
-            stream.push({ type: 'start', partial: message });
-            stream.push({ type: 'done', reason: 'stop', message });
-          });
-          return stream;
-        },
-      },
-      (observation) => observations.push(observation.transport),
-    );
-
-    const stream = provider.streamSimple(model, {} as any, { transport: 'auto' });
-
-    await expect(stream.result()).resolves.toMatchObject({ api: 'openai-codex-responses' });
-    expect(observations).toEqual(['ws']);
-  });
-
-  test('does not infer WebSocket when Codex transport is forced to SSE', async () => {
-    const observations: string[] = [];
-    const model = makeModel({ api: 'openai-codex-responses', provider: 'openai-codex' });
-    const provider = wrapApiProviderForTransportIndicators(
-      {
-        api: 'openai-codex-responses',
-        stream: vi.fn() as any,
-        streamSimple(_model: Model<any>, _context: any, _options?: any) {
-          const stream = createAssistantMessageEventStream();
-          queueMicrotask(() => {
-            const message = makeAssistantMessage({ api: 'openai-codex-responses' });
-            stream.push({ type: 'start', partial: message });
-            stream.push({ type: 'done', reason: 'stop', message });
-          });
-          return stream;
-        },
-      },
-      (observation) => observations.push(observation.transport),
-    );
-
-    const stream = provider.streamSimple(model, {} as any, { transport: 'sse' });
-
-    await expect(stream.result()).resolves.toMatchObject({ api: 'openai-codex-responses' });
-    expect(observations).toEqual([]);
-  });
-
-  test('HTTP response wins over Codex WebSocket inference when fallback happens first', async () => {
-    const observations: string[] = [];
-    const model = makeModel({ api: 'openai-codex-responses', provider: 'openai-codex' });
-    const provider = wrapApiProviderForTransportIndicators(
-      {
-        api: 'openai-codex-responses',
-        stream: vi.fn() as any,
-        streamSimple(_model: Model<any>, _context: any, options?: any) {
-          const stream = createAssistantMessageEventStream();
-          queueMicrotask(async () => {
-            await options?.onResponse?.(
-              { status: 200, headers: { 'content-type': 'text/event-stream' } },
-              model,
-            );
-            const message = makeAssistantMessage({ api: 'openai-codex-responses' });
-            stream.push({ type: 'start', partial: message });
-            stream.push({ type: 'done', reason: 'stop', message });
-          });
-          return stream;
-        },
-      },
-      (observation) => observations.push(observation.transport),
-    );
-
-    const stream = provider.streamSimple(model, {} as any, { transport: 'auto' });
-
-    await expect(stream.result()).resolves.toMatchObject({ api: 'openai-codex-responses' });
-    expect(observations).toEqual(['sse']);
-  });
-
-  test('infers SSE for Bedrock whose SDK headers never include content-type', async () => {
-    const observations: string[] = [];
-    const model = makeModel({
-      api: 'bedrock-converse-stream',
-      provider: 'amazon-bedrock',
-    });
-    const provider = wrapApiProviderForTransportIndicators(
-      {
-        api: 'bedrock-converse-stream',
-        stream: vi.fn() as any,
-        streamSimple(_model: Model<any>, _context: any, options?: any) {
-          const stream = createAssistantMessageEventStream();
-          queueMicrotask(async () => {
-            // amazon-bedrock.js only forwards x-amzn-requestid, never content-type.
-            await options?.onResponse?.(
-              { status: 200, headers: { 'x-amzn-requestid': 'abc' } },
-              model,
-            );
-            const message = makeAssistantMessage({ api: 'bedrock-converse-stream' });
-            stream.push({ type: 'start', partial: message });
-            stream.push({ type: 'done', reason: 'stop', message });
-          });
-          return stream;
-        },
-      },
-      (observation) => observations.push(observation.transport),
-    );
-
-    const stream = provider.streamSimple(model, {} as any, {});
-
-    await expect(stream.result()).resolves.toMatchObject({ api: 'bedrock-converse-stream' });
-    expect(observations).toEqual(['sse']);
-  });
-
-  test('infers SSE for Bedrock even when onResponse never fires', async () => {
-    const observations: string[] = [];
-    const model = makeModel({
-      api: 'bedrock-converse-stream',
-      provider: 'amazon-bedrock',
-    });
-    const provider = wrapApiProviderForTransportIndicators(
-      {
-        api: 'bedrock-converse-stream',
-        stream: vi.fn() as any,
-        streamSimple(_model: Model<any>, _context: any, _options?: any) {
-          const stream = createAssistantMessageEventStream();
-          queueMicrotask(() => {
-            const message = makeAssistantMessage({ api: 'bedrock-converse-stream' });
-            stream.push({ type: 'start', partial: message });
-            stream.push({ type: 'done', reason: 'stop', message });
-          });
-          return stream;
-        },
-      },
-      (observation) => observations.push(observation.transport),
-    );
-
-    const stream = provider.streamSimple(model, {} as any, {});
-
-    await expect(stream.result()).resolves.toMatchObject({ api: 'bedrock-converse-stream' });
-    expect(observations).toEqual(['sse']);
-  });
-
-  test('does not wrap an already wrapped provider again', () => {
-    const provider = {
-      api: 'openai-responses',
-      stream: vi.fn() as any,
-      streamSimple: vi.fn() as any,
-    };
-
-    const wrapped = wrapApiProviderForTransportIndicators(provider, vi.fn());
-    const wrappedAgain = wrapApiProviderForTransportIndicators(wrapped, vi.fn());
-
-    expect(wrappedAgain.streamSimple).toBe(wrapped.streamSimple);
+    [{ 'content-type': 'text/event-stream; charset=utf-8' }, undefined, 'sse'],
+    [{ 'Content-Type': 'TEXT/EVENT-STREAM' }, undefined, 'sse'],
+    [{ upgrade: 'websocket' }, 101, 'ws'],
+    [{ connection: 'Upgrade', upgrade: 'WebSocket' }, undefined, 'ws'],
+    [{ 'content-type': 'application/json' }, undefined, undefined],
+    [{}, undefined, undefined],
+  ] as const)('classifies observed response %o status %o as %s', (headers, status, expected) => {
+    expect(classifyHttpTransport(headers, status)).toBe(expected);
   });
 });
 
@@ -637,10 +418,7 @@ describe('whimsical extension lifecycle', () => {
     vi.restoreAllMocks();
   });
 
-  async function withColumns<T>(
-    columns: number | undefined,
-    run: () => Promise<T>,
-  ): Promise<T> {
+  async function withColumns<T>(columns: number | undefined, run: () => Promise<T>): Promise<T> {
     const original = Object.getOwnPropertyDescriptor(process.stdout, 'columns');
     Object.defineProperty(process.stdout, 'columns', { value: columns, configurable: true });
     try {
@@ -653,6 +431,55 @@ describe('whimsical extension lifecycle', () => {
       }
     }
   }
+
+  test('records transport from after_provider_response events', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(1_000));
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+
+    const handlers = new Map<string, (event: any, ctx: any) => Promise<void> | void>();
+    const pi = {
+      on(event: string, handler: (event: any, ctx: any) => Promise<void> | void) {
+        handlers.set(event, handler);
+      },
+    } as any;
+
+    whimsical(pi);
+
+    const model = makeModel({
+      api: 'custom-streaming-api',
+      provider: 'custom',
+      baseUrl: 'https://custom.example/v1',
+    });
+    const workingMessages: Array<string | undefined> = [];
+    const ctx = {
+      hasUI: true,
+      model,
+      ui: {
+        theme: makeTheme(),
+        setWorkingMessage(message?: string) {
+          workingMessages.push(message);
+        },
+        setStatus() {},
+      },
+    } as any;
+
+    await handlers.get('agent_start')?.({ type: 'agent_start' }, ctx);
+    await handlers.get('turn_start')?.({ type: 'turn_start', turnIndex: 0 }, ctx);
+    await handlers.get('before_provider_request')?.({ type: 'before_provider_request' }, ctx);
+    await handlers.get('after_provider_response')?.(
+      {
+        type: 'after_provider_response',
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      },
+      ctx,
+    );
+
+    expect(workingMessages).toContain(
+      `Schlepping... · SSE via ${hyperlink('https://custom.example/v1', 'custom.example')}`,
+    );
+  });
 
   test('hides the whimsy phrase on a narrow terminal while keeping the suffix', async () => {
     vi.useFakeTimers();

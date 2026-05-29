@@ -1,14 +1,5 @@
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
-import {
-  createAssistantMessageEventStream,
-  getApiProviders,
-  registerApiProvider,
-  type ApiProvider,
-  type AssistantMessageEventStream,
-  type Model,
-  type ProviderResponse,
-  type SimpleStreamOptions,
-} from '@earendil-works/pi-ai';
+import { type Model } from '@earendil-works/pi-ai';
 
 const messages = [
   // Short
@@ -689,28 +680,7 @@ type AssistantErrorLikeMessage = {
 
 const STATUS_KEY = 'whimsical';
 const LONG_RUN_STATUS_THRESHOLD_MS = 30_000;
-const TRANSPORT_WRAPPED_STREAM_SIMPLE = Symbol.for(
-  'whimsical.transport-indicator.wrapped-stream-simple',
-);
-const TRANSPORT_OBSERVER_STATE = Symbol.for('whimsical.transport-indicator.observer-state');
-
-export type EffectiveTransport = 'ws' | 'sse' | 'post';
-
-export interface TransportObservation {
-  api: string;
-  model: Model<any>;
-  transport: EffectiveTransport;
-}
-
-type TransportObserver = (observation: TransportObservation) => void;
-
-type TransportObserverState = {
-  observe?: TransportObserver;
-};
-
-type TransportWrappedStreamSimple = ApiProvider<any>['streamSimple'] & {
-  [TRANSPORT_WRAPPED_STREAM_SIMPLE]?: true;
-};
+export type EffectiveTransport = 'ws' | 'sse';
 
 export interface WorkingMessageState {
   turnCount: number;
@@ -825,188 +795,26 @@ function formatBaseUrlLabel(
   return clickable ? wrapHyperlink(customBaseUrl.fullUrl, label) : label;
 }
 
-function getTransportObserverState(): TransportObserverState {
-  const globalWithState = globalThis as typeof globalThis & {
-    [TRANSPORT_OBSERVER_STATE]?: TransportObserverState;
-  };
-
-  globalWithState[TRANSPORT_OBSERVER_STATE] ??= {};
-  return globalWithState[TRANSPORT_OBSERVER_STATE];
+function responseHeader(headers: Record<string, string>, name: string): string | undefined {
+  return Object.entries(headers).find(([key]) => key.toLowerCase() === name)?.[1];
 }
 
-export function classifyHttpTransport(headers: Record<string, string>): EffectiveTransport {
-  const contentType = Object.entries(headers).find(
-    ([name]) => name.toLowerCase() === 'content-type',
-  )?.[1];
-
-  return contentType?.toLowerCase().includes('text/event-stream') ? 'sse' : 'post';
-}
-
-const TRANSPORT_OBSERVED_APIS = new Set([
-  'amazon-bedrock',
-  'anthropic-messages',
-  'azure-openai-responses',
-  'bedrock-converse-stream',
-  'google-generative-ai',
-  'google-vertex',
-  'mistral-conversations',
-  'openai-codex-responses',
-  'openai-completions',
-  'openai-responses',
-]);
-
-function shouldInstallTransportWrapper(api: string): boolean {
-  return TRANSPORT_OBSERVED_APIS.has(api);
-}
-
-// Some providers never surface a usable `content-type` response header, so
-// header-based classification cannot distinguish how the bytes arrived. The
-// AWS SDK powering `bedrock-converse-stream` only forwards `x-amzn-requestid`,
-// which `classifyHttpTransport` would always read as a plain POST even though
-// ConverseStream is a server-side event stream. Treat those headers as
-// unreliable and fall back to a per-API inferred transport instead.
-function headerTransportIsReliable(api: string): boolean {
-  return api !== 'bedrock-converse-stream';
-}
-
-// Transport that should be reported from the first streamed event when the
-// HTTP response headers did not already pin it down. Codex can negotiate a
-// WebSocket, and Bedrock ConverseStream is always an event stream (SSE), but
-// neither is detectable from headers alone.
-function getInferredStreamTransport(
-  api: string,
-  options: SimpleStreamOptions | undefined,
+export function classifyHttpTransport(
+  headers: Record<string, string>,
+  status?: number,
 ): EffectiveTransport | undefined {
-  if (api === 'openai-codex-responses') {
-    return options?.transport === 'sse' ? undefined : 'ws';
+  const connection = responseHeader(headers, 'connection')?.toLowerCase();
+  const upgrade = responseHeader(headers, 'upgrade')?.toLowerCase();
+  if (upgrade === 'websocket' || (status === 101 && connection?.includes('upgrade'))) {
+    return 'ws';
   }
 
-  if (api === 'bedrock-converse-stream') {
+  const contentType = responseHeader(headers, 'content-type');
+  if (contentType?.toLowerCase().includes('text/event-stream')) {
     return 'sse';
   }
 
   return undefined;
-}
-
-function observeTransport(
-  observe: TransportObserver,
-  observation: TransportObservation,
-  currentTransport: EffectiveTransport | undefined,
-): EffectiveTransport {
-  if (currentTransport) {
-    return currentTransport;
-  }
-
-  try {
-    observe(observation);
-  } catch {
-    // Transport indicators are best-effort UI metadata. Never let observer
-    // failures interfere with provider streaming.
-  }
-
-  return observation.transport;
-}
-
-export function createTransportObserverStream(
-  sourceStream: AssistantMessageEventStream,
-  onFirstEvent: () => void,
-): AssistantMessageEventStream {
-  const proxy = createAssistantMessageEventStream();
-
-  void (async () => {
-    let sawFirstEvent = false;
-
-    try {
-      for await (const event of sourceStream) {
-        if (!sawFirstEvent) {
-          sawFirstEvent = true;
-          onFirstEvent();
-        }
-
-        proxy.push(event);
-      }
-    } finally {
-      proxy.end();
-    }
-  })();
-
-  return proxy;
-}
-
-export function wrapApiProviderForTransportIndicators<TProvider extends ApiProvider<any>>(
-  provider: TProvider,
-  observe: TransportObserver = (observation) => getTransportObserverState().observe?.(observation),
-): TProvider {
-  const originalStreamSimple = provider.streamSimple as TransportWrappedStreamSimple;
-
-  if (originalStreamSimple[TRANSPORT_WRAPPED_STREAM_SIMPLE]) {
-    return provider;
-  }
-
-  const wrappedStreamSimple: TransportWrappedStreamSimple = function wrappedWhimsicalStreamSimple(
-    model,
-    context,
-    options,
-  ) {
-    let detectedTransport: EffectiveTransport | undefined;
-    const reportTransport = (transport: EffectiveTransport): void => {
-      detectedTransport = observeTransport(
-        observe,
-        { api: provider.api, model, transport },
-        detectedTransport,
-      );
-    };
-    const classifyFromHeaders = headerTransportIsReliable(provider.api);
-    const originalOnResponse = options?.onResponse;
-    const wrappedOptions: SimpleStreamOptions = {
-      ...options,
-      onResponse: async (response: ProviderResponse, responseModel: Model<any>) => {
-        if (classifyFromHeaders) {
-          reportTransport(classifyHttpTransport(response.headers));
-        }
-        await originalOnResponse?.(response, responseModel);
-      },
-    };
-    const sourceStream = originalStreamSimple.call(provider, model, context, wrappedOptions);
-
-    const inferredTransport = getInferredStreamTransport(provider.api, options);
-    if (!inferredTransport) {
-      return sourceStream;
-    }
-
-    return createTransportObserverStream(sourceStream, () => {
-      if (!detectedTransport) {
-        reportTransport(inferredTransport);
-      }
-    });
-  };
-
-  Object.defineProperty(wrappedStreamSimple, TRANSPORT_WRAPPED_STREAM_SIMPLE, {
-    value: true,
-    enumerable: false,
-    configurable: false,
-    writable: false,
-  });
-
-  return {
-    ...provider,
-    streamSimple: wrappedStreamSimple,
-  };
-}
-
-function installTransportIndicatorProviderPatch(observe: TransportObserver): void {
-  getTransportObserverState().observe = observe;
-
-  for (const provider of getApiProviders()) {
-    if (!shouldInstallTransportWrapper(provider.api)) {
-      continue;
-    }
-
-    const wrappedProvider = wrapApiProviderForTransportIndicators(provider);
-    if (wrappedProvider.streamSimple !== provider.streamSimple) {
-      registerApiProvider(wrappedProvider);
-    }
-  }
 }
 
 function formatTransportLabel(transport: EffectiveTransport | undefined): string | undefined {
@@ -1171,9 +979,7 @@ export default function (pi: ExtensionAPI) {
       .replace(/\bin\s+([0-9][^ ]*)/, (_match, elapsed: string) => {
         return `${theme.fg('dim', 'in')} ${theme.fg('accent', elapsed)}`;
       })
-      .replace(/((?:(?:WS|SSE|POST)\s+)?via\s+.+)$/, (_match, via: string) =>
-        theme.fg('muted', via),
-      );
+      .replace(/((?:(?:WS|SSE)\s+)?via\s+.+)$/, (_match, via: string) => theme.fg('muted', via));
 
     ctx.ui.setStatus(STATUS_KEY, colorized);
   };
@@ -1211,12 +1017,10 @@ export default function (pi: ExtensionAPI) {
     }, 100);
   };
 
-  installTransportIndicatorProviderPatch((observation) => {
-    workingMessageState = recordProviderTransport(workingMessageState, observation.transport);
-    if (workingMessageCtx) {
-      updateWorkingMessage(workingMessageCtx);
-    }
-  });
+  const recordObservedTransport = (ctx: StatusUIContext, transport: EffectiveTransport): void => {
+    workingMessageState = recordProviderTransport(workingMessageState, transport);
+    updateWorkingMessage(ctx);
+  };
 
   const clearState = (): void => {
     clearTicker();
@@ -1260,6 +1064,13 @@ export default function (pi: ExtensionAPI) {
     if (!ctx.hasUI) return;
     workingMessageState = recordProviderRequest(workingMessageState, ctx.model);
     updateWorkingMessage(ctx);
+  });
+
+  pi.on('after_provider_response', async (event, ctx) => {
+    if (!ctx.hasUI) return;
+    const transport = classifyHttpTransport(event.headers, event.status);
+    if (!transport) return;
+    recordObservedTransport(ctx, transport);
   });
 
   pi.on('tool_execution_start', async (_event, ctx) => {
