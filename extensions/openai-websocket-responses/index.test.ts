@@ -369,6 +369,50 @@ describe('body and continuation helpers', () => {
 });
 
 describe('Responses adapter and retrieve recovery', () => {
+  it('preserves reasoning items required by following assistant messages', async () => {
+    const model = makeModel();
+    const output = makeAssistantMessage(model);
+    const stream = createAssistantMessageEventStream();
+    const reasoningItem = { type: 'reasoning', id: 'rs_1', summary: [] };
+
+    await processResponsesEvents(
+      events(
+        { type: 'response.created', response: { id: 'resp_reasoning' } },
+        { type: 'response.output_item.added', item: { type: 'reasoning', id: 'rs_1' } },
+        { type: 'response.output_item.done', item: reasoningItem },
+        { type: 'response.output_item.added', item: { type: 'message', id: 'msg_1', content: [] } },
+        { type: 'response.output_text.delta', delta: 'Need a tool' },
+        {
+          type: 'response.output_item.done',
+          item: {
+            type: 'message',
+            id: 'msg_1',
+            content: [{ type: 'output_text', text: 'Need a tool' }],
+          },
+        },
+        { type: 'response.completed', response: { id: 'resp_reasoning', status: 'completed' } },
+      ),
+      output,
+      stream,
+      model,
+    );
+
+    expect(output.content[0]).toEqual(
+      expect.objectContaining({
+        type: 'thinking',
+        thinkingSignature: JSON.stringify(reasoningItem),
+      }),
+    );
+    expect(buildResponsesBody(model, { messages: [output] }).input).toEqual([
+      reasoningItem,
+      expect.objectContaining({ type: 'message', id: 'msg_1' }),
+    ]);
+    expect(assistantMessageToResponseItems(output)).toEqual([
+      reasoningItem,
+      expect.objectContaining({ type: 'message', id: 'msg_1' }),
+    ]);
+  });
+
   it('processes text and function call Responses events', async () => {
     const model = makeModel();
     const output = makeAssistantMessage(model);

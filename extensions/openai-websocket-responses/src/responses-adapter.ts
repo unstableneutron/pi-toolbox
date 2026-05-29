@@ -280,6 +280,49 @@ export function createResponsesEventProcessor<TApi extends Api>(
       return;
     }
 
+    if (type === 'response.reasoning_summary_part.added' && currentItem?.type === 'reasoning') {
+      currentItem.summary = currentItem.summary ?? [];
+      currentItem.summary.push(event.part);
+      return;
+    }
+
+    if (
+      type === 'response.reasoning_summary_text.delta' &&
+      currentItem?.type === 'reasoning' &&
+      currentBlock?.type === 'thinking'
+    ) {
+      currentItem.summary = currentItem.summary ?? [];
+      const lastPart = currentItem.summary.at(-1);
+      if (lastPart) {
+        const delta = String(event.delta ?? '');
+        currentBlock.thinking += delta;
+        lastPart.text = `${lastPart.text ?? ''}${delta}`;
+        stream.push({
+          type: 'thinking_delta',
+          contentIndex: blockIndex(output),
+          delta,
+          partial: output,
+        });
+      }
+      return;
+    }
+
+    if (
+      type === 'response.reasoning_text.delta' &&
+      currentItem?.type === 'reasoning' &&
+      currentBlock?.type === 'thinking'
+    ) {
+      const delta = String(event.delta ?? '');
+      currentBlock.thinking += delta;
+      stream.push({
+        type: 'thinking_delta',
+        contentIndex: blockIndex(output),
+        delta,
+        partial: output,
+      });
+      return;
+    }
+
     if (type === 'response.content_part.added' && currentItem?.type === 'message') {
       currentItem.content = currentItem.content ?? [];
       currentItem.content.push(event.part);
@@ -309,7 +352,19 @@ export function createResponsesEventProcessor<TApi extends Api>(
 
     if (type === 'response.output_item.done') {
       const item = event.item ?? {};
-      if (item.type === 'message' && currentBlock?.type === 'text') {
+      if (item.type === 'reasoning' && currentBlock?.type === 'thinking') {
+        const summaryText = (item.summary ?? []).map((part: any) => part.text).join('\n\n');
+        const contentText = (item.content ?? []).map((part: any) => part.text).join('\n\n');
+        currentBlock.thinking = summaryText || contentText || currentBlock.thinking;
+        currentBlock.thinkingSignature = JSON.stringify(item);
+        stream.push({
+          type: 'thinking_end',
+          contentIndex: blockIndex(output),
+          content: currentBlock.thinking,
+          partial: output,
+        });
+        currentBlock = null;
+      } else if (item.type === 'message' && currentBlock?.type === 'text') {
         currentBlock.text = (item.content ?? [])
           .map((part: any) => (part.type === 'output_text' ? part.text : (part.refusal ?? '')))
           .join('');
@@ -392,7 +447,13 @@ export function assistantMessageToResponseItems(output: AssistantMessage): unkno
   let textIndex = 0;
   for (let index = 0; index < output.content.length; index++) {
     const block = output.content[index]!;
-    if (block.type === 'text') {
+    if (block.type === 'thinking' && block.thinkingSignature) {
+      try {
+        items.push(JSON.parse(block.thinkingSignature) as unknown);
+      } catch {
+        // Ignore malformed opaque signatures.
+      }
+    } else if (block.type === 'text') {
       const fallbackId = `msg_pi_0_${textIndex}`;
       const id = textSignatureItemId(block.textSignature) ?? fallbackId;
       const phase = textSignaturePhase(block.textSignature);
