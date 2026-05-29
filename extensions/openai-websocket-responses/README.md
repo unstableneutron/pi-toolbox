@@ -18,18 +18,23 @@ Configure the extension in `~/.pi/agent/settings.json`:
   "openaiWebsocketResponses": {
     "patch": {
       "enabled": true,
-      "apis": ["openai-responses"],
+      "apis": ["openai-responses", "openai-codex-responses"],
       "providers": [],
       "providerModels": ["facade/gpt-5.5-nomoderation"],
       "excludeProviderModels": []
     },
     "request": {
-      "queryParams": {
-        "api-version": "preview",
-        "deployment": "${model.id}",
-        "region": "global",
-        "azure-resource-bucket": "internal-productivity"
-      }
+      "profile": "auto",
+      "queryParams": {},
+      "queryParamsByProvider": {
+        "facade": {
+          "api-version": "preview",
+          "deployment": "${model.id}",
+          "region": "${headers.x-azure-region}",
+          "azure-resource-bucket": "${headers.x-azure-resource-bucket}"
+        }
+      },
+      "queryParamsByProviderModel": {}
     },
     "websocket": {
       "retries": 2,
@@ -48,11 +53,13 @@ Configure the extension in `~/.pi/agent/settings.json`:
 ```
 
 Defaults: `patch.enabled` is `false`; `patch.apis` is
-`["openai-responses"]`; `patch.providers`, `patch.providerModels`, and
-`patch.excludeProviderModels` are empty arrays; `request.queryParams` is empty;
-WebSocket defaults are `retries: 2`, `connectTimeoutMs: 15000`, and
+`["openai-responses", "openai-codex-responses"]`; `patch.providers`,
+`patch.providerModels`, and `patch.excludeProviderModels` are empty arrays;
+`request.profile` is `"auto"`; `request.queryParams`,
+`request.queryParamsByProvider`, and `request.queryParamsByProviderModel` are
+empty; WebSocket defaults are `retries: 2`, `connectTimeoutMs: 15000`, and
 `idleTimeoutMs: 0`; recovery defaults are shown above. Keep `providerModels`
-narrow when `request.queryParams` contains deployment-specific values.
+narrow when request query params contain deployment-specific values.
 
 For the current Azure/LFM WSS route, `api-version` alone is not enough. The
 handshake also needs Azure routing values in URL query params. Use `${model.id}`
@@ -68,9 +75,54 @@ Supported query-param template variables:
 
 If a template cannot be resolved, that query param is omitted.
 
-Only `request.queryParams` adds URL query params. Azure routing values such as
-`x-azure-region`, `x-azure-resource-bucket`, and `x-azure-deployment` remain
-headers.
+`request.queryParams`, `request.queryParamsByProvider`, and
+`request.queryParamsByProviderModel` add URL query params. Use provider or
+provider/model-scoped params when patching both Azure and Codex models, so Azure
+routing values do not leak into Codex URLs. Provider/model keys support `*`
+globs such as `facade/gpt-5*`. Azure routing values such as `x-azure-region`,
+`x-azure-resource-bucket`, and `x-azure-deployment` remain headers.
+
+`request.profile` controls endpoint-specific request shaping:
+
+- `auto` detects Codex from `openai-codex-responses`, `openai-codex`,
+  ChatGPT/backend-api URLs, or `/codex` paths; it detects Azure from
+  `azure-openai-responses`, `.openai.azure.com`, `azure_openai` paths,
+  `api-version`, or `x-azure-*` headers.
+- `azure` forces Azure/LFM-compatible behavior.
+- `codex` forces OpenAI Codex/ChatGPT-compatible behavior.
+- `generic` uses plain Responses WSS URL/body behavior.
+
+## Request body behavior
+
+The WebSocket `response.create` body follows Azure Responses fields that also
+match Pi's Codex Responses path where Azure supports them:
+
+- Pi system prompts are sent as top-level `instructions` instead of an input
+  `system`/`developer` item.
+- `store` defaults to `false`.
+- If no system prompt exists, `instructions` falls back to
+  `"You are a helpful assistant."`.
+- `text.verbosity` defaults to `low`; callers may pass `textVerbosity` as
+  `low`, `medium`, or `high`.
+- `include` starts with `["reasoning.encrypted_content"]` so reasoning items can
+  be replayed safely across stateless turns.
+- Reasoning requests include `reasoning.summary: "auto"` by default.
+- `tool_choice: "auto"` and `parallel_tool_calls: true` are sent by default.
+- When `sessionId` is present, it is sent as a 64-character-clamped
+  `prompt_cache_key`. Azure/generic profiles omit it for `cacheRetention:
+"none"`; Codex matches Codex behavior and still sends the key when a
+  `sessionId` is present.
+
+Profile-specific differences:
+
+- `azure`/`generic` send `max_output_tokens`; `codex` omits it because Codex
+  backends reject it.
+- `azure`/`generic` send `prompt_cache_retention: "24h"` for `cacheRetention:
+"long"`; `codex` omits retention.
+- `codex` allows `service_tier` when provided; `azure`/`generic` omit it because
+  Azure's published Responses schema does not include it.
+- `codex` resolves backend API URLs to `/codex/responses` and sets Codex WSS
+  headers such as `OpenAI-Beta: responses_websockets=2026-02-06`.
 
 ## Recovery behavior
 

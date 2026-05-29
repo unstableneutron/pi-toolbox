@@ -21,13 +21,14 @@ conversion and stream-processing logic from `@howaboua/pi-codex-conversion`.
 - Synthetic error tool results for unmatched assistant tool calls.
 - Local retrieve-recovery helpers that apply final response snapshots using the
   same reasoning-item and partial-JSON parsing rules.
+- Optional top-level `instructions` extraction while preserving legacy
+  system/developer input-item replay for callers that need it.
 
 ## What was intentionally not ported
 
 - ChatGPT/Codex backend URL handling.
 - ChatGPT account/auth headers.
-- Forced `store: false` request behavior.
-- Top-level `instructions` request shaping.
+- Codex's default `instructions` fallback when no system prompt is present.
 - Native Codex web search and image generation tools.
 - Codex service-tier pricing and compaction UI behavior.
 

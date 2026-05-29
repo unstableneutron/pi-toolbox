@@ -8,7 +8,7 @@
  *
  * Local adaptation notes:
  * - Keep Azure/LFM-compatible request semantics from this extension.
- * - Do not force `store: false`, `instructions`, Codex headers, native web/image tools,
+ * - Do not force default `instructions`, Codex headers, native web/image tools,
  *   or ChatGPT-specific service-tier behavior.
  * - Preserve the upstream per-output-index stream state machine, opaque reasoning
  *   item replay, text item signatures, partial JSON parsing, failed-message filtering,
@@ -32,6 +32,7 @@ import { parse as partialParse } from 'partial-json';
 type ResponsesEvent = Record<string, any>;
 type ResponsesInputItem = Record<string, any>;
 type Message = Context['messages'][number];
+type BuildResponsesInputOptions = { includeSystemPrompt?: boolean };
 type ThinkingBlock = Record<string, any> & {
   type: 'thinking';
   thinking: string;
@@ -78,6 +79,12 @@ export function parseResponsesJsonObject(value: string | undefined): Record<stri
       return {};
     }
   }
+}
+
+export function buildResponsesInstructions(
+  context: Pick<Context, 'systemPrompt'>,
+): string | undefined {
+  return context.systemPrompt?.trim() ? sanitizeSurrogates(context.systemPrompt) : undefined;
 }
 
 function textFromContent(content: string | (TextContent | ImageContent)[]): string {
@@ -215,13 +222,15 @@ function assistantMessageItems(
 export function buildResponsesInput<TApi extends Api>(
   model: Model<TApi>,
   context: Context,
+  options: BuildResponsesInputOptions = {},
 ): ResponsesInputItem[] {
   const input: ResponsesInputItem[] = [];
 
-  if (context.systemPrompt?.trim()) {
+  const instructions = buildResponsesInstructions(context);
+  if (instructions && options.includeSystemPrompt !== false) {
     input.push({
       role: model.reasoning ? 'developer' : 'system',
-      content: sanitizeSurrogates(context.systemPrompt),
+      content: instructions,
     });
   }
 

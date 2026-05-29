@@ -2,6 +2,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
+export type RequestProfile = 'auto' | 'azure' | 'codex' | 'generic';
+
 export interface OpenAIWebSocketResponsesSettings {
   patch: {
     enabled: boolean;
@@ -10,7 +12,12 @@ export interface OpenAIWebSocketResponsesSettings {
     providerModels: string[];
     excludeProviderModels: string[];
   };
-  request: { queryParams: Record<string, string> };
+  request: {
+    profile: RequestProfile;
+    queryParams: Record<string, string>;
+    queryParamsByProvider: Record<string, Record<string, string>>;
+    queryParamsByProviderModel: Record<string, Record<string, string>>;
+  };
   websocket: { retries: number; connectTimeoutMs: number; idleTimeoutMs: number };
   recovery: {
     enabled: boolean;
@@ -24,12 +31,17 @@ export interface OpenAIWebSocketResponsesSettings {
 const DEFAULT_SETTINGS: OpenAIWebSocketResponsesSettings = {
   patch: {
     enabled: false,
-    apis: ['openai-responses'],
+    apis: ['openai-responses', 'openai-codex-responses'],
     providers: [],
     providerModels: [],
     excludeProviderModels: [],
   },
-  request: { queryParams: {} },
+  request: {
+    profile: 'auto',
+    queryParams: {},
+    queryParamsByProvider: {},
+    queryParamsByProviderModel: {},
+  },
   websocket: { retries: 2, connectTimeoutMs: 15000, idleTimeoutMs: 0 },
   recovery: {
     enabled: true,
@@ -120,6 +132,10 @@ function stripJsonComments(source: string): string {
   return result;
 }
 
+function requestProfile(value: unknown): RequestProfile {
+  return value === 'azure' || value === 'codex' || value === 'generic' ? value : 'auto';
+}
+
 function queryParams(value: unknown): Record<string, string> {
   if (!isRecord(value)) return {};
   return Object.fromEntries(
@@ -129,6 +145,15 @@ function queryParams(value: unknown): Record<string, string> {
         return typeof item === 'string' || typeof item === 'number' || typeof item === 'boolean';
       })
       .map(([key, value]) => [key, String(value)]),
+  );
+}
+
+function queryParamsMap(value: unknown): Record<string, Record<string, string>> {
+  if (!isRecord(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter((entry): entry is [string, Record<string, unknown>] => isRecord(entry[1]))
+      .map(([key, item]) => [key, queryParams(item)]),
   );
 }
 
@@ -150,7 +175,12 @@ export function normalizeSettings(raw: unknown): OpenAIWebSocketResponsesSetting
         DEFAULT_SETTINGS.patch.excludeProviderModels,
       ),
     },
-    request: { queryParams: queryParams(request.queryParams) },
+    request: {
+      profile: requestProfile(request.profile),
+      queryParams: queryParams(request.queryParams),
+      queryParamsByProvider: queryParamsMap(request.queryParamsByProvider),
+      queryParamsByProviderModel: queryParamsMap(request.queryParamsByProviderModel),
+    },
     websocket: {
       retries: nonNegativeNumber(websocket.retries, DEFAULT_SETTINGS.websocket.retries),
       connectTimeoutMs: nonNegativeNumber(

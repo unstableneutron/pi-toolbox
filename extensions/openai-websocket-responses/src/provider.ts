@@ -19,6 +19,7 @@ import {
   setContinuation,
 } from './continuation-cache.ts';
 import { buildRequestHeaders, buildWebSocketHeaders } from './headers.ts';
+import { resolveRequestProfile } from './profile.ts';
 import { recoverResponseByRetrieve } from './retrieve-recovery.ts';
 import {
   assistantMessageToResponseItems,
@@ -77,9 +78,10 @@ export function createOpenAIWebSocketResponsesStream(
       let cacheKey: string | undefined;
       try {
         const settings = settingsProvider();
-        const requestHeaders = buildRequestHeaders(model, options);
-        const websocketHeaders = buildWebSocketHeaders(model, options);
-        const url = resolveWebSocketResponsesUrl(model, settings, websocketHeaders);
+        const profile = resolveRequestProfile(model, settings);
+        const requestHeaders = buildRequestHeaders(model, options, profile);
+        const websocketHeaders = buildWebSocketHeaders(model, options, profile);
+        const url = resolveWebSocketResponsesUrl(model, settings, websocketHeaders, profile);
         if (!websocketHeaders.has('authorization'))
           throw new Error(`Missing Authorization header for ${url}`);
 
@@ -93,7 +95,7 @@ export function createOpenAIWebSocketResponsesStream(
           });
         }
 
-        const fullBody = buildResponsesBody(model, context, options);
+        const fullBody = buildResponsesBody(model, context, options, profile);
         const continuationRequest = buildContinuationRequestBody(
           getContinuation(cacheKey),
           fullBody,
@@ -143,6 +145,7 @@ export function createOpenAIWebSocketResponsesStream(
             output,
             stream,
             signal: options?.signal,
+            profile,
           });
         }
 

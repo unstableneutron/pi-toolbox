@@ -20,6 +20,7 @@ import {
 } from './src/continuation-cache.ts';
 import { buildRequestHeaders, buildWebSocketHeaders } from './src/headers.ts';
 import { shouldPatchModel } from './src/match.ts';
+import { resolveRequestProfile } from './src/profile.ts';
 import { wrapProviderForWebSocketResponses } from './src/patch.ts';
 import { recoverResponseByRetrieve } from './src/retrieve-recovery.ts';
 import {
@@ -58,6 +59,18 @@ function makeModel(overrides: Partial<Model<any>> = {}): Model<any> {
   } as Model<any>;
 }
 
+function makeCodexModel(overrides: Partial<Model<any>> = {}): Model<any> {
+  return makeModel({
+    id: 'gpt-5.5-fast',
+    name: 'GPT-5.5 Fast',
+    api: 'openai-codex-responses',
+    provider: 'openai-codex',
+    baseUrl: 'https://chatgpt.com/backend-api',
+    headers: { 'x-api-key': 'sk-pi-test' },
+    ...overrides,
+  });
+}
+
 function makeAssistantMessage(model = makeModel()): AssistantMessage {
   return {
     role: 'assistant',
@@ -85,7 +98,7 @@ async function* events(...items: Record<string, any>[]): AsyncIterable<Record<st
 describe('settings and patch matching', () => {
   it('defaults to explicit API enabled and transparent patch disabled', () => {
     expect(normalizeSettings(undefined)).toMatchObject({
-      patch: { enabled: false, apis: ['openai-responses'] },
+      patch: { enabled: false, apis: ['openai-responses', 'openai-codex-responses'] },
       request: { queryParams: {} },
       websocket: { retries: 2, connectTimeoutMs: 15000, idleTimeoutMs: 0 },
       recovery: {
@@ -123,7 +136,12 @@ describe('settings and patch matching', () => {
       const settings = readOpenAIWebSocketResponsesSettings(path);
       expect(settings).toMatchObject({
         patch: { enabled: true, providerModels: ['facade/gpt-5.5-nomoderation'] },
-        request: { queryParams: { 'api-version': 'preview' } },
+        request: {
+          profile: 'auto',
+          queryParams: { 'api-version': 'preview' },
+          queryParamsByProvider: {},
+          queryParamsByProviderModel: {},
+        },
       });
       expect(settings).not.toHaveProperty('registerSmokeProvider');
     } finally {
@@ -150,6 +168,20 @@ describe('settings and patch matching', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('normalizes request profile and detects Azure vs Codex endpoints', () => {
+    expect(normalizeSettings({ request: { profile: 'codex' } }).request.profile).toBe('codex');
+    expect(normalizeSettings({ request: { profile: 'unknown' } }).request.profile).toBe('auto');
+
+    expect(resolveRequestProfile(makeModel(), normalizeSettings(undefined))).toBe('azure');
+    expect(resolveRequestProfile(makeCodexModel(), normalizeSettings(undefined))).toBe('codex');
+    expect(
+      resolveRequestProfile(
+        makeModel({ baseUrl: 'https://example.test/openai/v1', headers: {} }),
+        normalizeSettings({ request: { profile: 'generic' } }),
+      ),
+    ).toBe('generic');
   });
 
   it('matches provider/model globs and honors exclusions', () => {
@@ -258,6 +290,79 @@ describe('URL and header helpers', () => {
     );
   });
 
+  it('applies provider-scoped query params without leaking Azure routing into Codex URLs', () => {
+    const settings = normalizeSettings({
+      request: {
+        queryParamsByProvider: {
+          facade: {
+            'api-version': 'preview',
+            deployment: '${model.id}',
+            region: '${headers.x-azure-region}',
+            'azure-resource-bucket': '${headers.x-azure-resource-bucket}',
+          },
+        },
+      },
+    });
+
+    expect(resolveWebSocketResponsesUrl(makeModel(), settings)).toBe(
+      'wss://llm-fusion-hub.example/api/v2/proxy/experimental/azure_openai/openai/v1/responses?api-version=preview&deployment=gpt-5.5-nomoderation&region=global&azure-resource-bucket=internal-productivity',
+    );
+    expect(resolveWebSocketResponsesUrl(makeCodexModel(), settings)).toBe(
+      'wss://chatgpt.com/backend-api/codex/responses',
+    );
+  });
+
+  it('lets provider-model query params override provider query params', () => {
+    const settings = normalizeSettings({
+      request: {
+        queryParamsByProvider: {
+          facade: {
+            region: '${headers.x-azure-region}',
+            deployment: '${model.id}',
+          },
+        },
+        queryParamsByProviderModel: {
+          'facade/gpt-5*': {
+            region: 'override-region',
+          },
+        },
+      },
+    });
+
+    expect(resolveWebSocketResponsesUrl(makeModel(), settings)).toBe(
+      'wss://llm-fusion-hub.example/api/v2/proxy/experimental/azure_openai/openai/v1/responses?api-version=preview&region=override-region&deployment=gpt-5.5-nomoderation',
+    );
+  });
+
+  it('builds Codex WSS and retrieve URLs from backend-api base URLs', () => {
+    const settings = normalizeSettings({ request: { profile: 'auto' } });
+    const model = makeCodexModel();
+
+    expect(resolveWebSocketResponsesUrl(model, settings)).toBe(
+      'wss://chatgpt.com/backend-api/codex/responses',
+    );
+    expect(resolveRetrieveResponseUrl(model, settings, 'resp_123')).toBe(
+      'https://chatgpt.com/backend-api/codex/responses/resp_123',
+    );
+  });
+
+  it('builds Codex headers from a JWT api key and session id', () => {
+    const apiKey =
+      'eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xMjMifX0.';
+    const websocketHeaders = buildWebSocketHeaders(
+      makeCodexModel(),
+      { apiKey, sessionId: 'session-123', headers: { accept: 'application/json' } },
+      'codex',
+    );
+
+    expect(websocketHeaders.get('authorization')).toBe(`Bearer ${apiKey}`);
+    expect(websocketHeaders.get('chatgpt-account-id')).toBe('acct_123');
+    expect(websocketHeaders.get('openai-beta')).toBe('responses_websockets=2026-02-06');
+    expect(websocketHeaders.get('x-client-request-id')).toBe('session-123');
+    expect(websocketHeaders.get('session-id')).toBe('session-123');
+    expect(websocketHeaders.get('accept')).toBeNull();
+  });
+
   it('merges request headers and strips only WSS transport headers', () => {
     const model = makeModel({
       headers: { accept: 'application/json', 'x-azure-deployment': 'gpt-5.5' },
@@ -281,28 +386,75 @@ describe('URL and header helpers', () => {
 });
 
 describe('body and continuation helpers', () => {
-  it('builds Responses body and does not force store=false', () => {
+  it('builds Responses body with Azure-supported Codex-compatible fields', () => {
     const body = buildResponsesBody(
       makeModel(),
       {
         systemPrompt: 'You are helpful.',
         messages: [{ role: 'user', content: 'Hi', timestamp: 1 }],
       },
-      { reasoning: 'medium', maxTokens: 123 },
+      {
+        reasoning: 'medium',
+        maxTokens: 123,
+        sessionId: 'session-abcdefghijklmnopqrstuvwxyz-ABCDEFGHIJKLMNOPQRSTUVWXYZ-0123456789',
+        cacheRetention: 'long',
+        textVerbosity: 'high',
+        serviceTier: 'priority',
+      } as any,
     );
 
     expect(body).toMatchObject({
       model: 'gpt-5.5-nomoderation',
       max_output_tokens: 123,
-      reasoning: { effort: 'medium' },
+      instructions: 'You are helpful.',
+      store: false,
+      text: { verbosity: 'high' },
+      include: ['reasoning.encrypted_content'],
+      prompt_cache_key: 'session-abcdefghijklmnopqrstuvwxyz-ABCDEFGHIJKLMNOPQRSTUVWXYZ-01',
+      prompt_cache_retention: '24h',
+      reasoning: { effort: 'medium', summary: 'auto' },
     });
-    expect(body.store).toBeUndefined();
-    expect(body.input).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ role: 'developer' }),
-        expect.objectContaining({ role: 'user' }),
-      ]),
+    expect(body.service_tier).toBeUndefined();
+    expect(body.input).toEqual([expect.objectContaining({ role: 'user' })]);
+  });
+
+  it('builds Codex-profile request bodies with Codex-compatible defaults', () => {
+    const body = buildResponsesBody(
+      makeCodexModel(),
+      { messages: [{ role: 'user', content: 'Hi', timestamp: 1 }] },
+      {
+        maxTokens: 123,
+        sessionId: 'session-1',
+        cacheRetention: 'long',
+        serviceTier: 'priority',
+      } as any,
+      'codex',
     );
+
+    expect(body).toMatchObject({
+      model: 'gpt-5.5-fast',
+      instructions: 'You are a helpful assistant.',
+      store: false,
+      text: { verbosity: 'low' },
+      include: ['reasoning.encrypted_content'],
+      prompt_cache_key: 'session-1',
+      tool_choice: 'auto',
+      parallel_tool_calls: true,
+      service_tier: 'priority',
+    });
+    expect(body.max_output_tokens).toBeUndefined();
+    expect(body.prompt_cache_retention).toBeUndefined();
+  });
+
+  it('omits prompt cache fields when cache retention is disabled for Azure-compatible profiles', () => {
+    const body = buildResponsesBody(
+      makeModel(),
+      { messages: [{ role: 'user', content: 'Hi', timestamp: 1 }] },
+      { sessionId: 'session-1', cacheRetention: 'none' },
+    );
+
+    expect(body.prompt_cache_key).toBeUndefined();
+    expect(body.prompt_cache_retention).toBeUndefined();
   });
 
   it('uses previous_response_id and delta input only when the request prefix matches', () => {
@@ -1126,6 +1278,112 @@ describe('WebSocket transport', () => {
     expect(seen).toEqual(['response.created', 'response.completed']);
   });
 
+  it('processes binary terminal frames before a following close event', async () => {
+    const { WebSocketCtor } = makeWebSocketCtor([
+      (socket) => {
+        socket.emit('message', {
+          data: Buffer.from(
+            JSON.stringify({ type: 'response.created', response: { id: 'resp_binary' } }),
+          ),
+        });
+        socket.emit('message', {
+          data: Buffer.from(
+            JSON.stringify({
+              type: 'response.completed',
+              response: { id: 'resp_binary', status: 'completed' },
+            }),
+          ),
+        });
+        socket.emit('close', { code: 1000 });
+      },
+    ]);
+    const seen: string[] = [];
+
+    const result = await runWebSocketResponse(
+      {
+        url: 'wss://example.test/responses',
+        headers: new Headers(),
+        body: { model: 'gpt', input: [] },
+        settings: normalizeSettings({ websocket: { retries: 0 } }),
+        WebSocketCtor,
+      },
+      (event) => {
+        seen.push(event.type);
+      },
+    );
+
+    expect(result).toMatchObject({ responseId: 'resp_binary', eventCount: 2 });
+    expect(seen).toEqual(['response.created', 'response.completed']);
+  });
+
+  it('does not keep a cached socket after the server closes following a terminal event', async () => {
+    const instances: any[] = [];
+    class FakeWebSocket {
+      readyState = 1;
+      sent: string[] = [];
+      closed = false;
+      listeners = new Map<string, Set<(event: any) => void>>();
+
+      constructor() {
+        instances.push(this);
+        queueMicrotask(() => this.emit('open', {}));
+      }
+
+      send(data: string) {
+        this.sent.push(data);
+        queueMicrotask(() => {
+          this.emit('message', {
+            data: JSON.stringify({
+              type: 'response.created',
+              response: { id: `resp_${instances.length}` },
+            }),
+          });
+          this.emit('message', {
+            data: JSON.stringify({
+              type: 'response.completed',
+              response: { id: `resp_${instances.length}`, status: 'completed' },
+            }),
+          });
+          this.emit('close', { code: 1000 });
+        });
+      }
+
+      close() {
+        this.closed = true;
+        this.readyState = 3;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void) {
+        const listeners = this.listeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      removeEventListener(type: string, listener: (event: any) => void) {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      emit(type: string, event: any) {
+        for (const listener of this.listeners.get(type) ?? []) listener(event);
+      }
+    }
+
+    const request = {
+      url: 'wss://example.test/responses',
+      headers: new Headers(),
+      body: { model: 'gpt', input: [] },
+      settings: normalizeSettings({ websocket: { retries: 0 } }),
+      cacheKey: 'terminal-close-cache-key',
+      WebSocketCtor: FakeWebSocket as any,
+    };
+
+    await runWebSocketResponse(request, () => undefined);
+    await runWebSocketResponse(request, () => undefined);
+
+    expect(instances).toHaveLength(2);
+    closeAllCachedWebSockets();
+  });
+
   it('does not cache one-shot sockets opened while a same-key socket is busy', async () => {
     const instances: any[] = [];
     let firstSent!: () => void;
@@ -1242,6 +1500,69 @@ describe('WebSocket transport', () => {
       ),
     ).rejects.toMatchObject({ responseId: 'resp_mid' } satisfies Partial<WebSocketMidstreamError>);
     expect(instances).toHaveLength(1);
+  });
+
+  it('falls back to a full body when previous_response_id is no longer cached', async () => {
+    const { WebSocketCtor, instances } = makeWebSocketCtor([
+      (socket) => {
+        socket.emit('message', {
+          data: JSON.stringify({
+            type: 'error',
+            error: {
+              type: 'invalid_request_error',
+              code: 'previous_response_not_found',
+              message: "Previous response with id 'resp_old' not found.",
+              param: 'previous_response_id',
+            },
+            status: 400,
+          }),
+        });
+      },
+      (socket) => {
+        socket.emit('message', {
+          data: JSON.stringify({ type: 'response.created', response: { id: 'resp_new' } }),
+        });
+        socket.emit('message', {
+          data: JSON.stringify({
+            type: 'response.completed',
+            response: { id: 'resp_new', status: 'completed' },
+          }),
+        });
+      },
+    ]);
+    const seen: string[] = [];
+    const fullBody = {
+      model: 'gpt',
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'full' }] }],
+    };
+
+    const result = await runWebSocketResponse(
+      {
+        url: 'wss://example.test/responses',
+        headers: new Headers(),
+        body: {
+          ...fullBody,
+          previous_response_id: 'resp_old',
+          input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'next' }] }],
+        },
+        fallbackBodyOnPreviousResponseNotFound: fullBody,
+        settings: normalizeSettings({ websocket: { retries: 0 } }),
+        WebSocketCtor,
+      },
+      (event) => {
+        seen.push(event.type);
+      },
+    );
+
+    expect(result).toMatchObject({ responseId: 'resp_new', eventCount: 2, fallbackUsed: true });
+    expect(instances).toHaveLength(2);
+    expect(JSON.parse(instances[0].sent[0])).toMatchObject({
+      previous_response_id: 'resp_old',
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'next' }] }],
+    });
+    expect(JSON.parse(instances[1].sent[0])).toMatchObject(fullBody);
+    expect(JSON.parse(instances[1].sent[0])).not.toHaveProperty('previous_response_id');
+    expect(seen).toEqual(['response.created', 'response.completed']);
   });
 });
 

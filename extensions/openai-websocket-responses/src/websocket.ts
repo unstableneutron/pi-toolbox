@@ -114,11 +114,18 @@ function isTerminalEvent(type: string | undefined): boolean {
   );
 }
 
-async function decodeData(data: unknown): Promise<string> {
+function decodeImmediateData(data: unknown): string | undefined {
   if (typeof data === 'string') return data;
   if (data instanceof ArrayBuffer) return new TextDecoder().decode(new Uint8Array(data));
-  if (ArrayBuffer.isView(data))
+  if (ArrayBuffer.isView(data)) {
     return new TextDecoder().decode(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+  }
+  return undefined;
+}
+
+async function decodeData(data: unknown): Promise<string> {
+  const immediate = decodeImmediateData(data);
+  if (immediate !== undefined) return immediate;
   if (data && typeof data === 'object' && 'arrayBuffer' in data) {
     return new TextDecoder().decode(new Uint8Array(await (data as Blob).arrayBuffer()));
   }
@@ -339,8 +346,9 @@ export async function runWebSocketResponse(
         const onMessage = (messageEvent: MessageEvent) => {
           try {
             armIdleTimer();
-            if (typeof messageEvent.data === 'string') {
-              handleParsedMessage(JSON.parse(messageEvent.data) as Record<string, any>);
+            const immediate = decodeImmediateData(messageEvent.data);
+            if (immediate !== undefined) {
+              handleParsedMessage(JSON.parse(immediate) as Record<string, any>);
               return;
             }
             void (async () => {
@@ -367,12 +375,14 @@ export async function runWebSocketResponse(
         };
         const onError = (event: any) =>
           fail(new Error(event?.message || event?.error?.message || 'WebSocket error'));
-        const onClose = (event: any) =>
+        const onClose = (event: any) => {
+          keepSocket = false;
           fail(
             new Error(
               `WebSocket closed before response.completed${event?.code ? ` code=${event.code}` : ''}${event?.reason ? ` reason=${event.reason}` : ''}`,
             ),
           );
+        };
         socket.addEventListener('message', onMessage as any);
         socket.addEventListener('error', onError);
         socket.addEventListener('close', onClose);

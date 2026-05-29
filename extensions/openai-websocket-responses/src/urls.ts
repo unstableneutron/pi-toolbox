@@ -1,6 +1,9 @@
 import type { Api, Model } from '@earendil-works/pi-ai';
 
+import { resolveRequestProfile, type ResolvedRequestProfile } from './profile.ts';
 import type { OpenAIWebSocketResponsesSettings } from './settings.ts';
+
+const DEFAULT_CODEX_BASE_URL = 'https://chatgpt.com/backend-api';
 
 function appendPathSegment(pathname: string, segment: string): string {
   const trimmed = pathname.replace(/\/+$/, '');
@@ -67,20 +70,61 @@ function resolveQueryParamTemplate(
   return unresolved ? undefined : resolved;
 }
 
+function globToRegExp(glob: string): RegExp {
+  const escaped = glob.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+  return new RegExp(`^${escaped}$`);
+}
+
+function matchesGlob(value: string, pattern: string): boolean {
+  return globToRegExp(pattern).test(value);
+}
+
+function queryParamsForModel(
+  settings: OpenAIWebSocketResponsesSettings,
+  model: Model<Api>,
+): Record<string, string> {
+  const providerModel = `${model.provider}/${model.id}`;
+  return {
+    ...settings.request.queryParams,
+    ...settings.request.queryParamsByProvider[model.provider],
+    ...Object.assign(
+      {},
+      ...Object.entries(settings.request.queryParamsByProviderModel)
+        .filter(([pattern]) => matchesGlob(providerModel, pattern))
+        .map(([, queryParams]) => queryParams),
+    ),
+  };
+}
+
 function applySettingsQueryParams(
   url: URL,
   model: Model<Api>,
   settings: OpenAIWebSocketResponsesSettings,
-  runtimeHeaders?: HeaderTemplateSource,
+  runtimeHeaders: HeaderTemplateSource,
 ): URL {
-  for (const [key, value] of Object.entries(settings.request.queryParams)) {
+  for (const [key, value] of Object.entries(queryParamsForModel(settings, model))) {
     const resolved = resolveQueryParamTemplate(model, key, value, runtimeHeaders);
     if (resolved !== undefined) url.searchParams.set(key, resolved);
   }
   return url;
 }
 
-export function resolveResponsesBaseUrl(model: Model<Api>): URL {
+function appendCodexResponsesPath(pathname: string): string {
+  const trimmed = pathname.replace(/\/+$/, '');
+  if (trimmed.endsWith('/codex/responses')) return trimmed;
+  if (trimmed.endsWith('/codex')) return `${trimmed}/responses`;
+  return `${trimmed}/codex/responses`;
+}
+
+export function resolveResponsesBaseUrl(
+  model: Model<Api>,
+  profile: ResolvedRequestProfile = resolveRequestProfile(model),
+): URL {
+  if (profile === 'codex') {
+    const url = new URL(model.baseUrl?.trim() || DEFAULT_CODEX_BASE_URL);
+    url.pathname = appendCodexResponsesPath(url.pathname);
+    return url;
+  }
   if (!model.baseUrl) throw new Error('model.baseUrl is required for openai-websocket-responses');
   const url = new URL(model.baseUrl);
   url.pathname = appendPathSegment(url.pathname, 'responses');
@@ -91,9 +135,10 @@ export function resolveWebSocketResponsesUrl(
   model: Model<Api>,
   settings: OpenAIWebSocketResponsesSettings,
   runtimeHeaders?: HeaderTemplateSource,
+  profile: ResolvedRequestProfile = resolveRequestProfile(model, settings),
 ): string {
   const url = applySettingsQueryParams(
-    resolveResponsesBaseUrl(model),
+    resolveResponsesBaseUrl(model, profile),
     model,
     settings,
     runtimeHeaders,
@@ -108,9 +153,10 @@ export function resolveRetrieveResponseUrl(
   settings: OpenAIWebSocketResponsesSettings,
   responseId: string,
   runtimeHeaders?: HeaderTemplateSource,
+  profile: ResolvedRequestProfile = resolveRequestProfile(model, settings),
 ): string {
   const url = applySettingsQueryParams(
-    resolveResponsesBaseUrl(model),
+    resolveResponsesBaseUrl(model, profile),
     model,
     settings,
     runtimeHeaders,

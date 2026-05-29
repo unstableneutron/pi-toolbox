@@ -15,6 +15,7 @@ import {
   isFinalizedTextBlock,
   responseMessageTextSignature,
 } from './responses-adapter.ts';
+import type { ResolvedRequestProfile } from './profile.ts';
 import type { OpenAIWebSocketResponsesSettings } from './settings.ts';
 import { resolveRetrieveResponseUrl } from './urls.ts';
 
@@ -63,6 +64,7 @@ export async function recoverResponseByRetrieve(request: {
   stream: AssistantMessageEventStream;
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
+  profile?: ResolvedRequestProfile;
 }): Promise<RetrieveRecoveryResult> {
   const fetchImpl = request.fetchImpl ?? fetch;
   const startedAt = Date.now();
@@ -75,6 +77,7 @@ export async function recoverResponseByRetrieve(request: {
     request.settings,
     request.responseId,
     request.headers,
+    request.profile,
   );
 
   while (Date.now() <= deadline) {
