@@ -473,6 +473,44 @@ function pickRandom(): string {
   return messages[Math.floor(Math.random() * messages.length)];
 }
 
+/**
+ * Minimum terminal width (in columns) required before the whimsical phrase is
+ * shown. On narrower terminals (e.g. mobile SSH sessions, measured around 57
+ * columns) the decorative phrase is dropped so the working line keeps the
+ * useful suffix (timer, transport, base URL) without spilling onto a second
+ * line. The 80-column default is the classic terminal width: it hides mobile
+ * sessions while keeping the phrase wrap-free across realistic suffixes,
+ * including a custom/proxy `via <host>` label. Override with the
+ * `WHIMSICAL_MIN_COLUMNS` environment variable.
+ */
+export const DEFAULT_MIN_WHIMSY_COLUMNS = 80;
+
+/**
+ * Decide whether the whimsical phrase should be injected for the current
+ * terminal width. When the width is unknown (non-interactive stdout, e.g. RPC
+ * or print mode), the phrase is shown so behaviour matches earlier releases.
+ */
+export function shouldShowWhimsy(
+  columns: number | undefined,
+  minColumns: number = DEFAULT_MIN_WHIMSY_COLUMNS,
+): boolean {
+  if (columns === undefined || !Number.isFinite(columns) || columns <= 0) {
+    return true;
+  }
+
+  return columns >= minColumns;
+}
+
+function resolveMinWhimsyColumns(): number {
+  const raw = process.env.WHIMSICAL_MIN_COLUMNS;
+  if (raw === undefined) {
+    return DEFAULT_MIN_WHIMSY_COLUMNS;
+  }
+
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MIN_WHIMSY_COLUMNS;
+}
+
 const DEFAULT_PROVIDER_BASE_URLS: Record<string, string[]> = {
   'amazon-bedrock': ['https://bedrock-runtime.us-east-1.amazonaws.com'],
   anthropic: ['https://api.anthropic.com'],
@@ -817,19 +855,37 @@ const TRANSPORT_OBSERVED_APIS = new Set([
   'openai-responses',
 ]);
 
-function isWebSocketCapableApi(api: string): boolean {
-  return api === 'openai-codex-responses';
-}
-
 function shouldInstallTransportWrapper(api: string): boolean {
   return TRANSPORT_OBSERVED_APIS.has(api);
 }
 
-function shouldInferWebSocketTransport(
+// Some providers never surface a usable `content-type` response header, so
+// header-based classification cannot distinguish how the bytes arrived. The
+// AWS SDK powering `bedrock-converse-stream` only forwards `x-amzn-requestid`,
+// which `classifyHttpTransport` would always read as a plain POST even though
+// ConverseStream is a server-side event stream. Treat those headers as
+// unreliable and fall back to a per-API inferred transport instead.
+function headerTransportIsReliable(api: string): boolean {
+  return api !== 'bedrock-converse-stream';
+}
+
+// Transport that should be reported from the first streamed event when the
+// HTTP response headers did not already pin it down. Codex can negotiate a
+// WebSocket, and Bedrock ConverseStream is always an event stream (SSE), but
+// neither is detectable from headers alone.
+function getInferredStreamTransport(
   api: string,
   options: SimpleStreamOptions | undefined,
-): boolean {
-  return isWebSocketCapableApi(api) && options?.transport !== 'sse';
+): EffectiveTransport | undefined {
+  if (api === 'openai-codex-responses') {
+    return options?.transport === 'sse' ? undefined : 'ws';
+  }
+
+  if (api === 'bedrock-converse-stream') {
+    return 'sse';
+  }
+
+  return undefined;
 }
 
 function observeTransport(
@@ -900,23 +956,27 @@ export function wrapApiProviderForTransportIndicators<TProvider extends ApiProvi
         detectedTransport,
       );
     };
+    const classifyFromHeaders = headerTransportIsReliable(provider.api);
     const originalOnResponse = options?.onResponse;
     const wrappedOptions: SimpleStreamOptions = {
       ...options,
       onResponse: async (response: ProviderResponse, responseModel: Model<any>) => {
-        reportTransport(classifyHttpTransport(response.headers));
+        if (classifyFromHeaders) {
+          reportTransport(classifyHttpTransport(response.headers));
+        }
         await originalOnResponse?.(response, responseModel);
       },
     };
     const sourceStream = originalStreamSimple.call(provider, model, context, wrappedOptions);
 
-    if (!shouldInferWebSocketTransport(provider.api, options)) {
+    const inferredTransport = getInferredStreamTransport(provider.api, options);
+    if (!inferredTransport) {
       return sourceStream;
     }
 
     return createTransportObserverStream(sourceStream, () => {
       if (!detectedTransport) {
-        reportTransport('ws');
+        reportTransport(inferredTransport);
       }
     });
   };
@@ -1035,7 +1095,7 @@ function buildCompletionStatus(
 }
 
 export function buildWorkingMessage(
-  whimsy: string,
+  whimsy: string | undefined,
   state: WorkingMessageState,
   elapsedMs?: number,
 ): string {
@@ -1046,7 +1106,13 @@ export function buildWorkingMessage(
     formatTransportViaLabel(state, true, 'working'),
   ].filter((value): value is string => Boolean(value));
 
-  return parts.length > 0 ? `${whimsy} · ${parts.join(' · ')}` : whimsy;
+  const suffix = parts.length > 0 ? parts.join(' · ') : undefined;
+
+  if (whimsy && suffix) {
+    return `${whimsy} · ${suffix}`;
+  }
+
+  return whimsy ?? suffix ?? '';
 }
 
 export default function (pi: ExtensionAPI) {
@@ -1057,13 +1123,7 @@ export default function (pi: ExtensionAPI) {
   let lastWorkingMessage: string | undefined;
   let lastStatusText: string | undefined;
   let workingMessageCtx: StatusUIContext | undefined;
-
-  const getOrCreateWhimsy = (): string => {
-    if (!currentWhimsy) {
-      currentWhimsy = pickRandom();
-    }
-    return currentWhimsy;
-  };
+  const minWhimsyColumns = resolveMinWhimsyColumns();
 
   const getElapsedMs = (): number | undefined => {
     if (agentStartedAt === undefined) {
@@ -1125,7 +1185,10 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    const message = buildWorkingMessage(getOrCreateWhimsy(), workingMessageState, getElapsedMs());
+    const whimsy = shouldShowWhimsy(process.stdout.columns, minWhimsyColumns)
+      ? currentWhimsy
+      : undefined;
+    const message = buildWorkingMessage(whimsy, workingMessageState, getElapsedMs());
     if (message === lastWorkingMessage) {
       return;
     }

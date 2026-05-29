@@ -7,10 +7,12 @@ import whimsical, {
   buildWorkingMessage,
   classifyHttpTransport,
   createWorkingMessageState,
+  DEFAULT_MIN_WHIMSY_COLUMNS,
   recordProviderRequest,
   recordProviderTransport,
   recordToolExecutionStart,
   recordTurnStart,
+  shouldShowWhimsy,
   wrapApiProviderForTransportIndicators,
 } from './index';
 
@@ -361,6 +363,44 @@ describe('working-message helpers', () => {
   });
 });
 
+describe('whimsy width gating', () => {
+  test('shows the phrase when the terminal is wide enough', () => {
+    expect(shouldShowWhimsy(DEFAULT_MIN_WHIMSY_COLUMNS)).toBe(true);
+    expect(shouldShowWhimsy(120)).toBe(true);
+  });
+
+  test('hides the phrase on narrow (mobile) terminals', () => {
+    expect(shouldShowWhimsy(DEFAULT_MIN_WHIMSY_COLUMNS - 1)).toBe(false);
+    expect(shouldShowWhimsy(40)).toBe(false);
+  });
+
+  test('honors a custom minimum column threshold', () => {
+    expect(shouldShowWhimsy(60, 50)).toBe(true);
+    expect(shouldShowWhimsy(49, 50)).toBe(false);
+  });
+
+  test('shows the phrase when the width is unknown or invalid', () => {
+    expect(shouldShowWhimsy(undefined)).toBe(true);
+    expect(shouldShowWhimsy(0)).toBe(true);
+    expect(shouldShowWhimsy(Number.NaN)).toBe(true);
+  });
+
+  test('drops the phrase but keeps the suffix when no whimsy is injected', () => {
+    let state = createWorkingMessageState();
+    state = recordTurnStart(state);
+    state = recordTurnStart(state);
+    state = recordProviderRequest(state, makeModel({ baseUrl: 'https://api.openai.com/v1' }));
+    state = recordProviderTransport(state, 'sse');
+
+    expect(buildWorkingMessage(undefined, state, 12_400)).toBe('↺2 · 12.4s · SSE');
+  });
+
+  test('renders an empty working message when there is no whimsy and no suffix', () => {
+    const state = createWorkingMessageState();
+    expect(buildWorkingMessage(undefined, state)).toBe('');
+  });
+});
+
 describe('transport indicator provider wrapper', () => {
   test.each([
     [{ 'content-type': 'text/event-stream; charset=utf-8' }, 'sse'],
@@ -514,6 +554,69 @@ describe('transport indicator provider wrapper', () => {
     expect(observations).toEqual(['sse']);
   });
 
+  test('infers SSE for Bedrock whose SDK headers never include content-type', async () => {
+    const observations: string[] = [];
+    const model = makeModel({
+      api: 'bedrock-converse-stream',
+      provider: 'amazon-bedrock',
+    });
+    const provider = wrapApiProviderForTransportIndicators(
+      {
+        api: 'bedrock-converse-stream',
+        stream: vi.fn() as any,
+        streamSimple(_model: Model<any>, _context: any, options?: any) {
+          const stream = createAssistantMessageEventStream();
+          queueMicrotask(async () => {
+            // amazon-bedrock.js only forwards x-amzn-requestid, never content-type.
+            await options?.onResponse?.(
+              { status: 200, headers: { 'x-amzn-requestid': 'abc' } },
+              model,
+            );
+            const message = makeAssistantMessage({ api: 'bedrock-converse-stream' });
+            stream.push({ type: 'start', partial: message });
+            stream.push({ type: 'done', reason: 'stop', message });
+          });
+          return stream;
+        },
+      },
+      (observation) => observations.push(observation.transport),
+    );
+
+    const stream = provider.streamSimple(model, {} as any, {});
+
+    await expect(stream.result()).resolves.toMatchObject({ api: 'bedrock-converse-stream' });
+    expect(observations).toEqual(['sse']);
+  });
+
+  test('infers SSE for Bedrock even when onResponse never fires', async () => {
+    const observations: string[] = [];
+    const model = makeModel({
+      api: 'bedrock-converse-stream',
+      provider: 'amazon-bedrock',
+    });
+    const provider = wrapApiProviderForTransportIndicators(
+      {
+        api: 'bedrock-converse-stream',
+        stream: vi.fn() as any,
+        streamSimple(_model: Model<any>, _context: any, _options?: any) {
+          const stream = createAssistantMessageEventStream();
+          queueMicrotask(() => {
+            const message = makeAssistantMessage({ api: 'bedrock-converse-stream' });
+            stream.push({ type: 'start', partial: message });
+            stream.push({ type: 'done', reason: 'stop', message });
+          });
+          return stream;
+        },
+      },
+      (observation) => observations.push(observation.transport),
+    );
+
+    const stream = provider.streamSimple(model, {} as any, {});
+
+    await expect(stream.result()).resolves.toMatchObject({ api: 'bedrock-converse-stream' });
+    expect(observations).toEqual(['sse']);
+  });
+
   test('does not wrap an already wrapped provider again', () => {
     const provider = {
       api: 'openai-responses',
@@ -532,6 +635,64 @@ describe('whimsical extension lifecycle', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
+  });
+
+  async function withColumns<T>(
+    columns: number | undefined,
+    run: () => Promise<T>,
+  ): Promise<T> {
+    const original = Object.getOwnPropertyDescriptor(process.stdout, 'columns');
+    Object.defineProperty(process.stdout, 'columns', { value: columns, configurable: true });
+    try {
+      return await run();
+    } finally {
+      if (original) {
+        Object.defineProperty(process.stdout, 'columns', original);
+      } else {
+        delete (process.stdout as { columns?: number }).columns;
+      }
+    }
+  }
+
+  test('hides the whimsy phrase on a narrow terminal while keeping the suffix', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(1_000));
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+
+    const handlers = new Map<string, (event: any, ctx: any) => Promise<void> | void>();
+    const pi = {
+      on(event: string, handler: (event: any, ctx: any) => Promise<void> | void) {
+        handlers.set(event, handler);
+      },
+    } as any;
+
+    whimsical(pi);
+
+    const workingMessages: Array<string | undefined> = [];
+    const ctx = {
+      hasUI: true,
+      model: makeModel({ baseUrl: 'https://api.openai.com/v1' }),
+      ui: {
+        theme: makeTheme(),
+        setWorkingMessage(message?: string) {
+          workingMessages.push(message);
+        },
+        setStatus() {},
+      },
+    } as any;
+
+    await withColumns(40, async () => {
+      await handlers.get('agent_start')?.({ type: 'agent_start' }, ctx);
+      await handlers.get('turn_start')?.({ type: 'turn_start', turnIndex: 0 }, ctx);
+      await handlers.get('before_provider_request')?.({ type: 'before_provider_request' }, ctx);
+
+      vi.setSystemTime(new Date(13_400));
+      await vi.advanceTimersByTimeAsync(100);
+
+      await handlers.get('agent_end')?.({ type: 'agent_end', messages: [] }, ctx);
+    });
+
+    expect(workingMessages).toEqual(['', '12.5s', undefined]);
   });
 
   test('keeps metadata across turns in the same agent and resets on agent end', async () => {
