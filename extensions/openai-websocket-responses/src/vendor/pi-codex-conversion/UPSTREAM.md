@@ -19,6 +19,8 @@ conversion and stream-processing logic from `@howaboua/pi-codex-conversion`.
 - Partial tool-call JSON parsing with `partial-json`.
 - Failed/aborted assistant-message filtering during replay.
 - Synthetic error tool results for unmatched assistant tool calls.
+- Local retrieve-recovery helpers that apply final response snapshots using the
+  same reasoning-item and partial-JSON parsing rules.
 
 ## What was intentionally not ported
 

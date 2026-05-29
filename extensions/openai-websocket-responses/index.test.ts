@@ -784,6 +784,52 @@ describe('Responses adapter and retrieve recovery', () => {
     expect((stream as any).queue.map((event: any) => event.type)).toContain('toolcall_end');
   });
 
+  it('parses recovered tool call arguments with partial-json', async () => {
+    const model = makeModel();
+    const settings = normalizeSettings({ recovery: { pollIntervalMs: 1, timeoutMs: 20 } });
+    const output = makeAssistantMessage(model);
+    const stream = createAssistantMessageEventStream();
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            id: 'resp_tool',
+            status: 'completed',
+            output: [
+              {
+                type: 'function_call',
+                id: 'fc_1',
+                call_id: 'call_1',
+                name: 'read',
+                arguments: '{"path":"a",',
+              },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+    );
+
+    await recoverResponseByRetrieve({
+      model,
+      settings,
+      responseId: 'resp_tool',
+      headers: new Headers(),
+      emittedText: '',
+      output,
+      stream,
+      fetchImpl,
+    });
+
+    expect(output.content).toEqual([
+      expect.objectContaining({
+        type: 'toolCall',
+        id: 'call_1|fc_1',
+        name: 'read',
+        arguments: { path: 'a' },
+      }),
+    ]);
+  });
+
   it('applies usage from retrieved completed snapshots', async () => {
     const model = makeModel();
     const settings = normalizeSettings({ recovery: { pollIntervalMs: 1, timeoutMs: 20 } });

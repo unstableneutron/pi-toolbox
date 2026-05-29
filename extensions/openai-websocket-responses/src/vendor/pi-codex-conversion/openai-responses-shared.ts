@@ -67,7 +67,7 @@ function parsedObject(value: unknown): Record<string, any> {
     : {};
 }
 
-function parseJsonObject(value: string | undefined): Record<string, any> {
+export function parseResponsesJsonObject(value: string | undefined): Record<string, any> {
   if (!value?.trim()) return {};
   try {
     return parsedObject(JSON.parse(value) as unknown);
@@ -457,7 +457,7 @@ export function createResponsesEventProcessor<TApi extends Api>(
       type: 'toolCall',
       id: `${item.call_id}|${item.id}`,
       name: item.name,
-      arguments: parseJsonObject(item.arguments),
+      arguments: parseResponsesJsonObject(item.arguments),
       partialJson: item.arguments || '',
     };
     output.content.push(block);
@@ -577,7 +577,7 @@ export function createResponsesEventProcessor<TApi extends Api>(
       if (state?.kind === 'function_call') {
         const delta = String(event.delta ?? '');
         state.block.partialJson = (state.block.partialJson ?? '') + delta;
-        state.block.arguments = parseJsonObject(state.block.partialJson);
+        state.block.arguments = parseResponsesJsonObject(state.block.partialJson);
         stream.push({
           type: 'toolcall_delta',
           contentIndex: state.blockIndex,
@@ -594,7 +594,7 @@ export function createResponsesEventProcessor<TApi extends Api>(
         const previous = state.block.partialJson ?? '';
         const partialJson = event.arguments ?? '';
         state.block.partialJson = partialJson;
-        state.block.arguments = parseJsonObject(partialJson);
+        state.block.arguments = parseResponsesJsonObject(partialJson);
         if (partialJson.startsWith(previous)) {
           const delta = partialJson.slice(previous.length);
           if (delta)
@@ -644,7 +644,9 @@ export function createResponsesEventProcessor<TApi extends Api>(
         const existing = states.get(index);
         const state =
           existing?.kind === 'function_call' ? existing : createFunctionCallState(index, item);
-        state.block.arguments = parseJsonObject(state.block.partialJson || item.arguments || '{}');
+        state.block.arguments = parseResponsesJsonObject(
+          state.block.partialJson || item.arguments || '{}',
+        );
         delete state.block.partialJson;
         stream.push({
           type: 'toolcall_end',
@@ -701,6 +703,117 @@ export function extractResponseOutputText(response: Record<string, any>): string
     .map((part) => (part?.type === 'output_text' ? part.text : (part?.refusal ?? '')))
     .filter((text): text is string => typeof text === 'string')
     .join('');
+}
+
+function responseOutputItems(response: Record<string, any>): Record<string, any>[] {
+  return (Array.isArray(response.output) ? response.output : []).filter(
+    (item): item is Record<string, any> => typeof item === 'object' && item !== null,
+  );
+}
+
+function reasoningIdFromSignature(signature: string | undefined): string | undefined {
+  if (!signature) return undefined;
+  try {
+    const parsed = JSON.parse(signature) as { id?: unknown };
+    return typeof parsed.id === 'string' ? parsed.id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function appendRecoveredReasoningItems(
+  response: Record<string, any>,
+  output: AssistantMessage,
+  stream: AssistantMessageEventStream,
+): void {
+  const existingReasoningIds = new Set(
+    output.content
+      .filter((block) => block.type === 'thinking')
+      .map((block) => reasoningIdFromSignature(block.thinkingSignature))
+      .filter((id): id is string => typeof id === 'string'),
+  );
+
+  for (const item of responseOutputItems(response)) {
+    if (item.type !== 'reasoning' || typeof item.id !== 'string') continue;
+    if (existingReasoningIds.has(item.id)) continue;
+    const block: ThinkingBlock = {
+      type: 'thinking',
+      thinking: reasoningItemText(item),
+      thinkingSignature: JSON.stringify(item),
+    };
+    const firstTextIndex = output.content.findIndex((content) => content.type === 'text');
+    const contentIndex = firstTextIndex >= 0 ? firstTextIndex : output.content.length;
+    output.content.splice(contentIndex, 0, block as AssistantMessage['content'][number]);
+    stream.push({ type: 'thinking_start', contentIndex, partial: output });
+    stream.push({ type: 'thinking_end', contentIndex, content: block.thinking, partial: output });
+    existingReasoningIds.add(item.id);
+  }
+}
+
+export function appendRecoveredFunctionCalls(
+  response: Record<string, any>,
+  output: AssistantMessage,
+  stream: AssistantMessageEventStream,
+): void {
+  const existing = new Map<string, { block: ToolCallBlock; index: number }>();
+  output.content.forEach((block, index) => {
+    if (block.type === 'toolCall') existing.set(block.id, { block: block as ToolCallBlock, index });
+  });
+
+  for (const item of responseOutputItems(response)) {
+    if (item.type !== 'function_call') continue;
+    const callId = typeof item.call_id === 'string' ? item.call_id : undefined;
+    const itemId = typeof item.id === 'string' ? item.id : undefined;
+    const name = typeof item.name === 'string' ? item.name : undefined;
+    if (!callId || !itemId || !name) continue;
+
+    const id = `${callId}|${itemId}`;
+    const argumentsJson = typeof item.arguments === 'string' ? item.arguments : '';
+    const existingEntry = existing.get(id);
+    if (existingEntry) {
+      const toolCall = existingEntry.block;
+      if (toolCall.partialJson === undefined) continue;
+      if (argumentsJson.startsWith(toolCall.partialJson)) {
+        const delta = argumentsJson.slice(toolCall.partialJson.length);
+        if (delta)
+          stream.push({
+            type: 'toolcall_delta',
+            contentIndex: existingEntry.index,
+            delta,
+            partial: output,
+          });
+      }
+      toolCall.arguments = parseResponsesJsonObject(argumentsJson);
+      delete toolCall.partialJson;
+      stream.push({
+        type: 'toolcall_end',
+        contentIndex: existingEntry.index,
+        toolCall,
+        partial: output,
+      });
+      continue;
+    }
+
+    const toolCall: ToolCall = {
+      type: 'toolCall',
+      id,
+      name,
+      arguments: parseResponsesJsonObject(argumentsJson),
+    };
+    const contentIndex = output.content.length;
+    output.content.push(toolCall);
+    stream.push({ type: 'toolcall_start', contentIndex, partial: output });
+    const fullArgumentsJson = argumentsJson || JSON.stringify(toolCall.arguments);
+    if (fullArgumentsJson)
+      stream.push({
+        type: 'toolcall_delta',
+        contentIndex,
+        delta: fullArgumentsJson,
+        partial: output,
+      });
+    stream.push({ type: 'toolcall_end', contentIndex, toolCall, partial: output });
+    existing.set(id, { block: toolCall, index: contentIndex });
+  }
 }
 
 export function assistantMessageToResponseItems(output: AssistantMessage): unknown[] {
