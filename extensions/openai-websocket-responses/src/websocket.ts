@@ -543,6 +543,7 @@ export async function runWebSocketResponse(
           socket.removeEventListener('message', onMessage);
           socket.removeEventListener('error', onError);
           socket.removeEventListener('close', onClose);
+          request.signal?.removeEventListener('abort', onAbort);
         };
         const resolveAfterProcessing = () => {
           if (settled) return;
@@ -630,9 +631,15 @@ export async function runWebSocketResponse(
             ),
           );
         };
+        const onAbort = () => {
+          keepSocket = false;
+          rejectNow(new Error('Request was aborted'));
+        };
         socket.addEventListener('message', onMessage as any);
         socket.addEventListener('error', onError);
         socket.addEventListener('close', onClose);
+        request.signal?.addEventListener('abort', onAbort, { once: true });
+        if (request.signal?.aborted) onAbort();
         armIdleTimer();
       });
       acquired.release(keepSocket);

@@ -1212,7 +1212,6 @@ describe('WebSocket transport', () => {
   });
 
   it('removes a cached socket when aborting after connect', async () => {
-    vi.useFakeTimers();
     const controller = new AbortController();
     const instances: any[] = [];
 
@@ -1230,6 +1229,16 @@ describe('WebSocket transport', () => {
 
       send(data: string) {
         this.sent.push(data);
+        if (instances.length === 2) {
+          queueMicrotask(() => {
+            this.emit('message', {
+              data: JSON.stringify({
+                type: 'response.completed',
+                response: { id: 'resp_after_abort', status: 'completed' },
+              }),
+            });
+          });
+        }
       }
 
       close() {
@@ -1257,37 +1266,36 @@ describe('WebSocket transport', () => {
       }
     }
 
-    try {
-      const request = {
-        url: 'wss://example.test/responses',
-        headers: new Headers(),
-        body: { model: 'gpt', input: [] },
-        settings: normalizeSettings({ websocket: { retries: 0, idleTimeoutMs: 0 } }),
-        cacheKey: 'active-abort-cache-key',
-        signal: controller.signal,
-        WebSocketCtor: FakeWebSocket as any,
-      };
+    const request = {
+      url: 'wss://example.test/responses',
+      headers: new Headers(),
+      body: { model: 'gpt', input: [] },
+      settings: normalizeSettings({ websocket: { retries: 0, idleTimeoutMs: 0 } }),
+      cacheKey: 'active-abort-cache-key',
+      signal: controller.signal,
+      WebSocketCtor: FakeWebSocket as any,
+    };
 
-      const run = runWebSocketResponse(request, () => undefined);
-      await vi.waitFor(() => expect(instances[0]?.sent).toHaveLength(1));
+    const run = runWebSocketResponse(request, () => undefined);
+    const settled = run.then(
+      () => 'resolved',
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    );
+    await vi.waitFor(() => expect(instances[0]?.sent).toHaveLength(1));
 
-      controller.abort();
+    controller.abort();
 
-      await expect(run).rejects.toThrow('Request was aborted');
-      expect(instances[0].closed).toBe(true);
-      expect(instances[0].terminated).toBe(true);
+    await vi.waitFor(async () => {
+      expect(await Promise.race([settled, Promise.resolve('pending')])).toBe('Request was aborted');
+    });
+    expect(instances[0].closed).toBe(true);
+    expect(instances[0].terminated).toBe(true);
 
-      await runWebSocketResponse(
-        { ...request, signal: undefined },
-        (event) => {
-          expect(event.type).toBe('response.completed');
-        },
-      );
-      expect(instances).toHaveLength(2);
-    } finally {
-      vi.useRealTimers();
-      closeAllCachedWebSockets();
-    }
+    await runWebSocketResponse({ ...request, signal: undefined }, (event) => {
+      expect(event.type).toBe('response.completed');
+    });
+    expect(instances).toHaveLength(2);
+    closeAllCachedWebSockets();
   });
 
   it('retries WebSocket handshake errors before sending a request', async () => {
