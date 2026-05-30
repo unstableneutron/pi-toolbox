@@ -31,11 +31,25 @@ import type { OpenAIWebSocketResponsesSettings } from './settings.ts';
 import { resolveWebSocketResponsesUrl } from './urls.ts';
 import {
   runWebSocketResponse,
+  type WebSocketConnectionMetadata,
   type WebSocketLifecycleObserver,
   WebSocketMidstreamError,
 } from './websocket.ts';
 
 export const API = 'openai-websocket-responses';
+
+export function buildWebSocketResponseHeaders(
+  connection: WebSocketConnectionMetadata,
+  requestUrl: string,
+): Record<string, string> {
+  return {
+    connection: 'Upgrade',
+    upgrade: 'websocket',
+    'x-pi-connection-id': connection.connectionId,
+    'x-pi-connection-cache-status': connection.cacheStatus,
+    'x-pi-request-url': requestUrl,
+  };
+}
 
 function emptyUsage(): Usage {
   return {
@@ -123,11 +137,14 @@ export function createOpenAIWebSocketResponsesStream(
 
         const processor = createResponsesEventProcessor(output, stream, model);
         let started = false;
-        const start = async () => {
+        const start = async (connection: WebSocketConnectionMetadata) => {
           if (started) return;
           started = true;
           await options?.onResponse?.(
-            { status: 101, headers: { connection: 'Upgrade', upgrade: 'websocket' } },
+            {
+              status: 101,
+              headers: buildWebSocketResponseHeaders(connection, url),
+            },
             model,
           );
           stream.push({ type: 'start', partial: output });
@@ -148,8 +165,8 @@ export function createOpenAIWebSocketResponsesStream(
               cacheKey,
               onLifecycleEvent,
             },
-            async (event) => {
-              await start();
+            async (event, connection) => {
+              await start(connection);
               processor.apply(event);
             },
           );

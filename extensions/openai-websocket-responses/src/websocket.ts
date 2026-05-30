@@ -26,6 +26,7 @@ interface SocketCacheEntry {
 }
 
 const IDLE_SOCKET_CACHE_TTL_MS = 15 * 60 * 1000;
+const CLOSED_READY_STATE = 3;
 const socketCache = new Map<string, SocketCacheEntry>();
 const socketIds = new WeakMap<WebSocketLike, string>();
 const openedSockets = new WeakSet<WebSocketLike>();
@@ -50,6 +51,13 @@ export interface WebSocketRunResult {
 }
 
 export type WebSocketCacheStatus = 'disabled' | 'miss' | 'hit' | 'busy' | 'stale';
+
+export interface WebSocketConnectionMetadata {
+  connectionId: string;
+  cacheStatus: WebSocketCacheStatus;
+  cacheKeyHash?: string;
+  localPort?: number;
+}
 
 export type WebSocketLifecycleEvent =
   | {
@@ -92,11 +100,24 @@ function getSocketId(socket: WebSocketLike): string {
   let id = socketIds.get(socket);
   if (!id) {
     const localPort = getSocketLocalPort(socket);
-    nextSocketId += localPort ? 0 : 1;
-    id = localPort ? `ws-${localPort}` : `ws-${nextSocketId.toString(36)}`;
+    if (!localPort) nextSocketId += 1;
+    id = localPort ? `ws#${localPort}` : `ws#${nextSocketId}`;
     socketIds.set(socket, id);
   }
   return id;
+}
+
+function getSocketConnectionMetadata(
+  socket: WebSocketLike,
+  cacheStatus: WebSocketCacheStatus,
+  cacheKey: string | undefined,
+): WebSocketConnectionMetadata {
+  return {
+    connectionId: getSocketId(socket),
+    cacheStatus,
+    cacheKeyHash: shortHash(cacheKey),
+    localPort: getSocketLocalPort(socket),
+  };
 }
 
 function emitLifecycle(
@@ -120,11 +141,8 @@ function emitSocketOpen(
   openedSockets.add(socket);
   emitLifecycle(onLifecycleEvent, {
     type: 'open',
-    connectionId: getSocketId(socket),
-    cacheStatus,
-    cacheKeyHash: shortHash(cacheKey),
+    ...getSocketConnectionMetadata(socket, cacheStatus, cacheKey),
     urlHash: shortHash(url) ?? '',
-    localPort: getSocketLocalPort(socket),
   });
 }
 
@@ -149,10 +167,22 @@ function emitSocketClose(
 }
 
 function closeSilently(socket: WebSocketLike, code = 1000, reason = 'done'): void {
+  if (socket.readyState === CLOSED_READY_STATE) return;
+
+  const ignoreCloseError = () => {};
+  const removeIgnoreCloseError = () => {
+    socket.removeEventListener('error', ignoreCloseError);
+    socket.removeEventListener('close', removeIgnoreCloseError);
+  };
+
   try {
+    socket.addEventListener('error', ignoreCloseError);
+    socket.addEventListener('close', removeIgnoreCloseError);
     socket.close(code, reason);
     socket.terminate?.();
+    if (socket.readyState === CLOSED_READY_STATE) removeIgnoreCloseError();
   } catch {
+    removeIgnoreCloseError();
     // Ignore close failures.
   }
 }
@@ -336,7 +366,11 @@ async function acquireSocket(request: {
   cacheKey?: string;
   WebSocketCtor?: WebSocketConstructorLike;
   onLifecycleEvent?: WebSocketLifecycleObserver;
-}): Promise<{ socket: WebSocketLike; release(keep: boolean): void }> {
+}): Promise<{
+  socket: WebSocketLike;
+  connection: WebSocketConnectionMetadata;
+  release(keep: boolean): void;
+}> {
   if (!request.cacheKey) {
     writeDebugLog(request.settings, 'websocket.cache.disabled');
     const socket = await connectSocket(
@@ -349,6 +383,7 @@ async function acquireSocket(request: {
     emitSocketOpen(request.onLifecycleEvent, socket, 'disabled', undefined, request.url);
     return {
       socket,
+      connection: getSocketConnectionMetadata(socket, 'disabled', undefined),
       release: () => {
         emitSocketClose(request.onLifecycleEvent, socket, undefined, 'done');
         closeSilently(socket);
@@ -374,6 +409,7 @@ async function acquireSocket(request: {
     emitSocketOpen(request.onLifecycleEvent, socket, 'busy', request.cacheKey, request.url);
     return {
       socket,
+      connection: getSocketConnectionMetadata(socket, 'busy', request.cacheKey),
       release: () => {
         emitSocketClose(request.onLifecycleEvent, socket, request.cacheKey, 'done');
         closeSilently(socket);
@@ -391,6 +427,7 @@ async function acquireSocket(request: {
     refSocket(cached.socket);
     return {
       socket: cached.socket,
+      connection: getSocketConnectionMetadata(cached.socket, 'hit', request.cacheKey),
       release: (keep) => releaseCached(request.cacheKey!, cached, keep, request.settings),
     };
   }
@@ -414,13 +451,8 @@ async function acquireSocket(request: {
     request.connectTimeoutMs,
     request.WebSocketCtor,
   );
-  emitSocketOpen(
-    request.onLifecycleEvent,
-    socket,
-    cached ? 'stale' : 'miss',
-    request.cacheKey,
-    request.url,
-  );
+  const cacheStatus = cached ? 'stale' : 'miss';
+  emitSocketOpen(request.onLifecycleEvent, socket, cacheStatus, request.cacheKey, request.url);
   const entry: SocketCacheEntry = {
     socket,
     busy: true,
@@ -429,6 +461,7 @@ async function acquireSocket(request: {
   socketCache.set(request.cacheKey, entry);
   return {
     socket,
+    connection: getSocketConnectionMetadata(socket, cacheStatus, request.cacheKey),
     release: (keep) => releaseCached(request.cacheKey!, entry, keep, request.settings),
   };
 }
@@ -469,7 +502,10 @@ export async function runWebSocketResponse(
     WebSocketCtor?: WebSocketConstructorLike;
     onLifecycleEvent?: WebSocketLifecycleObserver;
   },
-  onEvent: (event: Record<string, any>) => Promise<void> | void,
+  onEvent: (
+    event: Record<string, any>,
+    connection: WebSocketConnectionMetadata,
+  ) => Promise<void> | void,
 ): Promise<WebSocketRunResult> {
   let lastError: unknown;
   for (let attempt = 0; attempt <= request.settings.websocket.retries; attempt++) {
@@ -542,7 +578,7 @@ export async function runWebSocketResponse(
           const terminalEvent = isTerminalEvent(parsed.type);
           if (terminalEvent) terminal = true;
           processing = processing.then(async () => {
-            await onEvent(parsed);
+            await onEvent(parsed, acquired!.connection);
             if (terminalEvent) resolveAfterProcessing();
           });
           void processing.catch(rejectNow);

@@ -22,6 +22,7 @@ import {
 import { buildRequestHeaders, buildWebSocketHeaders } from './src/headers.ts';
 import { shouldPatchModel } from './src/match.ts';
 import { resolveRequestProfile } from './src/profile.ts';
+import { buildWebSocketResponseHeaders } from './src/provider.ts';
 import { wrapProviderForWebSocketResponses } from './src/patch.ts';
 import { recoverResponseByRetrieve } from './src/retrieve-recovery.ts';
 import {
@@ -1151,6 +1152,144 @@ describe('WebSocket transport', () => {
     return { WebSocketCtor: FakeWebSocket as any, instances };
   }
 
+  it('swallows ws abortHandshake errors when aborting during connect', async () => {
+    const controller = new AbortController();
+    let closeHadErrorListener: boolean | undefined;
+
+    class FakeWebSocket {
+      readyState = 0;
+      listeners = new Map<string, Set<(event: any) => void>>();
+
+      send() {
+        throw new Error('should not send before connect');
+      }
+
+      close() {
+        closeHadErrorListener = (this.listeners.get('error')?.size ?? 0) > 0;
+        this.readyState = 2;
+        queueMicrotask(() => {
+          this.emit(
+            'error',
+            new Error('WebSocket was closed before the connection was established'),
+          );
+          this.readyState = 3;
+          this.emit('close', { code: 1006 });
+        });
+      }
+
+      addEventListener(type: string, listener: (event: any) => void) {
+        const listeners = this.listeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      removeEventListener(type: string, listener: (event: any) => void) {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      emit(type: string, event: any) {
+        for (const listener of this.listeners.get(type) ?? []) listener(event);
+      }
+    }
+
+    const run = runWebSocketResponse(
+      {
+        url: 'wss://example.test/responses',
+        headers: new Headers(),
+        body: { model: 'gpt', input: [] },
+        settings: normalizeSettings({ websocket: { retries: 0, connectTimeoutMs: 0 } }),
+        signal: controller.signal,
+        WebSocketCtor: FakeWebSocket as any,
+      },
+      () => undefined,
+    );
+
+    controller.abort();
+
+    await expect(run).rejects.toThrow('Request was aborted');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(closeHadErrorListener).toBe(true);
+  });
+
+  it('removes a cached socket when aborting after connect', async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const instances: any[] = [];
+
+    class FakeWebSocket {
+      readyState = 1;
+      closed = false;
+      terminated = false;
+      sent: string[] = [];
+      listeners = new Map<string, Set<(event: any) => void>>();
+
+      constructor() {
+        instances.push(this);
+        queueMicrotask(() => this.emit('open', {}));
+      }
+
+      send(data: string) {
+        this.sent.push(data);
+      }
+
+      close() {
+        this.closed = true;
+        this.readyState = 3;
+      }
+
+      terminate() {
+        this.terminated = true;
+        this.readyState = 3;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void) {
+        const listeners = this.listeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      removeEventListener(type: string, listener: (event: any) => void) {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      emit(type: string, event: any) {
+        for (const listener of this.listeners.get(type) ?? []) listener(event);
+      }
+    }
+
+    try {
+      const request = {
+        url: 'wss://example.test/responses',
+        headers: new Headers(),
+        body: { model: 'gpt', input: [] },
+        settings: normalizeSettings({ websocket: { retries: 0, idleTimeoutMs: 0 } }),
+        cacheKey: 'active-abort-cache-key',
+        signal: controller.signal,
+        WebSocketCtor: FakeWebSocket as any,
+      };
+
+      const run = runWebSocketResponse(request, () => undefined);
+      await vi.waitFor(() => expect(instances[0]?.sent).toHaveLength(1));
+
+      controller.abort();
+
+      await expect(run).rejects.toThrow('Request was aborted');
+      expect(instances[0].closed).toBe(true);
+      expect(instances[0].terminated).toBe(true);
+
+      await runWebSocketResponse(
+        { ...request, signal: undefined },
+        (event) => {
+          expect(event.type).toBe('response.completed');
+        },
+      );
+      expect(instances).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+      closeAllCachedWebSockets();
+    }
+  });
+
   it('retries WebSocket handshake errors before sending a request', async () => {
     let constructed = 0;
     const seen: string[] = [];
@@ -1429,12 +1568,12 @@ describe('WebSocket transport', () => {
     expect(lifecycle).toEqual([
       expect.objectContaining({
         type: 'open',
-        connectionId: 'ws-61243',
+        connectionId: 'ws#61243',
         cacheStatus: 'miss',
       }),
       expect.objectContaining({
         type: 'close',
-        connectionId: 'ws-61243',
+        connectionId: 'ws#61243',
         reason: 'idle_close',
         code: 1000,
       }),
@@ -1472,7 +1611,69 @@ describe('WebSocket transport', () => {
     );
 
     expect(lifecycle[0]).toEqual(
-      expect.objectContaining({ type: 'open', connectionId: expect.stringMatching(/^ws-\d+$/) }),
+      expect.objectContaining({ type: 'open', connectionId: expect.stringMatching(/^ws#\d+$/) }),
+    );
+    closeAllCachedWebSockets();
+  });
+
+  it('builds synthetic response headers with connection metadata', () => {
+    expect(
+      buildWebSocketResponseHeaders(
+        {
+          connectionId: 'ws#61245',
+          cacheStatus: 'miss',
+          cacheKeyHash: 'cache',
+          localPort: 61245,
+        },
+        'wss://example.test/responses?deployment=gpt',
+      ),
+    ).toEqual({
+      connection: 'Upgrade',
+      upgrade: 'websocket',
+      'x-pi-connection-id': 'ws#61245',
+      'x-pi-connection-cache-status': 'miss',
+      'x-pi-request-url': 'wss://example.test/responses?deployment=gpt',
+    });
+  });
+
+  it('passes connection metadata to response event handlers', async () => {
+    const { WebSocketCtor } = makeWebSocketCtor(
+      [
+        (socket) => {
+          socket.emit('message', {
+            data: JSON.stringify({
+              type: 'response.created',
+              response: { id: 'resp_connection_metadata' },
+            }),
+          });
+          socket.emit('message', {
+            data: JSON.stringify({
+              type: 'response.completed',
+              response: { id: 'resp_connection_metadata', status: 'completed' },
+            }),
+          });
+        },
+      ],
+      { localPort: 61245 },
+    );
+    const seen: unknown[] = [];
+
+    await runWebSocketResponse(
+      {
+        url: 'wss://example.test/responses',
+        headers: new Headers(),
+        body: { model: 'gpt', input: [] },
+        settings: normalizeSettings({ websocket: { retries: 0 } }),
+        cacheKey: 'connection-metadata-cache-key',
+        WebSocketCtor,
+      },
+      (_event, connection) => {
+        seen.push(connection);
+      },
+    );
+
+    expect(seen[0]).toEqual(
+      expect.objectContaining({ connectionId: 'ws#61245', cacheStatus: 'miss' }),
     );
     closeAllCachedWebSockets();
   });
@@ -1481,25 +1682,25 @@ describe('WebSocket transport', () => {
     expect(
       formatWebSocketStatus({
         type: 'open',
-        connectionId: 'ws-61243',
+        connectionId: 'ws#61243',
         cacheStatus: 'miss',
         cacheKeyHash: '336920397f78',
         urlHash: 'urlhash',
       }),
-    ).toBe('WebSocket ws-61243 connected · new');
+    ).toBe('WebSocket ws#61243 connected · new');
     expect(
       formatWebSocketStatus({
         type: 'open',
-        connectionId: 'ws-61244',
+        connectionId: 'ws#61244',
         cacheStatus: 'busy',
         cacheKeyHash: '336920397f78',
         urlHash: 'urlhash',
       }),
-    ).toBe('WebSocket ws-61244 connected · extra');
+    ).toBe('WebSocket ws#61244 connected · extra');
     expect(
       formatWebSocketStatus({
         type: 'open',
-        connectionId: 'ws-1',
+        connectionId: 'ws#1',
         cacheStatus: 'disabled',
         urlHash: 'urlhash',
       }),
@@ -1507,7 +1708,7 @@ describe('WebSocket transport', () => {
     expect(
       formatWebSocketStatus({
         type: 'close',
-        connectionId: 'ws-61243',
+        connectionId: 'ws#61243',
         reason: 'idle_timeout',
         cacheKeyHash: '336920397f78',
       }),

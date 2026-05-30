@@ -193,6 +193,98 @@ describe('working-message helpers', () => {
     );
   });
 
+  test('renders WebSocket connection ids and cache status hints from response headers', () => {
+    const whimsy = 'Whimming...';
+
+    let state = createWorkingMessageState();
+    state = recordTurnStart(state);
+    state = recordProviderRequest(state, makeLongProxyModel());
+    state = recordProviderTransport(
+      state,
+      classifyHttpTransport(
+        {
+          connection: 'Upgrade',
+          upgrade: 'websocket',
+          'x-pi-connection-id': 'ws#4580',
+          'x-pi-connection-cache-status': 'miss',
+        },
+        101,
+      )!,
+    );
+
+    expect(buildWorkingMessage(whimsy, state)).toBe(
+      `Whimming... · WS#4580 (new) via ${hyperlink(
+        'https://proxy.example.com/api/v2/proxy/experimental/azure_openai/openai/v1',
+        'proxy.example.com',
+      )}`,
+    );
+
+    state = recordProviderRequest(state, makeLongProxyModel());
+    state = recordProviderTransport(
+      state,
+      classifyHttpTransport(
+        {
+          connection: 'Upgrade',
+          upgrade: 'websocket',
+          'x-pi-connection-id': 'ws#1123',
+          'x-pi-connection-cache-status': 'hit',
+        },
+        101,
+      )!,
+    );
+
+    expect(buildWorkingMessage(whimsy, state)).toBe(
+      `Whimming... · WS#1123 via ${hyperlink(
+        'https://proxy.example.com/api/v2/proxy/experimental/azure_openai/openai/v1',
+        'proxy.example.com',
+      )}`,
+    );
+  });
+
+  test('renders SSE connection ids when response headers provide them', () => {
+    const whimsy = 'Whimming...';
+
+    let state = createWorkingMessageState();
+    state = recordTurnStart(state);
+    state = recordProviderRequest(state, makeModel({ baseUrl: 'https://api.openai.com/v1' }));
+    state = recordProviderTransport(
+      state,
+      classifyHttpTransport({
+        'content-type': 'text/event-stream',
+        'x-pi-connection-id': 'sse#5550',
+        'x-pi-connection-cache-status': 'miss',
+      })!,
+    );
+
+    expect(buildWorkingMessage(whimsy, state)).toBe('Whimming... · SSE#5550 (new)');
+  });
+
+  test('uses response request URL headers when model metadata lacks the real request domain', () => {
+    const whimsy = 'Whimming...';
+
+    let state = createWorkingMessageState();
+    state = recordTurnStart(state);
+    state = recordProviderRequest(state, makeModel({ baseUrl: 'https://api.openai.com/v1' }));
+    state = recordProviderTransport(
+      state,
+      classifyHttpTransport(
+        {
+          connection: 'Upgrade',
+          upgrade: 'websocket',
+          'x-pi-connection-id': 'ws#45409',
+          'x-pi-connection-cache-status': 'hit',
+          'x-pi-request-url':
+            'wss://llm-fusion-hub.a.musta.ch/api/v2/proxy/experimental/azure_openai/openai/v1/responses?deployment=gpt-5.5-nomoderation',
+        },
+        101,
+      )!,
+    );
+
+    expect(buildWorkingMessage(whimsy, state)).toBe(
+      'Whimming... · WS#45409 via llm-fusion-hub.a.musta.ch',
+    );
+  });
+
   test('renders effective transport without a custom base url', () => {
     const whimsy = 'Whimming...';
 
@@ -405,10 +497,17 @@ describe('transport classification', () => {
     [{ 'Content-Type': 'TEXT/EVENT-STREAM' }, undefined, 'sse'],
     [{ upgrade: 'websocket' }, 101, 'ws'],
     [{ connection: 'Upgrade', upgrade: 'WebSocket' }, undefined, 'ws'],
-    [{ 'content-type': 'application/json' }, undefined, undefined],
-    [{}, undefined, undefined],
   ] as const)('classifies observed response %o status %o as %s', (headers, status, expected) => {
-    expect(classifyHttpTransport(headers, status)).toBe(expected);
+    expect(classifyHttpTransport(headers, status)).toEqual(
+      expect.objectContaining({ kind: expected }),
+    );
+  });
+
+  test.each([
+    [{ 'content-type': 'application/json' }, undefined],
+    [{}, undefined],
+  ] as const)('does not classify non-streaming response %o status %o', (headers, status) => {
+    expect(classifyHttpTransport(headers, status)).toBeUndefined();
   });
 });
 
@@ -431,6 +530,59 @@ describe('whimsical extension lifecycle', () => {
       }
     }
   }
+
+  test('renders connection id and request domain in final completion status', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(1_000));
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+
+    const handlers = new Map<string, (event: any, ctx: any) => Promise<void> | void>();
+    const pi = {
+      on(event: string, handler: (event: any, ctx: any) => Promise<void> | void) {
+        handlers.set(event, handler);
+      },
+    } as any;
+
+    whimsical(pi);
+
+    const statuses: Array<string | undefined> = [];
+    const ctx = {
+      hasUI: true,
+      model: makeModel({ baseUrl: 'https://api.openai.com/v1' }),
+      ui: {
+        theme: makeTheme(),
+        setWorkingMessage() {},
+        setStatus(_key: string, text?: string) {
+          statuses.push(text);
+        },
+      },
+    } as any;
+
+    await handlers.get('agent_start')?.({ type: 'agent_start' }, ctx);
+    await handlers.get('turn_start')?.({ type: 'turn_start', turnIndex: 0 }, ctx);
+    await handlers.get('turn_start')?.({ type: 'turn_start', turnIndex: 1 }, ctx);
+    await handlers.get('before_provider_request')?.({ type: 'before_provider_request' }, ctx);
+    await handlers.get('after_provider_response')?.(
+      {
+        type: 'after_provider_response',
+        status: 101,
+        headers: {
+          connection: 'Upgrade',
+          upgrade: 'websocket',
+          'x-pi-connection-id': 'ws#45409',
+          'x-pi-connection-cache-status': 'hit',
+          'x-pi-request-url':
+            'wss://llm-fusion-hub.a.musta.ch/api/v2/proxy/experimental/azure_openai/openai/v1/responses?deployment=gpt-5.5-nomoderation',
+        },
+      },
+      ctx,
+    );
+
+    vi.setSystemTime(new Date(35_000));
+    await handlers.get('agent_end')?.({ type: 'agent_end', messages: [] }, ctx);
+
+    expect(statuses.at(-1)).toBe('✓ Completed ↺2 in 34.0s WS#45409 via llm-fusion-hub.a.musta.ch');
+  });
 
   test('records transport from after_provider_response events', async () => {
     vi.useFakeTimers();

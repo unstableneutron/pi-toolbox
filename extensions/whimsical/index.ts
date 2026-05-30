@@ -680,7 +680,16 @@ type AssistantErrorLikeMessage = {
 
 const STATUS_KEY = 'whimsical';
 const LONG_RUN_STATUS_THRESHOLD_MS = 30_000;
-export type EffectiveTransport = 'ws' | 'sse';
+export type EffectiveTransportKind = 'ws' | 'sse';
+
+export interface EffectiveTransport {
+  kind: EffectiveTransportKind;
+  connectionId?: string;
+  cacheStatus?: string;
+  requestUrl?: string;
+}
+
+export type EffectiveTransportInput = EffectiveTransportKind | EffectiveTransport;
 
 export interface WorkingMessageState {
   turnCount: number;
@@ -714,6 +723,14 @@ export function recordToolExecutionStart(state: WorkingMessageState): WorkingMes
   };
 }
 
+function customBaseUrlDisplay(baseUrl: string): CustomBaseUrlDisplay {
+  return {
+    fullUrl: normalizeBaseUrl(baseUrl) ?? baseUrl,
+    statusLabel: shortenBaseUrlLabel(baseUrl),
+    workingLabel: shortenWorkingMessageBaseUrlLabel(baseUrl),
+  };
+}
+
 function getModelDisplayMetadata(model: Model<any> | undefined): {
   modelTarget: string | undefined;
   customBaseUrl: CustomBaseUrlDisplay | undefined;
@@ -722,13 +739,7 @@ function getModelDisplayMetadata(model: Model<any> | undefined): {
 
   return {
     modelTarget: formatModelTarget(model),
-    customBaseUrl: hasCustomBaseUrl
-      ? {
-          fullUrl: normalizeBaseUrl(model.baseUrl) ?? model.baseUrl,
-          statusLabel: shortenBaseUrlLabel(model.baseUrl),
-          workingLabel: shortenWorkingMessageBaseUrlLabel(model.baseUrl),
-        }
-      : undefined,
+    customBaseUrl: hasCustomBaseUrl ? customBaseUrlDisplay(model.baseUrl) : undefined,
   };
 }
 
@@ -750,13 +761,21 @@ export function recordProviderRequest(
   };
 }
 
+function normalizeTransport(transport: EffectiveTransportInput): EffectiveTransport {
+  return typeof transport === 'string' ? { kind: transport } : transport;
+}
+
 export function recordProviderTransport(
   state: WorkingMessageState,
-  transport: EffectiveTransport,
+  transport: EffectiveTransportInput,
 ): WorkingMessageState {
+  const normalizedTransport = normalizeTransport(transport);
   return {
     ...state,
-    lastTransport: transport,
+    lastCustomBaseUrl: normalizedTransport.requestUrl
+      ? customBaseUrlDisplay(normalizedTransport.requestUrl)
+      : state.lastCustomBaseUrl,
+    lastTransport: normalizedTransport,
   };
 }
 
@@ -803,18 +822,35 @@ export function classifyHttpTransport(
   headers: Record<string, string>,
   status?: number,
 ): EffectiveTransport | undefined {
+  const connectionId = responseHeader(headers, 'x-pi-connection-id');
+  const cacheStatus = responseHeader(headers, 'x-pi-connection-cache-status');
+  const requestUrl = responseHeader(headers, 'x-pi-request-url');
   const connection = responseHeader(headers, 'connection')?.toLowerCase();
   const upgrade = responseHeader(headers, 'upgrade')?.toLowerCase();
   if (upgrade === 'websocket' || (status === 101 && connection?.includes('upgrade'))) {
-    return 'ws';
+    return { kind: 'ws', connectionId, cacheStatus, requestUrl };
   }
 
   const contentType = responseHeader(headers, 'content-type');
   if (contentType?.toLowerCase().includes('text/event-stream')) {
-    return 'sse';
+    return { kind: 'sse', connectionId, cacheStatus, requestUrl };
   }
 
   return undefined;
+}
+
+function formatCacheStatusHint(status: string | undefined): string | undefined {
+  if (status === 'miss' || status === 'stale') return 'new';
+  if (status === 'busy') return 'extra';
+  return undefined;
+}
+
+function formatConnectionId(kind: EffectiveTransportKind, connectionId: string): string {
+  const prefix = `${kind}#`;
+  if (connectionId.toLowerCase().startsWith(prefix)) {
+    return `${kind.toUpperCase()}#${connectionId.slice(prefix.length)}`;
+  }
+  return `${kind.toUpperCase()} ${connectionId}`;
 }
 
 function formatTransportLabel(transport: EffectiveTransport | undefined): string | undefined {
@@ -822,7 +858,12 @@ function formatTransportLabel(transport: EffectiveTransport | undefined): string
     return undefined;
   }
 
-  return transport.toUpperCase();
+  const kind = transport.kind.toUpperCase();
+  if (!transport.connectionId) return kind;
+
+  const connectionLabel = formatConnectionId(transport.kind, transport.connectionId);
+  const statusHint = formatCacheStatusHint(transport.cacheStatus);
+  return statusHint ? `${connectionLabel} (${statusHint})` : connectionLabel;
 }
 
 function formatTransportViaLabel(
@@ -979,7 +1020,10 @@ export default function (pi: ExtensionAPI) {
       .replace(/\bin\s+([0-9][^ ]*)/, (_match, elapsed: string) => {
         return `${theme.fg('dim', 'in')} ${theme.fg('accent', elapsed)}`;
       })
-      .replace(/((?:(?:WS|SSE)\s+)?via\s+.+)$/, (_match, via: string) => theme.fg('muted', via));
+      .replace(
+        /((?:(?:WS|SSE)(?:#[^\s]+)?(?:\s+\([^)]*\))?\s+)?via\s+.+)$/,
+        (_match, via: string) => theme.fg('muted', via),
+      );
 
     ctx.ui.setStatus(STATUS_KEY, colorized);
   };
