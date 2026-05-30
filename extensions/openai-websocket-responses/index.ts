@@ -15,6 +15,15 @@ import {
 const WEBSOCKET_LIFECYCLE_EVENT = 'openai-websocket-responses:websocket-lifecycle';
 const WEBSOCKET_STATUS_KEY = 'openai-websocket-responses';
 const WEBSOCKET_STATUS_TTL_MS = 3000;
+export const IDLE_KEEPALIVE_ACTIVITY_WINDOW_MS = 15 * 60 * 1000;
+
+interface InputEventLike {
+  source?: string;
+}
+
+interface UIContextLike {
+  hasUI?: boolean;
+}
 
 function cacheStatusLabel(status: WebSocketCacheStatus): string {
   if (status === 'busy') return 'extra';
@@ -27,11 +36,60 @@ export function formatWebSocketStatus(event: WebSocketLifecycleEvent): string | 
   return `WebSocket ${event.connectionId} connected · ${cacheStatusLabel(event.cacheStatus)}`;
 }
 
+export function createIdleKeepaliveActivityTracker(now = () => Date.now()) {
+  let currentCtx: UIContextLike | undefined;
+  let nextRunIsInteractive = false;
+  let currentRunIsInteractive = false;
+  let keepaliveAllowedUntil = 0;
+
+  const hasUI = () => currentCtx?.hasUI === true;
+
+  return {
+    setContext(ctx: UIContextLike | undefined): void {
+      currentCtx = ctx;
+      if (!hasUI()) {
+        nextRunIsInteractive = false;
+        currentRunIsInteractive = false;
+        keepaliveAllowedUntil = 0;
+      }
+    },
+
+    noteInput(event: InputEventLike): void {
+      if (!hasUI() || event.source !== 'interactive') return;
+      nextRunIsInteractive = true;
+    },
+
+    noteAgentStart(): void {
+      currentRunIsInteractive = hasUI() && nextRunIsInteractive;
+      nextRunIsInteractive = false;
+    },
+
+    noteAgentEnd(): void {
+      if (hasUI() && currentRunIsInteractive) {
+        keepaliveAllowedUntil = now() + IDLE_KEEPALIVE_ACTIVITY_WINDOW_MS;
+      }
+      currentRunIsInteractive = false;
+    },
+
+    shouldEnable(): boolean {
+      return hasUI() && (currentRunIsInteractive || now() < keepaliveAllowedUntil);
+    },
+
+    clear(): void {
+      currentCtx = undefined;
+      nextRunIsInteractive = false;
+      currentRunIsInteractive = false;
+      keepaliveAllowedUntil = 0;
+    },
+  };
+}
+
 export default function (pi: ExtensionAPI) {
   installOpenAICodexTransportMetadataPatch();
 
   let currentCtx: ExtensionContext | undefined;
   let statusTimer: ReturnType<typeof setTimeout> | undefined;
+  const idleKeepaliveActivity = createIdleKeepaliveActivityTracker();
   const clearStatus = () => {
     if (statusTimer) clearTimeout(statusTimer);
     statusTimer = undefined;
@@ -48,7 +106,11 @@ export default function (pi: ExtensionAPI) {
   };
 
   const settingsProvider = () => readOpenAIWebSocketResponsesSettings();
-  const streamWebSocket = createOpenAIWebSocketResponsesStream(settingsProvider, onLifecycleEvent);
+  const streamWebSocket = createOpenAIWebSocketResponsesStream(
+    settingsProvider,
+    onLifecycleEvent,
+    () => idleKeepaliveActivity.shouldEnable(),
+  );
 
   registerApiProvider(
     {
@@ -62,6 +124,19 @@ export default function (pi: ExtensionAPI) {
 
   pi.on('session_start', (_event, ctx) => {
     currentCtx = ctx;
+    idleKeepaliveActivity.setContext(ctx);
+  });
+
+  pi.on('input', (event) => {
+    idleKeepaliveActivity.noteInput(event as InputEventLike);
+  });
+
+  pi.on('agent_start', () => {
+    idleKeepaliveActivity.noteAgentStart();
+  });
+
+  pi.on('agent_end', () => {
+    idleKeepaliveActivity.noteAgentEnd();
   });
 
   pi.on('session_shutdown', () => {
@@ -69,5 +144,6 @@ export default function (pi: ExtensionAPI) {
     closeAllCachedWebSockets();
     clearAllContinuations();
     currentCtx = undefined;
+    idleKeepaliveActivity.clear();
   });
 }

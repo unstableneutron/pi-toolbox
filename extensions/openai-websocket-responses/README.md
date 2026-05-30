@@ -162,7 +162,11 @@ The extension keeps its own per-session socket/continuation cache keyed by
 session, URL, provider, model, and headers; it does not share Pi's built-in
 `openai-codex-responses` cache. Idle sockets are retained internally for up to
 15 minutes after a turn finishes, and are removed sooner if the idle socket emits
-`close` or `error`.
+`close` or `error`. After interactive user-initiated runs, Node `ws` sockets also
+receive protocol-level pings while idle so stale cached sockets can be evicted
+before the next turn; these pings do not extend the 15-minute idle cache TTL. The
+extension never sends keepalive pings while a socket is busy with an active
+response.
 
 ## Debugging
 

@@ -86,6 +86,7 @@ function formatProviderError(error: unknown): string {
 export function createOpenAIWebSocketResponsesStream(
   settingsProvider: () => OpenAIWebSocketResponsesSettings,
   onLifecycleEvent?: WebSocketLifecycleObserver,
+  shouldEnableIdleKeepalive?: () => boolean,
 ): (
   model: Model<Api>,
   context: Context,
@@ -164,6 +165,7 @@ export function createOpenAIWebSocketResponsesStream(
               signal: options?.signal,
               cacheKey,
               onLifecycleEvent,
+              enableIdleKeepalive: shouldEnableIdleKeepalive?.() ?? false,
             },
             async (event, connection) => {
               await start(connection);

@@ -9,7 +9,11 @@ import {
 } from '@earendil-works/pi-ai';
 import { describe, expect, it, vi } from 'vitest';
 
-import { formatWebSocketStatus } from './index.ts';
+import {
+  createIdleKeepaliveActivityTracker,
+  formatWebSocketStatus,
+  IDLE_KEEPALIVE_ACTIVITY_WINDOW_MS,
+} from './index.ts';
 import { buildResponsesBody } from './src/body.ts';
 import {
   buildContinuationRequestBody,
@@ -1407,6 +1411,321 @@ describe('WebSocket transport', () => {
     expect(seen).toEqual(['response.created', 'response.completed']);
   });
 
+  it('pings idle cached sockets without extending their idle TTL', async () => {
+    vi.useFakeTimers();
+    const instances: any[] = [];
+
+    class FakeWebSocket {
+      readyState = 1;
+      closed = false;
+      pings = 0;
+      sent: string[] = [];
+      listeners = new Map<string, Set<(event: any) => void>>();
+      eventListeners = new Map<string, Set<(...args: any[]) => void>>();
+
+      constructor() {
+        instances.push(this);
+        queueMicrotask(() => this.emit('open', {}));
+      }
+
+      send(data: string) {
+        this.sent.push(data);
+        queueMicrotask(() => {
+          this.emit('message', {
+            data: JSON.stringify({
+              type: 'response.created',
+              response: { id: `resp_${instances.length}` },
+            }),
+          });
+          this.emit('message', {
+            data: JSON.stringify({
+              type: 'response.completed',
+              response: { id: `resp_${instances.length}`, status: 'completed' },
+            }),
+          });
+        });
+      }
+
+      ping() {
+        this.pings++;
+        this.emitEvent('pong');
+      }
+
+      close() {
+        this.closed = true;
+        this.readyState = 3;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void) {
+        const listeners = this.listeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      removeEventListener(type: string, listener: (event: any) => void) {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      on(type: string, listener: (...args: any[]) => void) {
+        const listeners = this.eventListeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.eventListeners.set(type, listeners);
+      }
+
+      removeListener(type: string, listener: (...args: any[]) => void) {
+        this.eventListeners.get(type)?.delete(listener);
+      }
+
+      emit(type: string, event: any) {
+        for (const listener of this.listeners.get(type) ?? []) listener(event);
+      }
+
+      emitEvent(type: string, ...args: any[]) {
+        for (const listener of this.eventListeners.get(type) ?? []) listener(...args);
+      }
+    }
+
+    const request = {
+      url: 'wss://example.test/responses',
+      headers: new Headers(),
+      body: { model: 'gpt', input: [] },
+      settings: normalizeSettings({ websocket: { retries: 0 } }),
+      cacheKey: 'idle-ping-cache-key',
+      enableIdleKeepalive: true,
+      WebSocketCtor: FakeWebSocket as any,
+    };
+
+    try {
+      await runWebSocketResponse(request, () => undefined);
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(instances[0].pings).toBe(1);
+      expect(instances[0].closed).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(14 * 60 * 1000 + 29_999);
+      expect(instances[0].closed).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(instances[0].closed).toBe(true);
+
+      await runWebSocketResponse(request, () => undefined);
+      expect(instances).toHaveLength(2);
+    } finally {
+      closeAllCachedWebSockets();
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not ping a cached socket while it is busy with an active response', async () => {
+    vi.useFakeTimers();
+    const instances: any[] = [];
+    let completeSecond!: () => void;
+    const secondResponse = new Promise<void>((resolve) => {
+      completeSecond = resolve;
+    });
+
+    class FakeWebSocket {
+      readyState = 1;
+      pings = 0;
+      sent: string[] = [];
+      listeners = new Map<string, Set<(event: any) => void>>();
+      eventListeners = new Map<string, Set<(...args: any[]) => void>>();
+
+      constructor() {
+        instances.push(this);
+        queueMicrotask(() => this.emit('open', {}));
+      }
+
+      send(data: string) {
+        this.sent.push(data);
+        if (this.sent.length === 1) {
+          queueMicrotask(() => this.complete('resp_first'));
+          return;
+        }
+        void secondResponse.then(() => this.complete('resp_second'));
+      }
+
+      complete(id: string) {
+        this.emit('message', {
+          data: JSON.stringify({ type: 'response.created', response: { id } }),
+        });
+        this.emit('message', {
+          data: JSON.stringify({
+            type: 'response.completed',
+            response: { id, status: 'completed' },
+          }),
+        });
+      }
+
+      ping() {
+        this.pings++;
+        this.emitEvent('pong');
+      }
+
+      close() {
+        this.readyState = 3;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void) {
+        const listeners = this.listeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      removeEventListener(type: string, listener: (event: any) => void) {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      on(type: string, listener: (...args: any[]) => void) {
+        const listeners = this.eventListeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.eventListeners.set(type, listeners);
+      }
+
+      removeListener(type: string, listener: (...args: any[]) => void) {
+        this.eventListeners.get(type)?.delete(listener);
+      }
+
+      emit(type: string, event: any) {
+        for (const listener of this.listeners.get(type) ?? []) listener(event);
+      }
+
+      emitEvent(type: string, ...args: any[]) {
+        for (const listener of this.eventListeners.get(type) ?? []) listener(...args);
+      }
+    }
+
+    const request = {
+      url: 'wss://example.test/responses',
+      headers: new Headers(),
+      body: { model: 'gpt', input: [] },
+      settings: normalizeSettings({ websocket: { retries: 0 } }),
+      cacheKey: 'busy-no-ping-cache-key',
+      enableIdleKeepalive: true,
+      WebSocketCtor: FakeWebSocket as any,
+    };
+
+    try {
+      await runWebSocketResponse(request, () => undefined);
+      const second = runWebSocketResponse(request, () => undefined);
+      await vi.waitFor(() => expect(instances[0].sent).toHaveLength(2));
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(instances[0].pings).toBe(0);
+
+      completeSecond();
+      await second;
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(instances[0].pings).toBe(1);
+    } finally {
+      closeAllCachedWebSockets();
+      vi.useRealTimers();
+    }
+  });
+
+  it('installs active listeners before sending on a reused cached socket', async () => {
+    const instances: any[] = [];
+    const unhandledErrors: string[] = [];
+    const listenerCountsAtCachedSend: Array<{ close: number; error: number }> = [];
+
+    class FakeWebSocket {
+      readyState = 1;
+      sent: string[] = [];
+      listeners = new Map<string, Set<(event: any) => void>>();
+
+      constructor() {
+        instances.push(this);
+        queueMicrotask(() => this.emit('open', {}));
+      }
+
+      send(data: string) {
+        this.sent.push(data);
+        if (instances[0] === this && this.sent.length === 1) {
+          queueMicrotask(() => {
+            this.emit('message', {
+              data: JSON.stringify({ type: 'response.created', response: { id: 'resp_cached' } }),
+            });
+            this.emit('message', {
+              data: JSON.stringify({
+                type: 'response.completed',
+                response: { id: 'resp_cached', status: 'completed' },
+              }),
+            });
+          });
+          return;
+        }
+        if (instances[0] === this && this.sent.length === 2) {
+          listenerCountsAtCachedSend.push({
+            close: this.listeners.get('close')?.size ?? 0,
+            error: this.listeners.get('error')?.size ?? 0,
+          });
+          this.emit('error', { message: 'WebSocket closed with code 1005' });
+          this.emit('close', { code: 1005 });
+          return;
+        }
+        queueMicrotask(() => {
+          this.emit('message', {
+            data: JSON.stringify({ type: 'response.created', response: { id: 'resp_retry' } }),
+          });
+          this.emit('message', {
+            data: JSON.stringify({
+              type: 'response.completed',
+              response: { id: 'resp_retry', status: 'completed' },
+            }),
+          });
+        });
+      }
+
+      close() {
+        this.readyState = 3;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void) {
+        const listeners = this.listeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      removeEventListener(type: string, listener: (event: any) => void) {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      emit(type: string, event: any) {
+        const listeners = this.listeners.get(type) ?? new Set();
+        if (type === 'error' && listeners.size === 0) {
+          unhandledErrors.push(event?.message ?? String(event));
+          return;
+        }
+        for (const listener of listeners) listener(event);
+      }
+    }
+
+    const request = {
+      url: 'wss://example.test/responses',
+      headers: new Headers(),
+      body: { model: 'gpt', input: [] },
+      settings: normalizeSettings({ websocket: { retries: 1, idleTimeoutMs: 5 } }),
+      cacheKey: 'stale-reused-socket-cache-key',
+      WebSocketCtor: FakeWebSocket as any,
+    };
+    const seen: string[] = [];
+
+    try {
+      await runWebSocketResponse(request, () => undefined);
+      const result = await runWebSocketResponse(request, (event) => {
+        seen.push(event.type);
+      });
+
+      expect(listenerCountsAtCachedSend).toEqual([{ close: 1, error: 1 }]);
+      expect(unhandledErrors).toEqual([]);
+      expect(instances).toHaveLength(2);
+      expect(result).toMatchObject({ responseId: 'resp_retry', eventCount: 2 });
+      expect(seen).toEqual(['response.created', 'response.completed']);
+    } finally {
+      closeAllCachedWebSockets();
+    }
+  });
+
   it('treats close after terminal event as success even when event handling is async', async () => {
     const { WebSocketCtor } = makeWebSocketCtor([
       (socket) => {
@@ -1695,6 +2014,50 @@ describe('WebSocket transport', () => {
       expect.objectContaining({ connectionId: 'ws#61245', cacheStatus: 'miss' }),
     );
     closeAllCachedWebSockets();
+  });
+
+  it('enables idle WebSocket keepalive only during and shortly after interactive runs', () => {
+    let now = 1_000;
+    const tracker = createIdleKeepaliveActivityTracker(() => now);
+
+    tracker.setContext({ hasUI: true });
+    expect(tracker.shouldEnable()).toBe(false);
+
+    tracker.noteInput({ source: 'rpc' });
+    tracker.noteAgentStart();
+    expect(tracker.shouldEnable()).toBe(false);
+    tracker.noteAgentEnd();
+    expect(tracker.shouldEnable()).toBe(false);
+
+    tracker.noteInput({ source: 'interactive' });
+    tracker.noteAgentStart();
+    expect(tracker.shouldEnable()).toBe(true);
+
+    tracker.noteAgentEnd();
+    expect(tracker.shouldEnable()).toBe(true);
+
+    now += IDLE_KEEPALIVE_ACTIVITY_WINDOW_MS - 1;
+    expect(tracker.shouldEnable()).toBe(true);
+
+    now += 1;
+    expect(tracker.shouldEnable()).toBe(false);
+  });
+
+  it('disables idle WebSocket keepalive when the UI context is unavailable or reset', () => {
+    const tracker = createIdleKeepaliveActivityTracker(() => 1_000);
+
+    tracker.setContext({ hasUI: false });
+    tracker.noteInput({ source: 'interactive' });
+    tracker.noteAgentStart();
+    expect(tracker.shouldEnable()).toBe(false);
+
+    tracker.setContext({ hasUI: true });
+    tracker.noteInput({ source: 'interactive' });
+    tracker.noteAgentStart();
+    expect(tracker.shouldEnable()).toBe(true);
+
+    tracker.clear();
+    expect(tracker.shouldEnable()).toBe(false);
   });
 
   it('formats status text only for main-session WebSocket opens', () => {

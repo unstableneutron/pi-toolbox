@@ -7,9 +7,12 @@ interface WebSocketLike {
   send(data: string): void;
   close(code?: number, reason?: string): void;
   terminate?(): void;
+  ping?(): void;
   addEventListener(type: string, listener: (event: any) => void): void;
   removeEventListener(type: string, listener: (event: any) => void): void;
   on?(event: string, listener: (...args: any[]) => void): void;
+  off?(event: string, listener: (...args: any[]) => void): void;
+  removeListener?(event: string, listener: (...args: any[]) => void): void;
 }
 
 interface WebSocketConstructorLike {
@@ -22,10 +25,15 @@ interface SocketCacheEntry {
   idleTimer?: ReturnType<typeof setTimeout>;
   idleCloseListener?: (event: any) => void;
   idleErrorListener?: (event: any) => void;
+  keepaliveTimer?: ReturnType<typeof setTimeout>;
+  keepalivePongTimer?: ReturnType<typeof setTimeout>;
+  keepalivePongListener?: (...args: any[]) => void;
   onLifecycleEvent?: WebSocketLifecycleObserver;
 }
 
 const IDLE_SOCKET_CACHE_TTL_MS = 15 * 60 * 1000;
+const IDLE_SOCKET_KEEPALIVE_INTERVAL_MS = 30 * 1000;
+const IDLE_SOCKET_KEEPALIVE_PONG_TIMEOUT_MS = 10 * 1000;
 const CLOSED_READY_STATE = 3;
 const socketCache = new Map<string, SocketCacheEntry>();
 const socketIds = new WeakMap<WebSocketLike, string>();
@@ -203,7 +211,27 @@ function unrefSocket(socket: WebSocketLike): void {
   }
 }
 
+function removeKeepalivePongListener(entry: SocketCacheEntry): void {
+  if (!entry.keepalivePongListener) return;
+  entry.socket.off?.('pong', entry.keepalivePongListener);
+  entry.socket.removeListener?.('pong', entry.keepalivePongListener);
+  entry.keepalivePongListener = undefined;
+}
+
+function clearIdleKeepalive(entry: SocketCacheEntry): void {
+  if (entry.keepaliveTimer) {
+    clearTimeout(entry.keepaliveTimer);
+    entry.keepaliveTimer = undefined;
+  }
+  if (entry.keepalivePongTimer) {
+    clearTimeout(entry.keepalivePongTimer);
+    entry.keepalivePongTimer = undefined;
+  }
+  removeKeepalivePongListener(entry);
+}
+
 function removeIdleListeners(entry: SocketCacheEntry): void {
+  clearIdleKeepalive(entry);
   if (entry.idleErrorListener) {
     entry.socket.removeEventListener('error', entry.idleErrorListener);
     entry.idleErrorListener = undefined;
@@ -248,6 +276,65 @@ function addIdleListeners(
     entry.idleCloseListener = (event: any) =>
       evictIdleSocket(key, entry, settings, 'idle_close', false, event);
     entry.socket.addEventListener('close', entry.idleCloseListener);
+  }
+}
+
+function canPingSocket(socket: WebSocketLike): boolean {
+  return typeof socket.ping === 'function' && typeof socket.on === 'function';
+}
+
+function scheduleIdleKeepalive(
+  key: string,
+  entry: SocketCacheEntry,
+  settings: OpenAIWebSocketResponsesSettings,
+): void {
+  if (entry.busy || socketCache.get(key) !== entry || !canPingSocket(entry.socket)) return;
+  if (entry.keepaliveTimer || entry.keepalivePongTimer) return;
+  entry.keepaliveTimer = setTimeout(() => {
+    entry.keepaliveTimer = undefined;
+    sendIdleKeepalivePing(key, entry, settings);
+  }, IDLE_SOCKET_KEEPALIVE_INTERVAL_MS);
+  entry.keepaliveTimer.unref?.();
+}
+
+function sendIdleKeepalivePing(
+  key: string,
+  entry: SocketCacheEntry,
+  settings: OpenAIWebSocketResponsesSettings,
+): void {
+  if (entry.busy || socketCache.get(key) !== entry) return;
+  if (!isReusable(entry.socket)) {
+    evictIdleSocket(key, entry, settings, 'idle_ping_stale', true);
+    return;
+  }
+
+  const onPong = () => {
+    if (entry.keepalivePongTimer) {
+      clearTimeout(entry.keepalivePongTimer);
+      entry.keepalivePongTimer = undefined;
+    }
+    removeKeepalivePongListener(entry);
+    scheduleIdleKeepalive(key, entry, settings);
+  };
+
+  entry.keepalivePongListener = onPong;
+  entry.socket.on?.('pong', onPong);
+  entry.keepalivePongTimer = setTimeout(() => {
+    entry.keepalivePongTimer = undefined;
+    removeKeepalivePongListener(entry);
+    evictIdleSocket(key, entry, settings, 'idle_pong_timeout', true);
+  }, IDLE_SOCKET_KEEPALIVE_PONG_TIMEOUT_MS);
+  entry.keepalivePongTimer.unref?.();
+
+  try {
+    entry.socket.ping?.();
+  } catch (error) {
+    if (entry.keepalivePongTimer) {
+      clearTimeout(entry.keepalivePongTimer);
+      entry.keepalivePongTimer = undefined;
+    }
+    removeKeepalivePongListener(entry);
+    evictIdleSocket(key, entry, settings, 'idle_ping_error', true, error);
   }
 }
 
@@ -366,6 +453,7 @@ async function acquireSocket(request: {
   cacheKey?: string;
   WebSocketCtor?: WebSocketConstructorLike;
   onLifecycleEvent?: WebSocketLifecycleObserver;
+  enableIdleKeepalive?: boolean;
 }): Promise<{
   socket: WebSocketLike;
   connection: WebSocketConnectionMetadata;
@@ -428,7 +516,14 @@ async function acquireSocket(request: {
     return {
       socket: cached.socket,
       connection: getSocketConnectionMetadata(cached.socket, 'hit', request.cacheKey),
-      release: (keep) => releaseCached(request.cacheKey!, cached, keep, request.settings),
+      release: (keep) =>
+        releaseCached(
+          request.cacheKey!,
+          cached,
+          keep,
+          request.settings,
+          request.enableIdleKeepalive ?? false,
+        ),
     };
   }
   if (cached) {
@@ -462,7 +557,14 @@ async function acquireSocket(request: {
   return {
     socket,
     connection: getSocketConnectionMetadata(socket, cacheStatus, request.cacheKey),
-    release: (keep) => releaseCached(request.cacheKey!, entry, keep, request.settings),
+    release: (keep) =>
+      releaseCached(
+        request.cacheKey!,
+        entry,
+        keep,
+        request.settings,
+        request.enableIdleKeepalive ?? false,
+      ),
   };
 }
 
@@ -471,6 +573,7 @@ function releaseCached(
   entry: SocketCacheEntry,
   keep: boolean,
   settings: OpenAIWebSocketResponsesSettings,
+  enableIdleKeepalive: boolean,
 ): void {
   if (!keep || !isReusable(entry.socket)) {
     removeIdleListeners(entry);
@@ -487,6 +590,7 @@ function releaseCached(
     if (entry.busy) return;
     evictIdleSocket(key, entry, settings, 'idle_timeout', true);
   }, IDLE_SOCKET_CACHE_TTL_MS);
+  if (enableIdleKeepalive) scheduleIdleKeepalive(key, entry, settings);
   entry.idleTimer.unref?.();
 }
 
@@ -501,6 +605,7 @@ export async function runWebSocketResponse(
     cacheKey?: string;
     WebSocketCtor?: WebSocketConstructorLike;
     onLifecycleEvent?: WebSocketLifecycleObserver;
+    enableIdleKeepalive?: boolean;
   },
   onEvent: (
     event: Record<string, any>,
@@ -530,9 +635,9 @@ export async function runWebSocketResponse(
         cacheKey: request.cacheKey,
         WebSocketCtor: request.WebSocketCtor,
         onLifecycleEvent: request.onLifecycleEvent,
+        enableIdleKeepalive: request.enableIdleKeepalive,
       });
       const socket = acquired.socket;
-      socket.send(JSON.stringify({ type: 'response.create', ...request.body }));
       await new Promise<void>((resolve, reject) => {
         let terminal = false;
         let settled = false;
@@ -639,8 +744,16 @@ export async function runWebSocketResponse(
         socket.addEventListener('error', onError);
         socket.addEventListener('close', onClose);
         request.signal?.addEventListener('abort', onAbort, { once: true });
-        if (request.signal?.aborted) onAbort();
+        if (request.signal?.aborted) {
+          onAbort();
+          return;
+        }
         armIdleTimer();
+        try {
+          socket.send(JSON.stringify({ type: 'response.create', ...request.body }));
+        } catch (error) {
+          rejectNow(error);
+        }
       });
       acquired.release(keepSocket);
       writeDebugLog(request.settings, 'websocket.response.done', {
