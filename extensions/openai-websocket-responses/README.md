@@ -132,9 +132,14 @@ Profile-specific differences:
 ## Recovery behavior
 
 `websocket.retries` applies only before response state exists: connection
-failure, send failure, or close before any response event. After
-`response.created` provides a `response_id`, the extension does not resend the
-same request over a new socket. It polls:
+failure, send failure, or close before any response event. When transparent
+patching runs with Pi's default `auto` transport, a WebSocket failure before the
+stream starts falls back to the original provider with `transport: "sse"`.
+Explicit `transport: "websocket"` and `transport: "websocket-cached"` requests
+stay on WebSocket and report the failure.
+
+After `response.created` provides a `response_id`, the extension does not resend
+the same request over a new socket. It polls:
 
 ```http
 GET /responses/{response_id}

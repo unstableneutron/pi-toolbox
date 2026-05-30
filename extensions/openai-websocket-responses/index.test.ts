@@ -1973,6 +1973,20 @@ describe('WebSocket transport', () => {
   });
 });
 
+async function collectStreamEvents(stream: AsyncIterable<any>): Promise<any[]> {
+  const items: any[] = [];
+  for await (const item of stream) items.push(item);
+  return items;
+}
+
+function streamFromEvents(...events: any[]) {
+  const stream = createAssistantMessageEventStream();
+  queueMicrotask(() => {
+    for (const event of events) stream.push(event);
+  });
+  return stream;
+}
+
 describe('transparent provider patching', () => {
   it('routes matching models to the websocket stream and delegates non-matching models', async () => {
     const settings = normalizeSettings({
@@ -1999,5 +2013,146 @@ describe('transparent provider patching', () => {
 
     expect(websocketStream).toHaveBeenCalledTimes(1);
     expect(originalStreamSimple).toHaveBeenCalledTimes(1);
+  });
+
+  it('delegates matching models to the original SSE stream when transport is sse', async () => {
+    const settings = normalizeSettings({
+      patch: { enabled: true, providerModels: ['facade/gpt-5*'] },
+    });
+    const websocketStream = vi.fn((_model: Model<any>, _context: any, _options?: any) =>
+      createAssistantMessageEventStream(),
+    );
+    const originalMessage = makeAssistantMessage(makeModel({ id: 'gpt-5.5' }));
+    const originalStreamSimple = vi.fn((_model: Model<any>, _context: any, _options?: any) =>
+      streamFromEvents(
+        { type: 'start', partial: originalMessage },
+        { type: 'done', reason: 'stop', message: originalMessage },
+      ),
+    );
+    const provider = wrapProviderForWebSocketResponses(
+      {
+        api: 'openai-responses',
+        stream: originalStreamSimple as any,
+        streamSimple: originalStreamSimple,
+      },
+      () => settings,
+      websocketStream as any,
+    );
+
+    const events = await collectStreamEvents(
+      provider.streamSimple(makeModel({ id: 'gpt-5.5' }), { messages: [] }, { transport: 'sse' }),
+    );
+
+    expect(websocketStream).not.toHaveBeenCalled();
+    expect(originalStreamSimple).toHaveBeenCalledTimes(1);
+    expect(events.map((event) => event.type)).toEqual(['start', 'done']);
+  });
+
+  it('falls back to the original SSE stream when auto WebSocket fails before start', async () => {
+    const settings = normalizeSettings({
+      patch: { enabled: true, providerModels: ['facade/gpt-5*'] },
+    });
+    const websocketMessage = makeAssistantMessage(makeModel({ id: 'gpt-5.5' }));
+    websocketMessage.stopReason = 'error';
+    websocketMessage.errorMessage = 'Connection error: WebSocket closed 1006';
+    const websocketStream = vi.fn((_model: Model<any>, _context: any, _options?: any) =>
+      streamFromEvents({ type: 'error', reason: 'error', error: websocketMessage }),
+    );
+    const originalMessage = makeAssistantMessage(makeModel({ id: 'gpt-5.5' }));
+    const originalStreamSimple = vi.fn((_model: Model<any>, _context: any, _options?: any) =>
+      streamFromEvents(
+        { type: 'start', partial: originalMessage },
+        { type: 'done', reason: 'stop', message: originalMessage },
+      ),
+    );
+    const provider = wrapProviderForWebSocketResponses(
+      {
+        api: 'openai-responses',
+        stream: originalStreamSimple as any,
+        streamSimple: originalStreamSimple,
+      },
+      () => settings,
+      websocketStream as any,
+    );
+
+    const events = await collectStreamEvents(
+      provider.streamSimple(makeModel({ id: 'gpt-5.5' }), { messages: [] }, { transport: 'auto' }),
+    );
+
+    expect(websocketStream).toHaveBeenCalledTimes(1);
+    expect(originalStreamSimple).toHaveBeenCalledTimes(1);
+    expect(originalStreamSimple.mock.calls[0]?.[2]).toMatchObject({ transport: 'sse' });
+    expect(events.map((event) => event.type)).toEqual(['start', 'done']);
+    expect(events[1]?.message).toBe(originalMessage);
+  });
+
+  it('does not fall back when strict websocket transport fails before start', async () => {
+    const settings = normalizeSettings({
+      patch: { enabled: true, providerModels: ['facade/gpt-5*'] },
+    });
+    const websocketMessage = makeAssistantMessage(makeModel({ id: 'gpt-5.5' }));
+    websocketMessage.stopReason = 'error';
+    websocketMessage.errorMessage = 'Connection error: WebSocket closed 1006';
+    const websocketStream = vi.fn((_model: Model<any>, _context: any, _options?: any) =>
+      streamFromEvents({ type: 'error', reason: 'error', error: websocketMessage }),
+    );
+    const originalStreamSimple = vi.fn((_model: Model<any>, _context: any, _options?: any) =>
+      createAssistantMessageEventStream(),
+    );
+    const provider = wrapProviderForWebSocketResponses(
+      {
+        api: 'openai-responses',
+        stream: originalStreamSimple as any,
+        streamSimple: originalStreamSimple,
+      },
+      () => settings,
+      websocketStream as any,
+    );
+
+    const events = await collectStreamEvents(
+      provider.streamSimple(
+        makeModel({ id: 'gpt-5.5' }),
+        { messages: [] },
+        { transport: 'websocket' },
+      ),
+    );
+
+    expect(originalStreamSimple).not.toHaveBeenCalled();
+    expect(events).toEqual([{ type: 'error', reason: 'error', error: websocketMessage }]);
+  });
+
+  it('does not fall back after the WebSocket stream has started', async () => {
+    const settings = normalizeSettings({
+      patch: { enabled: true, providerModels: ['facade/gpt-5*'] },
+    });
+    const websocketMessage = makeAssistantMessage(makeModel({ id: 'gpt-5.5' }));
+    const websocketError = makeAssistantMessage(makeModel({ id: 'gpt-5.5' }));
+    websocketError.stopReason = 'error';
+    websocketError.errorMessage = 'Connection error: WebSocket closed 1006';
+    const websocketStream = vi.fn((_model: Model<any>, _context: any, _options?: any) =>
+      streamFromEvents(
+        { type: 'start', partial: websocketMessage },
+        { type: 'error', reason: 'error', error: websocketError },
+      ),
+    );
+    const originalStreamSimple = vi.fn((_model: Model<any>, _context: any, _options?: any) =>
+      createAssistantMessageEventStream(),
+    );
+    const provider = wrapProviderForWebSocketResponses(
+      {
+        api: 'openai-responses',
+        stream: originalStreamSimple as any,
+        streamSimple: originalStreamSimple,
+      },
+      () => settings,
+      websocketStream as any,
+    );
+
+    const events = await collectStreamEvents(
+      provider.streamSimple(makeModel({ id: 'gpt-5.5' }), { messages: [] }, { transport: 'auto' }),
+    );
+
+    expect(originalStreamSimple).not.toHaveBeenCalled();
+    expect(events.map((event) => event.type)).toEqual(['start', 'error']);
   });
 });

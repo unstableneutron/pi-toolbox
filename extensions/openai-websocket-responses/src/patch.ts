@@ -1,4 +1,5 @@
 import {
+  createAssistantMessageEventStream,
   registerApiProvider,
   getApiProviders,
   type Api,
@@ -23,6 +24,67 @@ const WRAPPED = Symbol.for('openai-websocket-responses.wrapped');
 
 type WrappedFunction = Function & { [WRAPPED]?: boolean };
 
+type StreamForOptions<TOptions extends StreamOptions> = (
+  options?: TOptions,
+) => AssistantMessageEventStream;
+
+function isSseTransport(options: StreamOptions | undefined): boolean {
+  return options?.transport === 'sse';
+}
+
+function canFallbackToSse(options: StreamOptions | undefined): boolean {
+  return options?.transport === undefined || options.transport === 'auto';
+}
+
+function sseOptions<TOptions extends StreamOptions>(options: TOptions | undefined): TOptions {
+  return { ...options, transport: 'sse' } as TOptions;
+}
+
+async function pipeStream(
+  source: AssistantMessageEventStream,
+  target: AssistantMessageEventStream,
+): Promise<void> {
+  try {
+    for await (const event of source) target.push(event);
+  } finally {
+    target.end();
+  }
+}
+
+function streamWithAutoSseFallback<TOptions extends StreamOptions>(
+  options: TOptions | undefined,
+  websocketStream: StreamForOptions<TOptions>,
+  originalStream: StreamForOptions<TOptions>,
+): AssistantMessageEventStream {
+  if (isSseTransport(options)) return originalStream(sseOptions(options));
+  if (!canFallbackToSse(options)) return websocketStream(options);
+
+  const proxy = createAssistantMessageEventStream();
+  void (async () => {
+    let started = false;
+    try {
+      const source = websocketStream(options);
+      for await (const event of source) {
+        if (!started && event.type === 'error') {
+          await pipeStream(originalStream(sseOptions(options)), proxy);
+          return;
+        }
+        started = true;
+        proxy.push(event);
+      }
+    } catch (error) {
+      if (!started) {
+        await pipeStream(originalStream(sseOptions(options)), proxy);
+        return;
+      }
+      throw error;
+    } finally {
+      proxy.end();
+    }
+  })();
+  return proxy;
+}
+
 export function wrapProviderForWebSocketResponses<TProvider extends ApiProvider<any>>(
   provider: TProvider,
   settingsProvider: () => OpenAIWebSocketResponsesSettings,
@@ -37,7 +99,13 @@ export function wrapProviderForWebSocketResponses<TProvider extends ApiProvider<
     options?: SimpleStreamOptions,
   ) => {
     const settings = settingsProvider();
-    if (shouldPatchModel(model, settings)) return websocketStream(model, context, options);
+    if (shouldPatchModel(model, settings)) {
+      return streamWithAutoSseFallback(
+        options,
+        (nextOptions) => websocketStream(model, context, nextOptions),
+        (nextOptions) => originalStreamSimple.call(provider, model, context, nextOptions),
+      );
+    }
     return originalStreamSimple.call(provider, model, context, options);
   }) as StreamSimple & WrappedFunction;
   Object.defineProperty(wrappedStreamSimple, WRAPPED, { value: true });
@@ -49,8 +117,13 @@ export function wrapProviderForWebSocketResponses<TProvider extends ApiProvider<
   ) => AssistantMessageEventStream;
   const wrappedStream = ((model: Model<Api>, context: Context, options?: StreamOptions) => {
     const settings = settingsProvider();
-    if (shouldPatchModel(model, settings))
-      return websocketStream(model, context, options as SimpleStreamOptions);
+    if (shouldPatchModel(model, settings)) {
+      return streamWithAutoSseFallback(
+        options,
+        (nextOptions) => websocketStream(model, context, nextOptions as SimpleStreamOptions),
+        (nextOptions) => originalStream.call(provider, model, context, nextOptions),
+      );
+    }
     return originalStream.call(provider, model, context, options);
   }) as typeof originalStream & WrappedFunction;
   Object.defineProperty(wrappedStream, WRAPPED, { value: true });
