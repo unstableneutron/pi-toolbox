@@ -41,6 +41,10 @@ Configure the extension in `~/.pi/agent/settings.json`:
       "connectTimeoutMs": 15000,
       "idleTimeoutMs": 0
     },
+    "debug": {
+      "enabled": false,
+      "logFile": "~/.pi/agent/openai-websocket-responses.debug.jsonl"
+    },
     "recovery": {
       "enabled": true,
       "pollIntervalMs": 1000,
@@ -58,8 +62,9 @@ Defaults: `patch.enabled` is `false`; `patch.apis` is
 `request.profile` is `"auto"`; `request.queryParams`,
 `request.queryParamsByProvider`, and `request.queryParamsByProviderModel` are
 empty; WebSocket defaults are `retries: 2`, `connectTimeoutMs: 15000`, and
-`idleTimeoutMs: 0`; recovery defaults are shown above. Keep `providerModels`
-narrow when request query params contain deployment-specific values.
+`idleTimeoutMs: 0`; debug logging is disabled; recovery defaults are shown
+above. Keep `providerModels` narrow when request query params contain
+deployment-specific values.
 
 For the current Azure/LFM WSS route, `api-version` alone is not enough. The
 handshake also needs Azure routing values in URL query params. Use `${model.id}`
@@ -142,9 +147,43 @@ retrieve reaches `completed`, the recovered response id becomes the next
 continuation checkpoint.
 
 The next real model turn opens or reuses a WebSocket and sends only the new
-input with `previous_response_id`. The extension keeps its own per-session
-socket/continuation cache keyed by session, URL, provider, model, and headers;
-it does not share Pi's built-in `openai-codex-responses` cache.
+input with `previous_response_id`. If Azure reports `previous_response_not_found`
+before any response events are processed, the extension clears the stale
+continuation and retries once without `previous_response_id` using the full Pi
+model context for that turn. That pays the full-context penalty once and creates
+a fresh response id for later delta turns.
+
+The extension keeps its own per-session socket/continuation cache keyed by
+session, URL, provider, model, and headers; it does not share Pi's built-in
+`openai-codex-responses` cache. Idle sockets are retained internally for up to
+15 minutes after a turn finishes, and are removed sooner if the idle socket emits
+`close` or `error`.
+
+## Debugging
+
+Enable JSONL transport logs when diagnosing reuse, continuation, and reconnect
+behavior:
+
+```json
+{
+  "openaiWebsocketResponses": {
+    "debug": {
+      "enabled": true,
+      "logFile": ".pi/openai-websocket-responses.debug.jsonl"
+    }
+  }
+}
+```
+
+Each record includes a timestamp, event name, hashed cache key, continuation
+decision, request input counts, retry/fallback decisions, and idle socket cache
+evictions. Authorization and token-like fields are redacted before writing.
+
+A helper script can validate whether facade/Azure accepts persisted responses:
+
+```bash
+uv run scratch/validate-facade-store-true.py
+```
 
 ## Limitations
 

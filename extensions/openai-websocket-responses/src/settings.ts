@@ -19,6 +19,10 @@ export interface OpenAIWebSocketResponsesSettings {
     queryParamsByProviderModel: Record<string, Record<string, string>>;
   };
   websocket: { retries: number; connectTimeoutMs: number; idleTimeoutMs: number };
+  debug: {
+    enabled: boolean;
+    logFile: string | undefined;
+  };
   recovery: {
     enabled: boolean;
     pollIntervalMs: number;
@@ -43,6 +47,7 @@ const DEFAULT_SETTINGS: OpenAIWebSocketResponsesSettings = {
     queryParamsByProviderModel: {},
   },
   websocket: { retries: 2, connectTimeoutMs: 15000, idleTimeoutMs: 0 },
+  debug: { enabled: false, logFile: undefined },
   recovery: {
     enabled: true,
     pollIntervalMs: 1000,
@@ -162,6 +167,7 @@ export function normalizeSettings(raw: unknown): OpenAIWebSocketResponsesSetting
   const patch = isRecord(root.patch) ? root.patch : {};
   const request = isRecord(root.request) ? root.request : {};
   const websocket = isRecord(root.websocket) ? root.websocket : {};
+  const debug = isRecord(root.debug) ? root.debug : {};
   const recovery = isRecord(root.recovery) ? root.recovery : {};
 
   return {
@@ -191,6 +197,11 @@ export function normalizeSettings(raw: unknown): OpenAIWebSocketResponsesSetting
         websocket.idleTimeoutMs,
         DEFAULT_SETTINGS.websocket.idleTimeoutMs,
       ),
+    },
+    debug: {
+      enabled: booleanValue(debug.enabled, DEFAULT_SETTINGS.debug.enabled),
+      logFile:
+        typeof debug.logFile === 'string' && debug.logFile.length > 0 ? debug.logFile : undefined,
     },
     recovery: {
       enabled: booleanValue(recovery.enabled, DEFAULT_SETTINGS.recovery.enabled),

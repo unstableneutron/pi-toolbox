@@ -9,6 +9,7 @@ import {
 } from '@earendil-works/pi-ai';
 import { describe, expect, it, vi } from 'vitest';
 
+import { formatWebSocketStatus } from './index.ts';
 import { buildResponsesBody } from './src/body.ts';
 import {
   buildContinuationRequestBody,
@@ -33,6 +34,7 @@ import { resolveRetrieveResponseUrl, resolveWebSocketResponsesUrl } from './src/
 import {
   closeAllCachedWebSockets,
   runWebSocketResponse,
+  type WebSocketLifecycleEvent,
   WebSocketMidstreamError,
 } from './src/websocket.ts';
 
@@ -1103,16 +1105,20 @@ describe('Responses adapter and retrieve recovery', () => {
 });
 
 describe('WebSocket transport', () => {
-  function makeWebSocketCtor(behaviors: Array<(socket: any) => void>) {
+  function makeWebSocketCtor(
+    behaviors: Array<(socket: any) => void>,
+    config: { localPort?: number } = {},
+  ) {
     const instances: any[] = [];
     class FakeWebSocket {
       readyState = 1;
       sent: string[] = [];
       listeners = new Map<string, Set<(event: any) => void>>();
+      _socket = config.localPort ? { localPort: config.localPort } : undefined;
 
       constructor(
         readonly url: string,
-        readonly options: unknown,
+        readonly socketOptions: unknown,
       ) {
         instances.push(this);
         queueMicrotask(() => this.emit('open', {}));
@@ -1384,6 +1390,196 @@ describe('WebSocket transport', () => {
     closeAllCachedWebSockets();
   });
 
+  it('emits lifecycle events with the local port as the connection id when available', async () => {
+    const { WebSocketCtor, instances } = makeWebSocketCtor(
+      [
+        (socket) => {
+          socket.emit('message', {
+            data: JSON.stringify({
+              type: 'response.created',
+              response: { id: 'resp_lifecycle' },
+            }),
+          });
+          socket.emit('message', {
+            data: JSON.stringify({
+              type: 'response.completed',
+              response: { id: 'resp_lifecycle', status: 'completed' },
+            }),
+          });
+        },
+      ],
+      { localPort: 61243 },
+    );
+    const lifecycle: WebSocketLifecycleEvent[] = [];
+
+    await runWebSocketResponse(
+      {
+        url: 'wss://example.test/responses',
+        headers: new Headers(),
+        body: { model: 'gpt', input: [] },
+        settings: normalizeSettings({ websocket: { retries: 0 } }),
+        cacheKey: 'lifecycle-cache-key',
+        WebSocketCtor,
+        onLifecycleEvent: (event) => lifecycle.push(event),
+      },
+      () => undefined,
+    );
+    instances[0].emit('close', { code: 1000, reason: 'server_idle' });
+
+    expect(lifecycle).toEqual([
+      expect.objectContaining({
+        type: 'open',
+        connectionId: 'ws-61243',
+        cacheStatus: 'miss',
+      }),
+      expect.objectContaining({
+        type: 'close',
+        connectionId: 'ws-61243',
+        reason: 'idle_close',
+        code: 1000,
+      }),
+    ]);
+    closeAllCachedWebSockets();
+  });
+
+  it('falls back to a process-local connection id when the local port is unavailable', async () => {
+    const { WebSocketCtor } = makeWebSocketCtor([
+      (socket) => {
+        socket.emit('message', {
+          data: JSON.stringify({ type: 'response.created', response: { id: 'resp_lifecycle' } }),
+        });
+        socket.emit('message', {
+          data: JSON.stringify({
+            type: 'response.completed',
+            response: { id: 'resp_lifecycle', status: 'completed' },
+          }),
+        });
+      },
+    ]);
+    const lifecycle: WebSocketLifecycleEvent[] = [];
+
+    await runWebSocketResponse(
+      {
+        url: 'wss://example.test/responses',
+        headers: new Headers(),
+        body: { model: 'gpt', input: [] },
+        settings: normalizeSettings({ websocket: { retries: 0 } }),
+        cacheKey: 'lifecycle-fallback-cache-key',
+        WebSocketCtor,
+        onLifecycleEvent: (event) => lifecycle.push(event),
+      },
+      () => undefined,
+    );
+
+    expect(lifecycle[0]).toEqual(
+      expect.objectContaining({ type: 'open', connectionId: expect.stringMatching(/^ws-\d+$/) }),
+    );
+    closeAllCachedWebSockets();
+  });
+
+  it('formats status text only for main-session WebSocket opens', () => {
+    expect(
+      formatWebSocketStatus({
+        type: 'open',
+        connectionId: 'ws-61243',
+        cacheStatus: 'miss',
+        cacheKeyHash: '336920397f78',
+        urlHash: 'urlhash',
+      }),
+    ).toBe('WebSocket ws-61243 connected · new');
+    expect(
+      formatWebSocketStatus({
+        type: 'open',
+        connectionId: 'ws-61244',
+        cacheStatus: 'busy',
+        cacheKeyHash: '336920397f78',
+        urlHash: 'urlhash',
+      }),
+    ).toBe('WebSocket ws-61244 connected · extra');
+    expect(
+      formatWebSocketStatus({
+        type: 'open',
+        connectionId: 'ws-1',
+        cacheStatus: 'disabled',
+        urlHash: 'urlhash',
+      }),
+    ).toBeUndefined();
+    expect(
+      formatWebSocketStatus({
+        type: 'close',
+        connectionId: 'ws-61243',
+        reason: 'idle_timeout',
+        cacheKeyHash: '336920397f78',
+      }),
+    ).toBeUndefined();
+  });
+
+  it('removes an idle cached socket when the server closes it', async () => {
+    const instances: any[] = [];
+    class FakeWebSocket {
+      readyState = 1;
+      sent: string[] = [];
+      listeners = new Map<string, Set<(event: any) => void>>();
+
+      constructor() {
+        instances.push(this);
+        queueMicrotask(() => this.emit('open', {}));
+      }
+
+      send(data: string) {
+        this.sent.push(data);
+        queueMicrotask(() => {
+          this.emit('message', {
+            data: JSON.stringify({
+              type: 'response.created',
+              response: { id: `resp_${instances.length}` },
+            }),
+          });
+          this.emit('message', {
+            data: JSON.stringify({
+              type: 'response.completed',
+              response: { id: `resp_${instances.length}`, status: 'completed' },
+            }),
+          });
+        });
+      }
+
+      close() {
+        this.readyState = 3;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void) {
+        const listeners = this.listeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      removeEventListener(type: string, listener: (event: any) => void) {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      emit(type: string, event: any) {
+        for (const listener of this.listeners.get(type) ?? []) listener(event);
+      }
+    }
+
+    const request = {
+      url: 'wss://example.test/responses',
+      headers: new Headers(),
+      body: { model: 'gpt', input: [] },
+      settings: normalizeSettings({ websocket: { retries: 0 } }),
+      cacheKey: 'idle-close-cache-key',
+      WebSocketCtor: FakeWebSocket as any,
+    };
+
+    await runWebSocketResponse(request, () => undefined);
+    instances[0].emit('close', { code: 1000, reason: 'server_idle' });
+    await runWebSocketResponse(request, () => undefined);
+
+    expect(instances).toHaveLength(2);
+    closeAllCachedWebSockets();
+  });
+
   it('does not cache one-shot sockets opened while a same-key socket is busy', async () => {
     const instances: any[] = [];
     let firstSent!: () => void;
@@ -1543,10 +1739,12 @@ describe('WebSocket transport', () => {
         body: {
           ...fullBody,
           previous_response_id: 'resp_old',
-          input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'next' }] }],
+          input: [
+            { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'next' }] },
+          ],
         },
         fallbackBodyOnPreviousResponseNotFound: fullBody,
-        settings: normalizeSettings({ websocket: { retries: 0 } }),
+        settings: normalizeSettings({ websocket: { retries: 0, idleTimeoutMs: 25 } }),
         WebSocketCtor,
       },
       (event) => {

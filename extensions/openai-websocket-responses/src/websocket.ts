@@ -1,3 +1,4 @@
+import { shortHash, writeDebugLog } from './debug.ts';
 import type { OpenAIWebSocketResponsesSettings } from './settings.ts';
 import type { ResponsesBody } from './body.ts';
 
@@ -19,11 +20,17 @@ interface SocketCacheEntry {
   socket: WebSocketLike;
   busy: boolean;
   idleTimer?: ReturnType<typeof setTimeout>;
+  idleCloseListener?: (event: any) => void;
   idleErrorListener?: (event: any) => void;
+  onLifecycleEvent?: WebSocketLifecycleObserver;
 }
 
+const IDLE_SOCKET_CACHE_TTL_MS = 15 * 60 * 1000;
 const socketCache = new Map<string, SocketCacheEntry>();
-const SOCKET_CACHE_TTL_MS = 5 * 60 * 1000;
+const socketIds = new WeakMap<WebSocketLike, string>();
+const openedSockets = new WeakSet<WebSocketLike>();
+const closedSockets = new WeakSet<WebSocketLike>();
+let nextSocketId = 0;
 
 export class WebSocketMidstreamError extends Error {
   constructor(
@@ -39,10 +46,106 @@ export class WebSocketMidstreamError extends Error {
 export interface WebSocketRunResult {
   responseId?: string;
   eventCount: number;
+  fallbackUsed?: boolean;
+}
+
+export type WebSocketCacheStatus = 'disabled' | 'miss' | 'hit' | 'busy' | 'stale';
+
+export type WebSocketLifecycleEvent =
+  | {
+      type: 'open';
+      connectionId: string;
+      cacheStatus: WebSocketCacheStatus;
+      cacheKeyHash?: string;
+      urlHash: string;
+      localPort?: number;
+    }
+  | {
+      type: 'close';
+      connectionId: string;
+      reason: string;
+      cacheKeyHash?: string;
+      localPort?: number;
+      code?: number;
+      closeReason?: string;
+    };
+
+export type WebSocketLifecycleObserver = (event: WebSocketLifecycleEvent) => void;
+
+class PreviousResponseNotFoundError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PreviousResponseNotFoundError';
+  }
 }
 
 function isReusable(socket: WebSocketLike): boolean {
   return socket.readyState === undefined || socket.readyState === 1;
+}
+
+function getSocketLocalPort(socket: WebSocketLike): number | undefined {
+  const localPort = (socket as { _socket?: { localPort?: unknown } })._socket?.localPort;
+  return Number.isInteger(localPort) && Number(localPort) > 0 ? Number(localPort) : undefined;
+}
+
+function getSocketId(socket: WebSocketLike): string {
+  let id = socketIds.get(socket);
+  if (!id) {
+    const localPort = getSocketLocalPort(socket);
+    nextSocketId += localPort ? 0 : 1;
+    id = localPort ? `ws-${localPort}` : `ws-${nextSocketId.toString(36)}`;
+    socketIds.set(socket, id);
+  }
+  return id;
+}
+
+function emitLifecycle(
+  onLifecycleEvent: WebSocketLifecycleObserver | undefined,
+  event: WebSocketLifecycleEvent,
+): void {
+  try {
+    onLifecycleEvent?.(event);
+  } catch {
+    // Lifecycle observers are diagnostic/UI-only and must not affect transport.
+  }
+}
+
+function emitSocketOpen(
+  onLifecycleEvent: WebSocketLifecycleObserver | undefined,
+  socket: WebSocketLike,
+  cacheStatus: WebSocketCacheStatus,
+  cacheKey: string | undefined,
+  url: string,
+): void {
+  openedSockets.add(socket);
+  emitLifecycle(onLifecycleEvent, {
+    type: 'open',
+    connectionId: getSocketId(socket),
+    cacheStatus,
+    cacheKeyHash: shortHash(cacheKey),
+    urlHash: shortHash(url) ?? '',
+    localPort: getSocketLocalPort(socket),
+  });
+}
+
+function emitSocketClose(
+  onLifecycleEvent: WebSocketLifecycleObserver | undefined,
+  socket: WebSocketLike,
+  cacheKey: string | undefined,
+  reason: string,
+  event?: any,
+): void {
+  if (!openedSockets.has(socket) || closedSockets.has(socket)) return;
+  closedSockets.add(socket);
+  emitLifecycle(onLifecycleEvent, {
+    type: 'close',
+    connectionId: getSocketId(socket),
+    reason,
+    cacheKeyHash: shortHash(cacheKey),
+    localPort: getSocketLocalPort(socket),
+    code: typeof event?.code === 'number' ? event.code : undefined,
+    closeReason: typeof event?.reason === 'string' ? event.reason : undefined,
+  });
 }
 
 function closeSilently(socket: WebSocketLike, code = 1000, reason = 'done'): void {
@@ -70,21 +173,52 @@ function unrefSocket(socket: WebSocketLike): void {
   }
 }
 
-function removeIdleErrorListener(entry: SocketCacheEntry): void {
-  if (!entry.idleErrorListener) return;
-  entry.socket.removeEventListener('error', entry.idleErrorListener);
-  entry.idleErrorListener = undefined;
+function removeIdleListeners(entry: SocketCacheEntry): void {
+  if (entry.idleErrorListener) {
+    entry.socket.removeEventListener('error', entry.idleErrorListener);
+    entry.idleErrorListener = undefined;
+  }
+  if (entry.idleCloseListener) {
+    entry.socket.removeEventListener('close', entry.idleCloseListener);
+    entry.idleCloseListener = undefined;
+  }
 }
 
-function addIdleErrorListener(key: string, entry: SocketCacheEntry): void {
-  if (entry.idleErrorListener) return;
-  entry.idleErrorListener = () => {
-    removeIdleErrorListener(entry);
-    closeSilently(entry.socket, 1000, 'idle_error');
-    if (entry.idleTimer) clearTimeout(entry.idleTimer);
-    if (socketCache.get(key) === entry) socketCache.delete(key);
-  };
-  entry.socket.addEventListener('error', entry.idleErrorListener);
+function evictIdleSocket(
+  key: string,
+  entry: SocketCacheEntry,
+  settings: OpenAIWebSocketResponsesSettings,
+  reason: string,
+  closeSocket: boolean,
+  event?: any,
+): void {
+  removeIdleListeners(entry);
+  if (entry.idleTimer) clearTimeout(entry.idleTimer);
+  emitSocketClose(entry.onLifecycleEvent, entry.socket, key, reason, event);
+  if (closeSocket) closeSilently(entry.socket, 1000, reason);
+  if (socketCache.get(key) === entry) socketCache.delete(key);
+  writeDebugLog(settings, 'websocket.cache.evict', {
+    cacheKeyHash: shortHash(key),
+    reason,
+    readyState: entry.socket.readyState,
+  });
+}
+
+function addIdleListeners(
+  key: string,
+  entry: SocketCacheEntry,
+  settings: OpenAIWebSocketResponsesSettings,
+): void {
+  if (!entry.idleErrorListener) {
+    entry.idleErrorListener = (event: any) =>
+      evictIdleSocket(key, entry, settings, 'idle_error', true, event);
+    entry.socket.addEventListener('error', entry.idleErrorListener);
+  }
+  if (!entry.idleCloseListener) {
+    entry.idleCloseListener = (event: any) =>
+      evictIdleSocket(key, entry, settings, 'idle_close', false, event);
+    entry.socket.addEventListener('close', entry.idleCloseListener);
+  }
 }
 
 async function getWebSocketConstructor(): Promise<WebSocketConstructorLike> {
@@ -112,6 +246,12 @@ function isTerminalEvent(type: string | undefined): boolean {
     type === 'response.incomplete' ||
     type === 'response.cancelled'
   );
+}
+
+function previousResponseNotFoundMessage(event: Record<string, any>): string | undefined {
+  const error = event.error ?? {};
+  if (event.type !== 'error' || error.code !== 'previous_response_not_found') return undefined;
+  return typeof error.message === 'string' ? error.message : JSON.stringify(event);
 }
 
 function decodeImmediateData(data: unknown): string | undefined {
@@ -191,11 +331,14 @@ async function acquireSocket(request: {
   url: string;
   headers: Headers;
   signal?: AbortSignal;
+  settings: OpenAIWebSocketResponsesSettings;
   connectTimeoutMs: number;
   cacheKey?: string;
   WebSocketCtor?: WebSocketConstructorLike;
+  onLifecycleEvent?: WebSocketLifecycleObserver;
 }): Promise<{ socket: WebSocketLike; release(keep: boolean): void }> {
   if (!request.cacheKey) {
+    writeDebugLog(request.settings, 'websocket.cache.disabled');
     const socket = await connectSocket(
       request.url,
       request.headers,
@@ -203,7 +346,14 @@ async function acquireSocket(request: {
       request.connectTimeoutMs,
       request.WebSocketCtor,
     );
-    return { socket, release: () => closeSilently(socket) };
+    emitSocketOpen(request.onLifecycleEvent, socket, 'disabled', undefined, request.url);
+    return {
+      socket,
+      release: () => {
+        emitSocketClose(request.onLifecycleEvent, socket, undefined, 'done');
+        closeSilently(socket);
+      },
+    };
   }
   const cached = socketCache.get(request.cacheKey);
   if (cached?.idleTimer) {
@@ -211,6 +361,9 @@ async function acquireSocket(request: {
     cached.idleTimer = undefined;
   }
   if (cached?.busy) {
+    writeDebugLog(request.settings, 'websocket.cache.busy', {
+      cacheKeyHash: shortHash(request.cacheKey),
+    });
     const socket = await connectSocket(
       request.url,
       request.headers,
@@ -218,22 +371,42 @@ async function acquireSocket(request: {
       request.connectTimeoutMs,
       request.WebSocketCtor,
     );
-    return { socket, release: () => closeSilently(socket) };
+    emitSocketOpen(request.onLifecycleEvent, socket, 'busy', request.cacheKey, request.url);
+    return {
+      socket,
+      release: () => {
+        emitSocketClose(request.onLifecycleEvent, socket, request.cacheKey, 'done');
+        closeSilently(socket);
+      },
+    };
   }
   if (cached && isReusable(cached.socket)) {
+    writeDebugLog(request.settings, 'websocket.cache.hit', {
+      cacheKeyHash: shortHash(request.cacheKey),
+      readyState: cached.socket.readyState,
+    });
     cached.busy = true;
-    removeIdleErrorListener(cached);
+    cached.onLifecycleEvent = request.onLifecycleEvent;
+    removeIdleListeners(cached);
     refSocket(cached.socket);
     return {
       socket: cached.socket,
-      release: (keep) => releaseCached(request.cacheKey!, cached, keep),
+      release: (keep) => releaseCached(request.cacheKey!, cached, keep, request.settings),
     };
   }
   if (cached) {
-    removeIdleErrorListener(cached);
+    writeDebugLog(request.settings, 'websocket.cache.stale', {
+      cacheKeyHash: shortHash(request.cacheKey),
+      readyState: cached.socket.readyState,
+    });
+    removeIdleListeners(cached);
+    emitSocketClose(cached.onLifecycleEvent, cached.socket, request.cacheKey, 'stale_cache');
     closeSilently(cached.socket);
     socketCache.delete(request.cacheKey);
   }
+  writeDebugLog(request.settings, 'websocket.cache.miss', {
+    cacheKeyHash: shortHash(request.cacheKey),
+  });
   const socket = await connectSocket(
     request.url,
     request.headers,
@@ -241,28 +414,46 @@ async function acquireSocket(request: {
     request.connectTimeoutMs,
     request.WebSocketCtor,
   );
-  const entry: SocketCacheEntry = { socket, busy: true };
+  emitSocketOpen(
+    request.onLifecycleEvent,
+    socket,
+    cached ? 'stale' : 'miss',
+    request.cacheKey,
+    request.url,
+  );
+  const entry: SocketCacheEntry = {
+    socket,
+    busy: true,
+    onLifecycleEvent: request.onLifecycleEvent,
+  };
   socketCache.set(request.cacheKey, entry);
-  return { socket, release: (keep) => releaseCached(request.cacheKey!, entry, keep) };
+  return {
+    socket,
+    release: (keep) => releaseCached(request.cacheKey!, entry, keep, request.settings),
+  };
 }
 
-function releaseCached(key: string, entry: SocketCacheEntry, keep: boolean): void {
+function releaseCached(
+  key: string,
+  entry: SocketCacheEntry,
+  keep: boolean,
+  settings: OpenAIWebSocketResponsesSettings,
+): void {
   if (!keep || !isReusable(entry.socket)) {
-    removeIdleErrorListener(entry);
+    removeIdleListeners(entry);
+    emitSocketClose(entry.onLifecycleEvent, entry.socket, key, 'done');
     closeSilently(entry.socket);
     if (entry.idleTimer) clearTimeout(entry.idleTimer);
     if (socketCache.get(key) === entry) socketCache.delete(key);
     return;
   }
   entry.busy = false;
-  addIdleErrorListener(key, entry);
+  addIdleListeners(key, entry, settings);
   unrefSocket(entry.socket);
   entry.idleTimer = setTimeout(() => {
     if (entry.busy) return;
-    removeIdleErrorListener(entry);
-    closeSilently(entry.socket, 1000, 'idle_timeout');
-    if (socketCache.get(key) === entry) socketCache.delete(key);
-  }, SOCKET_CACHE_TTL_MS);
+    evictIdleSocket(key, entry, settings, 'idle_timeout', true);
+  }, IDLE_SOCKET_CACHE_TTL_MS);
   entry.idleTimer.unref?.();
 }
 
@@ -271,10 +462,12 @@ export async function runWebSocketResponse(
     url: string;
     headers: Headers;
     body: ResponsesBody;
+    fallbackBodyOnPreviousResponseNotFound?: ResponsesBody;
     settings: OpenAIWebSocketResponsesSettings;
     signal?: AbortSignal;
     cacheKey?: string;
     WebSocketCtor?: WebSocketConstructorLike;
+    onLifecycleEvent?: WebSocketLifecycleObserver;
   },
   onEvent: (event: Record<string, any>) => Promise<void> | void,
 ): Promise<WebSocketRunResult> {
@@ -285,13 +478,22 @@ export async function runWebSocketResponse(
     let acquired: Awaited<ReturnType<typeof acquireSocket>> | undefined;
     let keepSocket = true;
     try {
+      writeDebugLog(request.settings, 'websocket.response.create', {
+        attempt,
+        cacheKeyHash: shortHash(request.cacheKey),
+        hasPreviousResponseId: typeof request.body.previous_response_id === 'string',
+        inputItems: request.body.input?.length ?? 0,
+        hasFallbackBody: !!request.fallbackBodyOnPreviousResponseNotFound,
+      });
       acquired = await acquireSocket({
         url: request.url,
         headers: request.headers,
         signal: request.signal,
+        settings: request.settings,
         connectTimeoutMs: request.settings.websocket.connectTimeoutMs,
         cacheKey: request.cacheKey,
         WebSocketCtor: request.WebSocketCtor,
+        onLifecycleEvent: request.onLifecycleEvent,
       });
       const socket = acquired.socket;
       socket.send(JSON.stringify({ type: 'response.create', ...request.body }));
@@ -333,6 +535,8 @@ export async function runWebSocketResponse(
           }
         };
         const handleParsedMessage = (parsed: Record<string, any>) => {
+          const previousResponseError = previousResponseNotFoundMessage(parsed);
+          if (previousResponseError) throw new PreviousResponseNotFoundError(previousResponseError);
           eventCount++;
           responseId = extractResponseId(parsed) ?? responseId;
           const terminalEvent = isTerminalEvent(parsed.type);
@@ -377,6 +581,13 @@ export async function runWebSocketResponse(
           fail(new Error(event?.message || event?.error?.message || 'WebSocket error'));
         const onClose = (event: any) => {
           keepSocket = false;
+          emitSocketClose(
+            request.onLifecycleEvent,
+            socket,
+            request.cacheKey,
+            'active_close',
+            event,
+          );
           fail(
             new Error(
               `WebSocket closed before response.completed${event?.code ? ` code=${event.code}` : ''}${event?.reason ? ` reason=${event.reason}` : ''}`,
@@ -389,12 +600,45 @@ export async function runWebSocketResponse(
         armIdleTimer();
       });
       acquired.release(keepSocket);
+      writeDebugLog(request.settings, 'websocket.response.done', {
+        cacheKeyHash: shortHash(request.cacheKey),
+        responseId,
+        eventCount,
+        keepSocket,
+      });
       return { responseId, eventCount };
     } catch (error) {
       keepSocket = false;
       acquired?.release(false);
       lastError = error;
+      if (
+        error instanceof PreviousResponseNotFoundError &&
+        request.fallbackBodyOnPreviousResponseNotFound
+      ) {
+        writeDebugLog(request.settings, 'websocket.previous_response_not_found.fallback', {
+          cacheKeyHash: shortHash(request.cacheKey),
+          message: error.message,
+          fallbackInputItems: request.fallbackBodyOnPreviousResponseNotFound.input?.length ?? 0,
+        });
+        const result = await runWebSocketResponse(
+          {
+            ...request,
+            body: request.fallbackBodyOnPreviousResponseNotFound,
+            fallbackBodyOnPreviousResponseNotFound: undefined,
+          },
+          onEvent,
+        );
+        return { ...result, fallbackUsed: true };
+      }
       if (error instanceof WebSocketMidstreamError) throw error;
+      writeDebugLog(request.settings, 'websocket.response.error', {
+        attempt,
+        cacheKeyHash: shortHash(request.cacheKey),
+        responseId,
+        eventCount,
+        message: error instanceof Error ? error.message : String(error),
+        willRetry: eventCount === 0 && !responseId && attempt < request.settings.websocket.retries,
+      });
       if (eventCount > 0 || responseId || attempt >= request.settings.websocket.retries)
         throw error;
     }
@@ -404,8 +648,9 @@ export async function runWebSocketResponse(
 
 export function closeAllCachedWebSockets(): void {
   for (const entry of socketCache.values()) {
-    removeIdleErrorListener(entry);
+    removeIdleListeners(entry);
     if (entry.idleTimer) clearTimeout(entry.idleTimer);
+    emitSocketClose(entry.onLifecycleEvent, entry.socket, undefined, 'shutdown');
     closeSilently(entry.socket, 1000, 'shutdown');
   }
   socketCache.clear();

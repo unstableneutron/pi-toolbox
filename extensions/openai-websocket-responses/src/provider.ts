@@ -10,6 +10,7 @@ import {
 } from '@earendil-works/pi-ai';
 
 import { buildResponsesBody } from './body.ts';
+import { shortHash, writeDebugLog } from './debug.ts';
 import {
   buildContinuationRequestBody,
   buildSocketCacheKey,
@@ -28,7 +29,11 @@ import {
 } from './responses-adapter.ts';
 import type { OpenAIWebSocketResponsesSettings } from './settings.ts';
 import { resolveWebSocketResponsesUrl } from './urls.ts';
-import { runWebSocketResponse, WebSocketMidstreamError } from './websocket.ts';
+import {
+  runWebSocketResponse,
+  type WebSocketLifecycleObserver,
+  WebSocketMidstreamError,
+} from './websocket.ts';
 
 export const API = 'openai-websocket-responses';
 
@@ -66,6 +71,7 @@ function formatProviderError(error: unknown): string {
 
 export function createOpenAIWebSocketResponsesStream(
   settingsProvider: () => OpenAIWebSocketResponsesSettings,
+  onLifecycleEvent?: WebSocketLifecycleObserver,
 ): (
   model: Model<Api>,
   context: Context,
@@ -101,6 +107,13 @@ export function createOpenAIWebSocketResponsesStream(
           fullBody,
         );
         const body = continuationRequest.body;
+        writeDebugLog(settings, 'continuation.decision', {
+          cacheKeyHash: shortHash(cacheKey),
+          decision: continuationRequest.decision,
+          fullInputItems: fullBody.input?.length ?? 0,
+          sentInputItems: body.input?.length ?? 0,
+          hasPreviousResponseId: typeof body.previous_response_id === 'string',
+        });
         if (
           continuationRequest.decision !== 'delta' &&
           continuationRequest.decision !== 'no_continuation'
@@ -122,7 +135,19 @@ export function createOpenAIWebSocketResponsesStream(
 
         try {
           await runWebSocketResponse(
-            { url, headers: websocketHeaders, body, settings, signal: options?.signal, cacheKey },
+            {
+              url,
+              headers: websocketHeaders,
+              body,
+              fallbackBodyOnPreviousResponseNotFound:
+                settings.recovery.enabled && continuationRequest.decision === 'delta'
+                  ? fullBody
+                  : undefined,
+              settings,
+              signal: options?.signal,
+              cacheKey,
+              onLifecycleEvent,
+            },
             async (event) => {
               await start();
               processor.apply(event);
