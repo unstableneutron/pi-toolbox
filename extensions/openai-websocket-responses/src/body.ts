@@ -13,7 +13,6 @@ import {
 } from './responses-adapter.ts';
 import { resolveRequestProfile, type ResolvedRequestProfile } from './profile.ts';
 
-const DEFAULT_GPT_STYLE_MAX_OUTPUT_TOKENS = 128000;
 const OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH = 64;
 const VALID_TEXT_VERBOSITIES = new Set(['low', 'medium', 'high']);
 const VALID_REASONING_SUMMARIES = new Set(['auto', 'concise', 'detailed']);
@@ -112,9 +111,8 @@ export function buildResponsesBody(
     tool_choice: 'auto',
     parallel_tool_calls: true,
   };
-  if (shouldSendMaxOutputTokens(profile)) {
-    body.max_output_tokens =
-      options?.maxTokens ?? model.maxTokens ?? DEFAULT_GPT_STYLE_MAX_OUTPUT_TOKENS;
+  if (shouldSendMaxOutputTokens(profile) && options?.maxTokens !== undefined) {
+    body.max_output_tokens = options.maxTokens;
   }
   if (promptCacheKey) {
     body.prompt_cache_key = promptCacheKey;

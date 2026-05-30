@@ -421,6 +421,17 @@ describe('body and continuation helpers', () => {
     expect(body.input).toEqual([expect.objectContaining({ role: 'user' })]);
   });
 
+  it('omits max_output_tokens unless a caller explicitly requests a cap', () => {
+    const body = buildResponsesBody(
+      makeModel({ maxTokens: 123 }),
+      { messages: [{ role: 'user', content: 'Hi', timestamp: 1 }] },
+      undefined,
+      'generic',
+    );
+
+    expect(body.max_output_tokens).toBeUndefined();
+  });
+
   it('builds Codex-profile request bodies with Codex-compatible defaults', () => {
     const body = buildResponsesBody(
       makeCodexModel(),

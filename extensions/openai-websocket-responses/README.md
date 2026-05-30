@@ -120,8 +120,8 @@ match Pi's Codex Responses path where Azure supports them:
 
 Profile-specific differences:
 
-- `azure`/`generic` send `max_output_tokens`; `codex` omits it because Codex
-  backends reject it.
+- `azure`/`generic` send `max_output_tokens` only when the caller explicitly
+  provides `maxTokens`; `codex` omits it because Codex backends reject it.
 - `azure`/`generic` send `prompt_cache_retention: "24h"` for `cacheRetention:
 "long"`; `codex` omits retention.
 - `codex` allows `service_tier` when provided; `azure`/`generic` omit it because
