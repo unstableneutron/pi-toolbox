@@ -44,7 +44,7 @@ export class WebSocketMidstreamError extends Error {
   }
 }
 
-export interface WebSocketRunResult {
+interface WebSocketRunResult {
   responseId?: string;
   eventCount: number;
   fallbackUsed?: boolean;

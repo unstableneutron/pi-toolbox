@@ -68,7 +68,7 @@ function parsedObject(value: unknown): Record<string, any> {
     : {};
 }
 
-export function parseResponsesJsonObject(value: string | undefined): Record<string, any> {
+function parseResponsesJsonObject(value: string | undefined): Record<string, any> {
   if (!value?.trim()) return {};
   try {
     return parsedObject(JSON.parse(value) as unknown);
@@ -332,7 +332,7 @@ export function appendSyntheticTextDelta(
   stream.push({ type: 'text_delta', contentIndex: index, delta, partial: output });
 }
 
-export function applyResponseUsage<TApi extends Api>(
+function applyResponseUsage<TApi extends Api>(
   output: AssistantMessage,
   model: Model<TApi>,
   usage: Record<string, any> | undefined,

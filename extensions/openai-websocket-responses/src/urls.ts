@@ -116,7 +116,7 @@ function appendCodexResponsesPath(pathname: string): string {
   return `${trimmed}/codex/responses`;
 }
 
-export function resolveResponsesBaseUrl(
+function resolveResponsesBaseUrl(
   model: Model<Api>,
   profile: ResolvedRequestProfile = resolveRequestProfile(model),
 ): URL {

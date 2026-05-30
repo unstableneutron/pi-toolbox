@@ -2290,7 +2290,7 @@ export function parsePatch(patchText: string): PatchOperation[] {
   return parsePatchWithDiagnostics(patchText).ops;
 }
 
-export interface PatchTextAutofixDiagnostics {
+interface PatchTextAutofixDiagnostics {
   patchText: string;
   unifiedDiffHunkHeaders: number;
 }

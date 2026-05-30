@@ -6,7 +6,7 @@ export interface ContinuationState {
   lastResponseItems: unknown[];
 }
 
-export type ContinuationDecision =
+type ContinuationDecision =
   | 'no_continuation'
   | 'body_mismatch'
   | 'input_shorter_than_baseline'
@@ -14,7 +14,7 @@ export type ContinuationDecision =
   | 'missing_previous_response_id'
   | 'delta';
 
-export interface SocketCacheKeyParts {
+interface SocketCacheKeyParts {
   sessionId: string;
   url: string;
   provider: string;

@@ -22,8 +22,8 @@
     "test": "vitest run"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "^0.75.4",
-    "@earendil-works/pi-coding-agent": "^0.75.4",
+    "@earendil-works/pi-ai": "^0.78.0",
+    "@earendil-works/pi-coding-agent": "^0.78.0",
     "@types/node": "^24.3.0",
     "oxfmt": "^0.44.0",
     "oxlint": "^1.59.0",

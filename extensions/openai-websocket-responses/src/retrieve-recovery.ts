@@ -19,7 +19,7 @@ import type { ResolvedRequestProfile } from './profile.ts';
 import type { OpenAIWebSocketResponsesSettings } from './settings.ts';
 import { resolveRetrieveResponseUrl } from './urls.ts';
 
-export interface RetrieveRecoveryResult {
+interface RetrieveRecoveryResult {
   response: Record<string, any>;
   recoveredText: string;
   emittedSyntheticDeltas: number;
