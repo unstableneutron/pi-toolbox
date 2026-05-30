@@ -951,6 +951,37 @@ describe('multi-edit extension', () => {
     }
   });
 
+  test('apply_patch auto-fixes numbered unified-diff hunk headers at tool boundary', async () => {
+    const tool = getApplyPatchTool();
+    const cwd = await mkdtemp(join(tmpdir(), 'multi-edit-unified-hunk-autofix-'));
+
+    try {
+      await writeFile(join(cwd, 'demo.txt'), 'old\n', 'utf8');
+
+      const result = await tool.execute(
+        'call-unified-autofix',
+        {
+          patch: `*** Begin Patch
+*** Update File: demo.txt
+@@ -1,1 +1,1 @@
+-old
++new
+*** End Patch`,
+        },
+        undefined,
+        undefined,
+        { cwd, state: {} },
+      );
+
+      expect(result.isError).not.toBe(true);
+      expect(result.content[0]?.text).toContain('Applied patch with 1 operation');
+      expect(result.content[0]?.text).toContain('auto-fixed 1 numbered unified-diff hunk header');
+      await expect(readFile(join(cwd, 'demo.txt'), 'utf8')).resolves.toBe('new\n');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   test('apply_patch returns partial success details when independent operations apply', async () => {
     const tool = getApplyPatchTool();
     const cwd = await mkdtemp(join(tmpdir(), 'multi-edit-partial-'));

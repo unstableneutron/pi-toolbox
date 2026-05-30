@@ -418,7 +418,12 @@ function maybeRenderCorrectedSearchBlock(failure: ContextMatchFailure): string |
 
 function maybeRenderHunkRewriteSuggestion(failure: ContextMatchFailure): string | undefined {
   if (failure.chunkSource !== 'hunk') return undefined;
-  const search = failure.expectedLines;
+  const near = failure.nearestMatch;
+  const nearSearch =
+    near && near.score >= 0.5 && near.actualLines.some((line) => line.trim().length > 0)
+      ? near.actualLines
+      : undefined;
+  const search = nearSearch ?? failure.expectedLines;
   const replace = failure.chunkNewLines;
   // Need both SEARCH and REPLACE content to emit a non-degenerate
   // FindReplaceOnce rewrite.
@@ -450,9 +455,16 @@ function renderAnchorFailure(failure: ContextMatchFailure): string {
     for (const id of ids) {
       parts.push(`  line ${id.line}: ${id.text}`);
     }
+    parts.push('');
+    parts.push('Suggested corrected @@ anchors:');
+    for (const id of ids) {
+      parts.push(`@@ ${id.text}`);
+    }
   }
   parts.push('');
-  parts.push('Tip: the anchor may be stale — check those nearby identifiers or re-read.');
+  parts.push(
+    'Tip: the anchor may be stale — use one suggested anchor if it is the intended target, or re-read if none matches.',
+  );
   return parts.join('\n');
 }
 
@@ -916,13 +928,29 @@ export class AmbiguousFindReplaceOnceError extends Error {
   readonly filePath: string;
   readonly matchLines: number[];
   readonly matchPreviews: string[];
+  readonly suggestedSearchBlocks: string[];
 
-  constructor(filePath: string, matchLines: number[], matchPreviews: string[] = []) {
+  constructor(
+    filePath: string,
+    matchLines: number[],
+    matchPreviews: string[] = [],
+    suggestedSearchBlocks: string[] = [],
+  ) {
     const previewText = matchPreviews.length > 0 ? `\n${matchPreviews.join('\n\n')}` : '';
+    const suggestionsText =
+      suggestedSearchBlocks.length > 0
+        ? [
+            '',
+            'Suggested unique SEARCH blocks:',
+            'Paste one option into SEARCH and keep your REPLACE block unchanged.',
+            ...suggestedSearchBlocks.map((block, index) => `\nOption ${index + 1}:\n${block}`),
+          ].join('\n')
+        : '';
     super(
       [
         `FindReplaceOnce in ${filePath} found ${matchLines.length} matches; expected exactly 1: ${matchLines.map((l) => `line ${l}`).join(', ')}.`,
         previewText,
+        suggestionsText,
         '',
         'Tip: expand SEARCH with surrounding context to make it unique, or use FindReplaceAll if every occurrence should change.',
       ]
@@ -932,6 +960,7 @@ export class AmbiguousFindReplaceOnceError extends Error {
     this.filePath = filePath;
     this.matchLines = matchLines;
     this.matchPreviews = matchPreviews;
+    this.suggestedSearchBlocks = suggestedSearchBlocks;
     this.name = 'AmbiguousFindReplaceOnceError';
   }
 }
@@ -952,6 +981,28 @@ function buildAmbiguousMatchPreviews(
     }
     return rendered.join('\n');
   });
+}
+
+function buildAmbiguousSearchSuggestions(
+  lines: string[],
+  positions: number[],
+  patternLength: number,
+): string[] {
+  const patternWidth = Math.max(1, patternLength);
+  return positions
+    .map((position) => {
+      for (let margin = 1; margin <= 3; margin++) {
+        const start = Math.max(0, position - margin);
+        const end = Math.min(lines.length, position + patternWidth + margin);
+        const candidate = lines.slice(start, end);
+        const matches = seekAllInWinningTier(lines, candidate, 0);
+        if (matches?.positions.length === 1) {
+          return ['<<<<<<< SEARCH', ...candidate, '======= REPLACE'].join('\n');
+        }
+      }
+      return undefined;
+    })
+    .filter((suggestion): suggestion is string => suggestion !== undefined);
 }
 
 // Indent-aware replacement. When a hunk matched at a
@@ -1211,6 +1262,7 @@ function deriveUpdatedNormalizedContent(
           filePath,
           result.positions.map((p) => p + 1),
           buildAmbiguousMatchPreviews(originalLines, result.positions, chunk.oldLines.length),
+          buildAmbiguousSearchSuggestions(originalLines, result.positions, chunk.oldLines.length),
         );
       }
       const pos = result.positions[0]!;
@@ -1381,6 +1433,31 @@ function deriveUpdatedContent(
   };
 }
 
+function formatStrayUpdateSeparatorError(lines: string[], separatorIndex: number): string {
+  const previous = lines[separatorIndex - 1]?.trimEnd();
+  const next = lines[separatorIndex + 1]?.trimEnd();
+  const message = [
+    `Stray '***' line inside an Update File block. Chunk separators are implicit; place the next '@@', '*** FindReplaceOnce:', or '*** FindReplaceAll:' directly after the previous chunk, or start a new block with '*** Update File:', '*** Add File:', etc. Remove the bare '***' line.`,
+    'Remove this exact separator line:',
+    '***',
+  ];
+  if (previous && next) {
+    message.push('Corrected surrounding lines:', previous, next);
+  } else if (next) {
+    message.push('Next line should follow directly:', next);
+  }
+  return message.join('\n');
+}
+
+function formatExpectedUpdateHunkStartError(rawLine: string): string {
+  return [
+    `Expected update hunk to start with @@ context marker, got: '${rawLine}'`,
+    'If this line is unchanged context, prefix it with a single space:',
+    ` ${rawLine}`,
+    `If it starts a new chunk, insert a bare '@@' line before it.`,
+  ].join('\n');
+}
+
 function parseUpdateChunk(
   lines: string[],
   startIndex: number,
@@ -1399,10 +1476,13 @@ function parseUpdateChunk(
   // numbers as an anchor string.
   if (/^@@\s+-\d+(,\d+)?\s+\+\d+(,\d+)?\s*@@/.test(first)) {
     throw new Error(
-      `Unified-diff style hunk header not supported: '${first}'. ` +
-        `Use a bare '@@' (optionally followed by a context label like ` +
-        `'@@ class Foo') on its own line. Line numbers are ignored; ` +
-        `context is matched from the '-'/'+'/' ' lines that follow.`,
+      [
+        `Unified-diff style hunk header not supported: '${first}'.`,
+        `Line numbers are ignored; context is matched from the '-'/'+'/' ' lines that follow.`,
+        `Replace this line with a bare marker:`,
+        '@@',
+        `If you need an anchor, put the label after '@@' on its own line, for example: '@@ class Foo'.`,
+      ].join('\n'),
     );
   }
   // Bare '***' line inside an Update File block (legacy Codex hunk
@@ -1413,13 +1493,7 @@ function parseUpdateChunk(
   // in-block separator — diagnose it clearly instead of falling
   // through to the generic @@ error.
   if (first === '***') {
-    throw new Error(
-      `Stray '***' line inside an Update File block. Chunk separators ` +
-        `are implicit; place the next '@@', '*** FindReplaceOnce:', or ` +
-        `'*** FindReplaceAll:' directly after the previous chunk, or ` +
-        `start a new block with '*** Update File:', '*** Add File:', ` +
-        `etc. Remove the bare '***' line.`,
-    );
+    throw new Error(formatStrayUpdateSeparatorError(lines, i));
   }
 
   if (first === '@@' || first.startsWith('@@ ')) {
@@ -1437,7 +1511,7 @@ function parseUpdateChunk(
       break;
     }
   } else if (!allowMissingContext) {
-    throw new Error(`Expected update hunk to start with @@ context marker, got: '${lines[i]}'`);
+    throw new Error(formatExpectedUpdateHunkStartError(lines[i] ?? ''));
   }
 
   const oldLines: string[] = [];
@@ -1908,7 +1982,14 @@ function parsePatchOperationsFromLines(
         }
         if (!next.startsWith('+')) {
           if (mode === 'strict') {
-            throw new Error(`Invalid add-file line '${next}'. Add file lines must start with '+'`);
+            throw new Error(
+              [
+                `Invalid add-file line '${next}'. Add file lines must start with '+'.`,
+                'Prefix that content line exactly as:',
+                `+${next}`,
+                'For Add File blocks, every file-content line must start with + with no space after it.',
+              ].join('\n'),
+            );
           }
           break;
         }
@@ -2016,7 +2097,7 @@ function parsePatchOperationsFromLines(
         i = parsed.nextIndex;
       }
       if (mode === 'strict' && chunks.length === 0 && !moveTo) {
-        throw new Error(`Update file hunk for path '${path}' is empty`);
+        throw new Error(formatEmptyUpdateHunkError(path));
       }
       operations.push({
         kind: 'update',
@@ -2037,6 +2118,20 @@ function parsePatchOperationsFromLines(
   }
 
   return operations;
+}
+
+function formatEmptyUpdateHunkError(path: string): string {
+  return [
+    `Update file hunk for path '${path}' is empty`,
+    `Add an update chunk after '*** Update File: ${path}' or add '*** Move to: <new-path>' for a rename-only patch.`,
+    `For a content edit, use a valid hunk such as:`,
+    `*** FindReplaceOnce:`,
+    `<<<<<<< SEARCH`,
+    `<old text>`,
+    `======= REPLACE`,
+    `<new text>`,
+    `>>>>>>> REPLACE`,
+  ].join('\n');
 }
 
 function describeIncompleteStrictPatch(lines: string[]): string {
@@ -2078,7 +2173,13 @@ function describeIncompleteStrictPatch(lines: string[]): string {
   }
 
   if (currentFindReplace && currentUpdateFile) {
-    return `${currentFindReplace} chunk in ${currentUpdateFile} appears truncated: missing '${FIND_REPLACE_END_MARKER}' terminator and final '${END_PATCH_LINE}'. Finish the block, or split large edits into smaller apply_patch calls.`;
+    return [
+      `${currentFindReplace} chunk in ${currentUpdateFile} appears truncated: missing '${FIND_REPLACE_END_MARKER}' terminator and final '${END_PATCH_LINE}'.`,
+      'Add these exact lines to finish the block:',
+      FIND_REPLACE_END_MARKER,
+      END_PATCH_LINE,
+      'If the edit is large, split it into smaller apply_patch calls.',
+    ].join('\n');
   }
   if (currentAddFile) {
     return `Patch appears truncated while adding file '${currentAddFile}': missing '${END_PATCH_LINE}'. For large generated files, split large file creation into smaller chunks or create a shorter skeleton first.`;
@@ -2090,7 +2191,12 @@ function rewriteFindReplaceParseError(path: string, variant: 'once' | 'all', err
   const label = variant === 'once' ? 'FindReplaceOnce' : 'FindReplaceAll';
   if (error.message.includes(`missing '${FIND_REPLACE_END_MARKER}' terminator`)) {
     return new Error(
-      `${label} chunk in ${path} is missing '${FIND_REPLACE_END_MARKER}' terminator. Finish the REPLACE block before '${END_PATCH_LINE}', or split the edit into a smaller apply_patch call.`,
+      [
+        `${label} chunk in ${path} is missing '${FIND_REPLACE_END_MARKER}' terminator.`,
+        `Add this exact line before '${END_PATCH_LINE}':`,
+        FIND_REPLACE_END_MARKER,
+        `If the patch was truncated, split the edit into a smaller apply_patch call.`,
+      ].join('\n'),
     );
   }
   if (error.message.includes('ambiguous bare')) {
@@ -2098,7 +2204,12 @@ function rewriteFindReplaceParseError(path: string, variant: 'once' | 'all', err
   }
   if (error.message.includes(`missing '${FIND_REPLACE_DIVIDER}' divider`)) {
     return new Error(
-      `${label} chunk in ${path} is missing '${FIND_REPLACE_DIVIDER}' divider. Use the canonical SEARCH/REPLACE shape: '${FIND_REPLACE_SEARCH_MARKER}', '${FIND_REPLACE_DIVIDER}', '${FIND_REPLACE_END_MARKER}'.`,
+      [
+        `${label} chunk in ${path} is missing '${FIND_REPLACE_DIVIDER}' divider.`,
+        'Insert this exact line between SEARCH and REPLACE:',
+        FIND_REPLACE_DIVIDER,
+        `Canonical shape: '${FIND_REPLACE_SEARCH_MARKER}', '${FIND_REPLACE_DIVIDER}', '${FIND_REPLACE_END_MARKER}'.`,
+      ].join('\n'),
     );
   }
   return error;
@@ -2179,6 +2290,11 @@ export function parsePatch(patchText: string): PatchOperation[] {
   return parsePatchWithDiagnostics(patchText).ops;
 }
 
+export interface PatchTextAutofixDiagnostics {
+  patchText: string;
+  unifiedDiffHunkHeaders: number;
+}
+
 interface PatchParseDiagnostics {
   ops: PatchOperation[];
   /**
@@ -2196,6 +2312,52 @@ interface PatchParseDiagnostics {
    * agent learns to always include the full envelope.
    */
   autoWrappedEnvelope: boolean;
+}
+
+export function applyPatchTextAutofixes(patchText: string): PatchTextAutofixDiagnostics {
+  const ending = detectLineEnding(patchText);
+  const lines = normalizeToLF(patchText).split('\n');
+  let inUpdateFile = false;
+  let inFindReplace = false;
+  let unifiedDiffHunkHeaders = 0;
+  const fixedLines = lines.map((line) => {
+    const trimmed = line.trim();
+    if (trimmed.startsWith(UPDATE_FILE_PREFIX)) {
+      inUpdateFile = true;
+      inFindReplace = false;
+      return line;
+    }
+    if (
+      trimmed.startsWith(ADD_FILE_PREFIX) ||
+      trimmed.startsWith(DELETE_FILE_PREFIX) ||
+      trimmed === END_PATCH_LINE
+    ) {
+      inUpdateFile = false;
+      inFindReplace = false;
+      return line;
+    }
+    if (trimmed === FIND_REPLACE_ONCE_PREFIX || trimmed === FIND_REPLACE_ALL_PREFIX) {
+      inFindReplace = true;
+      return line;
+    }
+    if (trimmed === FIND_REPLACE_END_MARKER) {
+      inFindReplace = false;
+      return line;
+    }
+    if (inUpdateFile && !inFindReplace) {
+      const match = /^@@\s+-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s*@@(?:\s+(.*))?$/.exec(line.trimEnd());
+      if (match) {
+        unifiedDiffHunkHeaders++;
+        const label = match[1]?.trim();
+        return label ? `@@ ${label}` : '@@';
+      }
+    }
+    return line;
+  });
+  return {
+    patchText: restoreLineEndings(fixedLines.join('\n'), ending),
+    unifiedDiffHunkHeaders,
+  };
 }
 
 export function parsePatchWithDiagnostics(patchText: string): PatchParseDiagnostics {
@@ -2727,8 +2889,8 @@ function isClassifiedPlanningError(error: unknown): error is Error {
   if (error instanceof AmbiguousFindReplaceOnceError) return true;
   if (!(error instanceof Error)) return false;
   return (
-    /^Failed to add .*: file already exists$/.test(error.message) ||
-    /^Failed to delete .*: file does not exist$/.test(error.message) ||
+    /^Failed to add .*: file already exists(?:\n|$)/.test(error.message) ||
+    /^Failed to delete .*: file does not exist(?:\n|$)/.test(error.message) ||
     /^Failed to move .*: target already exists$/.test(error.message) ||
     error.message.startsWith('File not found:') ||
     error.message.startsWith(
@@ -2739,6 +2901,22 @@ function isClassifiedPlanningError(error: unknown): error is Error {
 
 function classifiedPlanningMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function formatAddFileExistsError(path: string): string {
+  return [
+    `Failed to add ${path}: file already exists`,
+    `Use '*** Update File: ${path}' to modify the existing file, or read the file first if you are not sure which operation is intended.`,
+    `If you intend to replace it completely, delete it explicitly first with '*** Delete File: ${path}' and then add the new file in a later apply_patch call.`,
+  ].join('\n');
+}
+
+function formatDeleteFileMissingError(path: string): string {
+  return [
+    `Failed to delete ${path}: file does not exist`,
+    `Remove the '*** Delete File: ${path}' operation if the file is already gone.`,
+    `If this is a stale path, read the containing directory or the intended file path before retrying.`,
+  ].join('\n');
 }
 
 async function collectVersionToken(
@@ -3208,7 +3386,7 @@ export async function applyPatchOperations(
     if (op.kind === 'add') {
       const abs = resolvePatchPath(cwd, op.path);
       if (await workspace.exists(abs)) {
-        throw new Error(`Failed to add ${op.path}: file already exists`);
+        throw new Error(formatAddFileExistsError(op.path));
       }
       await workspace.checkWriteAccess(abs);
       const newText = ensureTrailingNewline(op.contents);
@@ -3230,7 +3408,7 @@ export async function applyPatchOperations(
     if (op.kind === 'delete') {
       const abs = resolvePatchPath(cwd, op.path);
       const exists = await workspace.exists(abs);
-      if (!exists) throw new Error(`Failed to delete ${op.path}: file does not exist`);
+      if (!exists) throw new Error(formatDeleteFileMissingError(op.path));
       const oldBuffer = workspace.readBuffer
         ? await workspace.readBuffer(abs)
         : Buffer.from(await workspace.readText(abs), 'utf8');

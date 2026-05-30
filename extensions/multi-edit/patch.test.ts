@@ -67,6 +67,9 @@ describe('parsePatch', () => {
     expect(() => parsePatch(patch)).toThrow(
       /Unified-diff style hunk header not supported.*Line numbers are ignored/s,
     );
+    expect(() => parsePatch(patch)).toThrow(
+      /Replace this line with a bare marker:\n@@\nIf you need an anchor, put the label after '@@'/s,
+    );
   });
 
   test('rejects bare *** separator with actionable error', () => {
@@ -90,6 +93,33 @@ describe('parsePatch', () => {
     ].join('\n');
     expect(() => parsePatch(patch)).toThrow(
       /Stray '\*\*\*' line inside an Update File block.*Remove the bare '\*\*\*' line/s,
+    );
+    expect(() => parsePatch(patch)).toThrow(
+      /Remove this exact separator line:\n\*\*\*\nCorrected surrounding lines:\n\+new\n\*\*\* Update File: demo\.txt/s,
+    );
+  });
+
+  test('rejects unprefixed line after a hunk with context guidance', () => {
+    const patch = [
+      '*** Begin Patch',
+      '*** Update File: demo.txt',
+      '@@',
+      '-old',
+      '+new',
+      'missing prefix',
+      '-foo',
+      '+bar',
+      '*** End Patch',
+    ].join('\n');
+
+    expect(() => parsePatch(patch)).toThrow(
+      /Expected update hunk to start with @@ context marker, got: 'missing prefix'/,
+    );
+    expect(() => parsePatch(patch)).toThrow(
+      /If this line is unchanged context, prefix it with a single space:\n missing prefix/s,
+    );
+    expect(() => parsePatch(patch)).toThrow(
+      /If it starts a new chunk, insert a bare '@@' line before it/s,
     );
   });
 
@@ -137,6 +167,22 @@ describe('parsePatch', () => {
     );
   });
 
+  test('invalid Add File body line includes exact + prefix retry', () => {
+    const patch = [
+      '*** Begin Patch',
+      '*** Add File: notes.md',
+      'git diff --stat',
+      '*** End Patch',
+    ].join('\n');
+
+    expect(() => parsePatch(patch)).toThrow(
+      /Invalid add-file line 'git diff --stat'\. Add file lines must start with '\+'/,
+    );
+    expect(() => parsePatch(patch)).toThrow(
+      /Prefix that content line exactly as:\n\+git diff --stat/,
+    );
+  });
+
   test('missing FindReplace terminator names the file and open chunk', () => {
     const patch = [
       '*** Begin Patch',
@@ -151,6 +197,48 @@ describe('parsePatch', () => {
 
     expect(() => parsePatch(patch)).toThrow(
       /FindReplaceOnce chunk in demo\.txt is missing '>>>>>>> REPLACE' terminator/s,
+    );
+    expect(() => parsePatch(patch)).toThrow(
+      /Add this exact line before '\*\*\* End Patch':\n>>>>>>> REPLACE/s,
+    );
+  });
+
+  test('truncated FindReplace block includes exact closing lines', () => {
+    const patch = [
+      '*** Begin Patch',
+      '*** Update File: demo.txt',
+      '*** FindReplaceOnce:',
+      '<<<<<<< SEARCH',
+      'old',
+      '======= REPLACE',
+      'new',
+    ].join('\n');
+
+    expect(() => parsePatch(patch)).toThrow(
+      /FindReplaceOnce chunk in demo\.txt appears truncated/s,
+    );
+    expect(() => parsePatch(patch)).toThrow(
+      /Add these exact lines to finish the block:\n>>>>>>> REPLACE\n\*\*\* End Patch/s,
+    );
+  });
+
+  test('missing FindReplace divider includes copy-pasteable divider guidance', () => {
+    const patch = [
+      '*** Begin Patch',
+      '*** Update File: demo.txt',
+      '*** FindReplaceOnce:',
+      '<<<<<<< SEARCH',
+      'old',
+      'new',
+      '>>>>>>> REPLACE',
+      '*** End Patch',
+    ].join('\n');
+
+    expect(() => parsePatch(patch)).toThrow(
+      /FindReplaceOnce chunk in demo\.txt is missing '======= REPLACE' divider/s,
+    );
+    expect(() => parsePatch(patch)).toThrow(
+      /Insert this exact line between SEARCH and REPLACE:\n======= REPLACE/s,
     );
   });
 
@@ -524,6 +612,16 @@ describe('parsePatchStreaming', () => {
     });
   });
 
+  test('empty update-file hunk explains edit and rename-only shapes', () => {
+    const patch = ['*** Begin Patch', '*** Update File: notes.md', '*** End Patch'].join('\n');
+
+    expect(() => parsePatch(patch)).toThrow(/Update file hunk for path 'notes\.md' is empty/);
+    expect(() => parsePatch(patch)).toThrow(
+      /Add an update chunk after '\*\*\* Update File: notes\.md' or add '\*\*\* Move to: <new-path>' for a rename-only patch/s,
+    );
+    expect(() => parsePatch(patch)).toThrow(/\*\*\* FindReplaceOnce:\n<<<<<<< SEARCH/s);
+  });
+
   test('streaming preview walks past stray End Patch markers to show every op', () => {
     const result = parsePatchStreaming(
       [
@@ -814,7 +912,24 @@ describe('applyPatchOperations', () => {
     await expect(applyPatchOperations(operations, workspace, '/repo')).rejects.toThrow(
       /already exists/,
     );
+    await expect(applyPatchOperations(operations, workspace, '/repo')).rejects.toThrow(
+      /Use '\*\*\* Update File: new\.txt' to modify the existing file/s,
+    );
     expect(await workspace.readText('/repo/new.txt')).toBe('existing\n');
+  });
+
+  test('delete-file fails with recovery guidance when target is missing', async () => {
+    const workspace = createVirtualWorkspace('/repo', {});
+    const operations = parsePatch(`*** Begin Patch
+*** Delete File: missing.txt
+*** End Patch`);
+
+    await expect(applyPatchOperations(operations, workspace, '/repo')).rejects.toThrow(
+      /file does not exist/,
+    );
+    await expect(applyPatchOperations(operations, workspace, '/repo')).rejects.toThrow(
+      /Remove the '\*\*\* Delete File: missing\.txt' operation if the file is already gone/s,
+    );
   });
 
   test('captures text delete metadata without undercounting files lacking trailing newline', async () => {
@@ -1626,6 +1741,10 @@ describe('near-miss baseline (phase 0 characterization)', () => {
       expect(matchedTexts).toEqual(
         expect.arrayContaining(['def foo_helper(x):', 'def handle_foo(y):']),
       );
+      const rendered = renderContextMatchFailure(failure);
+      expect(rendered).toContain('Suggested corrected @@ anchors:');
+      expect(rendered).toContain('@@ def foo_helper(x):');
+      expect(rendered).toContain('@@ def handle_foo(y):');
     });
   });
 
@@ -1660,6 +1779,13 @@ describe('near-miss baseline (phase 0 characterization)', () => {
     await expect(attempt).rejects.toThrow(/Match 1 at line 2[\s\S]*alpha[\s\S]*shared target/);
     await expect(attempt).rejects.toThrow(/Match 2 at line 6[\s\S]*beta[\s\S]*shared target/);
     await expect(attempt).rejects.toThrow(/expand SEARCH with surrounding context|FindReplaceAll/s);
+    await expect(attempt).rejects.toThrow(/Suggested unique SEARCH blocks:/);
+    await expect(attempt).rejects.toThrow(
+      /Option 1:[\s\S]*<<<<<<< SEARCH\nalpha\nshared target\nomega/,
+    );
+    await expect(attempt).rejects.toThrow(
+      /Option 2:[\s\S]*<<<<<<< SEARCH\nbeta\nshared target\ngamma/,
+    );
   });
 
   test('near-miss FindReplaceOnce suggests probable cause and corrected SEARCH block', async () => {
@@ -2905,6 +3031,39 @@ describe('FindReplaceOnce (phase 2)', () => {
       expect(rendered).toContain('======= REPLACE');
       expect(rendered).toContain('epsilon');
       expect(rendered).toContain('>>>>>>> REPLACE');
+    }
+  });
+
+  test('hunk-suggestion: near-miss @@ hunk suggests SEARCH from current file', async () => {
+    const workspace = createVirtualWorkspace('/repo', {
+      '/repo/foo.ts': ['function calc() {', '  const value = 2;', '  return value;', '}'].join(
+        '\n',
+      ),
+    });
+    const operations = parsePatch(
+      [
+        '*** Begin Patch',
+        '*** Update File: foo.ts',
+        '@@',
+        ' function calc() {',
+        '-  const value = 1;',
+        '+  const value = 3;',
+        '   return value;',
+        ' }',
+        '*** End Patch',
+      ].join('\n'),
+    );
+
+    try {
+      await applyPatchOperations(operations, workspace, '/repo');
+      throw new Error('expected failure');
+    } catch (e) {
+      if (!(e instanceof PatchContextMatchError)) throw e;
+      const rendered = renderContextMatchFailure(e.failure);
+      expect(rendered).toMatch(
+        /\*\*\* FindReplaceOnce:\n<<<<<<< SEARCH\nfunction calc\(\) \{\n  const value = 2;\n  return value;\n\}\n======= REPLACE/,
+      );
+      expect(rendered).toMatch(/======= REPLACE\nfunction calc\(\) \{\n  const value = 3;/);
     }
   });
 

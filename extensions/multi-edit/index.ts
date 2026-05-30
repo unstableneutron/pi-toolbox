@@ -25,6 +25,7 @@ import { renderEditDiffResult } from './diff-renderer';
 import { withFilesMutationQueue } from './locking';
 import { extractTextOutput, pluralize, shortenDisplayPath } from './render-utils';
 import {
+  applyPatchTextAutofixes,
   buildPatchPlan,
   createRealWorkspace,
   createVirtualWorkspace,
@@ -553,7 +554,9 @@ async function executePatch(
   }) => void,
   context?: { state?: unknown },
 ) {
-  const { ops, mergedEnvelopes } = parsePatchWithDiagnostics(patch);
+  const patchAutofixes = applyPatchTextAutofixes(patch);
+  const effectivePatch = patchAutofixes.patchText;
+  const { ops, mergedEnvelopes } = parsePatchWithDiagnostics(effectivePatch);
   const files = ops.flatMap((op) => {
     if (op.kind === 'update' && op.moveTo) {
       return [resolveToCwd(op.path, cwd), resolveToCwd(op.moveTo, cwd)];
@@ -611,7 +614,7 @@ async function executePatch(
       | undefined;
     try {
       finalized = existingSession
-        ? await existingSession.finalize(patch)
+        ? await existingSession.finalize(effectivePatch)
         : {
             plan: await buildFreshPartialPlan(),
             reusedStage: false,
@@ -689,9 +692,16 @@ async function executePatch(
       };
     }
 
-    const text = plan.patch?.partial
+    const baseText = plan.patch?.partial
       ? formatPartialPatchSummary(commitRows.length, plan.patch)
       : (commit.summaryText ?? `Applied patch with ${commit.rows.length} operation(s).`);
+    const text =
+      patchAutofixes.unifiedDiffHunkHeaders > 0
+        ? [
+            baseText,
+            `Note: auto-fixed ${patchAutofixes.unifiedDiffHunkHeaders} numbered unified-diff hunk header${patchAutofixes.unifiedDiffHunkHeaders === 1 ? '' : 's'} by replacing it with apply_patch '@@' marker syntax.`,
+          ].join('\n')
+        : baseText;
 
     return {
       content: [
