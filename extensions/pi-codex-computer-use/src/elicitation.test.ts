@@ -22,6 +22,25 @@ describe('answerComputerUseElicitation', () => {
     expect(result).toEqual({ action: 'accept', content: {}, _meta: { persist: 'always' } });
   });
 
+  test('asks the Pi UI before allowing browser runtime access through node_repl', async () => {
+    const confirm = vi.fn(async () => true);
+
+    const result = await answerComputerUseElicitation(
+      {
+        message: 'Allow Codex browser access?',
+        serverName: 'node_repl',
+        requestedSchema: { type: 'object', properties: {} },
+      },
+      { hasUI: true, ui: { confirm } },
+    );
+
+    expect(confirm).toHaveBeenCalledWith(
+      'Allow Codex Browser Use?',
+      'Allow Codex browser access?\n\nThis grants Codex browser/runtime access through the Codex native Node REPL bridge for this request.',
+    );
+    expect(result).toEqual({ action: 'accept', content: {}, _meta: { persist: 'always' } });
+  });
+
   test('declines when no interactive UI is available', async () => {
     const result = await answerComputerUseElicitation(
       {

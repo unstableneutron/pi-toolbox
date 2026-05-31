@@ -1,7 +1,7 @@
 {
   "name": "pi-codex-computer-use",
   "version": "0.1.0",
-  "description": "Pi extension that exposes Codex.app's native Computer Use MCP server",
+  "description": "Pi extension that exposes Codex.app's native Computer Use and browser MCP surfaces",
   "keywords": [
     "codex",
     "computer-use",

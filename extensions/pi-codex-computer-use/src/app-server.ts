@@ -28,6 +28,14 @@ export interface CodexThreadStartOptions {
   name?: string;
 }
 
+export interface CodexAppServerProcessInfo {
+  pid?: number;
+  killed: boolean;
+  exitCode: number | null;
+  signalCode: NodeJS.Signals | null;
+  lastStderr: string[];
+}
+
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const THREAD_START_TIMEOUT_MS = 60_000;
 
@@ -43,6 +51,7 @@ export class CodexAppServerClient {
   private buffer = '';
   private nextId = 1;
   private initialized?: Promise<void>;
+  private readonly stderrLines: string[] = [];
   private onElicitation?: (params: McpElicitationRequestParams) => Promise<McpElicitationResponse>;
 
   constructor(options: CodexAppServerClientOptions) {
@@ -56,6 +65,7 @@ export class CodexAppServerClient {
     this.process.stdout.setEncoding('utf8');
     this.process.stdout.on('data', (chunk) => this.handleStdout(chunk));
     this.process.stderr.setEncoding('utf8');
+    this.process.stderr.on('data', (chunk) => this.recordStderr(chunk));
     this.process.on('exit', (code, signal) => {
       const error = new Error(`Codex app-server exited (${code ?? signal ?? 'unknown'})`);
       for (const pending of this.pending.values()) {
@@ -90,7 +100,7 @@ export class CodexAppServerClient {
         ephemeral: true,
         approvalPolicy: 'on-request',
         baseInstructions:
-          'Pi-created Codex Computer Use bridge thread. Only execute native Computer Use MCP calls requested by Pi.',
+          'Pi-created Codex native tool bridge thread. Only execute Computer Use and browser Node REPL MCP calls requested by Pi.',
       },
       THREAD_START_TIMEOUT_MS,
     );
@@ -136,8 +146,29 @@ export class CodexAppServerClient {
     });
   }
 
+  getProcessInfo(): CodexAppServerProcessInfo {
+    return {
+      pid: this.process.pid,
+      killed: this.process.killed,
+      exitCode: this.process.exitCode,
+      signalCode: this.process.signalCode,
+      lastStderr: [...this.stderrLines],
+    };
+  }
+
   close(): void {
     this.process.kill();
+  }
+
+  private recordStderr(chunk: string): void {
+    for (const line of chunk.split('\n')) {
+      const trimmed = line.trim();
+      if (trimmed.length === 0) continue;
+      this.stderrLines.push(trimmed);
+    }
+    if (this.stderrLines.length > 40) {
+      this.stderrLines.splice(0, this.stderrLines.length - 40);
+    }
   }
 
   private async initialize(): Promise<void> {

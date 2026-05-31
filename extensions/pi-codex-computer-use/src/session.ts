@@ -1,9 +1,14 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 
 import { CodexAppServerClient } from './app-server';
 import { getCodexComputerUsePaths } from './codex-paths';
 import { answerComputerUseElicitation } from './elicitation';
 
+const COMPUTER_USE_SERVER = 'computer-use';
 const RETRYABLE_OBSERVATION_TOOLS = new Set(['list_apps', 'get_app_state']);
 const TRANSIENT_PROCESS_ERROR = /NSOSStatusErrorDomain Code=-600|procNotFound/;
 
@@ -27,8 +32,121 @@ function getMcpErrorMessage(rawResult: any): string | undefined {
   return getRawResultText(rawResult) || 'Codex MCP tool returned an error';
 }
 
-function isRetryableMcpError(codexTool: string, message: string): boolean {
-  return RETRYABLE_OBSERVATION_TOOLS.has(codexTool) && TRANSIENT_PROCESS_ERROR.test(message);
+function isRetryableMcpError(server: string, codexTool: string, message: string): boolean {
+  return (
+    server === COMPUTER_USE_SERVER &&
+    RETRYABLE_OBSERVATION_TOOLS.has(codexTool) &&
+    TRANSIENT_PROCESS_ERROR.test(message)
+  );
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function formatPathStatus(label: string, filePath: string | undefined): string {
+  if (!filePath) {
+    return `${label}: (not found)`;
+  }
+  return `${label}: ${filePath} [${fs.existsSync(filePath) ? 'exists' : 'missing'}]`;
+}
+
+function truncate(value: string, maxLength = 100): string {
+  return value.length <= maxLength ? value : `${value.slice(0, maxLength - 1)}…`;
+}
+
+function normalizeMcpServers(mcpStatus: any): any[] {
+  if (Array.isArray(mcpStatus?.data)) return mcpStatus.data;
+  if (Array.isArray(mcpStatus?.servers)) return mcpStatus.servers;
+  return [];
+}
+
+function normalizeMcpTools(server: any): Array<{ name: string; description?: string }> {
+  const tools = server?.tools;
+  if (Array.isArray(tools)) {
+    return tools
+      .map((tool) => ({
+        name: String(tool?.name ?? '(unnamed)'),
+        description: 'string' === typeof tool?.description ? tool.description : undefined,
+      }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+  }
+  if (tools && 'object' === typeof tools) {
+    return Object.values(tools)
+      .map((tool: any) => ({
+        name: String(tool?.name ?? '(unnamed)'),
+        description: 'string' === typeof tool?.description ? tool.description : undefined,
+      }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+  }
+  return [];
+}
+
+function formatMcpServerLine(server: any): string {
+  const tools = normalizeMcpTools(server);
+  const authStatus = server?.authStatus ? ` auth: ${server.authStatus}` : '';
+  return `  ✓ ${server.name}${authStatus} tools: ${tools.length}`;
+}
+
+function formatMcpServerTools(server: any): string[] {
+  return normalizeMcpTools(server)
+    .slice(0, 12)
+    .map((tool) => {
+      const description = tool.description ? ` — ${truncate(tool.description)}` : '';
+      return `    - ${tool.name}${description}`;
+    });
+}
+
+function formatMcpSummary(mcpStatus: unknown): string[] {
+  const lines: string[] = [];
+  if ((mcpStatus as any)?.error) {
+    return [`MCP servers/tools: failed to list (${(mcpStatus as any).error})`];
+  }
+
+  const servers = normalizeMcpServers(mcpStatus);
+  const byName = new Map(servers.map((server) => [String(server?.name ?? ''), server]));
+  const expectedNames = ['computer-use', 'node_repl'];
+
+  lines.push('Expected bridge servers:');
+  for (const name of expectedNames) {
+    const server = byName.get(name);
+    if (!server) {
+      lines.push(`  ✗ ${name} (not reported)`);
+      continue;
+    }
+    lines.push(formatMcpServerLine(server), ...formatMcpServerTools(server));
+  }
+
+  lines.push('', 'Other app-server MCP servers:');
+  const otherServers = servers.filter((server) => !expectedNames.includes(String(server?.name)));
+  if (otherServers.length === 0) {
+    lines.push('  (none)');
+  } else {
+    for (const server of otherServers) {
+      const tools = normalizeMcpTools(server);
+      const authStatus = server?.authStatus ? ` auth: ${server.authStatus}` : '';
+      lines.push(`  - ${server.name}${authStatus} tools: ${tools.length}`);
+    }
+  }
+  return lines;
+}
+
+function writeVerboseDiagnosticJson(value: unknown): string {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-codex-computer-use-'));
+  const filePath = path.join(directory, 'diagnostics.json');
+  fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
+  return filePath;
+}
+
+export interface CodexMcpToolCall {
+  server: string;
+  tool: string;
+  arguments?: unknown;
+  timeoutMs?: number;
+}
+
+export interface CodexDiagnosticStatusOptions {
+  verbose?: boolean;
 }
 
 export class ComputerUseSession {
@@ -36,27 +154,62 @@ export class ComputerUseSession {
   private threadId?: string;
 
   async getStatus(ctx: ExtensionContext): Promise<string> {
+    return await this.getDiagnosticStatus(ctx);
+  }
+
+  async getDiagnosticStatus(
+    ctx: ExtensionContext,
+    options: CodexDiagnosticStatusOptions = {},
+  ): Promise<string> {
     const paths = getCodexComputerUsePaths();
-    const threadId = this.threadId ?? '(not started)';
+    const cwd = ctx.cwd ?? process.cwd();
     const lines = [
-      'pi-codex-computer-use status',
+      'pi-codex-computer-use diagnostics',
       '',
-      `Codex executable: ${paths.codexExecutable}`,
-      `Codex home: ${paths.codexHome}`,
-      `Computer Use app: ${paths.stableComputerUseApp}`,
-      `Computer Use client: ${paths.stableComputerUseClient}`,
-      `Thread: ${threadId}`,
+      'Codex paths:',
+      formatPathStatus('  Codex app', paths.codexApp),
+      formatPathStatus('  Codex executable', paths.codexExecutable),
+      formatPathStatus('  Codex home', paths.codexHome),
+      formatPathStatus('  Computer Use app', paths.stableComputerUseApp),
+      formatPathStatus('  Computer Use client', paths.stableComputerUseClient),
+      formatPathStatus('  IAB browser client', paths.browserClientScripts.iab),
+      formatPathStatus('  Chrome browser client', paths.browserClientScripts.chrome),
+      '',
+      'Bridge:',
+      `  CWD: ${cwd}`,
+      `  Pi UI: ${ctx.hasUI ? 'available' : 'not available; app/browser elicitations will be declined'}`,
     ];
 
-    if (this.client && this.threadId) {
-      const servers = await this.client.listMcpServers(this.threadId).catch((error: unknown) => ({
-        error: error instanceof Error ? error.message : String(error),
-      }));
-      lines.push('', `MCP status: ${JSON.stringify(servers).slice(0, 2000)}`);
-    }
+    try {
+      const client = await this.getClient();
+      const threadId = await this.getThreadId(ctx, client);
+      const processInfo = client.getProcessInfo();
+      lines.push(
+        `  App-server: connected (pid ${processInfo.pid ?? 'unknown'})`,
+        `  Process: killed=${processInfo.killed} exitCode=${processInfo.exitCode ?? 'null'} signal=${processInfo.signalCode ?? 'null'}`,
+        `  Thread: ${threadId}`,
+      );
+      if (processInfo.lastStderr.length > 0) {
+        lines.push('  Recent stderr:', ...processInfo.lastStderr.map((line) => `    ${line}`));
+      }
 
-    if (!ctx.hasUI) {
-      lines.push('', 'No Pi UI is available; app-use elicitations will be declined.');
+      const servers = await client.listMcpServers(threadId).catch((error: unknown) => ({
+        error: getErrorMessage(error),
+      }));
+      lines.push('', ...formatMcpSummary(servers));
+      if (options.verbose) {
+        const verbosePath = writeVerboseDiagnosticJson({
+          generatedAt: new Date().toISOString(),
+          cwd,
+          hasUI: ctx.hasUI,
+          paths,
+          bridge: { threadId, processInfo },
+          mcpServers: servers,
+        });
+        lines.push('', `Verbose diagnostic JSON: ${verbosePath}`);
+      }
+    } catch (error) {
+      lines.push(`  App-server: failed to connect (${getErrorMessage(error)})`);
     }
 
     return lines.join('\n');
@@ -67,6 +220,18 @@ export class ComputerUseSession {
     codexTool: string,
     args: unknown,
   ): Promise<{ threadId: string; rawResult: any }> {
+    return await this.callMcpTool(ctx, {
+      server: COMPUTER_USE_SERVER,
+      tool: codexTool,
+      arguments: args,
+      timeoutMs: 120_000,
+    });
+  }
+
+  async callMcpTool(
+    ctx: ExtensionContext,
+    input: CodexMcpToolCall,
+  ): Promise<{ threadId: string; rawResult: any }> {
     const client = await this.getClient();
     const threadId = await this.getThreadId(ctx, client);
     const restore = client.setElicitationHandler((params) =>
@@ -75,23 +240,23 @@ export class ComputerUseSession {
     try {
       for (let attempt = 0; attempt < 2; attempt++) {
         const rawResult = await client.callMcpTool({
-          server: 'computer-use',
+          server: input.server,
           threadId,
-          tool: codexTool,
-          arguments: args,
-          timeoutMs: 120_000,
+          tool: input.tool,
+          arguments: input.arguments,
+          timeoutMs: input.timeoutMs ?? 120_000,
         });
         const errorMessage = getMcpErrorMessage(rawResult);
         if (!errorMessage) {
           return { threadId, rawResult };
         }
-        if (attempt === 0 && isRetryableMcpError(codexTool, errorMessage)) {
+        if (attempt === 0 && isRetryableMcpError(input.server, input.tool, errorMessage)) {
           await sleep(250);
           continue;
         }
-        throw new Error(`Codex Computer Use ${codexTool} failed: ${errorMessage}`);
+        throw new Error(`Codex MCP ${input.server}.${input.tool} failed: ${errorMessage}`);
       }
-      throw new Error(`Codex Computer Use ${codexTool} failed unexpectedly`);
+      throw new Error(`Codex MCP ${input.server}.${input.tool} failed unexpectedly`);
     } finally {
       restore();
     }
