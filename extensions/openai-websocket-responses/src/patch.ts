@@ -13,6 +13,7 @@ import {
 
 import { shouldPatchModel } from './match.ts';
 import type { OpenAIWebSocketResponsesSettings } from './settings.ts';
+import { extractTransportDiagnostics, mergeTransportDiagnostics } from './transport-diagnostics.ts';
 
 type StreamSimple = (
   model: Model<Api>,
@@ -43,9 +44,30 @@ function sseOptions<TOptions extends StreamOptions>(options: TOptions | undefine
 async function pipeStream(
   source: AssistantMessageEventStream,
   target: AssistantMessageEventStream,
+  fallbackDiagnostics = [] as ReturnType<typeof extractTransportDiagnostics>,
 ): Promise<void> {
   try {
-    for await (const event of source) target.push(event);
+    for await (const event of source) {
+      if (fallbackDiagnostics.length > 0 && event.type === 'done') {
+        mergeTransportDiagnostics(event.message, fallbackDiagnostics, {
+          fallbackTransport: 'sse',
+          finalResponseId: event.message.responseId,
+          finalTransport: 'sse',
+          outcome: 'sse_fallback_after_websocket_failure',
+          timelineEvent: { type: 'sse_fallback', reason: 'websocket_failed_before_stream_start' },
+        });
+      }
+      if (fallbackDiagnostics.length > 0 && event.type === 'error') {
+        mergeTransportDiagnostics(event.error, fallbackDiagnostics, {
+          fallbackTransport: 'sse',
+          finalResponseId: event.error.responseId,
+          finalTransport: 'sse',
+          outcome: 'sse_fallback_after_websocket_failure',
+          timelineEvent: { type: 'sse_fallback', reason: 'websocket_failed_before_stream_start' },
+        });
+      }
+      target.push(event);
+    }
   } finally {
     target.end();
   }
@@ -66,7 +88,11 @@ function streamWithAutoSseFallback<TOptions extends StreamOptions>(
       const source = websocketStream(options);
       for await (const event of source) {
         if (!started && event.type === 'error') {
-          await pipeStream(originalStream(sseOptions(options)), proxy);
+          await pipeStream(
+            originalStream(sseOptions(options)),
+            proxy,
+            extractTransportDiagnostics(event.error),
+          );
           return;
         }
         started = true;
@@ -74,7 +100,11 @@ function streamWithAutoSseFallback<TOptions extends StreamOptions>(
       }
     } catch (error) {
       if (!started) {
-        await pipeStream(originalStream(sseOptions(options)), proxy);
+        await pipeStream(
+          originalStream(sseOptions(options)),
+          proxy,
+          extractTransportDiagnostics(error as { diagnostics?: any[] }),
+        );
         return;
       }
       throw error;

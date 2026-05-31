@@ -15,6 +15,7 @@ import {
   IDLE_KEEPALIVE_ACTIVITY_WINDOW_MS,
 } from './index.ts';
 import { buildResponsesBody } from './src/body.ts';
+import { shortHash } from './src/debug.ts';
 import {
   buildContinuationRequestBody,
   clearAllContinuations,
@@ -26,8 +27,17 @@ import {
 import { buildRequestHeaders, buildWebSocketHeaders } from './src/headers.ts';
 import { shouldPatchModel } from './src/match.ts';
 import { resolveRequestProfile } from './src/profile.ts';
-import { buildWebSocketResponseHeaders } from './src/provider.ts';
+import {
+  buildWebSocketResponseHeaders,
+  createOpenAIWebSocketResponsesStream,
+} from './src/provider.ts';
 import { wrapProviderForWebSocketResponses } from './src/patch.ts';
+import {
+  attachTransportDiagnostic,
+  createTransportDiagnostics,
+  extractTransportDiagnostics,
+  mergeTransportDiagnostics,
+} from './src/transport-diagnostics.ts';
 import { recoverResponseByRetrieve } from './src/retrieve-recovery.ts';
 import {
   assistantMessageToResponseItems,
@@ -101,6 +111,85 @@ function makeAssistantMessage(model = makeModel()): AssistantMessage {
 async function* events(...items: Record<string, any>[]): AsyncIterable<Record<string, any>> {
   for (const item of items) yield item;
 }
+
+describe('transport diagnostics', () => {
+  it('attaches significant transport timelines with sanitized bounded URLs', () => {
+    const diagnostics = createTransportDiagnostics(
+      {
+        configuredTransport: 'auto',
+        url: 'wss://user:pass@example.test/responses?deployment=gpt-5.5&api-key=secret&region=eastus',
+        previousResponseId: 'resp_prev',
+        requestBytes: 1234,
+      },
+      () => 1000,
+    );
+    expect(diagnostics.isSignificant()).toBe(false);
+
+    for (let index = 0; index < 25; index++) diagnostics.record('ws_acquire', { index });
+    diagnostics.record('ws_close', { attempt: 0, connectionId: 'ws#61245', code: 1006 });
+
+    const message = makeAssistantMessage();
+    expect(
+      attachTransportDiagnostic(message, diagnostics, {
+        finalTransport: 'websocket',
+        outcome: 'transport_error',
+      }),
+    ).toBe(true);
+
+    const [diagnostic] = extractTransportDiagnostics(message);
+    expect(diagnostic?.type).toBe('openai_websocket_transport');
+    expect(diagnostic?.details).toMatchObject({
+      configuredTransport: 'auto',
+      finalTransport: 'websocket',
+      outcome: 'transport_error',
+      previousResponseId: 'resp_prev',
+      requestBytes: 1234,
+    });
+    expect(diagnostic?.details?.requestId).toMatch(/^owsr_/);
+    const sanitizedUrl =
+      'wss://example.test/responses?deployment=gpt-5.5&api-key=REDACTED&region=eastus';
+    expect(diagnostic?.details?.url).toBe(sanitizedUrl);
+    expect(diagnostic?.details?.urlHash).toBe(shortHash(sanitizedUrl));
+    expect(diagnostic?.details?.timeline).toHaveLength(20);
+    expect(diagnostics.hasEvent('ws_close')).toBe(true);
+    expect(diagnostics.hasEvent('ws_retry')).toBe(false);
+    expect(diagnostic?.details?.timeline).toContainEqual(
+      expect.objectContaining({ type: 'ws_close', code: 1006, connectionId: 'ws#61245' }),
+    );
+  });
+
+  it('merges websocket diagnostics onto fallback assistant messages', () => {
+    const diagnostics = createTransportDiagnostics(
+      { configuredTransport: 'auto', url: 'wss://example.test/responses' },
+      () => 1000,
+    );
+    diagnostics.record('ws_close', { attempt: 0, code: 1006 });
+    const websocketError = makeAssistantMessage();
+    attachTransportDiagnostic(websocketError, diagnostics, {
+      finalTransport: 'websocket',
+      outcome: 'transport_error',
+    });
+
+    const sseMessage = makeAssistantMessage();
+    mergeTransportDiagnostics(sseMessage, extractTransportDiagnostics(websocketError), {
+      finalTransport: 'sse',
+      fallbackTransport: 'sse',
+      outcome: 'sse_fallback_after_websocket_failure',
+      timelineEvent: { type: 'sse_fallback', reason: 'websocket_failed_before_stream_start' },
+    });
+
+    const [diagnostic] = extractTransportDiagnostics(sseMessage);
+    expect(diagnostic?.details).toMatchObject({
+      configuredTransport: 'auto',
+      finalTransport: 'sse',
+      fallbackTransport: 'sse',
+      outcome: 'sse_fallback_after_websocket_failure',
+    });
+    expect(diagnostic?.details?.timeline).toContainEqual(
+      expect.objectContaining({ type: 'sse_fallback' }),
+    );
+  });
+});
 
 describe('settings and patch matching', () => {
   it('defaults to explicit API enabled and transparent patch disabled', () => {
@@ -1113,6 +1202,7 @@ describe('Responses adapter and retrieve recovery', () => {
       expect.anything(),
     );
     expect(result.recoveredText).toBe('Hello world');
+    expect(result.polls).toBe(1);
     expect(output.content).toEqual([
       expect.objectContaining({ type: 'text', text: 'Hello world' }),
     ]);
@@ -1392,6 +1482,10 @@ describe('WebSocket transport', () => {
       },
     ]);
     const seen: string[] = [];
+    const diagnostics = createTransportDiagnostics({
+      configuredTransport: 'websocket',
+      url: 'wss://example.test/responses',
+    });
 
     const result = await runWebSocketResponse(
       {
@@ -1400,6 +1494,7 @@ describe('WebSocket transport', () => {
         body: { model: 'gpt', input: [] },
         settings: normalizeSettings({ websocket: { retries: 1 } }),
         WebSocketCtor,
+        diagnostics,
       },
       (event) => {
         seen.push(event.type);
@@ -1409,6 +1504,64 @@ describe('WebSocket transport', () => {
     expect(instances).toHaveLength(2);
     expect(result).toMatchObject({ responseId: 'resp_1', eventCount: 2 });
     expect(seen).toEqual(['response.created', 'response.completed']);
+    const message = makeAssistantMessage();
+    expect(
+      attachTransportDiagnostic(message, diagnostics, {
+        finalTransport: 'websocket',
+        outcome: 'websocket_retry_succeeded',
+      }),
+    ).toBe(true);
+    const retryDetails = extractTransportDiagnostics(message)[0]?.details;
+    expect(retryDetails?.requestBytes).toBe(
+      new TextEncoder().encode(instances[1].sent[0]).byteLength,
+    );
+    expect(retryDetails?.timeline).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'ws_close', code: 1006, attempt: 0 }),
+        expect.objectContaining({ type: 'ws_retry', attempt: 1 }),
+        expect.objectContaining({ type: 'response_created', responseId: 'resp_1' }),
+        expect.objectContaining({ type: 'response_completed', responseId: 'resp_1' }),
+      ]),
+    );
+  });
+
+  it('records close codes when an active socket emits error before close', async () => {
+    const { WebSocketCtor } = makeWebSocketCtor([
+      (socket) => {
+        socket.emit('error', { message: 'network reset' });
+        socket.emit('close', { code: 1006 });
+      },
+    ]);
+    const diagnostics = createTransportDiagnostics({
+      configuredTransport: 'websocket',
+      url: 'wss://example.test/responses',
+    });
+
+    await expect(
+      runWebSocketResponse(
+        {
+          url: 'wss://example.test/responses',
+          headers: new Headers(),
+          body: { model: 'gpt', input: [] },
+          settings: normalizeSettings({ websocket: { retries: 0 } }),
+          WebSocketCtor,
+          diagnostics,
+        },
+        () => undefined,
+      ),
+    ).rejects.toThrow('network reset');
+
+    const message = makeAssistantMessage();
+    attachTransportDiagnostic(message, diagnostics, {
+      finalTransport: 'websocket',
+      outcome: 'transport_error',
+    });
+    expect(extractTransportDiagnostics(message)[0]?.details?.timeline).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'ws_error', message: 'network reset' }),
+        expect.objectContaining({ type: 'ws_close', code: 1006 }),
+      ]),
+    );
   });
 
   it('pings idle cached sockets without extending their idle TTL', async () => {
@@ -2361,6 +2514,216 @@ function streamFromEvents(...events: any[]) {
   return stream;
 }
 
+describe('provider transport diagnostics', () => {
+  it('persists diagnostics when an assistant error message cannot be emitted', async () => {
+    class FakeWebSocket {
+      readyState = 1;
+      listeners = new Map<string, Set<(event: any) => void>>();
+
+      constructor() {
+        queueMicrotask(() => this.emit('open', {}));
+      }
+
+      send() {
+        queueMicrotask(() => this.emit('close', { code: 1006 }));
+      }
+
+      close() {
+        this.readyState = 3;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void) {
+        const listeners = this.listeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      removeEventListener(type: string, listener: (event: any) => void) {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      emit(type: string, event: any) {
+        for (const listener of this.listeners.get(type) ?? []) listener(event);
+      }
+    }
+
+    vi.doMock('ws', () => ({ WebSocket: FakeWebSocket, default: FakeWebSocket }));
+    try {
+      const persisted: unknown[] = [];
+      const streamFactory = createOpenAIWebSocketResponsesStream(
+        () => normalizeSettings({ websocket: { retries: 0 } }),
+        undefined,
+        undefined,
+        (diagnostic) => persisted.push(diagnostic),
+      );
+      const stream = streamFactory(makeModel(), { messages: [] }, {
+        apiKey: 'test-token',
+        transport: 'websocket',
+      } as any);
+      (stream as any).push = () => {
+        throw new Error('push failed');
+      };
+
+      await vi.waitFor(() => expect(persisted).toHaveLength(1));
+      expect(persisted[0]).toMatchObject({
+        type: 'openai_websocket_transport',
+        details: { outcome: 'transport_error', finalTransport: 'websocket' },
+      });
+    } finally {
+      vi.doUnmock('ws');
+    }
+  });
+
+  it('labels stale-cache success as transport events rather than retry success', async () => {
+    const instances: any[] = [];
+    class FakeWebSocket {
+      readyState = 1;
+      sent: string[] = [];
+      listeners = new Map<string, Set<(event: any) => void>>();
+
+      constructor() {
+        instances.push(this);
+        queueMicrotask(() => this.emit('open', {}));
+      }
+
+      send() {
+        const id = `resp_stale_${instances.length}`;
+        queueMicrotask(() => {
+          this.emit('message', {
+            data: JSON.stringify({ type: 'response.created', response: { id } }),
+          });
+          this.emit('message', {
+            data: JSON.stringify({
+              type: 'response.completed',
+              response: { id, status: 'completed' },
+            }),
+          });
+        });
+      }
+
+      close() {
+        this.readyState = 3;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void) {
+        const listeners = this.listeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      removeEventListener(type: string, listener: (event: any) => void) {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      emit(type: string, event: any) {
+        for (const listener of this.listeners.get(type) ?? []) listener(event);
+      }
+    }
+
+    vi.doMock('ws', () => ({ WebSocket: FakeWebSocket, default: FakeWebSocket }));
+    try {
+      const streamFactory = createOpenAIWebSocketResponsesStream(() =>
+        normalizeSettings({ websocket: { retries: 0 } }),
+      );
+      await collectStreamEvents(
+        streamFactory(makeModel(), { messages: [] }, {
+          apiKey: 'test-token',
+          sessionId: 'stale-cache-session',
+          transport: 'websocket-cached',
+        } as any),
+      );
+      instances[0].readyState = 3;
+
+      const events = await collectStreamEvents(
+        streamFactory(makeModel(), { messages: [] }, {
+          apiKey: 'test-token',
+          sessionId: 'stale-cache-session',
+          transport: 'websocket-cached',
+        } as any),
+      );
+      const done = events.find((event) => event.type === 'done')?.message as AssistantMessage;
+
+      expect(extractTransportDiagnostics(done)[0]?.details).toMatchObject({
+        finalTransport: 'websocket',
+        outcome: 'websocket_succeeded_with_transport_events',
+      });
+      expect(extractTransportDiagnostics(done)[0]?.details?.timeline).toContainEqual(
+        expect.objectContaining({ type: 'ws_cache_stale' }),
+      );
+    } finally {
+      closeAllCachedWebSockets();
+      vi.doUnmock('ws');
+    }
+  });
+
+  it('attaches transport diagnostics to strict websocket errors', async () => {
+    class FakeWebSocket {
+      readyState = 1;
+      listeners = new Map<string, Set<(event: any) => void>>();
+
+      constructor() {
+        queueMicrotask(() => this.emit('open', {}));
+      }
+
+      send() {
+        queueMicrotask(() => this.emit('close', { code: 1006 }));
+      }
+
+      close() {
+        this.readyState = 3;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void) {
+        const listeners = this.listeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      removeEventListener(type: string, listener: (event: any) => void) {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      emit(type: string, event: any) {
+        for (const listener of this.listeners.get(type) ?? []) listener(event);
+      }
+    }
+
+    vi.doMock('ws', () => ({ WebSocket: FakeWebSocket, default: FakeWebSocket }));
+    try {
+      const streamFactory = createOpenAIWebSocketResponsesStream(() =>
+        normalizeSettings({ websocket: { retries: 0 } }),
+      );
+      const stream = streamFactory(makeModel(), { messages: [] }, {
+        apiKey: 'test-token',
+        transport: 'websocket',
+      } as any);
+
+      const events = await collectStreamEvents(stream);
+      const error = events.find((event) => event.type === 'error')?.error as AssistantMessage;
+
+      expect(error.errorMessage).toBe(
+        'Connection error: WebSocket closed before response.completed code=1006',
+      );
+      expect(extractTransportDiagnostics(error)[0]?.details).toMatchObject({
+        configuredTransport: 'websocket',
+        finalTransport: 'websocket',
+        outcome: 'transport_error',
+        eventCount: 0,
+        responseIdSeen: false,
+      });
+      expect(extractTransportDiagnostics(error)[0]?.details).not.toHaveProperty('error');
+      expect(extractTransportDiagnostics(error)[0]?.details?.timeline).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'ws_close', code: 1006 }),
+          expect.objectContaining({ type: 'transport_error' }),
+        ]),
+      );
+    } finally {
+      vi.doUnmock('ws');
+    }
+  });
+});
+
 describe('transparent provider patching', () => {
   it('routes matching models to the websocket stream and delegates non-matching models', async () => {
     const settings = normalizeSettings({
@@ -2429,6 +2792,15 @@ describe('transparent provider patching', () => {
     const websocketMessage = makeAssistantMessage(makeModel({ id: 'gpt-5.5' }));
     websocketMessage.stopReason = 'error';
     websocketMessage.errorMessage = 'Connection error: WebSocket closed 1006';
+    const websocketDiagnostics = createTransportDiagnostics({
+      configuredTransport: 'auto',
+      url: 'wss://example.test/responses',
+    });
+    websocketDiagnostics.record('ws_close', { code: 1006, attempt: 0 });
+    attachTransportDiagnostic(websocketMessage, websocketDiagnostics, {
+      finalTransport: 'websocket',
+      outcome: 'transport_error',
+    });
     const websocketStream = vi.fn((_model: Model<any>, _context: any, _options?: any) =>
       streamFromEvents({ type: 'error', reason: 'error', error: websocketMessage }),
     );
@@ -2458,6 +2830,70 @@ describe('transparent provider patching', () => {
     expect(originalStreamSimple.mock.calls[0]?.[2]).toMatchObject({ transport: 'sse' });
     expect(events.map((event) => event.type)).toEqual(['start', 'done']);
     expect(events[1]?.message).toBe(originalMessage);
+    expect(extractTransportDiagnostics(events[1]?.message)[0]?.details).toMatchObject({
+      configuredTransport: 'auto',
+      fallbackTransport: 'sse',
+      finalTransport: 'sse',
+      outcome: 'sse_fallback_after_websocket_failure',
+    });
+    expect(extractTransportDiagnostics(events[1]?.message)[0]?.details?.timeline).toContainEqual(
+      expect.objectContaining({ type: 'sse_fallback' }),
+    );
+  });
+
+  it('preserves websocket diagnostics when auto WebSocket throws before start', async () => {
+    const settings = normalizeSettings({
+      patch: { enabled: true, providerModels: ['facade/gpt-5*'] },
+    });
+    const websocketMessage = makeAssistantMessage(makeModel({ id: 'gpt-5.5' }));
+    const websocketDiagnostics = createTransportDiagnostics({
+      configuredTransport: 'auto',
+      url: 'wss://example.test/responses',
+    });
+    websocketDiagnostics.record('ws_error', { message: 'boom' });
+    attachTransportDiagnostic(websocketMessage, websocketDiagnostics, {
+      finalTransport: 'websocket',
+      outcome: 'transport_error',
+    });
+    const websocketStream = vi.fn(
+      (_model: Model<any>, _context: any, _options?: any) =>
+        ({
+          [Symbol.asyncIterator]() {
+            return {
+              async next() {
+                throw websocketMessage;
+              },
+            };
+          },
+        }) as any,
+    );
+    const originalMessage = makeAssistantMessage(makeModel({ id: 'gpt-5.5' }));
+    const originalStreamSimple = vi.fn((_model: Model<any>, _context: any, _options?: any) =>
+      streamFromEvents(
+        { type: 'start', partial: originalMessage },
+        { type: 'done', reason: 'stop', message: originalMessage },
+      ),
+    );
+    const provider = wrapProviderForWebSocketResponses(
+      {
+        api: 'openai-responses',
+        stream: originalStreamSimple as any,
+        streamSimple: originalStreamSimple,
+      },
+      () => settings,
+      websocketStream as any,
+    );
+
+    const events = await collectStreamEvents(
+      provider.streamSimple(makeModel({ id: 'gpt-5.5' }), { messages: [] }, { transport: 'auto' }),
+    );
+
+    expect(events.map((event) => event.type)).toEqual(['start', 'done']);
+    expect(extractTransportDiagnostics(events[1]?.message)[0]?.details).toMatchObject({
+      fallbackTransport: 'sse',
+      finalTransport: 'sse',
+      outcome: 'sse_fallback_after_websocket_failure',
+    });
   });
 
   it('does not fall back when strict websocket transport fails before start', async () => {

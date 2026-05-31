@@ -2,6 +2,7 @@ import {
   createAssistantMessageEventStream,
   type Api,
   type AssistantMessage,
+  type AssistantMessageDiagnostic,
   type AssistantMessageEventStream,
   type Context,
   type Model,
@@ -28,6 +29,12 @@ import {
   getOutputText,
 } from './responses-adapter.ts';
 import type { OpenAIWebSocketResponsesSettings } from './settings.ts';
+import {
+  attachTransportDiagnostic,
+  createTransportDiagnostics,
+  extractTransportDiagnostics,
+  type TransportDiagnosticsCollector,
+} from './transport-diagnostics.ts';
 import { resolveWebSocketResponsesUrl } from './urls.ts';
 import {
   runWebSocketResponse,
@@ -83,10 +90,44 @@ function formatProviderError(error: unknown): string {
   return message;
 }
 
+type PersistUnattachedDiagnostic = (diagnostic: AssistantMessageDiagnostic) => void;
+
+function persistMessageTransportDiagnostics(
+  persist: PersistUnattachedDiagnostic | undefined,
+  message: AssistantMessage,
+): void {
+  if (!persist) return;
+  for (const diagnostic of extractTransportDiagnostics(message)) {
+    try {
+      persist(diagnostic);
+    } catch {
+      // Session-log fallback diagnostics are best-effort and must not affect model streaming.
+    }
+  }
+}
+
+function pushFinalEvent(
+  stream: AssistantMessageEventStream,
+  event:
+    | { type: 'done'; reason: 'stop' | 'length' | 'toolUse'; message: AssistantMessage }
+    | { type: 'error'; reason: 'error' | 'aborted'; error: AssistantMessage },
+  message: AssistantMessage,
+  persist: PersistUnattachedDiagnostic | undefined,
+): void {
+  try {
+    stream.push(event);
+  } catch {
+    persistMessageTransportDiagnostics(persist, message);
+  } finally {
+    stream.end();
+  }
+}
+
 export function createOpenAIWebSocketResponsesStream(
   settingsProvider: () => OpenAIWebSocketResponsesSettings,
   onLifecycleEvent?: WebSocketLifecycleObserver,
   shouldEnableIdleKeepalive?: () => boolean,
+  persistUnattachedDiagnostic?: PersistUnattachedDiagnostic,
 ): (
   model: Model<Api>,
   context: Context,
@@ -97,6 +138,7 @@ export function createOpenAIWebSocketResponsesStream(
     void (async () => {
       const output = createOutput(model);
       let cacheKey: string | undefined;
+      let transportDiagnostics: TransportDiagnosticsCollector | undefined;
       try {
         const settings = settingsProvider();
         const profile = resolveRequestProfile(model, settings);
@@ -122,6 +164,12 @@ export function createOpenAIWebSocketResponsesStream(
           fullBody,
         );
         const body = continuationRequest.body;
+        transportDiagnostics = createTransportDiagnostics({
+          configuredTransport: options?.transport ?? 'auto',
+          previousResponseId:
+            typeof body.previous_response_id === 'string' ? body.previous_response_id : undefined,
+          url,
+        });
         writeDebugLog(settings, 'continuation.decision', {
           cacheKeyHash: shortHash(cacheKey),
           decision: continuationRequest.decision,
@@ -138,6 +186,7 @@ export function createOpenAIWebSocketResponsesStream(
 
         const processor = createResponsesEventProcessor(output, stream, model);
         let started = false;
+        let transportOutcome: string | undefined;
         const start = async (connection: WebSocketConnectionMetadata) => {
           if (started) return;
           started = true;
@@ -152,7 +201,7 @@ export function createOpenAIWebSocketResponsesStream(
         };
 
         try {
-          await runWebSocketResponse(
+          const websocketResult = await runWebSocketResponse(
             {
               url,
               headers: websocketHeaders,
@@ -166,12 +215,23 @@ export function createOpenAIWebSocketResponsesStream(
               cacheKey,
               onLifecycleEvent,
               enableIdleKeepalive: shouldEnableIdleKeepalive?.() ?? false,
+              diagnostics: transportDiagnostics,
             },
             async (event, connection) => {
               await start(connection);
               processor.apply(event);
             },
           );
+          if (websocketResult.fallbackUsed) {
+            transportOutcome = 'previous_response_not_found_fallback_succeeded';
+            transportDiagnostics?.record('previous_response_not_found_fallback', {
+              responseId: websocketResult.responseId,
+            });
+          } else if (transportDiagnostics?.hasEvent('ws_retry')) {
+            transportOutcome = 'websocket_retry_succeeded';
+          } else if (transportDiagnostics?.isSignificant()) {
+            transportOutcome = 'websocket_succeeded_with_transport_events';
+          }
         } catch (error) {
           if (
             !(error instanceof WebSocketMidstreamError) ||
@@ -180,17 +240,36 @@ export function createOpenAIWebSocketResponsesStream(
           ) {
             throw error;
           }
-          await recoverResponseByRetrieve({
-            model,
-            settings,
+          transportDiagnostics?.record('retrieve_recovery_start', {
             responseId: error.responseId,
-            headers: requestHeaders,
-            emittedText: getOutputText(output),
-            output,
-            stream,
-            signal: options?.signal,
-            profile,
+            emittedTextBytes: new TextEncoder().encode(getOutputText(output)).byteLength,
           });
+          try {
+            const recoveryResult = await recoverResponseByRetrieve({
+              model,
+              settings,
+              responseId: error.responseId,
+              headers: requestHeaders,
+              emittedText: getOutputText(output),
+              output,
+              stream,
+              signal: options?.signal,
+              profile,
+            });
+            transportOutcome = 'retrieve_recovered';
+            transportDiagnostics?.record('retrieve_recovery_done', {
+              polls: recoveryResult.polls,
+              responseId: error.responseId,
+              syntheticDeltas: recoveryResult.emittedSyntheticDeltas,
+            });
+          } catch (recoveryError) {
+            transportDiagnostics?.record('retrieve_recovery_error', {
+              message:
+                recoveryError instanceof Error ? recoveryError.message : String(recoveryError),
+              responseId: error.responseId,
+            });
+            throw recoveryError;
+          }
         }
 
         if (output.responseId) {
@@ -201,18 +280,39 @@ export function createOpenAIWebSocketResponsesStream(
           });
         }
         if (options?.signal?.aborted) throw new Error('Request was aborted');
-        stream.push({
-          type: 'done',
-          reason: output.stopReason as 'stop' | 'length' | 'toolUse',
-          message: output,
+        attachTransportDiagnostic(output, transportDiagnostics, {
+          finalResponseId: output.responseId,
+          finalTransport: 'websocket',
+          outcome: transportOutcome ?? 'websocket_transport_event_succeeded',
         });
-        stream.end();
+        pushFinalEvent(
+          stream,
+          {
+            type: 'done',
+            reason: output.stopReason as 'stop' | 'length' | 'toolUse',
+            message: output,
+          },
+          output,
+          persistUnattachedDiagnostic,
+        );
       } catch (error) {
         clearContinuation(cacheKey);
         output.stopReason = options?.signal?.aborted ? 'aborted' : 'error';
         output.errorMessage = formatProviderError(error);
-        stream.push({ type: 'error', reason: output.stopReason, error: output });
-        stream.end();
+        attachTransportDiagnostic(output, transportDiagnostics, {
+          error,
+          finalResponseId:
+            output.responseId ??
+            (error instanceof WebSocketMidstreamError ? error.responseId : undefined),
+          finalTransport: 'websocket',
+          outcome: 'transport_error',
+        });
+        pushFinalEvent(
+          stream,
+          { type: 'error', reason: output.stopReason, error: output },
+          output,
+          persistUnattachedDiagnostic,
+        );
       }
     })();
     return stream;

@@ -1,5 +1,6 @@
 import { shortHash, writeDebugLog } from './debug.ts';
 import type { OpenAIWebSocketResponsesSettings } from './settings.ts';
+import type { TransportDiagnosticsCollector } from './transport-diagnostics.ts';
 import type { ResponsesBody } from './body.ts';
 
 interface WebSocketLike {
@@ -606,6 +607,7 @@ export async function runWebSocketResponse(
     WebSocketCtor?: WebSocketConstructorLike;
     onLifecycleEvent?: WebSocketLifecycleObserver;
     enableIdleKeepalive?: boolean;
+    diagnostics?: TransportDiagnosticsCollector;
   },
   onEvent: (
     event: Record<string, any>,
@@ -614,6 +616,16 @@ export async function runWebSocketResponse(
 ): Promise<WebSocketRunResult> {
   let lastError: unknown;
   for (let attempt = 0; attempt <= request.settings.websocket.retries; attempt++) {
+    request.diagnostics?.set({ attempts: attempt + 1 });
+    request.diagnostics?.record(
+      'ws_attempt_start',
+      {
+        attempt,
+        hasPreviousResponseId: typeof request.body.previous_response_id === 'string',
+        inputItems: request.body.input?.length ?? 0,
+      },
+      { significant: false },
+    );
     let responseId: string | undefined;
     let eventCount = 0;
     let acquired: Awaited<ReturnType<typeof acquireSocket>> | undefined;
@@ -637,6 +649,14 @@ export async function runWebSocketResponse(
         onLifecycleEvent: request.onLifecycleEvent,
         enableIdleKeepalive: request.enableIdleKeepalive,
       });
+      request.diagnostics?.record(
+        'ws_acquire',
+        { attempt, ...acquired.connection },
+        { significant: false },
+      );
+      if (acquired.connection.cacheStatus === 'stale') {
+        request.diagnostics?.record('ws_cache_stale', { attempt, ...acquired.connection });
+      }
       const socket = acquired.socket;
       await new Promise<void>((resolve, reject) => {
         let terminal = false;
@@ -680,9 +700,27 @@ export async function runWebSocketResponse(
           const previousResponseError = previousResponseNotFoundMessage(parsed);
           if (previousResponseError) throw new PreviousResponseNotFoundError(previousResponseError);
           eventCount++;
-          responseId = extractResponseId(parsed) ?? responseId;
+          const nextResponseId = extractResponseId(parsed);
+          if (nextResponseId && nextResponseId !== responseId) {
+            responseId = nextResponseId;
+            request.diagnostics?.set({ websocketResponseId: responseId, responseIdSeen: true });
+            request.diagnostics?.record(
+              parsed.type === 'response.created' ? 'response_created' : 'response_id',
+              { attempt, responseId, eventCount, eventType: parsed.type },
+              { significant: false },
+            );
+          } else {
+            responseId = nextResponseId ?? responseId;
+          }
           const terminalEvent = isTerminalEvent(parsed.type);
-          if (terminalEvent) terminal = true;
+          if (terminalEvent) {
+            terminal = true;
+            request.diagnostics?.record(
+              parsed.type === 'response.completed' ? 'response_completed' : 'response_terminal',
+              { attempt, responseId, eventCount, eventType: parsed.type },
+              { significant: parsed.type !== 'response.completed' },
+            );
+          }
           processing = processing.then(async () => {
             await onEvent(parsed, acquired!.connection);
             if (terminalEvent) resolveAfterProcessing();
@@ -710,17 +748,48 @@ export async function runWebSocketResponse(
             rejectNow(error);
           }
         };
-        const fail = (error: Error) => {
+        let pendingError: Error | undefined;
+        const fail = (error: Error, options: { defer?: boolean } = {}) => {
           if (terminal) {
             resolveAfterProcessing();
             return;
           }
-          rejectNow(
-            responseId ? new WebSocketMidstreamError(error.message, responseId, error) : error,
-          );
+          const rejectError = responseId
+            ? new WebSocketMidstreamError(error.message, responseId, error)
+            : error;
+          if (!options.defer) {
+            pendingError = undefined;
+            rejectNow(rejectError);
+            return;
+          }
+          pendingError ??= error;
+          queueMicrotask(() => {
+            if (!pendingError) return;
+            const nextError = pendingError;
+            pendingError = undefined;
+            rejectNow(
+              responseId
+                ? new WebSocketMidstreamError(nextError.message, responseId, nextError)
+                : nextError,
+            );
+          });
         };
-        const onError = (event: any) =>
-          fail(new Error(event?.message || event?.error?.message || 'WebSocket error'));
+        const onError = (event: any) => {
+          request.diagnostics?.record(
+            'ws_error',
+            {
+              attempt,
+              connectionId: acquired?.connection.connectionId,
+              eventCount,
+              message: event?.message || event?.error?.message || 'WebSocket error',
+              responseId,
+            },
+            { significant: !terminal },
+          );
+          fail(new Error(event?.message || event?.error?.message || 'WebSocket error'), {
+            defer: true,
+          });
+        };
         const onClose = (event: any) => {
           keepSocket = false;
           emitSocketClose(
@@ -730,10 +799,30 @@ export async function runWebSocketResponse(
             'active_close',
             event,
           );
+          request.diagnostics?.record(
+            'ws_close',
+            {
+              attempt,
+              code: typeof event?.code === 'number' ? event.code : undefined,
+              connectionId: acquired?.connection.connectionId,
+              eventCount,
+              phase: terminal
+                ? 'after_terminal_event'
+                : responseId
+                  ? 'after_response_id'
+                  : eventCount > 0
+                    ? 'after_response_event'
+                    : 'before_response_event',
+              reason: typeof event?.reason === 'string' ? event.reason : undefined,
+              responseId,
+            },
+            { significant: !terminal },
+          );
           fail(
-            new Error(
-              `WebSocket closed before response.completed${event?.code ? ` code=${event.code}` : ''}${event?.reason ? ` reason=${event.reason}` : ''}`,
-            ),
+            pendingError ??
+              new Error(
+                `WebSocket closed before response.completed${event?.code ? ` code=${event.code}` : ''}${event?.reason ? ` reason=${event.reason}` : ''}`,
+              ),
           );
         };
         const onAbort = () => {
@@ -750,12 +839,24 @@ export async function runWebSocketResponse(
         }
         armIdleTimer();
         try {
-          socket.send(JSON.stringify({ type: 'response.create', ...request.body }));
+          const payload = JSON.stringify({ type: 'response.create', ...request.body });
+          request.diagnostics?.set({ requestBytes: new TextEncoder().encode(payload).byteLength });
+          socket.send(payload);
         } catch (error) {
+          request.diagnostics?.record('ws_send_error', {
+            attempt,
+            connectionId: acquired?.connection.connectionId,
+            message: error instanceof Error ? error.message : String(error),
+          });
           rejectNow(error);
         }
       });
       acquired.release(keepSocket);
+      request.diagnostics?.set({
+        eventCount,
+        responseIdSeen: !!responseId,
+        websocketResponseId: responseId,
+      });
       writeDebugLog(request.settings, 'websocket.response.done', {
         cacheKeyHash: shortHash(request.cacheKey),
         responseId,
@@ -786,17 +887,52 @@ export async function runWebSocketResponse(
         );
         return { ...result, fallbackUsed: true };
       }
-      if (error instanceof WebSocketMidstreamError) throw error;
+      if (!acquired && !(error instanceof PreviousResponseNotFoundError)) {
+        request.diagnostics?.record('ws_connect_error', {
+          attempt,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+      request.diagnostics?.set({
+        eventCount,
+        responseIdSeen: !!responseId,
+        websocketResponseId: responseId,
+      });
+      if (error instanceof WebSocketMidstreamError) {
+        request.diagnostics?.record('transport_error', {
+          attempt,
+          eventCount,
+          message: error.message,
+          responseId: error.responseId,
+        });
+        throw error;
+      }
+      const willRetry =
+        eventCount === 0 && !responseId && attempt < request.settings.websocket.retries;
       writeDebugLog(request.settings, 'websocket.response.error', {
         attempt,
         cacheKeyHash: shortHash(request.cacheKey),
         responseId,
         eventCount,
         message: error instanceof Error ? error.message : String(error),
-        willRetry: eventCount === 0 && !responseId && attempt < request.settings.websocket.retries,
+        willRetry,
       });
-      if (eventCount > 0 || responseId || attempt >= request.settings.websocket.retries)
+      if (willRetry) {
+        request.diagnostics?.record('ws_retry', {
+          attempt: attempt + 1,
+          previousAttempt: attempt,
+          reason: 'no_response_events_or_response_id',
+        });
+      }
+      if (eventCount > 0 || responseId || attempt >= request.settings.websocket.retries) {
+        request.diagnostics?.record('transport_error', {
+          attempt,
+          eventCount,
+          message: error instanceof Error ? error.message : String(error),
+          responseId,
+        });
         throw error;
+      }
     }
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError));

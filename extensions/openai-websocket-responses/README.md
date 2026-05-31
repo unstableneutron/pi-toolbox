@@ -168,6 +168,26 @@ before the next turn; these pings do not extend the 15-minute idle cache TTL. Th
 extension never sends keepalive pings while a socket is busy with an active
 response.
 
+### Session diagnostics
+
+Transport diagnostics are sparse and Pi-native. A normal successful WebSocket
+turn does not add noise, but significant transport events add an
+`openai_websocket_transport` item to the final assistant message's
+`diagnostics` array in the session JSONL.
+
+The diagnostic includes a local `requestId`, configured/final transport,
+outcome, sanitized WebSocket URL plus `urlHash`, request byte count,
+connection/cache metadata, upstream response ids when available, and a bounded
+timeline. Timeline events record the path that matters for later debugging:
+WebSocket acquisition, stale cached sockets, close/error codes, retry decisions,
+SSE fallback, response id discovery, and retrieve recovery start/done/failure.
+
+When transparent `transport: "auto"` falls back to SSE before the stream starts,
+the WebSocket failure diagnostic is copied onto the final SSE assistant message
+with `fallbackTransport: "sse"`. If a catastrophic failure prevents emitting an
+assistant message at all, the extension appends a custom session entry named
+`openai-websocket-transport-diagnostic` with the same diagnostic payload.
+
 ## Debugging
 
 Enable JSONL transport logs when diagnosing reuse, continuation, and reconnect

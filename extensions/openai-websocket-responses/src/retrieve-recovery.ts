@@ -23,6 +23,7 @@ interface RetrieveRecoveryResult {
   response: Record<string, any>;
   recoveredText: string;
   emittedSyntheticDeltas: number;
+  polls: number;
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -72,6 +73,7 @@ export async function recoverResponseByRetrieve(request: {
   let emittedText = request.emittedText;
   let emittedSyntheticDeltas = 0;
   let lastError: string | undefined;
+  let polls = 0;
   const url = resolveRetrieveResponseUrl(
     request.model,
     request.settings,
@@ -82,6 +84,7 @@ export async function recoverResponseByRetrieve(request: {
 
   while (Date.now() <= deadline) {
     if (request.signal?.aborted) throw new Error('Request was aborted');
+    polls++;
     const response = await fetchImpl(url, {
       method: 'GET',
       headers: request.headers,
@@ -137,7 +140,7 @@ export async function recoverResponseByRetrieve(request: {
         ...snapshot,
         id: snapshot.id ?? request.responseId,
       });
-      return { response: snapshot, recoveredText: snapshotText, emittedSyntheticDeltas };
+      return { response: snapshot, recoveredText: snapshotText, emittedSyntheticDeltas, polls };
     }
     if (snapshotText && request.settings.recovery.emitSyntheticDeltas) {
       const delta = snapshotText.slice(emittedText.length);

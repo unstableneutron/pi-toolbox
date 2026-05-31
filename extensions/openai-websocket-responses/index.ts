@@ -14,6 +14,7 @@ import {
 
 const WEBSOCKET_LIFECYCLE_EVENT = 'openai-websocket-responses:websocket-lifecycle';
 const WEBSOCKET_STATUS_KEY = 'openai-websocket-responses';
+const WEBSOCKET_DIAGNOSTIC_ENTRY = 'openai-websocket-transport-diagnostic';
 const WEBSOCKET_STATUS_TTL_MS = 3000;
 export const IDLE_KEEPALIVE_ACTIVITY_WINDOW_MS = 15 * 60 * 1000;
 
@@ -110,6 +111,7 @@ export default function (pi: ExtensionAPI) {
     settingsProvider,
     onLifecycleEvent,
     () => idleKeepaliveActivity.shouldEnable(),
+    (diagnostic) => pi.appendEntry(WEBSOCKET_DIAGNOSTIC_ENTRY, diagnostic),
   );
 
   registerApiProvider(
