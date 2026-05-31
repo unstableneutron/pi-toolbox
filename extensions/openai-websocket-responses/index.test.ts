@@ -18,8 +18,10 @@ import { buildResponsesBody } from './src/body.ts';
 import { shortHash } from './src/debug.ts';
 import {
   buildContinuationRequestBody,
+  buildSocketCacheKey,
   clearAllContinuations,
   getContinuation,
+  headersFingerprint,
   requestBodyForContinuationComparison,
   setContinuation,
   type ContinuationState,
@@ -2515,6 +2517,94 @@ function streamFromEvents(...events: any[]) {
 }
 
 describe('provider transport diagnostics', () => {
+  it('clears cached continuation after an upstream invalid_encrypted_content error frame', async () => {
+    const sentPayloads: any[] = [];
+    class FakeWebSocket {
+      readyState = 1;
+      listeners = new Map<string, Set<(event: any) => void>>();
+
+      constructor() {
+        queueMicrotask(() => this.emit('open', {}));
+      }
+
+      send(payload: string) {
+        sentPayloads.push(JSON.parse(payload));
+        queueMicrotask(() =>
+          this.emit('message', {
+            data: JSON.stringify({
+              type: 'error',
+              status: 400,
+              error: {
+                type: 'invalid_request_error',
+                code: 'invalid_encrypted_content',
+                message:
+                  'The encrypted content for item rs_123 could not be verified. Reason: Encrypted content could not be decrypted or parsed.',
+              },
+            }),
+          }),
+        );
+      }
+
+      close() {
+        this.readyState = 3;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void) {
+        const listeners = this.listeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      removeEventListener(type: string, listener: (event: any) => void) {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      emit(type: string, event: any) {
+        for (const listener of this.listeners.get(type) ?? []) listener(event);
+      }
+    }
+
+    vi.doMock('ws', () => ({ WebSocket: FakeWebSocket, default: FakeWebSocket }));
+    try {
+      clearAllContinuations();
+      const settings = normalizeSettings({ websocket: { retries: 0 } });
+      const streamFactory = createOpenAIWebSocketResponsesStream(() => settings);
+      const model = makeModel();
+      const context = { messages: [{ role: 'user', content: 'hello' }] } as any;
+      const options = {
+        apiKey: 'test-token',
+        sessionId: 'session-invalid-encrypted-content',
+        transport: 'websocket',
+      } as any;
+      const profile = resolveRequestProfile(model, settings);
+      const websocketHeaders = buildWebSocketHeaders(model, options, profile);
+      const cacheKey = buildSocketCacheKey({
+        sessionId: options.sessionId,
+        url: resolveWebSocketResponsesUrl(model, settings, websocketHeaders, profile),
+        provider: model.provider,
+        modelId: model.id,
+        headersFingerprint: headersFingerprint(websocketHeaders),
+      });
+      const fullBody = buildResponsesBody(model, context, options, profile);
+      setContinuation(cacheKey, {
+        lastRequestBody: fullBody,
+        lastResponseId: 'resp_previous',
+        lastResponseItems: [],
+      });
+
+      const stream = streamFactory(model, context, options);
+      const events = await collectStreamEvents(stream);
+      const error = events.find((event) => event.type === 'error')?.error as AssistantMessage;
+
+      expect(sentPayloads[0]).toMatchObject({ previous_response_id: 'resp_previous' });
+      expect(error.errorMessage).toContain('invalid_encrypted_content');
+      expect(getContinuation(cacheKey)).toBeUndefined();
+    } finally {
+      clearAllContinuations();
+      vi.doUnmock('ws');
+    }
+  });
+
   it('persists diagnostics when an assistant error message cannot be emitted', async () => {
     class FakeWebSocket {
       readyState = 1;

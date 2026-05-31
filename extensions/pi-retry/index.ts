@@ -108,13 +108,28 @@ let patchInstallPromise: Promise<PatchInstallResult> | undefined;
 let patchFailureReason: string | undefined;
 let patchFailureNotified = false;
 
+function getRetryableProviderErrorReason(message: AssistantErrorLike): RetryReason | undefined {
+  if (
+    'assistant' !== message.role ||
+    'error' !== message.stopReason ||
+    'string' !== typeof message.errorMessage
+  ) {
+    return undefined;
+  }
+  return classifyRetryableProviderError(message.errorMessage);
+}
+
+function requiresPiRetryOwnedRecovery(reason: RetryReason | undefined): boolean {
+  return 'encryptedContentVerification' === reason || 'nativeCompactionCreatedBy' === reason;
+}
+
 export function isExtraRetryableAssistantError(message: AssistantErrorLike): boolean {
-  return (
-    'assistant' === message.role &&
-    'error' === message.stopReason &&
-    'string' === typeof message.errorMessage &&
-    classifyRetryableProviderError(message.errorMessage) !== undefined
-  );
+  return getRetryableProviderErrorReason(message) !== undefined;
+}
+
+function isCoreSafeExtraRetryableAssistantError(message: AssistantErrorLike): boolean {
+  const reason = getRetryableProviderErrorReason(message);
+  return reason !== undefined && !requiresPiRetryOwnedRecovery(reason);
 }
 
 // Mirrors the regex used by `AgentSession._isRetryableError` in
@@ -164,11 +179,21 @@ function shouldTreatAsCoreWillRetry(
     return false;
   }
 
-  return Boolean(lastAssistant && isBranchableRetryableError(lastAssistant as AssistantErrorLike));
+  return Boolean(
+    lastAssistant && isCoreExpectedRetryableError(lastAssistant as AssistantErrorLike),
+  );
 }
 
 function isBranchableRetryableError(message: AssistantErrorLike): boolean {
   return isExtraRetryableAssistantError(message) || isLikelyCoreRetryableError(message);
+}
+
+function isCoreExpectedRetryableError(message: AssistantErrorLike): boolean {
+  const reason = getRetryableProviderErrorReason(message);
+  if (requiresPiRetryOwnedRecovery(reason)) {
+    return false;
+  }
+  return isLikelyCoreRetryableError(message) || isCoreSafeExtraRetryableAssistantError(message);
 }
 
 function hasUserVisibleAssistantOutput(content: unknown): boolean {
@@ -956,7 +981,8 @@ export async function installAgentSessionPatch(
       message: AssistantErrorLike,
     ): boolean {
       return Boolean(
-        originalIsRetryableError.call(this, message) || isExtraRetryableAssistantError(message),
+        originalIsRetryableError.call(this, message) ||
+        isCoreSafeExtraRetryableAssistantError(message),
       );
     };
 
@@ -1324,11 +1350,12 @@ export function createPiRetryExtension(
         return;
       }
 
+      const retryableProviderErrorReason = getRetryableProviderErrorReason(
+        event.message as AssistantErrorLike,
+      );
       const shouldDispatchImmediately =
-        !ctx.hasUI &&
-        'error' === event.message.stopReason &&
-        'string' === typeof event.message.errorMessage &&
-        classifyRetryableProviderError(event.message.errorMessage) !== undefined;
+        retryableProviderErrorReason !== undefined &&
+        (!ctx.hasUI || requiresPiRetryOwnedRecovery(retryableProviderErrorReason));
 
       await handleRefusalRecovery({
         event: { messages: [event.message] },

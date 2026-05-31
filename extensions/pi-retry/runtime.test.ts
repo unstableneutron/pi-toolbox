@@ -678,6 +678,22 @@ describe('sanitizeEncryptedReasoningOnCurrentBranch', () => {
     expect(sessionManager._buildIndex).toHaveBeenCalledTimes(1);
     expect(sessionManager._rewriteFile).toHaveBeenCalledTimes(1);
   });
+
+  test('leaves non-OpenAI Responses thinking signatures with encrypted_content untouched', () => {
+    const { session, sessionManager, entries } = createFakeEncryptedReasoningSession();
+    const nonResponsesSignature = JSON.stringify({
+      type: 'vendor_thinking',
+      encrypted_content: 'provider-owned-payload',
+    });
+    entries[1].message.content[0].thinkingSignature = nonResponsesSignature;
+
+    const result = sanitizeEncryptedReasoningOnCurrentBranch(session as any);
+
+    expect(result).toEqual({ sanitizedMessages: 0, sanitizedBlocks: 0 });
+    expect(entries[1].message.content[0].thinkingSignature).toBe(nonResponsesSignature);
+    expect(sessionManager._buildIndex).not.toHaveBeenCalled();
+    expect(sessionManager._rewriteFile).not.toHaveBeenCalled();
+  });
 });
 
 describe('detectRetryableTerminalLeaf', () => {

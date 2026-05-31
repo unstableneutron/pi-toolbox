@@ -13,6 +13,18 @@ import {
 } from './index';
 import * as runtime from './runtime';
 
+const ENCRYPTED_CONTENT_ERROR =
+  '{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"invalid_encrypted_content","message":"The encrypted content for item rs_123 could not be verified. Reason: Encrypted content could not be decrypted or parsed."}}';
+
+const CREATED_BY_ERROR = `Error: 400 litellm.BadRequestError: AzureException BadRequestError - {
+  "error": {
+    "message": "Unknown parameter: 'input[26].created_by'.",
+    "type": "invalid_request_error",
+    "param": "input[26].created_by",
+    "code": "unknown_parameter"
+  }
+}`;
+
 function makeAssistantErrorMessage(
   errorMessage: string,
   overrides: { [key: string]: unknown } = {},
@@ -422,6 +434,39 @@ describe('pi-retry patch installation', () => {
 
     expect(loader).toHaveBeenCalledTimes(1);
     expect(session.baseClassifierCalls).toHaveLength(2);
+  });
+
+  test('keeps sanitizer-owned provider errors out of the core retry classifier', async () => {
+    const fakeModule = makeFakeAgentSessionModule();
+    const loader = vi.fn().mockResolvedValue(fakeModule);
+
+    await installAgentSessionPatch(loader);
+
+    const session = new fakeModule.AgentSession();
+
+    expect(
+      session._isRetryableError({
+        role: 'assistant',
+        stopReason: 'error',
+        errorMessage: ENCRYPTED_CONTENT_ERROR,
+      }),
+    ).toBe(false);
+
+    expect(
+      session._isRetryableError({
+        role: 'assistant',
+        stopReason: 'error',
+        errorMessage: CREATED_BY_ERROR,
+      }),
+    ).toBe(false);
+
+    expect(
+      session._isRetryableError({
+        role: 'assistant',
+        stopReason: 'error',
+        errorMessage: '404 The API deployment for this resource does not exist.',
+      }),
+    ).toBe(true);
   });
 
   test('patches prompt to suppress retryable prompt failures after awaitable recovery succeeds', async () => {
@@ -1895,6 +1940,68 @@ describe('pi-retry extension runtime', () => {
       {
         message: 'pi-retry disabled: AgentSession export not found',
         type: 'warning',
+      },
+    ]);
+  });
+
+  test('turn_end dispatches sanitizer-owned encrypted-content recovery immediately', async () => {
+    const fakeModule = makeFakeAgentSessionModule();
+    const harness = await createExtensionHarness(async () => fakeModule);
+    let leafId = 'assistant-error-1';
+    const branchSpy = vi.fn((nextLeaf: string) => {
+      leafId = nextLeaf;
+    });
+
+    (harness.ctx.sessionManager as any).branch = branchSpy;
+    (harness.ctx.sessionManager as any).getLeafId = () => leafId;
+    (harness.ctx.sessionManager as any).getEntries = () => [
+      { id: 'user-1', type: 'message', message: { role: 'user' } },
+      {
+        id: 'assistant-error-1',
+        parentId: 'user-1',
+        type: 'message',
+        message: {
+          role: 'assistant',
+          stopReason: 'error',
+          errorMessage: ENCRYPTED_CONTENT_ERROR,
+          content: [],
+        },
+      },
+    ];
+
+    await getHandler(harness.handlers, 'turn_end')(
+      {
+        type: 'turn_end',
+        message: {
+          role: 'assistant',
+          stopReason: 'error',
+          errorMessage: ENCRYPTED_CONTENT_ERROR,
+          content: [],
+        },
+        toolResults: [],
+      },
+      harness.ctx,
+    );
+
+    expect(branchSpy).toHaveBeenCalledWith('user-1');
+    expect(harness.sendMessageCalls).toEqual([
+      {
+        message: expect.objectContaining({
+          customType: 'pi-retry-recovery',
+          content: 'Continue.',
+          display: false,
+          details: expect.objectContaining({
+            kind: 'retryable-error',
+            messageKind: 'continue',
+            attempt: 1,
+            expectedLeafId: 'user-1',
+            replacement: {
+              supersedesEntryId: 'assistant-error-1',
+              parentEntryId: 'user-1',
+            },
+          }),
+        }),
+        options: { triggerTurn: true },
       },
     ]);
   });

@@ -763,14 +763,20 @@ function appendDebugEntry(_session: PatchedSessionLike, _data: { [key: string]: 
   // Session-persisted debug logging intentionally disabled.
 }
 
-function parseEncryptedThinkingSignature(signature: string | undefined): boolean {
+function isOpenAIResponsesEncryptedReasoningSignature(signature: string | undefined): boolean {
   if (!signature) {
     return false;
   }
 
   try {
-    const parsed = JSON.parse(signature) as { encrypted_content?: unknown };
-    return typeof parsed === 'object' && parsed !== null && 'encrypted_content' in parsed;
+    const parsed = JSON.parse(signature) as { encrypted_content?: unknown; type?: unknown };
+    return (
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      parsed.type === 'reasoning' &&
+      typeof parsed.encrypted_content === 'string' &&
+      parsed.encrypted_content.length > 0
+    );
   } catch {
     return false;
   }
@@ -815,7 +821,10 @@ export function sanitizeEncryptedReasoningOnCurrentBranch(session: PatchedSessio
       type?: string;
       thinkingSignature?: string;
     }>) {
-      if ('thinking' !== block?.type || !parseEncryptedThinkingSignature(block.thinkingSignature)) {
+      if (
+        'thinking' !== block?.type ||
+        !isOpenAIResponsesEncryptedReasoningSignature(block.thinkingSignature)
+      ) {
         continue;
       }
 
