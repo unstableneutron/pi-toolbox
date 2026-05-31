@@ -13,6 +13,7 @@ import {
   createIdleKeepaliveActivityTracker,
   formatWebSocketStatus,
   IDLE_KEEPALIVE_ACTIVITY_WINDOW_MS,
+  registerOpenAIWebSocketResponsesPatchRefreshHooks,
 } from './index.ts';
 import { buildResponsesBody } from './src/body.ts';
 import { shortHash } from './src/debug.ts';
@@ -2815,6 +2816,32 @@ describe('provider transport diagnostics', () => {
 });
 
 describe('transparent provider patching', () => {
+  it('reapplies API provider wrappers after model-registry refresh events', async () => {
+    const handlers = new Map<string, (event?: unknown, ctx?: unknown) => unknown>();
+    const pi = {
+      on(event: string, handler: (event?: unknown, ctx?: unknown) => unknown) {
+        handlers.set(event, handler);
+      },
+    } as any;
+    const installPatch = vi.fn();
+
+    registerOpenAIWebSocketResponsesPatchRefreshHooks(pi, installPatch);
+
+    expect([...handlers.keys()].sort()).toEqual([
+      'agent_start',
+      'before_provider_request',
+      'model_select',
+      'session_start',
+    ]);
+
+    handlers.get('session_start')?.();
+    handlers.get('model_select')?.();
+    handlers.get('agent_start')?.();
+    handlers.get('before_provider_request')?.();
+
+    expect(installPatch).toHaveBeenCalledTimes(4);
+  });
+
   it('routes matching models to the websocket stream and delegates non-matching models', async () => {
     const settings = normalizeSettings({
       patch: { enabled: true, providerModels: ['facade/gpt-5*'] },

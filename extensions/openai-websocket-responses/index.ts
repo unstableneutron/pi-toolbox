@@ -26,6 +26,20 @@ interface UIContextLike {
   hasUI?: boolean;
 }
 
+export function registerOpenAIWebSocketResponsesPatchRefreshHooks(
+  pi: Pick<ExtensionAPI, 'on'>,
+  installPatch: () => void,
+): void {
+  const reapplyPatch = () => {
+    installPatch();
+  };
+
+  pi.on('session_start', reapplyPatch);
+  pi.on('model_select', reapplyPatch);
+  pi.on('agent_start', reapplyPatch);
+  pi.on('before_provider_request', reapplyPatch);
+}
+
 function cacheStatusLabel(status: WebSocketCacheStatus): string {
   if (status === 'busy') return 'extra';
   if (status === 'hit') return 'cached';
@@ -113,6 +127,9 @@ export default function (pi: ExtensionAPI) {
     () => idleKeepaliveActivity.shouldEnable(),
     (diagnostic) => pi.appendEntry(WEBSOCKET_DIAGNOSTIC_ENTRY, diagnostic),
   );
+  const installTransparentPatch = () => {
+    installOpenAIWebSocketResponsesPatch(settingsProvider, streamWebSocket);
+  };
 
   registerApiProvider(
     {
@@ -122,7 +139,8 @@ export default function (pi: ExtensionAPI) {
     },
     'extension:openai-websocket-responses',
   );
-  installOpenAIWebSocketResponsesPatch(settingsProvider, streamWebSocket);
+  installTransparentPatch();
+  registerOpenAIWebSocketResponsesPatchRefreshHooks(pi, installTransparentPatch);
 
   pi.on('session_start', (_event, ctx) => {
     currentCtx = ctx;
