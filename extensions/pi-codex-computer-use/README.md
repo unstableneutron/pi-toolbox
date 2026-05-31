@@ -15,21 +15,27 @@ Pi tool call
 
 ## Tools
 
-The extension registers prefixed Pi tools that map one-to-one to Codex's native
-Computer Use tools:
+The extension exposes a compact Pi-facing surface over Codex's native Computer Use
+MCP tools:
 
-| Pi tool                         | Codex native tool          |
-| ------------------------------- | -------------------------- |
-| `computer_use_list_apps`        | `list_apps`                |
-| `computer_use_get_app_state`    | `get_app_state`            |
-| `computer_use_click`            | `click`                    |
-| `computer_use_scroll`           | `scroll`                   |
-| `computer_use_drag`             | `drag`                     |
-| `computer_use_press_key`        | `press_key`                |
-| `computer_use_type_text`        | `type_text`                |
-| `computer_use_set_value`        | `set_value`                |
-| `computer_use_select_text`      | `select_text`              |
-| `computer_use_secondary_action` | `perform_secondary_action` |
+| Pi tool                  | Purpose                                    |
+| ------------------------ | ------------------------------------------ |
+| `computer_list_apps`     | List local apps visible to Codex CUA       |
+| `computer_get_app_state` | Read screenshot + accessibility tree       |
+| `computer_action`        | Dispatch one native click/scroll/type/etc. |
+
+`computer_action.action` maps to Codex native tools:
+
+| `computer_action.action` | Codex native tool          |
+| ------------------------ | -------------------------- |
+| `click`                  | `click`                    |
+| `scroll`                 | `scroll`                   |
+| `drag`                   | `drag`                     |
+| `press_key`              | `press_key`                |
+| `type_text`              | `type_text`                |
+| `set_value`              | `set_value`                |
+| `select_text`            | `select_text`              |
+| `secondary_action`       | `perform_secondary_action` |
 
 Use `/computer-use` in Pi to inspect the resolved Codex paths and bridge status.
 
@@ -53,6 +59,10 @@ Currently synced skills:
 - `computer-use`
 - `control-in-app-browser`
 - `control-chrome`
+
+This package also includes a Pi-specific overlay skill, `codex-computer-use`,
+that explains the compact tool names. The sync command refreshes only the
+vendor-copied Codex skills.
 
 ## Development
 

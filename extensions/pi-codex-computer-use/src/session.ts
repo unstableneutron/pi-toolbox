@@ -4,6 +4,33 @@ import { CodexAppServerClient } from './app-server';
 import { getCodexComputerUsePaths } from './codex-paths';
 import { answerComputerUseElicitation } from './elicitation';
 
+const RETRYABLE_OBSERVATION_TOOLS = new Set(['list_apps', 'get_app_state']);
+const TRANSIENT_PROCESS_ERROR = /NSOSStatusErrorDomain Code=-600|procNotFound/;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getRawResultText(rawResult: any): string {
+  const content = rawResult?.content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => ('text' === part?.type && 'string' === typeof part.text ? part.text : ''))
+      .filter(Boolean)
+      .join('\n');
+  }
+  return JSON.stringify(rawResult ?? null);
+}
+
+function getMcpErrorMessage(rawResult: any): string | undefined {
+  if (rawResult?.isError !== true) return undefined;
+  return getRawResultText(rawResult) || 'Codex MCP tool returned an error';
+}
+
+function isRetryableMcpError(codexTool: string, message: string): boolean {
+  return RETRYABLE_OBSERVATION_TOOLS.has(codexTool) && TRANSIENT_PROCESS_ERROR.test(message);
+}
+
 export class ComputerUseSession {
   private client?: CodexAppServerClient;
   private threadId?: string;
@@ -46,14 +73,25 @@ export class ComputerUseSession {
       answerComputerUseElicitation(params, ctx),
     );
     try {
-      const rawResult = await client.callMcpTool({
-        server: 'computer-use',
-        threadId,
-        tool: codexTool,
-        arguments: args,
-        timeoutMs: 120_000,
-      });
-      return { threadId, rawResult };
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const rawResult = await client.callMcpTool({
+          server: 'computer-use',
+          threadId,
+          tool: codexTool,
+          arguments: args,
+          timeoutMs: 120_000,
+        });
+        const errorMessage = getMcpErrorMessage(rawResult);
+        if (!errorMessage) {
+          return { threadId, rawResult };
+        }
+        if (attempt === 0 && isRetryableMcpError(codexTool, errorMessage)) {
+          await sleep(250);
+          continue;
+        }
+        throw new Error(`Codex Computer Use ${codexTool} failed: ${errorMessage}`);
+      }
+      throw new Error(`Codex Computer Use ${codexTool} failed unexpectedly`);
     } finally {
       restore();
     }
