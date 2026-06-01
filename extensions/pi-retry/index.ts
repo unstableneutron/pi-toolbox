@@ -228,6 +228,61 @@ function hasAssistantToolCall(content: unknown): boolean {
   );
 }
 
+function hasZeroOrEmptyUsage(usage: unknown): boolean {
+  if (usage === undefined || usage === null) {
+    return true;
+  }
+
+  if ('number' === typeof usage) {
+    return usage === 0;
+  }
+
+  if ('object' !== typeof usage) {
+    return false;
+  }
+
+  const numericValues: number[] = [];
+  const seen = new Set<object>();
+  const stack: unknown[] = [usage];
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (current === undefined || current === null) {
+      continue;
+    }
+    if ('number' === typeof current) {
+      numericValues.push(current);
+      continue;
+    }
+    if ('object' !== typeof current) {
+      continue;
+    }
+    if (seen.has(current)) {
+      continue;
+    }
+    seen.add(current);
+
+    if (Array.isArray(current)) {
+      stack.push(...current);
+      continue;
+    }
+
+    stack.push(...Object.values(current));
+  }
+
+  return numericValues.every((value) => value === 0);
+}
+
+export function isSkippableEmptyFailedAssistantArtifact(message: unknown): boolean {
+  const candidate = asRecord(message);
+  return Boolean(
+    candidate?.role === 'assistant' &&
+    ('error' === candidate.stopReason || 'aborted' === candidate.stopReason) &&
+    !hasUserVisibleAssistantOutput(candidate.content) &&
+    hasZeroOrEmptyUsage(candidate.usage),
+  );
+}
+
 function isLengthTruncatedAssistantMessage(message: unknown): boolean {
   if (!message || 'object' !== typeof message) {
     return false;
@@ -503,12 +558,29 @@ function parseRetryRecoveryDetails(value: unknown): RetryRecoveryMessageDetails 
   return candidate as unknown as RetryRecoveryMessageDetails;
 }
 
+function filterSkippableEmptyFailedAssistantArtifacts(
+  sessionContext: SessionContextLike,
+): SessionContextLike {
+  let changed = false;
+  const filteredMessages = sessionContext.messages.filter((message) => {
+    if (!isSkippableEmptyFailedAssistantArtifact(message)) {
+      return true;
+    }
+    changed = true;
+    return false;
+  });
+
+  return changed ? { ...sessionContext, messages: filteredMessages } : sessionContext;
+}
+
 export function filterSessionContextForRetryDisplay(
   sessionContext: SessionContextLike,
   pathEntries: Array<Record<string, any>>,
   leafId?: string | null,
 ): SessionContextLike {
-  const sanitizedContext = filterOrphanToolResults(sessionContext);
+  const sanitizedContext = filterSkippableEmptyFailedAssistantArtifacts(
+    filterOrphanToolResults(sessionContext),
+  );
   const hiddenRecoveryEntries = pathEntries.filter(isHiddenRetryRecoveryEntry);
   if (hiddenRecoveryEntries.length === 0) {
     return sanitizedContext;
@@ -522,7 +594,7 @@ export function filterSessionContextForRetryDisplay(
   );
 
   if (hiddenMessagesToDrop === 0) {
-    return sessionContext;
+    return sanitizedContext;
   }
 
   let dropped = 0;

@@ -9,6 +9,7 @@ import {
   getRecoveryDispatchDelayMs,
   installAgentSessionPatch,
   isExtraRetryableAssistantError,
+  isSkippableEmptyFailedAssistantArtifact,
   resetPiRetryTestState,
 } from './index';
 import * as runtime from './runtime';
@@ -149,6 +150,59 @@ describe('pi-retry extra provider classification', () => {
         role: 'assistant',
         stopReason: 'error',
         errorMessage: 'todo entry is locked by another session',
+      }),
+    ).toBe(false);
+  });
+});
+
+describe('pi-retry skippable empty failed assistant artifacts', () => {
+  test('detects empty zero-token assistant error artifacts', () => {
+    expect(
+      isSkippableEmptyFailedAssistantArtifact({
+        role: 'assistant',
+        stopReason: 'error',
+        content: [],
+        usage: { input: 0, output: 0, total: 0 },
+      }),
+    ).toBe(true);
+  });
+
+  test('detects empty aborted assistant artifacts with empty usage', () => {
+    expect(
+      isSkippableEmptyFailedAssistantArtifact({
+        role: 'assistant',
+        stopReason: 'aborted',
+        content: [],
+        usage: {},
+      }),
+    ).toBe(true);
+  });
+
+  test('keeps failed assistant messages that have visible output, tool calls, or token usage', () => {
+    expect(
+      isSkippableEmptyFailedAssistantArtifact({
+        role: 'assistant',
+        stopReason: 'error',
+        content: [{ type: 'text', text: 'Partial answer' }],
+        usage: { input: 0, output: 0, total: 0 },
+      }),
+    ).toBe(false);
+
+    expect(
+      isSkippableEmptyFailedAssistantArtifact({
+        role: 'assistant',
+        stopReason: 'aborted',
+        content: [{ type: 'toolCall', id: 'call-1', name: 'read' }],
+        usage: { input: 0, output: 0, total: 0 },
+      }),
+    ).toBe(false);
+
+    expect(
+      isSkippableEmptyFailedAssistantArtifact({
+        role: 'assistant',
+        stopReason: 'error',
+        content: [],
+        usage: { input: 12, output: 0, total: 12 },
       }),
     ).toBe(false);
   });
@@ -705,6 +759,88 @@ describe('pi-retry patch installation', () => {
     expect(result).toBeUndefined();
   });
 
+  test('skips an empty zero-token assistant error artifact from retry/resume context', async () => {
+    const fakeModule = makeFakeAgentSessionModule();
+    const loader = vi.fn().mockResolvedValue(fakeModule);
+
+    const { handlers, ctx } = await createExtensionHarness(loader);
+
+    (ctx.sessionManager as any).getBranch = () => [
+      { id: 'user-1', parentId: null, type: 'message' },
+      {
+        id: 'assistant-error-empty',
+        parentId: 'user-1',
+        type: 'message',
+        message: {
+          role: 'assistant',
+          stopReason: 'error',
+          content: [],
+          usage: { input: 0, output: 0, total: 0 },
+          errorMessage: 'upstream stream bootstrap timed out before first chunk',
+        },
+      },
+      { id: 'user-continue', parentId: 'assistant-error-empty', type: 'message' },
+    ];
+    (ctx.sessionManager as any).getLeafId = () => 'user-continue';
+
+    const contextHandler = getHandler(handlers, 'context');
+    const originalPrompt = { role: 'user', content: [{ type: 'text', text: 'Do the thing' }] };
+    const emptyError = {
+      role: 'assistant',
+      stopReason: 'error',
+      content: [],
+      usage: { input: 0, output: 0, total: 0 },
+      errorMessage: 'upstream stream bootstrap timed out before first chunk',
+    };
+    const continuePrompt = { role: 'user', content: [{ type: 'text', text: 'Continue' }] };
+
+    const result = await contextHandler(
+      { type: 'context', messages: [originalPrompt, emptyError, continuePrompt] },
+      ctx,
+    );
+
+    expect(result).toEqual({ messages: [originalPrompt, continuePrompt] });
+  });
+
+  test('skips an empty aborted assistant artifact from retry/resume context', async () => {
+    const fakeModule = makeFakeAgentSessionModule();
+    const loader = vi.fn().mockResolvedValue(fakeModule);
+
+    const { handlers, ctx } = await createExtensionHarness(loader);
+
+    (ctx.sessionManager as any).getBranch = () => [
+      { id: 'user-1', parentId: null, type: 'message' },
+      {
+        id: 'assistant-aborted-empty',
+        parentId: 'user-1',
+        type: 'message',
+        message: {
+          role: 'assistant',
+          stopReason: 'aborted',
+          content: [],
+          usage: {},
+        },
+      },
+    ];
+    (ctx.sessionManager as any).getLeafId = () => 'assistant-aborted-empty';
+
+    const contextHandler = getHandler(handlers, 'context');
+    const originalPrompt = { role: 'user', content: [{ type: 'text', text: 'Do the thing' }] };
+    const emptyAborted = {
+      role: 'assistant',
+      stopReason: 'aborted',
+      content: [],
+      usage: {},
+    };
+
+    const result = await contextHandler(
+      { type: 'context', messages: [originalPrompt, emptyAborted] },
+      ctx,
+    );
+
+    expect(result).toEqual({ messages: [originalPrompt] });
+  });
+
   test('filters orphan tool results from context before provider calls', async () => {
     const fakeModule = makeFakeAgentSessionModule();
     const loader = vi.fn().mockResolvedValue(fakeModule);
@@ -1048,6 +1184,50 @@ describe('pi-retry patch installation', () => {
 });
 
 describe('pi-retry display linearization helpers', () => {
+  test('preserves visible tree history while skipping empty failed assistant context', () => {
+    const originalPrompt = { role: 'user', content: [{ type: 'text', text: 'Do the thing' }] };
+    const emptyError = {
+      role: 'assistant',
+      stopReason: 'error',
+      content: [],
+      usage: { input: 0, output: 0, total: 0 },
+      errorMessage: 'upstream stream bootstrap timed out before first chunk',
+    };
+    const pathEntries = [
+      { id: 'user-1', parentId: null, type: 'message', message: originalPrompt },
+      {
+        id: 'assistant-error-empty',
+        parentId: 'user-1',
+        type: 'message',
+        message: emptyError,
+      },
+    ];
+
+    const context = filterSessionContextForRetryDisplay(
+      {
+        messages: [originalPrompt, emptyError],
+        thinkingLevel: 'high',
+        model: { provider: 'gust', modelId: 'gpt-5.4' },
+      },
+      pathEntries,
+      'assistant-error-empty',
+    );
+
+    expect(context.messages).toEqual([originalPrompt]);
+
+    const tree = linearizeRetryRecoveryTreeForDisplay(
+      [
+        {
+          entry: pathEntries[0],
+          children: [{ entry: pathEntries[1], children: [] }],
+        },
+      ],
+      'assistant-error-empty',
+    );
+
+    expect(tree[0].children.map((child) => child.entry.id)).toEqual(['assistant-error-empty']);
+  });
+
   test('keeps the hidden retry recovery prompt when it is still the current leaf', () => {
     const context = filterSessionContextForRetryDisplay(
       {
