@@ -17,6 +17,14 @@ const DEFAULT_SOCKET_PATH = path.join(
 const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
 const CONNECT_RETRY_DELAY_MS = 50;
 
+/**
+ * @typedef {object} BridgeSocket
+ * @property {(chunk: Buffer | string) => boolean} write
+ * @property {() => void} end
+ * @property {(event: string, listener: (...args: any[]) => void) => unknown} on
+ * @property {(event: string, listener: (...args: any[]) => void) => unknown} off
+ */
+
 function encodeClientFrame(opcode, payload) {
   const payloadBuffer = Buffer.isBuffer(payload) ? payload : Buffer.from(payload);
   const length = payloadBuffer.length;
@@ -123,6 +131,13 @@ function readEnvPath(env, primary, fallback) {
   return value && value.length > 0 ? value : undefined;
 }
 
+function getConnectTimeoutMs(env = process.env) {
+  const raw = env.PI_CODEX_DESKTOP_CONNECT_TIMEOUT_MS?.trim();
+  if (!raw) return DEFAULT_CONNECT_TIMEOUT_MS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_CONNECT_TIMEOUT_MS;
+}
+
 export function buildRealAppServerArgs(argv, socketPath) {
   const rewritten = ['app-server', '--listen', unixListenUrl(socketPath)];
   for (let index = 1; index < argv.length; index++) {
@@ -223,10 +238,16 @@ export async function connectWebSocketUnix(
   return socket;
 }
 
-async function connectWebSocketUnixWithRetry(socketPath, childProcess) {
-  const deadline = Date.now() + DEFAULT_CONNECT_TIMEOUT_MS;
+async function connectWebSocketUnixWithRetry(
+  socketPath,
+  childProcess,
+  { timeoutMs = DEFAULT_CONNECT_TIMEOUT_MS, getChildError = () => undefined } = {},
+) {
+  const deadline = Date.now() + timeoutMs;
   let lastError;
   while (Date.now() <= deadline) {
+    const childError = getChildError();
+    if (childError) throw childError;
     if (childProcess.exitCode !== null || childProcess.signalCode !== null) {
       throw new Error(
         `Codex app-server exited before socket became ready (${childProcess.exitCode ?? childProcess.signalCode})`,
@@ -246,6 +267,14 @@ async function connectWebSocketUnixWithRetry(socketPath, childProcess) {
   );
 }
 
+/**
+ * Bridge newline-delimited JSON-RPC stdio messages to WebSocket text frames.
+ *
+ * @param {BridgeSocket} socket
+ * @param {NodeJS.ReadableStream} [stdin]
+ * @param {NodeJS.WritableStream} [stdout]
+ * @returns {{ dispose(): void }}
+ */
 export function bridgeStdioToWebSocket(socket, stdin = process.stdin, stdout = process.stdout) {
   let stdinBuffer = '';
   let socketBuffer = Buffer.alloc(0);
@@ -302,25 +331,45 @@ async function runPassthrough(plan) {
   process.exitCode = child.exitCode ?? 1;
 }
 
+function killChildIfRunning(child) {
+  if (child.exitCode === null && child.signalCode === null) child.kill();
+}
+
 async function runBridge(plan) {
   mkdirSync(path.dirname(plan.socketPath), { recursive: true, mode: 0o700 });
   const child = spawn(plan.realCodexPath, plan.realArgs, {
     stdio: ['ignore', 'ignore', 'pipe'],
     env: process.env,
   });
+  let childSpawnError;
+  child.once('error', (error) => {
+    childSpawnError = error;
+  });
   child.stderr?.on('data', (chunk) => process.stderr.write(chunk));
 
-  const socket = await connectWebSocketUnixWithRetry(plan.socketPath, child);
-  const bridge = bridgeStdioToWebSocket(socket);
+  let socket;
+  let bridge;
+  try {
+    socket = await connectWebSocketUnixWithRetry(plan.socketPath, child, {
+      timeoutMs: getConnectTimeoutMs(),
+      getChildError: () => childSpawnError,
+    });
+    bridge = bridgeStdioToWebSocket(socket);
+  } catch (error) {
+    socket?.destroy();
+    killChildIfRunning(child);
+    throw error;
+  }
+
   const closeAll = () => {
     bridge.dispose();
     socket.destroy();
-    if (child.exitCode === null && child.signalCode === null) child.kill();
+    killChildIfRunning(child);
   };
   process.once('SIGINT', closeAll);
   process.once('SIGTERM', closeAll);
   socket.once('close', () => {
-    if (child.exitCode === null && child.signalCode === null) child.kill();
+    killChildIfRunning(child);
   });
   child.once('exit', (code, signal) => {
     bridge.dispose();

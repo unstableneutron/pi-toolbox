@@ -1,9 +1,11 @@
+import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
+import { fileURLToPath } from 'node:url';
 
 import { afterEach, describe, expect, test } from 'vitest';
 
@@ -33,6 +35,26 @@ function encodeServerTextFrame(text: string): Buffer {
   const payload = Buffer.from(text);
   if (payload.length >= 126) throw new Error('test helper only supports short frames');
   return Buffer.concat([Buffer.from([0x81, payload.length]), payload]);
+}
+
+async function waitForExit(child: ReturnType<typeof spawn>): Promise<{ code: number | null }> {
+  return await new Promise((resolve) => {
+    child.once('exit', (code) => resolve({ code }));
+  });
+}
+
+async function waitForFileText(filePath: string): Promise<string> {
+  const deadline = Date.now() + 2_000;
+  let lastError: unknown;
+  while (Date.now() < deadline) {
+    try {
+      return await readFile(filePath, 'utf8');
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+  throw lastError;
 }
 
 afterEach(async () => {
@@ -137,6 +159,48 @@ describe('codex desktop app-server wrapper WebSocket transport', () => {
     expect(observedRequest).toContain('Upgrade: websocket\r\n');
     expect(observedRequest).toContain('Connection: Upgrade\r\n');
     expect(observedRequest).toContain('Sec-WebSocket-Key:');
+  });
+});
+
+describe('codex desktop app-server wrapper CLI lifecycle', () => {
+  test('kills the real app-server process if bridge setup fails', async () => {
+    const socketPath = await makeTempSocketPath();
+    const directory = path.dirname(socketPath);
+    const fakeCodexPath = path.join(directory, 'fake-codex.mjs');
+    const signalPath = path.join(directory, 'fake-codex-signal.txt');
+    const startedPath = path.join(directory, 'fake-codex-started.txt');
+    await writeFile(
+      fakeCodexPath,
+      `#!/usr/bin/env node
+import { writeFileSync } from 'node:fs';
+writeFileSync(${JSON.stringify(startedPath)}, 'STARTED');
+process.on('SIGTERM', () => {
+  writeFileSync(${JSON.stringify(signalPath)}, 'SIGTERM');
+  process.exit(0);
+});
+setInterval(() => {}, 1_000);
+`,
+    );
+    await chmod(fakeCodexPath, 0o755);
+
+    const wrapperPath = fileURLToPath(
+      new URL('./codex-desktop-app-server-wrapper.mjs', import.meta.url),
+    );
+    const child = spawn(process.execPath, [wrapperPath, 'app-server'], {
+      env: {
+        ...process.env,
+        PI_CODEX_DESKTOP_APP_SERVER_SOCKET: socketPath,
+        PI_CODEX_DESKTOP_CONNECT_TIMEOUT_MS: '1000',
+        PI_CODEX_DESKTOP_REAL_CODEX: fakeCodexPath,
+      },
+      stdio: 'ignore',
+    });
+
+    await expect(waitForFileText(startedPath)).resolves.toBe('STARTED');
+    const exit = await waitForExit(child);
+
+    expect(exit.code).toBe(1);
+    await expect(waitForFileText(signalPath)).resolves.toBe('SIGTERM');
   });
 });
 

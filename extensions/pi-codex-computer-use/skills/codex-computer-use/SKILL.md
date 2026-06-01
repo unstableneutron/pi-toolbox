@@ -26,16 +26,16 @@ coordinates when both are available.
 
 Use `computer_action.action` to choose the native Codex operation:
 
-| `computer_action.action` | Native Codex tool          | Notes                                      |
-| ------------------------ | -------------------------- | ------------------------------------------ |
-| `click`                  | `click`                    | Use `element_index` when possible          |
-| `scroll`                 | `scroll`                   | Requires `element_index` and `direction`   |
-| `drag`                   | `drag`                     | Uses coordinate endpoints                  |
-| `press_key`              | `press_key`                | Use for Return, Tab, shortcuts, arrows     |
-| `type_text`              | `type_text`                | Types into the focused control             |
-| `set_value`              | `set_value`                | Replaces a settable AX element value       |
-| `select_text`            | `select_text`              | Selects text or positions a cursor         |
-| `secondary_action`       | `perform_secondary_action` | Pass action name as `secondary_action`     |
+| `computer_action.action` | Native Codex tool          | Notes                                    |
+| ------------------------ | -------------------------- | ---------------------------------------- |
+| `click`                  | `click`                    | Use `element_index` when possible        |
+| `scroll`                 | `scroll`                   | Requires `element_index` and `direction` |
+| `drag`                   | `drag`                     | Uses coordinate endpoints                |
+| `press_key`              | `press_key`                | Use for Return, Tab, shortcuts, arrows   |
+| `type_text`              | `type_text`                | Types into the focused control           |
+| `set_value`              | `set_value`                | Replaces a settable AX element value     |
+| `select_text`            | `select_text`              | Selects text or positions a cursor       |
+| `secondary_action`       | `perform_secondary_action` | Pass action name as `secondary_action`   |
 
 Example: open Downloads in Finder and inspect it:
 

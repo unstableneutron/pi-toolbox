@@ -33,13 +33,11 @@ scripts/check-native-host-manifest.js --json
 
 Depending on the outcome follow the following checks. Be sure to ask the user permission when required, if it is stated in the check.
 
-
 ### 1. Chrome is not installed
 
 Keep the first response short and non-technical unless the user asks for more information.
 
 If Chrome is not installed, then inform the user that this plugin only works with the Chrome browser.
-
 
 ### 2. Chrome is not running
 
@@ -47,13 +45,11 @@ Keep the first response short and non-technical unless the user asks for more in
 
 If Chrome is not running then ALWAYS ask the User if they would like to launch Chrome. ALWAYS wait for a user response before taking action.
 
-
 ### 3. The native host manifest is not installed, or is invalid
 
 Keep the first response short and non-technical unless the user asks for more information.
 
 Do not install or repair the native host yourself. If native host setup appears broken, tell the user to reinstall the Chrome plugin from the Codex plugin UI.
-
 
 ### 4. The Codex Chrome Extension is not installed
 
@@ -61,19 +57,17 @@ Keep the first response short and non-technical unless the user asks for more in
 
 If the Codex Chrome Extension is missing, tell the user:
 
-`Cannot communicate with the Codex Chrome Extension. Confirm that the extension is installed and enabled in Chrome.` 
+`Cannot communicate with the Codex Chrome Extension. Confirm that the extension is installed and enabled in Chrome.`
 
 Ask the User if you can open the Codex Chrome Extension webstore page so they can verify that the extension is installed. ALWAYS wait for a user response before taking action. ALWAYS refer to the extension as the [Codex Chrome Extension](https://chromewebstore.google.com/detail/codex/<<EXTENSION_ID>>), and not by it's extension ID.
 
 You can construct the URL of the Codex Chrome extension webstore page by appending the `extensionId` from `scripts/extension-id.json` to `https://chromewebstore.google.com/detail/codex/`.
-
 
 ### 4. The Codex Chrome Extension is not enabled
 
 Keep the first response short and non-technical unless the user asks for more information.
 
 If the Codex Chrome Extension is not enabled ask the User if you can open the Google Chrome Extension Manager so they can verify that the extension is enabled. ALWAYS wait for a user response before taking action. Always refer to the Google Chrome Extension Manager as [Google Chrome Extension Manager](chrome://extensions/).
-
 
 ### 5. Codex Extension is installed and enabled, the manifest file is installed, but communication still fails
 
@@ -93,7 +87,6 @@ After one successful setup check in a session, do not repeat extension detection
 
 If the issue is specifically the native host or extension-backed install path, or if communication still fails after opening a Chrome window and retrying setup once, tell the user to reinstall the Chrome plugin from the Codex plugin UI. Never import or run `scripts/installManifest.mjs` yourself.
 
-
 ## Chrome Error handling
 
 ### File upload errors
@@ -103,7 +96,6 @@ Keep the first response short and non-technical unless the user asks for more in
 If file upload fails when using `playwright_file_chooser_set_files`, `set_files` or similar tell the user exactly this:
 
 `To enable file upload, go to chrome://extensions in Chrome, click Details under the Codex extension, and enable "Allow access to file URLs." See [here](https://developers.openai.com/codex/app/chrome-extension#upload-files) for details.`
-
 
 ## Commands
 
@@ -208,22 +200,21 @@ Handle file inputs and uploads through the file chooser flow.
 Use this pattern:
 
 ```js
-const chooserPromise = tab.playwright.waitForEvent("filechooser", { timeoutMs: 10000 });
+const chooserPromise = tab.playwright.waitForEvent('filechooser', { timeoutMs: 10000 });
 await tab.playwright.locator('input[type="file"]').click();
 const chooser = await chooserPromise;
-await chooser.setFiles(["/absolute/path/to/file.txt"]);
+await chooser.setFiles(['/absolute/path/to/file.txt']);
 ```
 
 Notes:
 
-* Start `waitForEvent("filechooser")` before clicking the file input or its associated upload control.
-* Prefer the actual `input[type="file"]` when it is available; if the UI uses a visible button or label, click that only when it is the control that opens the chooser.
-* Use absolute local paths for `setFiles(...)`.
-* Use `chooser.isMultiple()` before passing multiple files when needed.
-* Do not look for `locator.setInputFiles(...)` in this wrapper; uploads are exposed via the chooser object instead.
+- Start `waitForEvent("filechooser")` before clicking the file input or its associated upload control.
+- Prefer the actual `input[type="file"]` when it is available; if the UI uses a visible button or label, click that only when it is the control that opens the chooser.
+- Use absolute local paths for `setFiles(...)`.
+- Use `chooser.isMultiple()` before passing multiple files when needed.
+- Do not look for `locator.setInputFiles(...)` in this wrapper; uploads are exposed via the chooser object instead.
 
 If the task involves attaching a local file, check for a file input and try the `filechooser` flow before falling back to a native picker.
-
 
 ## Tab Cleanup
 
@@ -245,9 +236,9 @@ IMPORTANT: If this path cannot be found, stop and report that this plugin is mis
 Run browser setup code through the Node REPL `js` tool. In this environment the callable tool id typically appears as `mcp__node_repl__js`; `js_reset` only clears state and is not the execution tool. Run this once per fresh `node_repl` session:
 
 ```js
-const { setupBrowserRuntime } = await import("<plugin root>/scripts/browser-client.mjs");
+const { setupBrowserRuntime } = await import('<plugin root>/scripts/browser-client.mjs');
 await setupBrowserRuntime({ globals: globalThis });
-globalThis.browser = await agent.browsers.get("extension");
+globalThis.browser = await agent.browsers.get('extension');
 ```
 
 Use the browser bound to `browser` for tasks in this skill.
@@ -271,10 +262,10 @@ IMPORTANT: do NOT attempt to dig through source code or control the browser thro
 
 Browser commands are executed by calling the Node REPL `js` tool with JavaScript code. Do not look for a browser-specific `js` tool; the generic Node REPL MCP provides it.
 
-* Before interacting with the browser via `node_repl`, first set up the runtime using the guarded first-browser-cell pattern below. There is no `tab` variable until you define it yourself.
-* If a task can be completed with `node_repl`, prefer `node_repl` instead of shell commands.
-* `node_repl` does not automatically print or return the last expression. If you want to see text, explicitly use `console.log(...)`.
-* Screenshot methods return byte arrays. When you need to inspect one visually, send it directly to `nodeRepl.emitImage(...)`.
+- Before interacting with the browser via `node_repl`, first set up the runtime using the guarded first-browser-cell pattern below. There is no `tab` variable until you define it yourself.
+- If a task can be completed with `node_repl`, prefer `node_repl` instead of shell commands.
+- `node_repl` does not automatically print or return the last expression. If you want to see text, explicitly use `console.log(...)`.
+- Screenshot methods return byte arrays. When you need to inspect one visually, send it directly to `nodeRepl.emitImage(...)`.
 
 #### Runtime patterns
 
@@ -287,16 +278,17 @@ Browser commands are executed by calling the Node REPL `js` tool with JavaScript
 #### First browser cell
 
 If startup may be retried, use a retry-safe setup cell such as:
+
 ```js
 if (!globalThis.agent) {
-  const { setupBrowserRuntime } = await import("<plugin root>/scripts/browser-client.mjs");
+  const { setupBrowserRuntime } = await import('<plugin root>/scripts/browser-client.mjs');
   await setupBrowserRuntime({ globals: globalThis });
 }
 if (!globalThis.browser) {
-  globalThis.browser = await agent.browsers.get("extension");
+  globalThis.browser = await agent.browsers.get('extension');
 }
-await browser.nameSession("🔎 short task name");
-if (typeof tab === "undefined") {
+await browser.nameSession('🔎 short task name');
+if (typeof tab === 'undefined') {
   globalThis.tab = await browser.tabs.selected();
 }
 ```
@@ -304,16 +296,17 @@ if (typeof tab === "undefined") {
 `browser.tabs.selected()` may fail if the selected browser does not report an active tab.
 
 If there may not be a selected tab, create a new one instead:
+
 ```js
 if (!globalThis.agent) {
-  const { setupBrowserRuntime } = await import("<plugin root>/scripts/browser-client.mjs");
+  const { setupBrowserRuntime } = await import('<plugin root>/scripts/browser-client.mjs');
   await setupBrowserRuntime({ globals: globalThis });
 }
 if (!globalThis.browser) {
-  globalThis.browser = await agent.browsers.get("extension");
+  globalThis.browser = await agent.browsers.get('extension');
 }
-await browser.nameSession("🔎 short task name");
-if (typeof tab === "undefined") {
+await browser.nameSession('🔎 short task name');
+if (typeof tab === 'undefined') {
   globalThis.tab = await browser.tabs.new();
 }
 ```
@@ -323,57 +316,63 @@ After that, keep using the existing `tab` binding. Do not alternate between `tab
 #### Variable reuse
 
 If you already created the bindings in an earlier `node_repl` call in the current session, such as:
+
 ```js
 if (!globalThis.agent) {
-  const { setupBrowserRuntime } = await import("<plugin root>/scripts/browser-client.mjs");
+  const { setupBrowserRuntime } = await import('<plugin root>/scripts/browser-client.mjs');
   await setupBrowserRuntime({ globals: globalThis });
 }
 if (!globalThis.browser) {
-  globalThis.browser = await agent.browsers.get("extension");
+  globalThis.browser = await agent.browsers.get('extension');
 }
-await browser.nameSession("📰 Hacker News");
-if (typeof tab === "undefined") {
+await browser.nameSession('📰 Hacker News');
+if (typeof tab === 'undefined') {
   globalThis.tab = await browser.tabs.new();
 }
-await tab.goto("https://news.ycombinator.com");
+await tab.goto('https://news.ycombinator.com');
 await nodeRepl.emitImage(await tab.screenshot({ fullPage: false }));
 ```
 
 GOOD: re-using that variable to maintain state:
+
 ```js
-await tab.playwright.getByText("Interesting Post", { exact: false }).click();
-await tab.playwright.waitForLoadState({ state: "load", timeoutMs: 10000 });
+await tab.playwright.getByText('Interesting Post', { exact: false }).click();
+await tab.playwright.waitForLoadState({ state: 'load', timeoutMs: 10000 });
 await nodeRepl.emitImage(await tab.screenshot({ fullPage: false }));
 ```
 
 GOOD: if you intentionally want the main `tab` variable to point at a different tab later, declare it once with `let` and then reassign it:
+
 ```js
 let tab = await browser.tabs.new();
-await tab.goto("https://news.ycombinator.com");
+await tab.goto('https://news.ycombinator.com');
 
-tab = await browser.tabs.get("other-tab-id");
-await tab.playwright.getByText("Interesting Post", { exact: false }).click();
-await tab.playwright.waitForLoadState({ state: "load", timeoutMs: 10000 });
+tab = await browser.tabs.get('other-tab-id');
+await tab.playwright.getByText('Interesting Post', { exact: false }).click();
+await tab.playwright.waitForLoadState({ state: 'load', timeoutMs: 10000 });
 await nodeRepl.emitImage(await tab.screenshot({ fullPage: false }));
 ```
 
 GOOD: if you need both tabs live at once, give the second tab a new descriptive variable:
+
 ```js
-const detailsTab = await browser.tabs.get("other-tab-id");
-await detailsTab.playwright.getByText("Interesting Post", { exact: false }).click();
-await detailsTab.playwright.waitForLoadState({ state: "load", timeoutMs: 10000 });
+const detailsTab = await browser.tabs.get('other-tab-id');
+await detailsTab.playwright.getByText('Interesting Post', { exact: false }).click();
+await detailsTab.playwright.waitForLoadState({ state: 'load', timeoutMs: 10000 });
 await nodeRepl.emitImage(await detailsTab.screenshot({ fullPage: false }));
 ```
 
 BAD: refetching the same tab into a new variable just to avoid reuse:
+
 ```js
-const tab2 = await browser.tabs.get("tab-id");
-await tab2.playwright.getByText("Interesting Post", { exact: false }).click();
-await tab2.playwright.waitForLoadState({ state: "load", timeoutMs: 10000 });
+const tab2 = await browser.tabs.get('tab-id');
+await tab2.playwright.getByText('Interesting Post', { exact: false }).click();
+await tab2.playwright.waitForLoadState({ state: 'load', timeoutMs: 10000 });
 await nodeRepl.emitImage(await tab2.screenshot({ fullPage: false }));
 ```
 
 BAD: wrapping a whole cell in block scope when there is no specific naming collision to solve:
+
 ```js
 {
   const snap = await tab.playwright.domSnapshot();
@@ -382,14 +381,16 @@ BAD: wrapping a whole cell in block scope when there is no specific naming colli
 ```
 
 BAD: redeclaring an existing variable (`const tab = ` will fail):
+
 ```js
-const tab = await browser.tabs.get("tab-id");
-await tab.playwright.getByText("Interesting Post", { exact: false }).click();
-await tab.playwright.waitForLoadState({ state: "load", timeoutMs: 10000 });
+const tab = await browser.tabs.get('tab-id');
+await tab.playwright.getByText('Interesting Post', { exact: false }).click();
+await tab.playwright.waitForLoadState({ state: 'load', timeoutMs: 10000 });
 await nodeRepl.emitImage(await tab.screenshot({ fullPage: false }));
 ```
 
 GOOD: if you only need a snapshot once, avoid creating a new reusable variable name for it:
+
 ```js
 console.log(await tab.playwright.domSnapshot());
 ```
@@ -399,14 +400,15 @@ console.log(await tab.playwright.domSnapshot());
 In `node_repl` you can use Node filesystem libraries when needed.
 
 For file operations, prefer the Node runtime libraries directly:
+
 ```js
-const fs = await import("node:fs/promises");
+const fs = await import('node:fs/promises');
 
 // write a file
-await fs.writeFile("hello.txt", "Hello world");
+await fs.writeFile('hello.txt', 'Hello world');
 
 // read a file
-const contents = await fs.readFile("hello.txt", "utf-8");
+const contents = await fs.readFile('hello.txt', 'utf-8');
 ```
 
 #### Browser interactions
@@ -417,33 +419,34 @@ Use the guarded first-browser-cell pattern above when starting browser work. It 
 
 ### How to use the API
 
-* You are provided with various options for interacting with the browser (Playwright, vision), and you should use the most appropriate tool for the job.
-* Prefer Playwright where possible, but if it is not clear how to best use it, prefer vision.
-* Always make sure you understand what is on the screen before proceeding to your next action. After clicking, scrolling, typing, or other interactions, collect the cheapest state check that answers the next question. Prefer a fresh DOM snapshot when you need locator ground truth, prefer a screenshot when visual confirmation matters, and avoid requesting both by default.
-* Remember that variables are persistent across calls to the REPL. By default, define `tab` once and keep using it. Only re-query a tab when you are intentionally switching to a different tab, after a kernel reset, or after a failed cell that never created the binding.
+- You are provided with various options for interacting with the browser (Playwright, vision), and you should use the most appropriate tool for the job.
+- Prefer Playwright where possible, but if it is not clear how to best use it, prefer vision.
+- Always make sure you understand what is on the screen before proceeding to your next action. After clicking, scrolling, typing, or other interactions, collect the cheapest state check that answers the next question. Prefer a fresh DOM snapshot when you need locator ground truth, prefer a screenshot when visual confirmation matters, and avoid requesting both by default.
+- Remember that variables are persistent across calls to the REPL. By default, define `tab` once and keep using it. Only re-query a tab when you are intentionally switching to a different tab, after a kernel reset, or after a failed cell that never created the binding.
 
 ### General guidance
 
-* Minimize interruptions as much as possible. Only ask clarifying questions if you really need to. If a user has an under-specified prompt, try to fulfill it first before asking for more information.
-* Remember, the user is asking questions about what they see on the screen. Base your interactions on what is visible to the user (based on DOM and screenshots) rather than programmatically determining what they are talking about. The "first link" on the page is not necessarily the first `a href` in the DOM.
-* Try not to over-complicate things. It is okay to click based on node ID if it is not clear how to determine the UI element in Playwright.
-* If a tab is already on a given URL, do not call `goto` with the same URL. This will reload the page and may lose any in-progress information the user has provided. When you intentionally need to reload, call `tab.reload()`.
-* If browser-use is interrupted because the extension or user took control, do not quote the raw runtime error. Summarize it naturally for the user, for example: "Browser use was stopped in the extension." Avoid internal terms like turn_id, runtime, retry, or plugin error text unless the user asks for details.
-* When testing a user's local app on `localhost`, `127.0.0.1`, `::1`, or another local development URL in a framework that does not support hot reloading or hot reloading is disabled, call `tab.reload()` after code or build changes before verifying the UI. After reloading, take a fresh DOM snapshot or screenshot before continuing.
-* Do not brute-force undocumented site search URLs, query parameter variants, search engine query grids, or candidate URL arrays unless the user explicitly asks for exhaustive coverage.
-* If a guessed URL, search query, or candidate page fails, try at most one new approach. After that, switch to visible page navigation, the site's own search UI, or give the best current answer with uncertainty.
-* If you use a search engine fallback, run one focused query, inspect the strongest results, and open the best candidate. Do not keep rewriting the query in loops.
-* Once you have one strong candidate page, verify it directly instead of collecting more candidates.
-* When the page exposes one authoritative signal for the fact you need, such as a selected option, checked state, success modal or toast, basket line item, selected sort option, or current URL parameter, treat that as the answer unless another signal directly contradicts it.
-* Do not keep re-verifying the same fact through header badges, alternate surfaces, or repeated full-page snapshots once an authoritative signal is already present.
+- Minimize interruptions as much as possible. Only ask clarifying questions if you really need to. If a user has an under-specified prompt, try to fulfill it first before asking for more information.
+- Remember, the user is asking questions about what they see on the screen. Base your interactions on what is visible to the user (based on DOM and screenshots) rather than programmatically determining what they are talking about. The "first link" on the page is not necessarily the first `a href` in the DOM.
+- Try not to over-complicate things. It is okay to click based on node ID if it is not clear how to determine the UI element in Playwright.
+- If a tab is already on a given URL, do not call `goto` with the same URL. This will reload the page and may lose any in-progress information the user has provided. When you intentionally need to reload, call `tab.reload()`.
+- If browser-use is interrupted because the extension or user took control, do not quote the raw runtime error. Summarize it naturally for the user, for example: "Browser use was stopped in the extension." Avoid internal terms like turn_id, runtime, retry, or plugin error text unless the user asks for details.
+- When testing a user's local app on `localhost`, `127.0.0.1`, `::1`, or another local development URL in a framework that does not support hot reloading or hot reloading is disabled, call `tab.reload()` after code or build changes before verifying the UI. After reloading, take a fresh DOM snapshot or screenshot before continuing.
+- Do not brute-force undocumented site search URLs, query parameter variants, search engine query grids, or candidate URL arrays unless the user explicitly asks for exhaustive coverage.
+- If a guessed URL, search query, or candidate page fails, try at most one new approach. After that, switch to visible page navigation, the site's own search UI, or give the best current answer with uncertainty.
+- If you use a search engine fallback, run one focused query, inspect the strongest results, and open the best candidate. Do not keep rewriting the query in loops.
+- Once you have one strong candidate page, verify it directly instead of collecting more candidates.
+- When the page exposes one authoritative signal for the fact you need, such as a selected option, checked state, success modal or toast, basket line item, selected sort option, or current URL parameter, treat that as the answer unless another signal directly contradicts it.
+- Do not keep re-verifying the same fact through header badges, alternate surfaces, or repeated full-page snapshots once an authoritative signal is already present.
 
 ### Screenshots
-* If you take a screenshot that the user should see, include the image inline in your Markdown response using Markdown image syntax so the image renders, rather than as a bare link:
+
+- If you take a screenshot that the user should see, include the image inline in your Markdown response using Markdown image syntax so the image renders, rather than as a bare link:
   ```md
   ![screenshot](IMAGE_LINK)
   ```
-* IMPORTANT: If the user has asked you to take screenshots, you MUST include them as part of your final markdown response.
-* If the user has asked you to test a website as part of development, you should take screenshots at key moments and include them in your final response.
+- IMPORTANT: If the user has asked you to take screenshots, you MUST include them as part of your final markdown response.
+- If the user has asked you to test a website as part of development, you should take screenshots at key moments and include them in your final response.
 
 ## Playwright
 
@@ -655,7 +658,7 @@ If explicitly permitted in the **initial prompt**, proceed without re-confirming
 
 - **[2.3, 2.7]** Login + browser permission prompts
   - **Login nuance:** “go to xyz.com” implies consent to log in to xyz.com.
-  - If login is *not* implied/approved (e.g., redirected elsewhere with saved creds), confirm.
+  - If login is _not_ implied/approved (e.g., redirected elsewhere with saved creds), confirm.
   - Accept browser permission requests (location/camera/mic) requires pre-approval or confirmation.
 - **[3.3]** Submit age verification
 - **[5.1]** Accept third-party “are you sure?” warnings
@@ -748,7 +751,7 @@ interface Tab {
 interface CUAAPI {
   click(options: ClickOptions): Promise<void>; // Click at a coordinate in the current viewport.
   double_click(options: DoubleClickOptions): Promise<void>; // Double click at a coordinate in the current viewport.
-  
+
   drag(options: DragOptions): Promise<void>; // Drag from a point to a point by the provided path.
   keypress(options: KeypressOptions): Promise<void>; // Press control characters at the current focused element (focus it first via click/dblclick).
   move(options: MoveOptions): Promise<void>; // Move the mouse to a point by the provided x and y coordinates.
@@ -759,7 +762,7 @@ interface CUAAPI {
 interface DomCUAAPI {
   click(options: DomClickOptions): Promise<void>; // Click a DOM node by its id from the visible DOM snapshot.
   double_click(options: DomClickOptions): Promise<void>; // Double-click a DOM node by its id.
-  
+
   get_visible_dom(): Promise<unknown>; // Return a filtered DOM with node ids for interactable elements.
   keypress(options: DomKeypressOptions): Promise<void>; // Press control characters at the currently focused element (focus it first via click/dblclick).
   scroll(options: DomScrollOptions): Promise<void>; // Scroll either the page or a specific node (if node_id provided) by deltas.
