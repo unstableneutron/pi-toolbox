@@ -5,6 +5,7 @@ import {
   buildCodexBrowserEvalScript,
   buildCodexBrowserListScript,
   buildNodeReplJsArguments,
+  registerCodexBrowserTools,
   toCodexBrowserToolResult,
 } from './browser-tools';
 
@@ -20,7 +21,7 @@ describe('browser script builders', () => {
     expect(script).toContain('"iab",');
     expect(script).toContain('await browser.tabs.list()');
     expect(script).toContain('await browser.tabs.selected().catch(() => undefined)');
-    expect(script).toContain('nodeRepl.write(JSON.stringify(__piBrowserResult, null, 2));');
+    expect(script).toContain('__piNodeRepl.write(JSON.stringify(__piBrowserResult, null, 2));');
     expect(script).not.toContain('await browser.tabs.new()');
   });
 
@@ -33,6 +34,25 @@ describe('browser script builders', () => {
     expect(script).toContain('globalThis.__piCodexGetBrowser(');
     expect(script).toContain('"chrome",');
     expect(script).toContain('"extension",');
+  });
+
+  test('filters bundled browser runtime telemetry and display noise from node_repl output', () => {
+    const script = buildCodexBrowserListScript({
+      backend: 'chrome',
+      browserClientPath: '/tmp/chrome/scripts/browser-client.mjs',
+    });
+
+    expect(script).toContain('globalThis.__piCodexOriginalConsole');
+    expect(script).toContain('globalThis.__piCodexOriginalProcessWrites');
+    expect(script).toContain('process.stderr.write');
+    expect(script).toContain('__piCodexIsBrowserRuntimeNoise');
+    expect(script).toContain('IAB_DISCOVERY');
+    expect(script).toContain('[Statsig]');
+    expect(script).toContain('oaistatsig.com');
+    expect(script).toContain('selectedBrowser');
+    expect(script).toContain('<<<pi-codex-browser-result:start>>>');
+    expect(script).toContain('<<<pi-codex-browser-result:end>>>');
+    expect(script).toContain('Object.defineProperty(__piNodeRepl, "write"');
   });
 
   test('explains how to recover when the requested browser backend is unavailable', () => {
@@ -70,7 +90,7 @@ describe('browser script builders', () => {
     expect(script).toContain('await browser.tabs.new()');
     expect(script).toContain('async ({ agent, browser, tab, nodeRepl }) => {');
     expect(script).toContain('await tab.goto("https://example.com");');
-    expect(script).toContain('nodeRepl.write(JSON.stringify(__piBrowserEvalResult, null, 2));');
+    expect(script).toContain('__piNodeRepl.write(JSON.stringify(__piBrowserEvalResult, null, 2));');
   });
 });
 
@@ -110,5 +130,70 @@ describe('toCodexBrowserToolResult', () => {
         rawResult: { content: [{ type: 'text', text: 'snapshot' }] },
       },
     });
+  });
+
+  test('returns only delimited browser output when node_repl also captures runtime noise', () => {
+    const result = toCodexBrowserToolResult({
+      threadId: 'thread-1',
+      piName: 'codex_browser_eval',
+      rawResult: {
+        content: [
+          {
+            type: 'text',
+            text:
+              'IAB_DISCOVERY no session-owned iab browser\n' +
+              '<<<pi-codex-browser-result:start>>>\n' +
+              '{"title":"Example Domain"}\n' +
+              '<<<pi-codex-browser-result:end>>>\n' +
+              ' ERROR  [Statsig] A networking error occurred at oaistatsig.com',
+          },
+          { type: 'image', data: 'base64' },
+        ],
+      },
+    });
+
+    expect(result.content).toEqual([
+      { type: 'text', text: '{"title":"Example Domain"}' },
+      { type: 'image', data: 'base64' },
+    ]);
+  });
+});
+
+describe('registerCodexBrowserTools', () => {
+  test('routes Chrome backend node_repl calls through the Chrome browser bridge', async () => {
+    const registered: any[] = [];
+    const calls: any[] = [];
+    const session = {
+      async callBrowserMcpTool(_ctx: unknown, backend: string, input: unknown) {
+        calls.push({ backend, input });
+        return {
+          threadId: 'chrome-thread',
+          rawResult: { content: [{ type: 'text', text: 'chrome result' }] },
+        };
+      },
+      async callMcpTool() {
+        throw new Error('default app-server bridge should not be used for chrome backend');
+      },
+    };
+    registerCodexBrowserTools(
+      { registerTool: (tool: any) => registered.push(tool) },
+      session as any,
+    );
+
+    const listTool = registered.find((tool) => tool.name === 'codex_browser_list');
+    const result = await listTool.execute(
+      'tool-call-1',
+      { backend: 'chrome' },
+      undefined,
+      undefined,
+      {
+        cwd: '/tmp/project',
+      },
+    );
+
+    expect(result.content).toEqual([{ type: 'text', text: 'chrome result' }]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].backend).toBe('chrome');
+    expect(calls[0].input).toMatchObject({ server: 'node_repl', tool: 'js' });
   });
 });

@@ -2,21 +2,20 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-export const DEFAULT_CODEX_APP = '/Applications/Codex.app';
-export const DEFAULT_CODEX_EXECUTABLE = path.join(DEFAULT_CODEX_APP, 'Contents/Resources/codex');
+const DEFAULT_CODEX_APP = '/Applications/Codex.app';
 
-export interface CodexComputerUsePathOptions {
+interface CodexComputerUsePathOptions {
   codexApp?: string;
   codexExecutable?: string;
   codexHome?: string;
 }
 
-export interface CodexBrowserClientScripts {
+interface CodexBrowserClientScripts {
   iab?: string;
   chrome?: string;
 }
 
-export interface CodexComputerUsePaths {
+interface CodexComputerUsePaths {
   codexApp: string;
   codexExecutable: string;
   codexHome: string;
@@ -25,7 +24,7 @@ export interface CodexComputerUsePaths {
   browserClientScripts: CodexBrowserClientScripts;
 }
 
-export interface ResolveCodexPluginScriptOptions {
+interface ResolveCodexPluginScriptOptions {
   codexApp: string;
   codexHome: string;
   plugin: string;

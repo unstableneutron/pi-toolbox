@@ -7,7 +7,7 @@ import {
 
 import { shortHash } from './debug.ts';
 
-export const TRANSPORT_DIAGNOSTIC_TYPE = 'openai_websocket_transport';
+const TRANSPORT_DIAGNOSTIC_TYPE = 'openai_websocket_transport';
 
 const MAX_TIMELINE_EVENTS = 20;
 const SENSITIVE_QUERY_PARAM =
@@ -29,12 +29,12 @@ const SIGNIFICANT_EVENT_TYPES = new Set([
 
 let nextRequestId = 0;
 
-export interface TransportTimelineEvent extends Record<string, unknown> {
+interface TransportTimelineEvent extends Record<string, unknown> {
   type: string;
   tMs: number;
 }
 
-export interface TransportDiagnosticsInit {
+interface TransportDiagnosticsInit {
   configuredTransport?: string;
   requestId?: string;
   requestBytes?: number;
@@ -76,7 +76,7 @@ export interface AttachTransportDiagnosticOptions extends TransportDiagnosticFie
   error?: unknown;
 }
 
-export interface MergeTransportDiagnosticOptions extends TransportDiagnosticFields {
+interface MergeTransportDiagnosticOptions extends TransportDiagnosticFields {
   error?: unknown;
   timelineEvent?: Omit<TransportTimelineEvent, 'tMs'> & { tMs?: number };
 }

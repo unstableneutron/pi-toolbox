@@ -4,7 +4,8 @@ import path from 'node:path';
 
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 
-import { CodexAppServerClient } from './app-server';
+import { CodexAppServerClient, CodexAppServerWebSocketClient } from './app-server';
+import { ensureChromeExtensionAppServer, getChromeExtensionOrigin } from './chrome-extension-host';
 import { getCodexComputerUsePaths } from './codex-paths';
 import { answerComputerUseElicitation } from './elicitation';
 
@@ -139,12 +140,14 @@ function writeVerboseDiagnosticJson(value: unknown): string {
   return filePath;
 }
 
-export interface CodexMcpToolCall {
+interface CodexMcpToolCall {
   server: string;
   tool: string;
   arguments?: unknown;
   timeoutMs?: number;
 }
+
+type BrowserBackend = 'iab' | 'chrome';
 
 function buildNodeReplRequestMeta(threadId: string, turnNumber: number): Record<string, unknown> {
   return {
@@ -163,6 +166,8 @@ export interface CodexDiagnosticStatusOptions {
 
 export class ComputerUseSession {
   private client?: CodexAppServerClient;
+  private chromeClient?: CodexAppServerWebSocketClient;
+  private chromeThreadId?: string;
   private threadId?: string;
   private nextNodeReplTurnNumber = 1;
 
@@ -278,10 +283,48 @@ export class ComputerUseSession {
     }
   }
 
+  async callBrowserMcpTool(
+    ctx: ExtensionContext,
+    backend: BrowserBackend,
+    input: CodexMcpToolCall,
+  ): Promise<{ threadId: string; rawResult: any }> {
+    if (backend !== 'chrome') {
+      return await this.callMcpTool(ctx, input);
+    }
+
+    const client = await this.getChromeClient();
+    const threadId = await this.getChromeThreadId(ctx, client);
+    const restore = client.setElicitationHandler((params) =>
+      answerComputerUseElicitation(params, ctx),
+    );
+    try {
+      const rawResult = await client.callMcpTool({
+        server: input.server,
+        threadId,
+        tool: input.tool,
+        arguments: input.arguments,
+        timeoutMs: input.timeoutMs ?? 120_000,
+        ...(input.server === NODE_REPL_SERVER
+          ? { _meta: buildNodeReplRequestMeta(threadId, this.nextNodeReplTurnNumber++) }
+          : {}),
+      });
+      const errorMessage = getMcpErrorMessage(rawResult);
+      if (errorMessage) {
+        throw new Error(`Codex MCP ${input.server}.${input.tool} failed: ${errorMessage}`);
+      }
+      return { threadId, rawResult };
+    } finally {
+      restore();
+    }
+  }
+
   close(): void {
     this.client?.close();
+    this.chromeClient?.close();
     this.client = undefined;
+    this.chromeClient = undefined;
     this.threadId = undefined;
+    this.chromeThreadId = undefined;
   }
 
   private async getClient(): Promise<CodexAppServerClient> {
@@ -304,5 +347,30 @@ export class ComputerUseSession {
       });
     }
     return this.threadId;
+  }
+
+  private async getChromeClient(): Promise<CodexAppServerWebSocketClient> {
+    if (!this.chromeClient) {
+      const appServer = await ensureChromeExtensionAppServer();
+      this.chromeClient = new CodexAppServerWebSocketClient({
+        origin: getChromeExtensionOrigin(),
+        url: appServer.localAppServerUrl,
+      });
+      await this.chromeClient.init();
+    }
+    return this.chromeClient;
+  }
+
+  private async getChromeThreadId(
+    ctx: ExtensionContext,
+    client: CodexAppServerWebSocketClient,
+  ): Promise<string> {
+    if (!this.chromeThreadId) {
+      this.chromeThreadId = await client.startThread({
+        cwd: ctx.cwd ?? process.cwd(),
+        name: 'Pi Chrome Browser',
+      });
+    }
+    return this.chromeThreadId;
   }
 }

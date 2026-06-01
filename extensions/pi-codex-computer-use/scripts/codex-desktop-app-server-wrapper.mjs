@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -132,6 +132,27 @@ function readEnvPath(env, primary, fallback) {
   return value && value.length > 0 ? value : undefined;
 }
 
+function getExplicitListenValue(argv) {
+  for (let index = 1; index < argv.length; index++) {
+    const arg = argv[index];
+    if (arg === '--listen') return argv[index + 1];
+    if (arg.startsWith('--listen=')) return arg.slice('--listen='.length);
+  }
+  return undefined;
+}
+
+export function buildRealCodexChildEnv(env = process.env) {
+  const {
+    CODEX_CLI_PATH: _codexCliPath,
+    PI_CODEX_DESKTOP_REAL_CODEX: _piRealCodex,
+    PI_CODEX_DESKTOP_APP_SERVER_SOCKET: _piSocket,
+    CODEX_DESKTOP_REAL_CODEX: _legacyRealCodex,
+    CODEX_DESKTOP_APP_SERVER_SOCKET: _legacySocket,
+    ...childEnv
+  } = env;
+  return childEnv;
+}
+
 function getConnectTimeoutMs(env = process.env) {
   const raw = env.PI_CODEX_DESKTOP_CONNECT_TIMEOUT_MS?.trim();
   if (!raw) return DEFAULT_CONNECT_TIMEOUT_MS;
@@ -158,6 +179,10 @@ export function buildWrapperPlan(argv = process.argv.slice(2), env = process.env
     readEnvPath(env, 'PI_CODEX_DESKTOP_REAL_CODEX', 'CODEX_DESKTOP_REAL_CODEX') ??
     DEFAULT_REAL_CODEX_PATH;
   if (argv[0] !== 'app-server') {
+    return { mode: 'passthrough', realCodexPath, realArgs: [...argv] };
+  }
+
+  if (getExplicitListenValue(argv) === 'stdio://') {
     return { mode: 'passthrough', realCodexPath, realArgs: [...argv] };
   }
 
@@ -328,7 +353,15 @@ export function bridgeStdioToWebSocket(socket, stdin = process.stdin, stdout = p
 }
 
 async function runPassthrough(plan) {
-  const child = spawn(plan.realCodexPath, plan.realArgs, { stdio: 'inherit', env: process.env });
+  const childEnv = buildRealCodexChildEnv();
+  if (typeof process.execve === 'function' && existsSync(plan.realCodexPath)) {
+    process.execve(plan.realCodexPath, [plan.realCodexPath, ...plan.realArgs], childEnv);
+  }
+
+  const child = spawn(plan.realCodexPath, plan.realArgs, {
+    stdio: 'inherit',
+    env: childEnv,
+  });
   const result = await new Promise((resolve, reject) => {
     child.once('error', reject);
     child.once('exit', (code, signal) => resolve({ code, signal }));
@@ -341,11 +374,35 @@ function killChildIfRunning(child) {
   if (child.exitCode === null && child.signalCode === null) child.kill();
 }
 
+async function runExistingBridge(plan) {
+  if (!existsSync(plan.socketPath)) {
+    throw new Error(`Codex app-server socket does not exist: ${plan.socketPath}`);
+  }
+  const socket = await connectWebSocketUnix(plan.socketPath, { timeoutMs: getConnectTimeoutMs() });
+  const bridge = bridgeStdioToWebSocket(socket);
+
+  await new Promise((resolve) => {
+    const finish = (exitCode) => {
+      process.off('SIGINT', onSignal);
+      process.off('SIGTERM', onSignal);
+      bridge.dispose();
+      socket.destroy();
+      process.exitCode = exitCode;
+      resolve();
+    };
+    const onSignal = () => finish(1);
+    process.once('SIGINT', onSignal);
+    process.once('SIGTERM', onSignal);
+    socket.once('close', () => finish(0));
+    socket.once('error', () => finish(1));
+  });
+}
+
 async function runBridge(plan) {
   mkdirSync(path.dirname(plan.socketPath), { recursive: true, mode: 0o700 });
   const child = spawn(plan.realCodexPath, plan.realArgs, {
     stdio: ['ignore', 'ignore', 'pipe'],
-    env: process.env,
+    env: buildRealCodexChildEnv(),
   });
   let childSpawnError;
   child.once('error', (error) => {
@@ -388,6 +445,10 @@ export async function runWrapper(argv = process.argv.slice(2), env = process.env
   const plan = buildWrapperPlan(argv, env);
   if (plan.mode === 'passthrough') {
     await runPassthrough(plan);
+    return;
+  }
+  if (plan.mode === 'bridge-existing-app-server') {
+    await runExistingBridge(plan);
     return;
   }
   await runBridge(plan);

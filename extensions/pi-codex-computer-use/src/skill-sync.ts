@@ -1,6 +1,6 @@
 import path from 'node:path';
 
-export interface CodexSkillCopy {
+interface CodexSkillCopy {
   plugin: string;
   skill: string;
   destination: string;

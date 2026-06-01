@@ -1,6 +1,7 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "tags": ["-lintignore"],
+  "ignoreBinaries": ["aubr"],
   "ignoreDependencies": ["@earendil-works/pi-agent-core", "@aws-sdk/client-bedrock-runtime", "tsx"],
   "workspaces": {
     ".": {

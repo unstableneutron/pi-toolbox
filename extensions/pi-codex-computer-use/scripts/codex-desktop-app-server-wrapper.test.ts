@@ -135,6 +135,19 @@ describe('codex desktop app-server wrapper planning', () => {
       realArgs: ['--version'],
     });
   });
+
+  test('scrubs Desktop wrapper env before spawning real Codex children', async () => {
+    const { buildRealCodexChildEnv } = await import('./codex-desktop-app-server-wrapper.mjs');
+
+    expect(
+      buildRealCodexChildEnv({
+        CODEX_CLI_PATH: '/tmp/wrapper.mjs',
+        PI_CODEX_DESKTOP_REAL_CODEX: '/real/codex',
+        PI_CODEX_DESKTOP_APP_SERVER_SOCKET: '/tmp/codex.sock',
+        KEEP_ME: 'yes',
+      }),
+    ).toEqual({ KEEP_ME: 'yes' });
+  });
 });
 
 describe('codex desktop app-server wrapper WebSocket transport', () => {
@@ -249,6 +262,39 @@ setInterval(() => {}, 1_000);
 
     expect(exit.code).toBe(1);
     await expect(waitForFileText(signalPath)).resolves.toBe('SIGTERM');
+  });
+
+  test('execs nested explicit stdio app-server invocations as the signed real Codex binary', async () => {
+    const socketPath = await makeTempSocketPath();
+    const directory = path.dirname(socketPath);
+    const fakeCodexPath = path.join(directory, 'fake-codex.mjs');
+    const startedPath = path.join(directory, 'fake-codex-started.txt');
+    await writeFile(
+      fakeCodexPath,
+      `#!/usr/bin/env node
+import { writeFileSync } from 'node:fs';
+writeFileSync(${JSON.stringify(startedPath)}, process.argv.slice(2).join(' '));
+`,
+    );
+    await chmod(fakeCodexPath, 0o755);
+
+    const wrapperPath = fileURLToPath(
+      new URL('./codex-desktop-app-server-wrapper.mjs', import.meta.url),
+    );
+    const child = spawn(process.execPath, [wrapperPath, 'app-server', '--listen', 'stdio://'], {
+      env: {
+        ...process.env,
+        PI_CODEX_DESKTOP_APP_SERVER_SOCKET: socketPath,
+        PI_CODEX_DESKTOP_CONNECT_TIMEOUT_MS: '1000',
+        PI_CODEX_DESKTOP_REAL_CODEX: fakeCodexPath,
+      },
+      stdio: 'ignore',
+    });
+
+    const exit = await waitForExit(child);
+
+    expect(exit.code).toBe(0);
+    await expect(waitForFileText(startedPath)).resolves.toBe('app-server --listen stdio://');
   });
 
   test('reports passthrough spawn errors instead of waiting forever', async () => {

@@ -5,10 +5,12 @@ import { Type } from 'typebox';
 import { getCodexComputerUsePaths } from './codex-paths';
 import type { ComputerUseSession } from './session';
 
-export type BrowserBackend = 'iab' | 'chrome';
+type BrowserBackend = 'iab' | 'chrome';
 
 const NODE_REPL_SERVER = 'node_repl';
 const NODE_REPL_JS_TOOL = 'js';
+const BROWSER_RESULT_START = '<<<pi-codex-browser-result:start>>>';
+const BROWSER_RESULT_END = '<<<pi-codex-browser-result:end>>>';
 
 const BROWSER_BACKEND_TO_CODEX_ID: Record<BrowserBackend, string> = {
   iab: 'iab',
@@ -36,11 +38,11 @@ interface BrowserRuntimeScriptInput {
   browserClientPath: string;
 }
 
-export interface CodexBrowserEvalScriptInput extends BrowserRuntimeScriptInput {
+interface CodexBrowserEvalScriptInput extends BrowserRuntimeScriptInput {
   script: string;
 }
 
-export interface BrowserToolSpec {
+interface BrowserToolSpec {
   piName: string;
   label: string;
   description: string;
@@ -74,6 +76,69 @@ function normalizeBackend(value: unknown): BrowserBackend {
   return value === 'chrome' ? 'chrome' : 'iab';
 }
 
+function buildBrowserRuntimeNoiseFilterScript(): string {
+  return `if (!globalThis.__piCodexOriginalConsole) {
+  globalThis.__piCodexOriginalConsole = globalThis.console;
+}
+if (!globalThis.__piCodexIsBrowserRuntimeNoise) {
+  globalThis.__piCodexIsBrowserRuntimeNoise = (__piArgs) => {
+    const __piText = __piArgs
+      .map((__piArg) => {
+        if (typeof __piArg === "string") return __piArg;
+        try { return JSON.stringify(__piArg); } catch { return String(__piArg); }
+      })
+      .join(" ");
+    return __piText.includes("IAB_DISCOVERY") ||
+      __piText.includes("[Statsig]") ||
+      __piText.includes("oaistatsig.com") ||
+      __piText.includes("selectedBrowser") ||
+      (__piArgs.length === 1 &&
+        __piArgs[0] &&
+        typeof __piArgs[0] === "object" &&
+        Object.prototype.hasOwnProperty.call(__piArgs[0], "selectedBrowser"));
+  };
+}
+if (typeof process !== "undefined" && process?.stdout?.write && process?.stderr?.write && !globalThis.__piCodexOriginalProcessWrites) {
+  globalThis.__piCodexOriginalProcessWrites = {
+    stdout: process.stdout.write.bind(process.stdout),
+    stderr: process.stderr.write.bind(process.stderr),
+  };
+  const __piWrapProcessWrite = (__piStreamName) => {
+    const __piOriginalWrite = globalThis.__piCodexOriginalProcessWrites[__piStreamName];
+    return (__piChunk, ...__piRest) => {
+      const __piText = typeof __piChunk === "string"
+        ? __piChunk
+        : (typeof Buffer !== "undefined" && Buffer.isBuffer(__piChunk) ? __piChunk.toString("utf8") : String(__piChunk));
+      if (globalThis.__piCodexIsBrowserRuntimeNoise([__piText])) return true;
+      return __piOriginalWrite(__piChunk, ...__piRest);
+    };
+  };
+  process.stdout.write = __piWrapProcessWrite("stdout");
+  process.stderr.write = __piWrapProcessWrite("stderr");
+}
+if (!globalThis.__piCodexFilteredConsole) {
+  const __piOriginalConsole = globalThis.__piCodexOriginalConsole;
+  const __piFilteredConsole = Object.create(__piOriginalConsole ?? null);
+  for (const __piMethod of ["debug", "error", "info", "log", "warn"]) {
+    const __piOriginalMethod = __piOriginalConsole?.[__piMethod]?.bind(__piOriginalConsole);
+    __piFilteredConsole[__piMethod] = (...__piArgs) => {
+      if (globalThis.__piCodexIsBrowserRuntimeNoise(__piArgs)) return;
+      return __piOriginalMethod?.(...__piArgs);
+    };
+  }
+  globalThis.__piCodexFilteredConsole = __piFilteredConsole;
+}
+globalThis.console = globalThis.__piCodexFilteredConsole;`;
+}
+
+function buildNodeReplResultWrapperScript(): string {
+  return `var __piNodeRepl = Object.create(nodeRepl);
+Object.defineProperty(__piNodeRepl, "write", {
+  configurable: true,
+  value: (__piValue) => nodeRepl.write(${quoted(BROWSER_RESULT_START)} + "\\n" + String(__piValue) + "\\n" + ${quoted(BROWSER_RESULT_END)}),
+});`;
+}
+
 function buildBrowserRuntimePrelude({
   backend,
   browserClientPath,
@@ -84,7 +149,9 @@ function buildBrowserRuntimePrelude({
       ? 'Open the Codex Chrome Extension side panel in Chrome or Brave, confirm it is connected, then retry.'
       : 'Open the Codex in-app Browser for this Codex thread, then retry.';
 
-  return `if (!globalThis.agent) {
+  return `${buildBrowserRuntimeNoiseFilterScript()}
+${buildNodeReplResultWrapperScript()}
+if (!globalThis.agent) {
   const { setupBrowserRuntime } = await import(${quoted(browserClientPath)});
   await setupBrowserRuntime({ globals: globalThis });
 }
@@ -152,7 +219,7 @@ var __piBrowserResult = {
   selectedTab: __piSelectedTabInfo,
   tabs: await browser.tabs.list(),
 };
-nodeRepl.write(JSON.stringify(__piBrowserResult, null, 2));`;
+__piNodeRepl.write(JSON.stringify(__piBrowserResult, null, 2));`;
 }
 
 export function buildCodexBrowserEvalScript(input: CodexBrowserEvalScriptInput): string {
@@ -160,12 +227,12 @@ export function buildCodexBrowserEvalScript(input: CodexBrowserEvalScriptInput):
 ${buildEnsureTabBlock(input.backend)}
 var __piBrowserEvalResult = await (async ({ agent, browser, tab, nodeRepl }) => {
 ${input.script}
-})({ agent: globalThis.agent, browser: globalThis.browser, tab: globalThis.tab, nodeRepl });
+})({ agent: globalThis.agent, browser: globalThis.browser, tab: globalThis.tab, nodeRepl: __piNodeRepl });
 if (__piBrowserEvalResult !== undefined) {
   if (typeof __piBrowserEvalResult === "string") {
-    nodeRepl.write(__piBrowserEvalResult);
+    __piNodeRepl.write(__piBrowserEvalResult);
   } else {
-    nodeRepl.write(JSON.stringify(__piBrowserEvalResult, null, 2));
+    __piNodeRepl.write(JSON.stringify(__piBrowserEvalResult, null, 2));
   }
 }`;
 }
@@ -188,13 +255,54 @@ export function buildNodeReplJsArguments(code: string, timeoutMs: number): Recor
   };
 }
 
+function normalizeDelimitedBrowserOutput(value: string): string {
+  let output = value;
+  if (output.startsWith('\r\n')) output = output.slice(2);
+  else if (output.startsWith('\n')) output = output.slice(1);
+  if (output.endsWith('\r\n')) output = output.slice(0, -2);
+  else if (output.endsWith('\n')) output = output.slice(0, -1);
+  return output;
+}
+
+function extractDelimitedBrowserOutput(value: string): string[] {
+  const outputs: string[] = [];
+  let cursor = 0;
+  while (true) {
+    const start = value.indexOf(BROWSER_RESULT_START, cursor);
+    if (start < 0) break;
+    const contentStart = start + BROWSER_RESULT_START.length;
+    const end = value.indexOf(BROWSER_RESULT_END, contentStart);
+    if (end < 0) break;
+    outputs.push(normalizeDelimitedBrowserOutput(value.slice(contentStart, end)));
+    cursor = end + BROWSER_RESULT_END.length;
+  }
+  return outputs;
+}
+
+function sanitizeBrowserToolContent(content: any[] | undefined): any[] | undefined {
+  if (!Array.isArray(content)) return undefined;
+  const textOutputs: string[] = [];
+  const nonTextContent: any[] = [];
+
+  for (const part of content) {
+    if (part?.type === 'text' && 'string' === typeof part.text) {
+      textOutputs.push(...extractDelimitedBrowserOutput(part.text));
+    } else {
+      nonTextContent.push(part);
+    }
+  }
+
+  if (textOutputs.length === 0) return content;
+  return [...textOutputs.map((text) => ({ type: 'text', text })), ...nonTextContent];
+}
+
 export function toCodexBrowserToolResult(input: {
   threadId: string;
   piName: string;
   rawResult: any;
 }) {
   return {
-    content: input.rawResult?.content ?? [
+    content: sanitizeBrowserToolContent(input.rawResult?.content) ?? [
       { type: 'text', text: JSON.stringify(input.rawResult ?? null, null, 2) },
     ],
     details: {
@@ -211,10 +319,11 @@ async function runNodeReplJs(
   session: ComputerUseSession,
   ctx: ExtensionContext,
   piName: string,
+  backend: BrowserBackend,
   code: string,
 ) {
   const timeoutMs = 120_000;
-  const { threadId, rawResult } = await session.callMcpTool(ctx, {
+  const { threadId, rawResult } = await session.callBrowserMcpTool(ctx, backend, {
     server: NODE_REPL_SERVER,
     tool: NODE_REPL_JS_TOOL,
     arguments: buildNodeReplJsArguments(code, timeoutMs),
@@ -259,13 +368,20 @@ export function registerCodexBrowserTools(
         const input = getBrowserScriptInput(params);
 
         if (spec.piName === 'codex_browser_list') {
-          return await runNodeReplJs(session, ctx, spec.piName, buildCodexBrowserListScript(input));
+          return await runNodeReplJs(
+            session,
+            ctx,
+            spec.piName,
+            input.backend,
+            buildCodexBrowserListScript(input),
+          );
         }
 
         return await runNodeReplJs(
           session,
           ctx,
           spec.piName,
+          input.backend,
           buildCodexBrowserEvalScript({ ...input, script: params.script }),
         );
       },

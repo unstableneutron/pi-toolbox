@@ -65,13 +65,13 @@ type ComputerActionName =
   | 'select_text'
   | 'secondary_action';
 
-export interface ComputerActionCallParams {
+interface ComputerActionCallParams {
   action: ComputerActionName;
   secondary_action?: string;
   [key: string]: unknown;
 }
 
-export interface ComputerUseToolSpec {
+interface ComputerUseToolSpec {
   piName: string;
   label: string;
   codexTool?: string;
@@ -144,7 +144,7 @@ export function buildComputerActionCall(params: ComputerActionCallParams): {
   return { codexTool, arguments: args };
 }
 
-export interface ToPiToolResultInput {
+interface ToPiToolResultInput {
   threadId: string;
   piName: string;
   codexTool: string;
