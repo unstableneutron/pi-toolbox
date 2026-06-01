@@ -57,6 +57,15 @@ async function waitForFileText(filePath: string): Promise<string> {
   throw lastError;
 }
 
+async function waitForOutput(chunks: Buffer[], expected: string): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    if (Buffer.concat(chunks).toString('utf8') === expected) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  expect(Buffer.concat(chunks).toString('utf8')).toBe(expected);
+}
+
 afterEach(async () => {
   await Promise.all(
     tempDirs.splice(0).map((directory) => rm(directory, { force: true, recursive: true })),
@@ -160,6 +169,45 @@ describe('codex desktop app-server wrapper WebSocket transport', () => {
     expect(observedRequest).toContain('Connection: Upgrade\r\n');
     expect(observedRequest).toContain('Sec-WebSocket-Key:');
   });
+
+  test('preserves WebSocket frame bytes coalesced with the upgrade response', async () => {
+    const { bridgeStdioToWebSocket, connectWebSocketUnix } =
+      await import('./codex-desktop-app-server-wrapper.mjs');
+    const socketPath = await makeTempSocketPath();
+
+    const server = net.createServer((socket) => {
+      socket.once('data', () => {
+        socket.write(
+          Buffer.concat([
+            Buffer.from(
+              [
+                'HTTP/1.1 101 Switching Protocols',
+                'Upgrade: websocket',
+                'Connection: Upgrade',
+                'Sec-WebSocket-Accept: test',
+                '',
+                '',
+              ].join('\r\n'),
+            ),
+            encodeServerTextFrame('{"id":1,"result":{}}'),
+          ]),
+        );
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+
+    const socket = await connectWebSocketUnix(socketPath, { timeoutMs: 1_000 });
+    const stdout = new PassThrough();
+    const chunks: Buffer[] = [];
+    stdout.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+    const bridge = bridgeStdioToWebSocket(socket, new PassThrough(), stdout);
+
+    await waitForOutput(chunks, '{"id":1,"result":{}}\n');
+
+    bridge.dispose();
+    socket.destroy();
+    server.close();
+  });
 });
 
 describe('codex desktop app-server wrapper CLI lifecycle', () => {
@@ -201,6 +249,23 @@ setInterval(() => {}, 1_000);
 
     expect(exit.code).toBe(1);
     await expect(waitForFileText(signalPath)).resolves.toBe('SIGTERM');
+  });
+
+  test('reports passthrough spawn errors instead of waiting forever', async () => {
+    const wrapperPath = fileURLToPath(
+      new URL('./codex-desktop-app-server-wrapper.mjs', import.meta.url),
+    );
+    const child = spawn(process.execPath, [wrapperPath, '--version'], {
+      env: {
+        ...process.env,
+        PI_CODEX_DESKTOP_REAL_CODEX: '/definitely/not/a/codex/binary',
+      },
+      stdio: 'ignore',
+    });
+
+    const exit = await waitForExit(child);
+
+    expect(exit.code).toBe(1);
   });
 });
 

@@ -234,19 +234,30 @@ export class CodexControlClient {
 
     await new Promise((resolve, reject) => {
       const chunks = [];
+      const cleanup = () => {
+        clearTimeout(timer);
+        this.socket.off('data', onData);
+        this.socket.off('error', onError);
+      };
+      const fail = (error) => {
+        cleanup();
+        this.socket.destroy();
+        reject(error);
+      };
       const timer = setTimeout(
-        () => reject(new Error('Timed out waiting for WebSocket upgrade')),
-        5_000,
+        () => fail(new Error('Timed out waiting for WebSocket upgrade')),
+        Math.min(5_000, this.requestTimeoutMs),
       );
+      const onError = (error) => fail(error);
       const onData = (chunk) => {
         chunks.push(chunk);
         const raw = Buffer.concat(chunks);
         const headerEnd = raw.indexOf('\r\n\r\n');
         if (headerEnd < 0) return;
-        this.socket.off('data', onData);
-        clearTimeout(timer);
+        cleanup();
         const header = raw.subarray(0, headerEnd).toString('utf8');
         if (!header.includes('101 Switching Protocols')) {
+          this.socket.destroy();
           reject(new Error(`WebSocket upgrade failed: ${header}`));
           return;
         }
@@ -254,7 +265,7 @@ export class CodexControlClient {
         resolve();
       };
       this.socket.on('data', onData);
-      this.socket.once('error', reject);
+      this.socket.once('error', onError);
     });
   }
 
@@ -361,8 +372,8 @@ await (async () => {
 
 async function withInitializedClient(options, fn) {
   const client = new CodexControlClient(options);
-  await client.connect();
   try {
+    await client.connect();
     await client.initialize(options.clientName);
     return await fn(client);
   } finally {

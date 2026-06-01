@@ -23,6 +23,7 @@ const CONNECT_RETRY_DELAY_MS = 50;
  * @property {() => void} end
  * @property {(event: string, listener: (...args: any[]) => void) => unknown} on
  * @property {(event: string, listener: (...args: any[]) => void) => unknown} off
+ * @property {() => void} [resume]
  */
 
 function encodeClientFrame(opcode, payload) {
@@ -217,6 +218,7 @@ export async function connectWebSocketUnix(
       const headerEnd = raw.indexOf('\r\n\r\n');
       if (headerEnd < 0) return;
       socket.off('data', onData);
+      socket.pause();
       clearTimeout(timer);
       const header = raw.subarray(0, headerEnd).toString('utf8');
       if (!header.includes('101 Switching Protocols')) {
@@ -314,6 +316,7 @@ export function bridgeStdioToWebSocket(socket, stdin = process.stdin, stdout = p
   stdin.on('data', onStdinData);
   stdin.on('end', onStdinEnd);
   socket.on('data', onSocketData);
+  socket.resume?.();
   disposers.push(() => stdin.off('data', onStdinData));
   disposers.push(() => stdin.off('end', onStdinEnd));
   disposers.push(() => socket.off('data', onSocketData));
@@ -326,9 +329,12 @@ export function bridgeStdioToWebSocket(socket, stdin = process.stdin, stdout = p
 
 async function runPassthrough(plan) {
   const child = spawn(plan.realCodexPath, plan.realArgs, { stdio: 'inherit', env: process.env });
-  await new Promise((resolve) => child.once('exit', resolve));
-  if (child.signalCode) process.kill(process.pid, child.signalCode);
-  process.exitCode = child.exitCode ?? 1;
+  const result = await new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('exit', (code, signal) => resolve({ code, signal }));
+  });
+  if (result.signal) process.kill(process.pid, result.signal);
+  process.exitCode = result.code ?? 1;
 }
 
 function killChildIfRunning(child) {
