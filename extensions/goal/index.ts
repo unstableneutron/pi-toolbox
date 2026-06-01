@@ -22,6 +22,11 @@ interface Goal {
   updatedAt: number;
 }
 
+type ContinuationBlock = {
+  goalId: string;
+  reason: 'assistantError';
+};
+
 interface PersistedGoalState {
   version: 1;
   action: 'set' | 'status' | 'clear' | 'account';
@@ -124,6 +129,45 @@ function assistantUsageTokens(messages: unknown[]): number {
     total += Math.max(0, msg.usage.input ?? 0) + Math.max(0, msg.usage.output ?? 0);
   }
   return total;
+}
+
+function getFinalAssistantMessage(messages: unknown[]): Record<string, unknown> | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (
+      message &&
+      typeof message === 'object' &&
+      (message as { role?: unknown }).role === 'assistant'
+    ) {
+      return message as Record<string, unknown>;
+    }
+  }
+  return undefined;
+}
+
+function hasVisibleAssistantOutput(content: unknown): boolean {
+  if (!Array.isArray(content)) return false;
+  return content.some((part) => {
+    if (!part || typeof part !== 'object') return false;
+    const block = part as { type?: unknown; text?: unknown };
+    if (block.type === 'text')
+      return typeof block.text === 'string' && block.text.trim().length > 0;
+    return block.type === 'toolCall';
+  });
+}
+
+function isTerminalAssistantError(message: Record<string, unknown> | undefined): boolean {
+  if (!message) return false;
+  return (
+    (message.stopReason === 'error' || message.stopReason === 'length') &&
+    !hasVisibleAssistantOutput(message.content)
+  );
+}
+
+function isUsefulAssistantProgress(message: Record<string, unknown> | undefined): boolean {
+  if (!message) return false;
+  if (message.stopReason === 'error' || message.stopReason === 'aborted') return false;
+  return hasVisibleAssistantOutput(message.content);
 }
 
 function goalResponse(goal: Goal | null, sessionId: string, includeCompletionReport = false) {
@@ -244,6 +288,7 @@ export default function goalExtension(pi: ExtensionAPI) {
   let activeSinceMs: number | null = null;
   let activeGoalIdAtAgentStart: string | null = null;
   let continuationQueued = false;
+  let continuationBlock: ContinuationBlock | null = null;
 
   function currentGoalSnapshot(): Goal | null {
     if (!goal) return null;
@@ -328,6 +373,7 @@ export default function goalExtension(pi: ExtensionAPI) {
     };
     activeSinceMs = Date.now();
     continuationQueued = false;
+    continuationBlock = null;
     return goal;
   }
 
@@ -342,6 +388,7 @@ export default function goalExtension(pi: ExtensionAPI) {
     if (status === 'active' && goal.status !== 'active') {
       activeSinceMs = Date.now();
       continuationQueued = false;
+      continuationBlock = null;
     }
     goal.status = status;
     goal.updatedAt = nowSeconds();
@@ -355,6 +402,7 @@ export default function goalExtension(pi: ExtensionAPI) {
     activeSinceMs = null;
     activeGoalIdAtAgentStart = null;
     continuationQueued = false;
+    continuationBlock = null;
     return true;
   }
 
@@ -366,12 +414,14 @@ export default function goalExtension(pi: ExtensionAPI) {
     goal.updatedAt = nowSeconds();
     activeSinceMs = null;
     continuationQueued = false;
+    continuationBlock = null;
     return true;
   }
 
   function queueContinuation(ctx: ExtensionContext): void {
     const snapshot = currentGoalSnapshot();
     if (!snapshot || snapshot.status !== 'active') return;
+    if (continuationBlock?.goalId === snapshot.id) return;
     if (continuationQueued || ctx.hasPendingMessages()) return;
 
     continuationQueued = true;
@@ -401,6 +451,7 @@ export default function goalExtension(pi: ExtensionAPI) {
     activeSinceMs = null;
     activeGoalIdAtAgentStart = null;
     continuationQueued = false;
+    continuationBlock = null;
 
     for (const entry of ctx.sessionManager.getBranch()) {
       if (entry.type !== 'custom' || entry.customType !== STATE_TYPE) continue;
@@ -415,6 +466,20 @@ export default function goalExtension(pi: ExtensionAPI) {
 
   pi.on('session_start', async (_event, ctx) => reconstructState(ctx));
   pi.on('session_tree', async (_event, ctx) => reconstructState(ctx));
+
+  pi.on('session_compact', async (_event, ctx) => {
+    if (!goal || goal.status !== 'active') return;
+    if (continuationBlock?.goalId !== goal.id) return;
+    continuationBlock = null;
+    continuationQueued = false;
+    queueContinuation(ctx);
+  });
+
+  pi.on('input', async (event) => {
+    if ((event as { source?: unknown }).source !== 'extension') {
+      continuationBlock = null;
+    }
+  });
 
   pi.on('before_agent_start', async (event) => {
     const snapshot = currentGoalSnapshot();
@@ -450,6 +515,24 @@ export default function goalExtension(pi: ExtensionAPI) {
     if (changed) persist('account');
     updateStatus(ctx);
     activeGoalIdAtAgentStart = null;
+
+    const finalAssistant = getFinalAssistantMessage(event.messages as unknown[]);
+    if (goal.status === 'active' && isTerminalAssistantError(finalAssistant)) {
+      const wasAlreadyBlocked = continuationBlock?.goalId === goal.id;
+      continuationBlock = { goalId: goal.id, reason: 'assistantError' };
+      continuationQueued = false;
+      if (!wasAlreadyBlocked) {
+        showGoalMessage(
+          'Goal auto-continuation suspended after an assistant error. Recovery retries or compaction can continue; goal continuations will resume automatically after successful compaction or a useful assistant response.',
+        );
+      }
+      return;
+    }
+
+    if (goal.status === 'active' && isUsefulAssistantProgress(finalAssistant)) {
+      continuationBlock = null;
+      continuationQueued = false;
+    }
 
     if (goal.status === 'active') {
       queueContinuation(ctx);
