@@ -122,6 +122,7 @@ export class CodexAppServerClient {
     tool: string;
     arguments?: unknown;
     timeoutMs?: number;
+    _meta?: Record<string, unknown>;
   }): Promise<any> {
     await this.init();
     return await this.request(
@@ -131,6 +132,7 @@ export class CodexAppServerClient {
         threadId: input.threadId,
         tool: input.tool,
         arguments: input.arguments ?? {},
+        ...(input._meta ? { _meta: input._meta } : {}),
       },
       input.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
     );

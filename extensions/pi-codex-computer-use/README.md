@@ -71,19 +71,51 @@ summarized MCP server/tool status. Use `/codex-computer-use-status verbose` to
 also write the raw diagnostic JSON to a temporary file; verbose mode prints the
 file path instead of dumping full MCP schemas into the status output.
 
+## Codex Desktop app-server wrapper
+
+`codex-desktop-app-server-wrapper.mjs` lets Codex Desktop keep its expected
+stdio app-server contract while the real app-server listens on a Unix socket that
+other Pi tooling can also connect to.
+
+Launch Codex Desktop directly with `CODEX_CLI_PATH` pointing at the wrapper:
+
+```bash
+PI_CODEX_DESKTOP_REAL_CODEX=/Applications/Codex.app/Contents/Resources/codex \
+PI_CODEX_DESKTOP_APP_SERVER_SOCKET="$HOME/.codex/pi-codex-desktop/app-server.sock" \
+CODEX_CLI_PATH="$PWD/extensions/pi-codex-computer-use/scripts/codex-desktop-app-server-wrapper.mjs" \
+/Applications/Codex.app/Contents/MacOS/Codex
+```
+
+The wrapper rewrites Desktop's local app-server spawn from:
+
+```text
+codex app-server --analytics-default-enabled
+```
+
+to:
+
+```text
+codex app-server --listen unix://$PI_CODEX_DESKTOP_APP_SERVER_SOCKET --analytics-default-enabled
+```
+
+Then it bridges Desktop stdio JSON-RPC to the Unix-socket WebSocket transport.
+Use the exposed socket with `scripts/codex-control.mjs --socket ...` for
+additional same-process clients.
+
 ## Sync bundled Codex skills
 
 The `skills/` directory is copied from the installed Codex.app bundled plugins.
 Refresh it after updating Codex.app with:
 
 ```bash
-pnpm run sync:skills
+aubr -C extensions/pi-codex-computer-use sync:skills
 ```
 
 Override the Codex.app location when needed:
 
 ```bash
-PI_COMPUTER_USE_CODEX_APP=/path/to/Codex.app pnpm run sync:skills
+PI_COMPUTER_USE_CODEX_APP=/path/to/Codex.app \
+  aubr -C extensions/pi-codex-computer-use sync:skills
 ```
 
 Currently synced skills:
@@ -99,6 +131,6 @@ vendor-copied Codex skills.
 ## Development
 
 ```bash
-pnpm test
-pnpm run check
+aubr -C extensions/pi-codex-computer-use test
+aubr -C extensions/pi-codex-computer-use check
 ```

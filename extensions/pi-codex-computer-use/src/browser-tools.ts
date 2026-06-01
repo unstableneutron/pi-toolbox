@@ -79,6 +79,10 @@ function buildBrowserRuntimePrelude({
   browserClientPath,
 }: BrowserRuntimeScriptInput): string {
   const codexBrowserId = BROWSER_BACKEND_TO_CODEX_ID[backend];
+  const recoveryHint =
+    backend === 'chrome'
+      ? 'Open the Codex Chrome Extension side panel in Chrome or Brave, confirm it is connected, then retry.'
+      : 'Open the Codex in-app Browser for this Codex thread, then retry.';
 
   return `if (!globalThis.agent) {
   const { setupBrowserRuntime } = await import(${quoted(browserClientPath)});
@@ -87,10 +91,38 @@ function buildBrowserRuntimePrelude({
 if (!globalThis.__piCodexBrowsers) {
   globalThis.__piCodexBrowsers = {};
 }
-if (!globalThis.__piCodexBrowsers[${quoted(backend)}]) {
-  globalThis.__piCodexBrowsers[${quoted(backend)}] = await agent.browsers.get(${quoted(codexBrowserId)});
+if (!globalThis.__piCodexGetBrowser) {
+  globalThis.__piCodexGetBrowser = async (piBackend, codexBrowserId, unavailableMessage, recoveryHint) => {
+    if (!globalThis.__piCodexBrowsers[piBackend]) {
+      const __piAvailableBrowsers = await agent.browsers.list();
+      const __piMatchingBrowser = __piAvailableBrowsers.find(
+        (__piBrowser) => __piBrowser.id === codexBrowserId || __piBrowser.type === codexBrowserId,
+      );
+      if (!__piMatchingBrowser) {
+        const __piAvailableSummary = __piAvailableBrowsers.length === 0
+          ? "none"
+          : __piAvailableBrowsers
+              .map((__piBrowser) => [__piBrowser.type, __piBrowser.id].filter(Boolean).join(":"))
+              .join(", ");
+        throw new Error(
+          unavailableMessage +
+            " Available browser backends: " +
+            __piAvailableSummary +
+            ". " +
+            recoveryHint,
+        );
+      }
+      globalThis.__piCodexBrowsers[piBackend] = await agent.browsers.get(codexBrowserId);
+    }
+    return globalThis.__piCodexBrowsers[piBackend];
+  };
 }
-globalThis.browser = globalThis.__piCodexBrowsers[${quoted(backend)}];
+globalThis.browser = await globalThis.__piCodexGetBrowser(
+  ${quoted(backend)},
+  ${quoted(codexBrowserId)},
+  ${quoted(`No Codex ${backend} browser backend is available.`)},
+  ${quoted(recoveryHint)},
+);
 await browser.nameSession("🔎 Pi Browser");`;
 }
 

@@ -9,6 +9,7 @@ import { getCodexComputerUsePaths } from './codex-paths';
 import { answerComputerUseElicitation } from './elicitation';
 
 const COMPUTER_USE_SERVER = 'computer-use';
+const NODE_REPL_SERVER = 'node_repl';
 const RETRYABLE_OBSERVATION_TOOLS = new Set(['list_apps', 'get_app_state']);
 const TRANSIENT_PROCESS_ERROR = /NSOSStatusErrorDomain Code=-600|procNotFound/;
 
@@ -145,6 +146,17 @@ export interface CodexMcpToolCall {
   timeoutMs?: number;
 }
 
+function buildNodeReplRequestMeta(threadId: string, turnNumber: number): Record<string, unknown> {
+  return {
+    'x-codex-turn-metadata': {
+      session_id: threadId,
+      thread_id: threadId,
+      thread_source: 'pi-codex-computer-use',
+      turn_id: `pi-codex-computer-use-turn-${turnNumber}`,
+    },
+  };
+}
+
 export interface CodexDiagnosticStatusOptions {
   verbose?: boolean;
 }
@@ -152,6 +164,7 @@ export interface CodexDiagnosticStatusOptions {
 export class ComputerUseSession {
   private client?: CodexAppServerClient;
   private threadId?: string;
+  private nextNodeReplTurnNumber = 1;
 
   async getStatus(ctx: ExtensionContext): Promise<string> {
     return await this.getDiagnosticStatus(ctx);
@@ -245,6 +258,9 @@ export class ComputerUseSession {
           tool: input.tool,
           arguments: input.arguments,
           timeoutMs: input.timeoutMs ?? 120_000,
+          ...(input.server === NODE_REPL_SERVER
+            ? { _meta: buildNodeReplRequestMeta(threadId, this.nextNodeReplTurnNumber++) }
+            : {}),
         });
         const errorMessage = getMcpErrorMessage(rawResult);
         if (!errorMessage) {

@@ -16,7 +16,8 @@ describe('browser script builders', () => {
     });
 
     expect(script).toContain('await import("/tmp/browser/scripts/browser-client.mjs")');
-    expect(script).toContain('agent.browsers.get("iab")');
+    expect(script).toContain('globalThis.__piCodexGetBrowser(');
+    expect(script).toContain('"iab",');
     expect(script).toContain('await browser.tabs.list()');
     expect(script).toContain('await browser.tabs.selected().catch(() => undefined)');
     expect(script).toContain('nodeRepl.write(JSON.stringify(__piBrowserResult, null, 2));');
@@ -29,7 +30,32 @@ describe('browser script builders', () => {
       browserClientPath: '/tmp/chrome/scripts/browser-client.mjs',
     });
 
-    expect(script).toContain('agent.browsers.get("extension")');
+    expect(script).toContain('globalThis.__piCodexGetBrowser(');
+    expect(script).toContain('"chrome",');
+    expect(script).toContain('"extension",');
+  });
+
+  test('explains how to recover when the requested browser backend is unavailable', () => {
+    const script = buildCodexBrowserEvalScript({
+      backend: 'chrome',
+      browserClientPath: '/tmp/chrome/scripts/browser-client.mjs',
+      script: 'return await tab.title();',
+    });
+
+    expect(script).toContain('globalThis.__piCodexGetBrowser = async');
+    expect(script).toContain('await agent.browsers.list()');
+    expect(script).toContain('No Codex chrome browser backend is available.');
+    expect(script).toContain('Open the Codex Chrome Extension side panel');
+  });
+
+  test('does not redeclare helper identifiers when node_repl evaluates scripts repeatedly', () => {
+    const script = buildCodexBrowserListScript({
+      backend: 'iab',
+      browserClientPath: '/tmp/browser/scripts/browser-client.mjs',
+    });
+
+    expect(script).not.toContain('async function __piCodexGetBrowser');
+    expect(script).toContain('if (!globalThis.__piCodexGetBrowser)');
   });
 
   test('builds an eval script with agent, browser, tab, and nodeRepl bindings', () => {
@@ -39,7 +65,8 @@ describe('browser script builders', () => {
       script: 'await tab.goto("https://example.com");\nreturn { title: await tab.title() };',
     });
 
-    expect(script).toContain('agent.browsers.get("iab")');
+    expect(script).toContain('globalThis.__piCodexGetBrowser(');
+    expect(script).toContain('"iab",');
     expect(script).toContain('await browser.tabs.new()');
     expect(script).toContain('async ({ agent, browser, tab, nodeRepl }) => {');
     expect(script).toContain('await tab.goto("https://example.com");');

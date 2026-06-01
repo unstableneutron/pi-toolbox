@@ -77,8 +77,24 @@ describe('ComputerUseSession.callMcpTool', () => {
         tool: 'js',
         arguments: { code: 'console.log("hello from node")' },
         timeoutMs: 5000,
+        _meta: {
+          'x-codex-turn-metadata': {
+            session_id: 'thread-1',
+            thread_id: 'thread-1',
+            thread_source: 'pi-codex-computer-use',
+            turn_id: 'pi-codex-computer-use-turn-1',
+          },
+        },
       },
     ]);
+  });
+
+  test('does not attach Codex turn metadata to Computer Use calls', async () => {
+    const { session, calls } = makeSessionWithClient([successfulListApps]);
+
+    await session.callTool({ cwd: '/tmp', hasUI: false } as any, 'list_apps', {});
+
+    expect(calls[0]).not.toHaveProperty('_meta');
   });
 });
 
