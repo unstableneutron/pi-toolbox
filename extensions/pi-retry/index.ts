@@ -52,6 +52,7 @@ const DEFAULT_CORE_RETRY_MAX_RETRIES = 3;
 const DEFAULT_COMPACTION_EXTRA_RETRIES = 2;
 const LENGTH_TRUNCATION_MAX_RECOVERY_ATTEMPTS = 1;
 const PROMPT_RECOVERY_TIMEOUT_MS = 120_000;
+const RECOVERY_FALLBACK_QUIET_WINDOW_MS = 750;
 const RECOVERY_DISPATCH_IDLE_POLL_DELAY_MS = 100;
 
 export interface PatchInstallResult {
@@ -99,6 +100,7 @@ const linearizedTreeCache = new WeakMap<object, LinearizedTreeCacheEntry>();
 
 const uiBySessionId = new Map<string, StatusUi>();
 const recoveryDispatchTimerBySessionId = new Map<string, ReturnType<typeof setTimeout>>();
+const recoveryFallbackTimerBySessionId = new Map<string, ReturnType<typeof setTimeout>>();
 const abortListenerBySessionId = new Map<string, { signal: AbortSignal; onAbort: () => void }>();
 const terminatingToolCallIdsBySessionId = new Map<string, Set<string>>();
 const pendingLengthTruncationBySessionId = new Map<string, { failedEntryId?: string }>();
@@ -820,6 +822,18 @@ function cancelScheduledRecoveryDispatch(sessionId: string | undefined): void {
   recoveryDispatchTimerBySessionId.delete(sessionId);
 }
 
+function cancelScheduledFallbackRecovery(sessionId: string | undefined): void {
+  if (!sessionId) {
+    return;
+  }
+  const timer = recoveryFallbackTimerBySessionId.get(sessionId);
+  if (timer === undefined) {
+    return;
+  }
+  clearTimeout(timer);
+  recoveryFallbackTimerBySessionId.delete(sessionId);
+}
+
 function unbindAbortListener(sessionId: string | undefined): void {
   if (!sessionId) {
     return;
@@ -852,6 +866,7 @@ function clearRecoveryForSession(
 
   if (options?.cancelDispatch ?? true) {
     cancelScheduledRecoveryDispatch(sessionId);
+    cancelScheduledFallbackRecovery(sessionId);
   }
   clearLengthTruncationRecoveryForSession(sessionId);
   handleRecoveryAbort(sessionId);
@@ -930,7 +945,7 @@ function schedulePendingRecoveryDispatch(
       return;
     }
 
-    if (!ctx.isIdle()) {
+    if (!ctx.isIdle() || ctx.hasPendingMessages()) {
       scheduleTick(RECOVERY_DISPATCH_IDLE_POLL_DELAY_MS);
       return;
     }
@@ -1144,6 +1159,9 @@ export function resetPiRetryTestState(): void {
   for (const sessionId of recoveryDispatchTimerBySessionId.keys()) {
     cancelScheduledRecoveryDispatch(sessionId);
   }
+  for (const sessionId of recoveryFallbackTimerBySessionId.keys()) {
+    cancelScheduledFallbackRecovery(sessionId);
+  }
   for (const sessionId of abortListenerBySessionId.keys()) {
     unbindAbortListener(sessionId);
   }
@@ -1335,6 +1353,111 @@ export function createPiRetryExtension(
       schedulePendingRecoveryDispatch(sessionId, ctx, pi);
     };
 
+    const sendRecoveryMessage = (content: string, details?: RetryRecoveryMessageDetails) =>
+      pi.sendMessage(
+        { customType: PI_RETRY_RECOVERY_CUSTOM_TYPE, content, display: false, details },
+        { triggerTurn: true },
+      );
+
+    const sameTerminalLeaf = (
+      expected: NonNullable<ReturnType<typeof detectRetryableTerminalLeaf>>,
+      ctx: ExtensionContext,
+    ): NonNullable<ReturnType<typeof detectRetryableTerminalLeaf>> | undefined => {
+      if (expected.entryId && ctx.sessionManager.getLeafId() !== expected.entryId) {
+        return undefined;
+      }
+      const current = detectRetryableTerminalLeaf(ctx.sessionManager as any);
+      if (!current || current.kind !== expected.kind || current.entryId !== expected.entryId) {
+        return undefined;
+      }
+      return current;
+    };
+
+    const dispatchTerminalFallbackRecovery = async (
+      candidate: NonNullable<ReturnType<typeof detectRetryableTerminalLeaf>>,
+      ctx: ExtensionContext,
+    ): Promise<void> => {
+      const current = sameTerminalLeaf(candidate, ctx);
+      if (!current) {
+        return;
+      }
+
+      const sessionId = ctx.sessionManager.getSessionId();
+      if (current.kind === 'stranded-tool-results') {
+        const details: RetryRecoveryMessageDetails = {
+          version: 1,
+          displayHint: 'linear-replacement',
+          kind: current.kind,
+          messageKind: 'continue',
+          attempt: 1,
+          expectedLeafId: current.entryId,
+        };
+        setPendingRecovery(sessionId, {
+          kind: current.kind,
+          message: 'Continue.',
+          expectedLeafId: current.entryId,
+          details,
+        });
+        const queuedRecovery = getQueuedRecovery(sessionId);
+        if (queuedRecovery && ctx.hasUI) {
+          ctx.ui.setStatus(STATUS_KEY, buildRecoveryStatus(queuedRecovery));
+        }
+      } else {
+        await handleRefusalRecovery({
+          event: { messages: [current.message] },
+          ctx,
+          patchedSession: { sessionManager: ctx.sessionManager as any },
+          reviewRewrite: requestRefusalRewrite,
+          sendUserMessage: sendRecoveryMessage,
+          dispatchMode: 'pending',
+        });
+      }
+
+      if (getPendingRecovery(sessionId)) {
+        await dispatchPendingRecovery({
+          sessionId,
+          sendUserMessage: sendRecoveryMessage,
+          ui: createDispatchRecoveryUi(ctx),
+        });
+      }
+    };
+
+    const scheduleTerminalFallbackRecovery = (
+      candidate: NonNullable<ReturnType<typeof detectRetryableTerminalLeaf>>,
+      ctx: ExtensionContext,
+    ): void => {
+      const sessionId = ctx.sessionManager.getSessionId();
+      if (recoveryFallbackTimerBySessionId.has(sessionId)) {
+        return;
+      }
+
+      const scheduleTick = (delayMs: number) => {
+        const timer = setTimeout(() => void tick(), delayMs);
+        timer.unref?.();
+        recoveryFallbackTimerBySessionId.set(sessionId, timer);
+      };
+
+      const tick = async () => {
+        recoveryFallbackTimerBySessionId.delete(sessionId);
+        if (!ctx.isIdle() || ctx.hasPendingMessages()) {
+          scheduleTick(RECOVERY_DISPATCH_IDLE_POLL_DELAY_MS);
+          return;
+        }
+        if (getPendingRecovery(sessionId)) {
+          schedulePendingRecoveryDispatch(sessionId, ctx, pi);
+          return;
+        }
+        try {
+          await dispatchTerminalFallbackRecovery(candidate, ctx);
+        } catch {
+          // Keep terminal fallback best-effort. The retryable leaf remains in the session
+          // for manual /retry if a custom extension or review model fails during dispatch.
+        }
+      };
+
+      scheduleTick(RECOVERY_FALLBACK_QUIET_WINDOW_MS);
+    };
+
     pi.on('session_start', async (event, ctx) => {
       bindStatusUi(ctx);
       stashSessionReference(ctx);
@@ -1418,7 +1541,7 @@ export function createPiRetryExtension(
         }
       }
 
-      if (refusalRecoveryDisabled()) {
+      if (refusalRecoveryDisabled() || event.message?.stopReason === 'stop') {
         return;
       }
 
@@ -1493,25 +1616,8 @@ export function createPiRetryExtension(
       } else {
         if (!getPendingRecovery(sessionId) && !refusalRecoveryDisabled()) {
           const candidate = detectRetryableTerminalLeaf(ctx.sessionManager as any);
-          if ('stranded-tool-results' === candidate?.kind) {
-            const details: RetryRecoveryMessageDetails = {
-              version: 1,
-              displayHint: 'linear-replacement',
-              kind: candidate.kind,
-              messageKind: 'continue',
-              attempt: 1,
-              expectedLeafId: candidate.entryId,
-            };
-            setPendingRecovery(sessionId, {
-              kind: candidate.kind,
-              message: 'Continue.',
-              expectedLeafId: candidate.entryId,
-              details,
-            });
-            const queuedRecovery = getQueuedRecovery(sessionId);
-            if (queuedRecovery && ctx.hasUI) {
-              ctx.ui.setStatus(STATUS_KEY, buildRecoveryStatus(queuedRecovery));
-            }
+          if (candidate) {
+            scheduleTerminalFallbackRecovery(candidate, ctx);
           }
         }
 

@@ -2345,7 +2345,7 @@ describe('pi-retry extension runtime', () => {
     expect(getAbortListenerBindingCount()).toBe(0);
   });
 
-  test('turn_end triggers refusal recovery for terminal stop turns', async () => {
+  test('turn_end leaves terminal stop recovery to the post-run fallback path', async () => {
     const fakeModule = makeFakeAgentSessionModule();
     const harness = await createExtensionHarness(async () => fakeModule);
 
@@ -2368,25 +2368,144 @@ describe('pi-retry extension runtime', () => {
       harness.ctx,
     );
 
-    expect(handleRefusalRecoverySpy).toHaveBeenCalledTimes(1);
-    expect(handleRefusalRecoverySpy).toHaveBeenCalledWith(
-      expect.objectContaining({
-        event: {
-          messages: [
-            {
-              role: 'assistant',
-              stopReason: 'stop',
-              content: [
-                { type: 'text', text: "I'm sorry, but I cannot assist with that request." },
-              ],
-            },
-          ],
+    expect(handleRefusalRecoverySpy).not.toHaveBeenCalled();
+    expect(harness.sendMessageCalls).toEqual([]);
+    expect(harness.sendUserMessageCalls).toEqual([]);
+  });
+
+  test('agent_end dispatches terminal refusal fallback only after idle with no pending messages', async () => {
+    vi.useFakeTimers();
+
+    const fakeModule = makeFakeAgentSessionModule();
+    const harness = await createExtensionHarness(async () => fakeModule);
+    let leafId = 'assistant-refusal-1';
+    let hasPendingMessages = true;
+
+    harness.ctx.isIdle = () => true;
+    harness.ctx.hasPendingMessages = () => hasPendingMessages;
+    harness.ctx.sessionManager.branch = vi.fn((nextLeafId: string) => {
+      leafId = nextLeafId;
+    });
+    harness.ctx.sessionManager.getLeafId = () => leafId;
+    harness.ctx.sessionManager.getEntries = () => [
+      {
+        id: 'user-1',
+        type: 'message',
+        message: { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+      },
+      {
+        id: 'assistant-refusal-1',
+        parentId: 'user-1',
+        type: 'message',
+        message: {
+          role: 'assistant',
+          stopReason: 'stop',
+          content: [{ type: 'text', text: "I'm sorry, but I cannot assist with that request." }],
         },
-        patchedSession: { sessionManager: harness.ctx.sessionManager },
-      }),
+      },
+    ];
+
+    await getHandler(harness.handlers, 'agent_end')(
+      {
+        type: 'agent_end',
+        messages: [
+          {
+            role: 'assistant',
+            stopReason: 'stop',
+            content: [{ type: 'text', text: "I'm sorry, but I cannot assist with that request." }],
+          },
+        ],
+      },
+      harness.ctx,
     );
 
-    expect(harness.sendUserMessageCalls).toEqual([]);
+    await vi.runOnlyPendingTimersAsync();
+    expect(harness.sendMessageCalls).toEqual([]);
+
+    hasPendingMessages = false;
+    await vi.runAllTimersAsync();
+
+    expect(harness.ctx.sessionManager.branch).toHaveBeenCalledWith('user-1');
+    expect(harness.sendMessageCalls).toEqual([
+      {
+        message: expect.objectContaining({
+          customType: 'pi-retry-recovery',
+          display: false,
+          details: expect.objectContaining({
+            version: 1,
+            displayHint: 'linear-replacement',
+            kind: 'refusal',
+            messageKind: 'continue',
+            attempt: 1,
+            expectedLeafId: 'user-1',
+            replacement: {
+              supersedesEntryId: 'assistant-refusal-1',
+              parentEntryId: 'user-1',
+            },
+          }),
+        }),
+        options: { triggerTurn: true },
+      },
+    ]);
+  });
+
+  test('agent_end cancels terminal fallback if another extension advances the leaf first', async () => {
+    vi.useFakeTimers();
+
+    const fakeModule = makeFakeAgentSessionModule();
+    const harness = await createExtensionHarness(async () => fakeModule);
+    let leafId = 'assistant-empty-1';
+
+    harness.ctx.isIdle = () => true;
+    harness.ctx.hasPendingMessages = () => false;
+    harness.ctx.sessionManager.branch = vi.fn((nextLeafId: string) => {
+      leafId = nextLeafId;
+    });
+    harness.ctx.sessionManager.getLeafId = () => leafId;
+    harness.ctx.sessionManager.getEntries = () => [
+      {
+        id: 'user-1',
+        type: 'message',
+        message: { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+      },
+      {
+        id: 'assistant-empty-1',
+        parentId: 'user-1',
+        type: 'message',
+        message: {
+          role: 'assistant',
+          stopReason: 'stop',
+          content: [{ type: 'thinking', thinking: 'Need to inspect sample code more closely.' }],
+        },
+      },
+      {
+        id: 'other-extension-recovery',
+        parentId: 'assistant-empty-1',
+        type: 'custom',
+        customType: 'other-extension-recovery',
+        data: { queued: true },
+      },
+    ];
+
+    await getHandler(harness.handlers, 'agent_end')(
+      {
+        type: 'agent_end',
+        messages: [
+          {
+            role: 'assistant',
+            stopReason: 'stop',
+            content: [{ type: 'thinking', thinking: 'Need to inspect sample code more closely.' }],
+          },
+        ],
+      },
+      harness.ctx,
+    );
+
+    leafId = 'other-extension-recovery';
+    await vi.runAllTimersAsync();
+
+    expect(harness.ctx.sessionManager.branch).not.toHaveBeenCalled();
+    expect(harness.sendMessageCalls).toEqual([]);
   });
 
   test('turn_end dispatches retryable provider errors immediately in headless sessions', async () => {
@@ -2572,13 +2691,15 @@ describe('pi-retry extension runtime', () => {
     );
 
     expect(harness.sendMessageCalls).toEqual([]);
+    expect(harness.statusCalls).toEqual([]);
+
+    harness.ctx.isIdle = () => true;
+    await vi.runAllTimersAsync();
+
     expect(harness.statusCalls).toContainEqual({
       key: 'pi-retry',
       text: '↻ Stranded tool results detected; retrying with Continue...',
     });
-
-    harness.ctx.isIdle = () => true;
-    await vi.runAllTimersAsync();
 
     expect(harness.sendMessageCalls).toEqual([
       {
@@ -2930,7 +3051,7 @@ describe('pi-retry extension runtime', () => {
     expect(harness.sendUserMessageCalls).toEqual([]);
   });
 
-  test('turn_end recovers empty-stop turns even when tool results are present', async () => {
+  test('turn_end leaves empty-stop turns with tool results for post-run fallback', async () => {
     const fakeModule = makeFakeAgentSessionModule();
     const harness = await createExtensionHarness(async () => fakeModule);
 
@@ -2951,7 +3072,7 @@ describe('pi-retry extension runtime', () => {
       harness.ctx,
     );
 
-    expect(handleRefusalRecoverySpy).toHaveBeenCalledTimes(1);
+    expect(handleRefusalRecoverySpy).not.toHaveBeenCalled();
   });
 
   test('turn_end ignores visible assistant turns that still have tool results', async () => {
