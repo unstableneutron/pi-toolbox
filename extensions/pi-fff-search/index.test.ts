@@ -999,7 +999,7 @@ describe('pi-fff-search extension', () => {
     );
   });
 
-  test('builtin read override does not use package compaction in expanded mode', () => {
+  test('builtin read override shows the original package path in expanded mode', () => {
     const { tools } = createHarness({
       overrideBuiltinRead: true,
       overrideBuiltinGrep: false,
@@ -1014,8 +1014,28 @@ describe('pi-fff-search extension', () => {
       expanded: true,
     } as any);
 
-    expect(renderTextTrimmed(call, 120)).toBe(
-      '<toolTitle><b>read</b></toolTitle> <accent>node_modules/zod/v4/core/api.js</accent>',
+    expect(renderTextTrimmed(call, 500)).toBe(
+      '<toolTitle><b>read</b></toolTitle> <accent>/repo/node_modules/zod/v4/core/api.js</accent>',
+    );
+  });
+
+  test('builtin read override shows the original resource path in expanded mode', () => {
+    const { tools } = createHarness({
+      overrideBuiltinRead: true,
+      overrideBuiltinGrep: false,
+      overrideBuiltinFind: false,
+      rewriteBuiltinBash: false,
+    });
+    const theme = createTaggedTheme();
+    const read = tools.find((tool) => tool.name === 'read')!;
+
+    const call = read.renderCall!({ path: '/repo/AGENTS.md' }, theme, {
+      cwd: '/repo',
+      expanded: true,
+    } as any);
+
+    expect(renderTextTrimmed(call, 500)).toBe(
+      '<toolTitle><b>read</b></toolTitle> <accent>/repo/AGENTS.md</accent>',
     );
   });
 

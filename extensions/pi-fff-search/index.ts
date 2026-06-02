@@ -2237,7 +2237,7 @@ function formatBuiltinReadCallSummary(
     return `:${startLine}${endLine ? `-${endLine}` : ''}`;
   })();
   const fullExpandHintText = showExpandHint ? ' (ctrl+o to expand)' : '';
-  const shortenedPath = shortenDisplayPath(pathValue, cwd);
+  const displayBasePath = showExpandHint ? shortenDisplayPath(pathValue, cwd) : pathValue;
   const suffixChoice = chooseOptionalSuffix({
     width,
     fixedWidth: 'read '.length + rawRange.length,
@@ -2246,7 +2246,7 @@ function formatBuiltinReadCallSummary(
   });
   const pathBudget = width ? suffixChoice.primaryBudget : 0;
   const displayPath =
-    pathBudget > 0 ? collapseMiddlePath(shortenedPath, pathBudget) : shortenedPath;
+    pathBudget > 0 ? collapseMiddlePath(displayBasePath, pathBudget) : displayBasePath;
   const expandHint = suffixChoice.suffix ? theme.fg('dim', suffixChoice.suffix) : '';
 
   return `${title} ${theme.fg('accent', displayPath)}${formatBuiltinReadLineRange(args, theme)}${expandHint}`;
