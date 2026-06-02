@@ -113,6 +113,35 @@ describe('pi-fff-search rendering helpers', () => {
     ).toBe('3 files\n  · src/router.ts\n  · src/router.test.ts\n    … 1 more');
   });
 
+  test('find-files collapsed rows do not exceed narrow widths', () => {
+    const rendered = formatCollapsedResultText('fff_find_files', {
+      contentText: 'base_path: /repo\n\nsrc/features/search/rendering/very-long-file-name.test.ts',
+      details: {
+        toolName: 'fff_find_files',
+        resolvedWithin: '/repo',
+        publicRequest: { tool: 'fff_find_files', query: 'long', within: '/repo' } as any,
+      },
+      width: 20,
+    });
+
+    expect(rendered.split('\n').every((line) => line.length <= 20)).toBe(true);
+  });
+
+  test('grep collapsed rows do not exceed narrow widths', () => {
+    const rendered = formatCollapsedResultText('fff_grep', {
+      contentText:
+        'base_path: /repo\n\nsrc/features/search/rendering/very-long-file-name.test.ts:42: match',
+      details: {
+        toolName: 'fff_grep',
+        resolvedWithin: '/repo',
+        publicRequest: { tool: 'fff_grep', patterns: ['match'], within: '/repo' } as any,
+      },
+      width: 24,
+    });
+
+    expect(rendered.split('\n').every((line) => line.length <= 24)).toBe(true);
+  });
+
   test('formats search collapsed summary grouped by file counts', () => {
     expect(
       formatCollapsedResultText('fff_search_terms', {
@@ -836,6 +865,29 @@ describe('pi-fff-search extension', () => {
     expect(renderTextTrimmed(call, 500)).toBe(
       '<toolTitle><b>read</b></toolTitle> <accent>src/router.ts</accent><warning>:20-24</warning><dim> (ctrl+o to expand)</dim>',
     );
+  });
+
+  test('builtin read override hides compact package expand hint before it wraps on narrow screens', () => {
+    const { tools } = createHarness({
+      overrideBuiltinRead: true,
+      overrideBuiltinGrep: false,
+      overrideBuiltinFind: false,
+      rewriteBuiltinBash: false,
+    });
+    const theme = createTheme();
+    const read = tools.find((tool) => tool.name === 'read')!;
+
+    const call = read.renderCall!(
+      { path: '/repo/node_modules/@earendil-works/pi-coding-agent/docs/skills.md' },
+      theme,
+      { cwd: '/repo', expanded: false } as any,
+    );
+
+    const lines = renderTextTrimmed(call, 48).split('\n');
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toBe('read package @earendil-works/.../docs/skills.md');
+    expect(lines[0]).not.toContain('ctrl+o');
+    expect(lines[0]!.length).toBeLessThanOrEqual(48);
   });
 
   test('builtin read override preserves native compact skill-file rendering', () => {

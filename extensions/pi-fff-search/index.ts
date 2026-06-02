@@ -31,6 +31,7 @@ import {
   type SearchCoordinatorResult,
 } from 'fff-router';
 import { clampMatchText } from './match-heuristics';
+import { chooseOptionalSuffix } from '../shared/tui-width';
 import { tryRewriteBash, type RewriteDecision, type RewriteTool } from './bash-rewrite';
 import {
   type FallbackSpillInfo,
@@ -2168,12 +2169,33 @@ function formatCompactReadCall(
   classification: CompactReadClassification,
   args: Record<string, unknown>,
   theme: ReadCallTheme,
+  width?: number,
 ): string {
-  const expandHint = theme.fg('dim', ' (ctrl+o to expand)');
+  const rawRange = (() => {
+    if (args.offset === undefined && args.limit === undefined) return '';
+    const startLine = typeof args.offset === 'number' ? args.offset : 1;
+    const endLine = typeof args.limit === 'number' ? startLine + args.limit - 1 : '';
+    return `:${startLine}${endLine ? `-${endLine}` : ''}`;
+  })();
+  const plainPrefix = classification.kind === 'skill' ? '[skill] ' : `read ${classification.kind} `;
+  const suffixChoice = chooseOptionalSuffix({
+    width,
+    fixedWidth: plainPrefix.length + rawRange.length,
+    suffixes: [' (ctrl+o to expand)', ''],
+    minPrimaryWidth: 24,
+  });
+  const displayLabel =
+    Number.isFinite(suffixChoice.primaryBudget) && suffixChoice.primaryBudget > 0
+      ? normalizeCompactCollapsedPath(
+          collapseMiddlePath(classification.label, suffixChoice.primaryBudget),
+        )
+      : classification.label;
+  const expandHint = suffixChoice.suffix ? theme.fg('dim', suffixChoice.suffix) : '';
+
   if (classification.kind === 'skill') {
     return (
       theme.fg('customMessageLabel', `${theme.bold('[skill]')} `) +
-      theme.fg('customMessageText', classification.label) +
+      theme.fg('customMessageText', displayLabel) +
       formatBuiltinReadLineRange(args, theme) +
       expandHint
     );
@@ -2182,7 +2204,7 @@ function formatCompactReadCall(
   return (
     theme.fg('toolTitle', theme.bold(`read ${classification.kind}`)) +
     ' ' +
-    theme.fg('accent', classification.label) +
+    theme.fg('accent', displayLabel) +
     formatBuiltinReadLineRange(args, theme) +
     expandHint
   );
@@ -2197,7 +2219,7 @@ function formatBuiltinReadCallSummary(
 ): string {
   const compactClassification = showExpandHint ? getCompactReadClassification(args, cwd) : null;
   if (compactClassification) {
-    return formatCompactReadCall(compactClassification, args, theme);
+    return formatCompactReadCall(compactClassification, args, theme, width);
   }
 
   const title = theme.fg('toolTitle', theme.bold('read'));
@@ -2216,29 +2238,18 @@ function formatBuiltinReadCallSummary(
   })();
   const fullExpandHintText = showExpandHint ? ' (ctrl+o to expand)' : '';
   const shortenedPath = shortenDisplayPath(pathValue, cwd);
-  const renderParts = (hintText: string) => {
-    const fixedWidth = 'read '.length + rawRange.length + hintText.length;
-    const pathBudget = width ? Math.max(1, width - fixedWidth) : 0;
-    const displayPath =
-      pathBudget > 0 ? collapseMiddlePath(shortenedPath, pathBudget) : shortenedPath;
-    return {
-      displayPath,
-      hintText,
-      pathBudget,
-      visibleWidth: fixedWidth + displayPath.length,
-    };
-  };
+  const suffixChoice = chooseOptionalSuffix({
+    width,
+    fixedWidth: 'read '.length + rawRange.length,
+    suffixes: fullExpandHintText ? [fullExpandHintText, ''] : [''],
+    minPrimaryWidth: 24,
+  });
+  const pathBudget = width ? suffixChoice.primaryBudget : 0;
+  const displayPath =
+    pathBudget > 0 ? collapseMiddlePath(shortenedPath, pathBudget) : shortenedPath;
+  const expandHint = suffixChoice.suffix ? theme.fg('dim', suffixChoice.suffix) : '';
 
-  const fullHintParts = renderParts(fullExpandHintText);
-  const parts =
-    fullExpandHintText &&
-    width &&
-    (fullHintParts.visibleWidth > width || fullHintParts.pathBudget < 24)
-      ? renderParts('')
-      : fullHintParts;
-  const expandHint = parts.hintText ? theme.fg('dim', parts.hintText) : '';
-
-  return `${title} ${theme.fg('accent', parts.displayPath)}${formatBuiltinReadLineRange(args, theme)}${expandHint}`;
+  return `${title} ${theme.fg('accent', displayPath)}${formatBuiltinReadLineRange(args, theme)}${expandHint}`;
 }
 
 function wrapBuiltinReadCallRenderer(args: {

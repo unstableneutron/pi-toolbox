@@ -1,6 +1,7 @@
 import type { PublicToolName, PublicToolRequest } from 'fff-router';
 import { clampMatchText } from './match-heuristics';
 import { shortenDisplayPath } from '../shared/paths';
+import { normalizeWidth } from '../shared/tui-width';
 
 export { shortenDisplayPath };
 
@@ -271,8 +272,9 @@ function formatCompactFileRow(pathValue: string, count: number, width?: number):
     return [`  · ${pathValue} — ${count}`];
   }
 
+  const safeWidth = normalizeWidth(width);
   const countSuffix = `— ${count}`;
-  const inlineBudget = Math.max(24, width - '  · '.length - countSuffix.length - 1);
+  const inlineBudget = Math.max(1, safeWidth - '  · '.length - countSuffix.length - 1);
   const inlinePath = collapseMiddlePath(pathValue, inlineBudget);
   const singleLine = `  · ${inlinePath} ${countSuffix}`;
 
@@ -280,7 +282,7 @@ function formatCompactFileRow(pathValue: string, count: number, width?: number):
     return [singleLine];
   }
 
-  const hangingBudget = Math.max(24, width - '  · '.length);
+  const hangingBudget = Math.max(1, safeWidth - '  · '.length);
   const hangingPath = collapseMiddlePath(pathValue, hangingBudget);
   return [`  · ${hangingPath}`, `    ${countSuffix}`];
 }
@@ -290,7 +292,8 @@ function formatFileOnlyRow(pathValue: string, width?: number): string {
     return `  · ${pathValue}`;
   }
 
-  const pathBudget = Math.max(24, width - '  · '.length);
+  const safeWidth = normalizeWidth(width);
+  const pathBudget = Math.max(1, safeWidth - '  · '.length);
   return `  · ${collapseMiddlePath(pathValue, pathBudget)}`;
 }
 

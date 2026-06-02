@@ -1,7 +1,11 @@
-interface WidthMeasurementOps {
-  measure(text: string): number;
-  truncate(text: string, maxWidth: number): string;
-}
+import {
+  clampRenderedLineToWidth,
+  clampRenderedLinesToWidth,
+  normalizeWidth,
+  type WidthMeasurementOps,
+} from '../shared/tui-width';
+
+export { clampRenderedLineToWidth, clampRenderedLinesToWidth, type WidthMeasurementOps };
 
 interface CollapsedDiffHintOptions {
   remainingLines: number;
@@ -10,45 +14,6 @@ interface CollapsedDiffHintOptions {
 
 function pluralize(count: number, singular: string, plural = `${singular}s`): string {
   return count === 1 ? singular : plural;
-}
-
-function normalizeWidth(width: number): number {
-  if (!Number.isFinite(width)) {
-    return 0;
-  }
-  return Math.max(0, Math.floor(width));
-}
-
-export function clampRenderedLineToWidth(
-  text: string,
-  width: number,
-  ops: WidthMeasurementOps,
-): string {
-  const safeWidth = normalizeWidth(width);
-  if (safeWidth === 0) {
-    return '';
-  }
-
-  if (ops.measure(text) <= safeWidth) {
-    return text;
-  }
-
-  for (let targetWidth = safeWidth; targetWidth >= 0; targetWidth--) {
-    const candidate = ops.truncate(text, targetWidth);
-    if (ops.measure(candidate) <= safeWidth) {
-      return candidate;
-    }
-  }
-
-  return '';
-}
-
-export function clampRenderedLinesToWidth(
-  lines: string[],
-  width: number,
-  ops: WidthMeasurementOps,
-): string[] {
-  return lines.map((line) => clampRenderedLineToWidth(line, width, ops));
 }
 
 export function buildCollapsedDiffHintText(
