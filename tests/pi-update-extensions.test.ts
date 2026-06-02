@@ -7,6 +7,7 @@ import {
   applyPiCodingAgentResolverPatch,
   applyPiContinuousLearningPatch,
   applyPiMermaidPatch,
+  applyPiSubagentsIntercomDetachPatch,
   buildPiCodingAgentResolverReplacement,
   compareVersions,
   formatPackageManagerCommand,
@@ -14,6 +15,7 @@ import {
   isPiCodingAgentResolverPatchApplied,
   isPiContinuousLearningPatchApplied,
   isPiMermaidPatchApplied,
+  isPiSubagentsIntercomDetachPatchApplied,
   parsePiListOutput,
   readConfiguredNpmCommand,
   resolvePackageManagerCommand,
@@ -391,6 +393,112 @@ describe('pi-continuous-learning patching', () => {
 
     await expect(applyPiContinuousLearningPatch({ packageRoot })).rejects.toThrow(
       /compiled dist directory not found/i,
+    );
+  });
+});
+
+describe('pi-subagents intercom detach patching', () => {
+  const FIXTURE_CONTENT = [
+    'function runSingleAttempt(options) {',
+    '		let detached = false;',
+    '		let intercomStarted = false;',
+    '		let assistantError: string | undefined;',
+    '',
+    '	const processLine = (line) => {',
+    '			let evt: { type?: string; message?: Message; toolName?: string; args?: unknown };',
+    '			try {',
+    '				evt = JSON.parse(line) as { type?: string; message?: Message; toolName?: string; args?: unknown };',
+    '			} catch {',
+    '				return;',
+    '			}',
+    '',
+    '			if (evt.type === "tool_execution_start") {',
+    '				const toolArgs = evt.args && typeof evt.args === "object" && !Array.isArray(evt.args)',
+    '					? evt.args as Record<string, unknown>',
+    '					: {};',
+    '				if (options.allowIntercomDetach && (evt.toolName === "intercom" || evt.toolName === "contact_supervisor")) {',
+    '					intercomStarted = true;',
+    '				}',
+    '			}',
+    '',
+    '			if (evt.type === "tool_result_end" && evt.message) {',
+    '				result.messages.push(evt.message);',
+    '			}',
+    '	};',
+    '}',
+    '',
+  ].join('\n');
+
+  function setupFakePackage(version: string, executionContent = FIXTURE_CONTENT): string {
+    const packageRoot = makeTempDir('pi-subagents-');
+    writeFileSync(
+      join(packageRoot, 'package.json'),
+      JSON.stringify({ name: 'pi-subagents', version }, null, 2),
+    );
+    mkdirSync(join(packageRoot, 'src', 'runs', 'foreground'), { recursive: true });
+    writeFileSync(join(packageRoot, 'src', 'runs', 'foreground', 'execution.ts'), executionContent);
+    return packageRoot;
+  }
+
+  it('reports unpatched fixture as not yet patched', () => {
+    const packageRoot = setupFakePackage('0.27.0');
+    expect(isPiSubagentsIntercomDetachPatchApplied(packageRoot)).toBe(false);
+  });
+
+  it('patches foreground sync runs to detach after blocking supervisor asks are sent', async () => {
+    const packageRoot = setupFakePackage('0.27.0');
+    const result = await applyPiSubagentsIntercomDetachPatch({ packageRoot });
+
+    expect(result).toMatchObject({
+      status: 'applied',
+      packageRoot,
+      version: '0.27.0',
+    });
+    expect(result.patchPath).toBe(join(packageRoot, 'src', 'runs', 'foreground', 'execution.ts'));
+
+    const patched = readFileSync(
+      join(packageRoot, 'src', 'runs', 'foreground', 'execution.ts'),
+      'utf8',
+    );
+    expect(patched).toContain('__pi_update_extensions:pi-subagents-blocking-intercom-detach__');
+    expect(patched).toContain('let blockingIntercomStarted = false;');
+    expect(patched).toContain('evt.customType === "intercom_sent"');
+    expect(patched).toContain('toolArgs.reason !== "progress_update"');
+    expect(patched).toContain('blockingIntercomStarted = false;');
+    expect(isPiSubagentsIntercomDetachPatchApplied(packageRoot)).toBe(true);
+  });
+
+  it('is idempotent after patching', async () => {
+    const packageRoot = setupFakePackage('0.27.0');
+    await applyPiSubagentsIntercomDetachPatch({ packageRoot });
+    const second = await applyPiSubagentsIntercomDetachPatch({ packageRoot });
+
+    expect(second).toMatchObject({
+      status: 'already-applied',
+      packageRoot,
+      version: '0.27.0',
+    });
+  });
+
+  it('supports dry-run without mutating the file', async () => {
+    const packageRoot = setupFakePackage('0.27.0');
+    const executionPath = join(packageRoot, 'src', 'runs', 'foreground', 'execution.ts');
+    const original = readFileSync(executionPath, 'utf8');
+
+    const result = await applyPiSubagentsIntercomDetachPatch({ packageRoot, dryRun: true });
+    expect(result).toMatchObject({
+      status: 'would-apply',
+      packageRoot,
+      version: '0.27.0',
+    });
+    expect(readFileSync(executionPath, 'utf8')).toBe(original);
+    expect(isPiSubagentsIntercomDetachPatchApplied(packageRoot)).toBe(false);
+  });
+
+  it('throws a descriptive error when the target text is missing', async () => {
+    const packageRoot = setupFakePackage('1.0.0', 'export function changedUpstream() {}\n');
+    await expect(applyPiSubagentsIntercomDetachPatch({ packageRoot })).rejects.toThrow(
+      /target text for pi-subagents intercom detach patch not found/i,
     );
   });
 });

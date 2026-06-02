@@ -652,6 +652,161 @@ export async function applyPiContinuousLearningPatch(
   return { status: 'applied', packageRoot, version, patchPath: distPath };
 }
 
+// ---------------------------------------------------------------------------
+// pi-subagents foreground intercom detach patch
+//
+// pi-subagents@0.27.0 handles blocking child `contact_supervisor` asks by
+// waiting for a separate `pi-intercom:detach-request` event before returning
+// control to the parent foreground `subagent(...)` call. pi-intercom@0.6.0 does
+// not emit that event, so the parent can remain blocked and hide the supervisor
+// ask until manual interrupt/termination. Detach once the child has actually
+// emitted `intercom_sent` for a blocking ask, leaving the child alive to receive
+// the reply.
+// ---------------------------------------------------------------------------
+
+const PI_SUBAGENTS_PACKAGE_NAME = 'pi-subagents';
+const PI_SUBAGENTS_EXECUTION_RELATIVE_PATH = 'src/runs/foreground/execution.ts';
+const PI_SUBAGENTS_INTERCOM_DETACH_PATCH_MARKER =
+  '__pi_update_extensions:pi-subagents-blocking-intercom-detach__';
+const PI_SUBAGENTS_INTERCOM_DETACH_VARS_TARGET = [
+  '\t\tlet detached = false;',
+  '\t\tlet intercomStarted = false;',
+  '\t\tlet assistantError: string | undefined;',
+].join('\n');
+const PI_SUBAGENTS_INTERCOM_DETACH_EVENT_TYPE_TARGET = [
+  '\t\t\tlet evt: { type?: string; message?: Message; toolName?: string; args?: unknown };',
+  '\t\t\ttry {',
+  '\t\t\t\tevt = JSON.parse(line) as { type?: string; message?: Message; toolName?: string; args?: unknown };',
+].join('\n');
+const PI_SUBAGENTS_INTERCOM_DETACH_TOOL_START_TARGET = [
+  '\t\t\tif (evt.type === "tool_execution_start") {',
+  '\t\t\t\tconst toolArgs = evt.args && typeof evt.args === "object" && !Array.isArray(evt.args)',
+  '\t\t\t\t\t? evt.args as Record<string, unknown>',
+  '\t\t\t\t\t: {};',
+  '\t\t\t\tif (options.allowIntercomDetach && (evt.toolName === "intercom" || evt.toolName === "contact_supervisor")) {',
+  '\t\t\t\t\tintercomStarted = true;',
+  '\t\t\t\t}',
+].join('\n');
+const PI_SUBAGENTS_INTERCOM_DETACH_TOOL_RESULT_TARGET = [
+  '\t\t\tif (evt.type === "tool_result_end" && evt.message) {',
+  '\t\t\t\tresult.messages.push(evt.message);',
+].join('\n');
+
+function buildPiSubagentsVarsReplacement(): string {
+  return [
+    '\t\tlet detached = false;',
+    '\t\tlet intercomStarted = false;',
+    `\t\t// ${PI_SUBAGENTS_INTERCOM_DETACH_PATCH_MARKER}`,
+    '\t\tlet blockingIntercomStarted = false;',
+    '\t\tlet assistantError: string | undefined;',
+  ].join('\n');
+}
+
+function buildPiSubagentsEventTypeReplacement(): string {
+  return [
+    '\t\t\tlet evt: { type?: string; message?: Message; toolName?: string; args?: unknown; customType?: string; data?: unknown };',
+    '\t\t\ttry {',
+    '\t\t\t\tevt = JSON.parse(line) as { type?: string; message?: Message; toolName?: string; args?: unknown; customType?: string; data?: unknown };',
+  ].join('\n');
+}
+
+function buildPiSubagentsToolStartReplacement(): string {
+  return [
+    '\t\t\tif (options.allowIntercomDetach && intercomStarted && blockingIntercomStarted && evt.type === "custom" && evt.customType === "intercom_sent") {',
+    '\t\t\t\tdetachForIntercom();',
+    '\t\t\t\treturn;',
+    '\t\t\t}',
+    '',
+    '\t\t\tif (evt.type === "tool_execution_start") {',
+    '\t\t\t\tconst toolArgs = evt.args && typeof evt.args === "object" && !Array.isArray(evt.args)',
+    '\t\t\t\t\t? evt.args as Record<string, unknown>',
+    '\t\t\t\t\t: {};',
+    '\t\t\t\tif (options.allowIntercomDetach && (evt.toolName === "intercom" || evt.toolName === "contact_supervisor")) {',
+    '\t\t\t\t\tintercomStarted = true;',
+    '\t\t\t\t\tblockingIntercomStarted ||= (evt.toolName === "intercom" && toolArgs.action === "ask")',
+    '\t\t\t\t\t\t|| (evt.toolName === "contact_supervisor" && toolArgs.reason !== "progress_update");',
+    '\t\t\t\t}',
+  ].join('\n');
+}
+
+function buildPiSubagentsToolResultReplacement(): string {
+  return [
+    '\t\t\tif (evt.type === "tool_result_end" && evt.message) {',
+    '\t\t\t\tblockingIntercomStarted = false;',
+    '\t\t\t\tresult.messages.push(evt.message);',
+  ].join('\n');
+}
+
+function isPiSubagentsSemanticallyPatched(content: string): boolean {
+  return (
+    content.includes('let blockingIntercomStarted = false;') &&
+    content.includes('evt.customType === "intercom_sent"') &&
+    content.includes('toolArgs.reason !== "progress_update"') &&
+    content.includes('blockingIntercomStarted = false;')
+  );
+}
+
+export function isPiSubagentsIntercomDetachPatchApplied(packageRoot: string): boolean {
+  const filePath = join(packageRoot, PI_SUBAGENTS_EXECUTION_RELATIVE_PATH);
+  if (!existsSync(filePath)) return false;
+  const content = readFileSync(filePath, 'utf8');
+  return (
+    content.includes(PI_SUBAGENTS_INTERCOM_DETACH_PATCH_MARKER) ||
+    isPiSubagentsSemanticallyPatched(content)
+  );
+}
+
+export async function applyPiSubagentsIntercomDetachPatch(
+  options: { dryRun?: boolean; packageRoot?: string; cwd?: string } = {},
+): Promise<ApplyPatchResult> {
+  const packageRoot =
+    options.packageRoot ?? findGlobalPackagePath(PI_SUBAGENTS_PACKAGE_NAME, { cwd: options.cwd });
+  if (!packageRoot) {
+    throw new Error(
+      `Could not locate installed ${PI_SUBAGENTS_PACKAGE_NAME} via configured package manager, aube, or pnpm`,
+    );
+  }
+
+  const version = getPackageVersion(packageRoot) ?? 'unknown';
+  const filePath = join(packageRoot, PI_SUBAGENTS_EXECUTION_RELATIVE_PATH);
+  if (!existsSync(filePath)) {
+    throw new Error(`pi-subagents@${version}: execution file not found at ${filePath}`);
+  }
+
+  if (isPiSubagentsIntercomDetachPatchApplied(packageRoot)) {
+    return { status: 'already-applied', packageRoot, version, patchPath: filePath };
+  }
+
+  const content = readFileSync(filePath, 'utf8');
+  const missingTargets = [
+    PI_SUBAGENTS_INTERCOM_DETACH_VARS_TARGET,
+    PI_SUBAGENTS_INTERCOM_DETACH_EVENT_TYPE_TARGET,
+    PI_SUBAGENTS_INTERCOM_DETACH_TOOL_START_TARGET,
+    PI_SUBAGENTS_INTERCOM_DETACH_TOOL_RESULT_TARGET,
+  ].filter((target) => !content.includes(target));
+  if (missingTargets.length > 0) {
+    throw new Error(
+      `pi-subagents@${version}: target text for pi-subagents intercom detach patch not found at ${filePath}. ` +
+        `Missing ${missingTargets.length} target(s). Upstream may have changed; update pi-update-extensions.ts.`,
+    );
+  }
+
+  if (options.dryRun) {
+    return { status: 'would-apply', packageRoot, version, patchPath: filePath };
+  }
+
+  const patched = content
+    .replace(PI_SUBAGENTS_INTERCOM_DETACH_VARS_TARGET, buildPiSubagentsVarsReplacement())
+    .replace(PI_SUBAGENTS_INTERCOM_DETACH_EVENT_TYPE_TARGET, buildPiSubagentsEventTypeReplacement())
+    .replace(PI_SUBAGENTS_INTERCOM_DETACH_TOOL_START_TARGET, buildPiSubagentsToolStartReplacement())
+    .replace(
+      PI_SUBAGENTS_INTERCOM_DETACH_TOOL_RESULT_TARGET,
+      buildPiSubagentsToolResultReplacement(),
+    );
+  writeFileSync(filePath, patched);
+  return { status: 'applied', packageRoot, version, patchPath: filePath };
+}
+
 export function getInstalledPackage(
   installedPackages: readonly InstalledPackage[],
   source: string,
@@ -1293,6 +1448,26 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     } catch (error) {
       console.error(
         `Skipped pi-continuous-learning compatibility patch: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    try {
+      const subagentsResult = await applyPiSubagentsIntercomDetachPatch({
+        dryRun,
+        cwd: REPO_ROOT,
+        packageRoot: installedPackages.find((entry) => entry.source === 'npm:pi-subagents')
+          ?.installedPath,
+      });
+      const label =
+        subagentsResult.status === 'already-applied'
+          ? `Already applied: pi-subagents intercom detach patch (${subagentsResult.version})`
+          : subagentsResult.status === 'would-apply'
+            ? `Would apply: pi-subagents intercom detach patch (${subagentsResult.version})`
+            : `${subagentsResult.status}: pi-subagents intercom detach patch (${subagentsResult.version}) via ${subagentsResult.patchPath}`;
+      console.log(label);
+    } catch (error) {
+      console.error(
+        `Skipped pi-subagents intercom detach patch: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
