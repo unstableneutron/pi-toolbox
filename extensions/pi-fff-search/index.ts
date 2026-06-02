@@ -306,6 +306,16 @@ function formatPartialResultText(
   return scope ? `Searching… ${pattern} in ${shortenDisplayPath(scope)}` : `Searching… ${pattern}`;
 }
 
+const COMPACT_SCOPE_WARNING_TEXT =
+  '⚠ FFF unavailable for this path; local fallback used. Expand for allowlist fix.';
+
+function formatCompactScopeWarningText(theme: { fg: (...args: any[]) => string }): string {
+  return `${theme.fg('warning', '⚠')} ${theme.fg(
+    'dim',
+    COMPACT_SCOPE_WARNING_TEXT.slice('⚠ '.length),
+  )}`;
+}
+
 function formatScopeWarningText(args: { resolvedWithin: string; fallbackFailed?: string }): string {
   const lines = [
     'Warning: FFF unavailable for this within path only; auto-retried with a local search fallback.',
@@ -1383,7 +1393,7 @@ function extractBashCommand(args: unknown): string | null {
 /** @internal exported for tests; not part of the stable API. */
 export function renderBashRewritePreview(
   args: unknown,
-  theme: { fg(color: string, text: string): string },
+  theme: CompactCallTheme,
   cwd: string | undefined,
 ): Component | null {
   const command = extractBashCommand(args);
@@ -1391,14 +1401,15 @@ export function renderBashRewritePreview(
   const rewrite = tryRewriteBash(command, cwd ?? process.cwd());
   if (!rewrite || !rewrite.decision) return null;
   const d = rewrite.decision;
+
+  if (d.tool === 'fff_grep' || d.tool === 'fff_find_files') {
+    const compact = buildCompactFffSearchSummary(d.tool, d.params, cwd, 'bash');
+    if (compact) {
+      return createWidthAwareText((width) => renderCompactSearchCall(compact, width, theme));
+    }
+  }
+
   const chip = theme.fg('dim', 'bash →');
-  // All four rewrite targets share the same compact one-line chip format:
-  //   `bash → tool(primary, key=value, flag, …)`
-  // For fff_grep / fff_find_files we deliberately do NOT use rendering.ts's
-  // `formatToolCallText` (the multi-line title + wrapped-metadata layout
-  // used for direct calls) — a rewrite chip is scaffolding around the
-  // underlying body render, so denser matches the read / ls convention
-  // and saves vertical space.
   const summary = formatStructuredToolSignature(d.tool, d.params, cwd);
   return new Text(`${chip} ${summary}`, 0, 0);
 }
@@ -1454,6 +1465,8 @@ function formatStructuredToolSignature(
     if (tool === 'fff_grep') {
       if (params.literal === true) parts.push('literal');
       if (params.case_sensitive === true) parts.push('case-sensitive');
+      if (typeof params.context_lines === 'number')
+        parts.push(`ctx=${String(params.context_lines)}`);
     }
 
     const extensions = Array.isArray(params.extensions)
@@ -1660,6 +1673,211 @@ function formatOriginalSearchPath(value: string, cwd?: string): string {
   }
 
   return value;
+}
+
+type CompactCallTheme = {
+  bold: (text: string) => string;
+  fg: (...args: any[]) => string;
+};
+
+type CompactRewriteMetadata = {
+  key?: string;
+  value: string;
+  collapsiblePath?: boolean;
+};
+
+type CompactRewriteSummary = {
+  sourceTool?: 'grep' | 'find' | 'bash';
+  targetTool: 'fff_grep' | 'fff_find_files';
+  primary: string;
+  metadata: CompactRewriteMetadata[];
+};
+
+function compactMetadata(key: string | undefined, value: string | null): CompactRewriteMetadata[] {
+  return value ? [{ key, value }] : [];
+}
+
+function compactPathMetadata(key: string, value: unknown, cwd?: string): CompactRewriteMetadata[] {
+  if (typeof value === 'string' && ['undefined', 'null'].includes(value.trim().toLowerCase())) {
+    return [];
+  }
+  const formatted = formatRewriteWithin(value, cwd);
+  return formatted ? [{ key, value: formatted, collapsiblePath: true }] : [];
+}
+
+function renderCompactMetadataEntry(entry: CompactRewriteMetadata): string {
+  return entry.key ? `${entry.key}=${entry.value}` : entry.value;
+}
+
+function compactStringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string' && item.length > 0)
+    : [];
+}
+
+function compactListMetadata(key: string, value: unknown): CompactRewriteMetadata[] {
+  const values = compactStringList(value);
+  return values.length > 0 ? [{ key, value: values.join(',') }] : [];
+}
+
+function formatCompactPrimary(value: string): string {
+  return value.replace(/(?<!\\)\|/g, ' | ').replace(/\s+\|\s+/g, ' | ');
+}
+
+function normalizeCompactCollapsedPath(pathValue: string): string {
+  return pathValue.replace(/\/ \.\.\.$/, '/...');
+}
+
+function renderCompactMetadataLine(
+  metadata: CompactRewriteMetadata[],
+  width: number | undefined,
+): string {
+  if (metadata.length === 0) {
+    return '';
+  }
+
+  const mutable = metadata.map((entry) => ({ ...entry }));
+  const renderLine = () => `  ${mutable.map(renderCompactMetadataEntry).join(' · ')}`;
+  let line = renderLine();
+  if (!width || width <= 0 || line.length <= width) {
+    return line;
+  }
+
+  for (const entry of mutable) {
+    if (!entry.collapsiblePath) {
+      continue;
+    }
+
+    const staticWidth = line.length - entry.value.length;
+    const pathBudget = Math.max(1, Math.min(31, width - staticWidth));
+    entry.value = normalizeCompactCollapsedPath(collapseMiddlePath(entry.value, pathBudget));
+    line = renderLine();
+    if (line.length <= width) {
+      return line;
+    }
+  }
+
+  return line;
+}
+
+function collapseCompactPrimary(primary: string, budget: number): string {
+  if (budget <= 0 || primary.length <= budget) {
+    return primary;
+  }
+  if (budget <= 4) {
+    return primary.slice(0, Math.max(1, budget));
+  }
+
+  const left = Math.ceil((budget - 1) / 2);
+  const right = Math.floor((budget - 1) / 2);
+  return `${primary.slice(0, left)}…${primary.slice(primary.length - right)}`;
+}
+
+function buildCompactFffSearchSummary(
+  targetTool: 'fff_grep' | 'fff_find_files',
+  params: Record<string, unknown>,
+  cwd?: string,
+  sourceTool?: 'grep' | 'find' | 'bash',
+): CompactRewriteSummary | null {
+  if (targetTool === 'fff_grep') {
+    const patterns = compactStringList(params.patterns);
+    if (patterns.length === 0 && typeof params.pattern === 'string' && params.pattern.length > 0) {
+      patterns.push(params.pattern);
+    }
+
+    const primary = patterns.map(formatCompactPrimary).join(' | ');
+    if (!primary) {
+      return null;
+    }
+
+    return {
+      sourceTool,
+      targetTool,
+      primary,
+      metadata: [
+        ...compactPathMetadata('within', params.within, cwd),
+        ...compactMetadata(
+          'glob',
+          typeof params.glob === 'string' && params.glob.trim() ? params.glob.trim() : null,
+        ),
+        ...(params.literal === true ? [{ value: 'literal' }] : []),
+        ...(params.case_sensitive === true && !sourceTool ? [{ value: 'case-sensitive' }] : []),
+        ...(params.case_sensitive === false ? [{ value: 'ignoreCase' }] : []),
+        ...compactListMetadata('ext', params.extensions),
+        ...compactListMetadata('exclude', params.exclude_paths),
+        ...(typeof params.context_lines === 'number'
+          ? [{ key: 'ctx', value: String(params.context_lines) }]
+          : []),
+        ...(typeof params.limit === 'number'
+          ? [{ key: 'limit', value: String(params.limit) }]
+          : []),
+      ],
+    };
+  }
+
+  const query = typeof params.query === 'string' && params.query.trim() ? params.query.trim() : '';
+  if (!query) {
+    return null;
+  }
+
+  return {
+    sourceTool,
+    targetTool,
+    primary: formatCompactPrimary(query),
+    metadata: [
+      ...compactPathMetadata('within', params.within, cwd),
+      ...compactMetadata(
+        'glob',
+        typeof params.glob === 'string' && params.glob.trim() ? params.glob.trim() : null,
+      ),
+      ...compactListMetadata('ext', params.extensions),
+      ...compactListMetadata('exclude', params.exclude_paths),
+      ...(typeof params.limit === 'number' ? [{ key: 'limit', value: String(params.limit) }] : []),
+    ],
+  };
+}
+
+function buildCompactRewriteSummary(
+  sourceTool: 'grep' | 'find',
+  params: Record<string, unknown>,
+  cwd?: string,
+): CompactRewriteSummary | null {
+  return buildCompactFffSearchSummary(
+    sourceTool === 'grep' ? 'fff_grep' : 'fff_find_files',
+    params,
+    cwd,
+    sourceTool,
+  );
+}
+
+function renderCompactSearchCall(
+  summary: CompactRewriteSummary,
+  width: number | undefined,
+  theme: CompactCallTheme,
+): string {
+  const metadataText = summary.metadata.map(renderCompactMetadataEntry).join(' · ');
+  const sourcePrefix = summary.sourceTool ? `${summary.sourceTool} → ` : '';
+  const firstLinePrefix = `${sourcePrefix}${summary.targetTool}  `;
+  const inline = `${firstLinePrefix}${summary.primary}${metadataText ? `  ${metadataText}` : ''}`;
+  const fitsInline = !width || width <= 0 || inline.length <= width;
+  const primaryBudget = width
+    ? Math.max(8, width - firstLinePrefix.length)
+    : summary.primary.length;
+  const primary = fitsInline
+    ? summary.primary
+    : collapseCompactPrimary(summary.primary, primaryBudget);
+  const metadataLine = fitsInline ? '' : renderCompactMetadataLine(summary.metadata, width);
+  const inlineMetadata = fitsInline && metadataText ? metadataText : '';
+
+  const firstLine = [
+    summary.sourceTool ? theme.fg('dim', `${summary.sourceTool} → `) : '',
+    theme.fg('toolTitle', theme.bold(summary.targetTool)),
+    '  ',
+    theme.fg('accent', primary),
+    inlineMetadata ? `  ${theme.fg('dim', inlineMetadata)}` : '',
+  ].join('');
+
+  return metadataLine ? `${firstLine}\n${theme.fg('dim', metadataLine)}` : firstLine;
 }
 
 function formatFffRewriteSummary(
@@ -1923,9 +2141,10 @@ function wrapBuiltinCallRenderer(args: {
   toolName: 'grep' | 'find';
   builtinRenderCall?: ((args: any, theme: any, context?: any) => Component) | undefined;
   renderArgs: Record<string, unknown>;
-  theme: { fg: (...args: any[]) => string };
-  context?: { cwd?: string };
+  theme: CompactCallTheme;
+  context?: { cwd?: string; expanded?: boolean };
   rewriteSummary: string | null;
+  compactRewriteSummary: CompactRewriteSummary | null;
 }): Component {
   // Builtin renderCall implementations treat `context.lastComponent` as
   // their own cached inner primitive (a `Text`) and call `.setText(...)` on
@@ -1944,11 +2163,15 @@ function wrapBuiltinCallRenderer(args: {
     const baseText =
       baseComponent?.render(width).join('\n') ??
       formatBuiltinSearchCallSummary(args.toolName, args.renderArgs, cwd);
-    if (!args.rewriteSummary) {
+    if (!args.rewriteSummary || !args.compactRewriteSummary) {
       return baseText;
     }
 
-    return [baseText, args.theme.fg('dim', `  via FFF: ${args.rewriteSummary}`)].join('\n');
+    if (args.context?.expanded) {
+      return [baseText, args.theme.fg('dim', `  via FFF: ${args.rewriteSummary}`)].join('\n');
+    }
+
+    return renderCompactSearchCall(args.compactRewriteSummary, width, args.theme);
   });
 }
 
@@ -2026,6 +2249,19 @@ export function createPiFffSearchExtension(options: CreatePiFffSearchExtensionOp
             };
           },
           renderCall(args, theme, context) {
+            if (tool.name === 'fff_grep' || tool.name === 'fff_find_files') {
+              const compact = buildCompactFffSearchSummary(
+                tool.name,
+                args as Record<string, unknown>,
+                context?.cwd,
+              );
+              if (compact) {
+                return createWidthAwareText((width) =>
+                  renderCompactSearchCall(compact, width, theme),
+                );
+              }
+            }
+
             return createWidthAwareText((width) => {
               const lines = formatToolCallText(
                 tool.name,
@@ -2070,7 +2306,9 @@ export function createPiFffSearchExtension(options: CreatePiFffSearchExtensionOp
                 typeof details.scopeWarningText === 'string'
                   ? details.scopeWarningText
                   : 'Warning: FFF unavailable for this within path only.';
-              const warningBlock = renderNoticeBlock(warningText, theme);
+              const warningBlock = expanded
+                ? renderNoticeBlock(warningText, theme)
+                : formatCompactScopeWarningText(theme);
               const structuredText =
                 typeof details.fallbackText === 'string' ? details.fallbackText : null;
               if (!structuredText) {
@@ -2316,6 +2554,9 @@ export function createPiFffSearchExtension(options: CreatePiFffSearchExtensionOp
             rewriteSummary: fffParams
               ? formatFffRewriteSummary('grep', fffParams, context?.cwd)
               : null,
+            compactRewriteSummary: fffParams
+              ? buildCompactRewriteSummary('grep', fffParams, context?.cwd)
+              : null,
           });
         },
         async execute(toolCallId, params, signal, onUpdate, ctx) {
@@ -2404,6 +2645,9 @@ export function createPiFffSearchExtension(options: CreatePiFffSearchExtensionOp
             context,
             rewriteSummary: fffParams
               ? formatFffRewriteSummary('find', fffParams, context?.cwd)
+              : null,
+            compactRewriteSummary: fffParams
+              ? buildCompactRewriteSummary('find', fffParams, context?.cwd)
               : null,
           });
         },

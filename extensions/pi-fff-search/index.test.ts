@@ -520,13 +520,33 @@ describe('pi-fff-search extension', () => {
         theme,
       ),
     );
-    expect(grepText).toContain('FFF Grep:');
-    expect(grepText).toContain('case-sensitive');
-    expect(findText).toContain('FFF Find Files:');
-    expect(grepText).toContain('plan(Request)? | build(Request)?');
+    expect(grepText.trimEnd()).toBe(
+      'fff_grep  plan(Request)? | build(Request)?  within=/repo/src · case-sensitive',
+    );
+    expect(findText.trimEnd()).toBe('fff_find_files  router  within=/repo/src');
   });
 
-  test('builtin grep override renderCall preserves a builtin-style summary and adds via FFF details', () => {
+  test('direct FFF renderCall styles compact call parts', () => {
+    const { tools } = createHarness();
+    const theme = createTaggedTheme();
+
+    const rendered = tools.find((tool) => tool.name === 'fff_grep')!.renderCall!(
+      {
+        patterns: ['alpha|beta'],
+        within: 'src',
+        glob: '*.ts',
+        limit: 50,
+      },
+      theme,
+      { cwd: '/repo' } as any,
+    );
+
+    expect(renderTextTrimmed(rendered, 160)).toBe(
+      '<toolTitle><b>fff_grep</b></toolTitle>  <accent>alpha | beta</accent>  <dim>within=src · glob=*.ts · limit=50</dim>',
+    );
+  });
+
+  test('builtin grep override renderCall uses a compact FFF rewrite summary by default', () => {
     const { tools } = createHarness({
       overrideBuiltinRead: false,
       overrideBuiltinGrep: true,
@@ -546,11 +566,82 @@ describe('pi-fff-search extension', () => {
     );
 
     expect(renderTextTrimmed(rendered, 220)).toBe(
-      [
-        'grep /createReadTool\\(|createGrepTool\\(|createFindTool\\(/ in node_modules (**/*.{ts,js,mjs,cjs}) limit 50',
-        '  via FFF: pattern=createReadTool\\(|createGrepTool\\(|createFindTool\\( · within=node_modules · glob=**/*.{ts,js,mjs,cjs} · limit=50',
-      ].join('\n'),
+      'grep → fff_grep  createReadTool\\( | createGrepTool\\( | createFindTool\\(  within=node_modules · glob=**/*.{ts,js,mjs,cjs} · limit=50',
     );
+  });
+
+  test('builtin grep override renderCall styles compact rewritten call parts', () => {
+    const { tools } = createHarness({
+      overrideBuiltinRead: false,
+      overrideBuiltinGrep: true,
+      overrideBuiltinFind: false,
+    });
+    const theme = createTaggedTheme();
+
+    const rendered = tools.find((tool) => tool.name === 'grep')!.renderCall!(
+      {
+        pattern: 'warning',
+        path: 'src',
+        ignoreCase: true,
+      },
+      theme,
+      { cwd: '/repo' } as any,
+    );
+
+    expect(renderTextTrimmed(rendered, 160)).toBe(
+      '<dim>grep → </dim><toolTitle><b>fff_grep</b></toolTitle>  <accent>warning</accent>  <dim>within=src · ignoreCase</dim>',
+    );
+  });
+
+  test('builtin grep override renderCall preserves ignoreCase in compact FFF summaries', () => {
+    const { tools } = createHarness({
+      overrideBuiltinRead: false,
+      overrideBuiltinGrep: true,
+      overrideBuiltinFind: false,
+    });
+    const theme = createTheme();
+
+    const rendered = tools.find((tool) => tool.name === 'grep')!.renderCall!(
+      {
+        pattern: 'warning',
+        path: 'src',
+        ignoreCase: true,
+      },
+      theme,
+      { cwd: '/repo' } as any,
+    );
+
+    expect(renderTextTrimmed(rendered, 120)).toBe(
+      'grep → fff_grep  warning  within=src · ignoreCase',
+    );
+  });
+
+  test('builtin grep override renderCall collapses long compact rewrite paths by width', () => {
+    const { tools } = createHarness({
+      overrideBuiltinRead: false,
+      overrideBuiltinGrep: true,
+      overrideBuiltinFind: false,
+    });
+    const theme = createTheme();
+
+    const rendered = tools.find((tool) => tool.name === 'grep')!.renderCall!(
+      {
+        pattern: 'getToolDefinition|toolCallId|definition.execute|execute\\(',
+        path: '/Users/thinh/.cache/aube/virtual-store/@earendil-works+pi-coding-agent@0.78.0_ws@8.21.0_zod@4.4.3_-954be6349bfa0d7d/node_modules/@earendil-works/pi-coding-agent/dist/core',
+        glob: '*.js',
+        context: 4,
+        limit: 200,
+      },
+      theme,
+      { cwd: '/Users/thinh/Projects/pi-toolbox' } as any,
+    );
+
+    const lines = renderTextTrimmed(rendered, 96).split('\n');
+    expect(lines).toEqual([
+      'grep → fff_grep  getToolDefinition | toolCallId | definition.execute | execute\\(',
+      '  within=~/.../pi-coding-agent/dist/core · glob=*.js · ctx=4 · limit=200',
+    ]);
+    expect(lines.every((line) => line.length <= 96)).toBe(true);
   });
 
   test('builtin grep override renderCall survives a non-Text lastComponent from a previous frame', () => {
@@ -599,7 +690,33 @@ describe('pi-fff-search extension', () => {
     expect(() => secondFrame.render(120)).not.toThrow();
   });
 
-  test('builtin find override renderCall preserves a builtin-style summary and adds via FFF details', () => {
+  test('builtin find override renderCall keeps compact metadata to two lines on narrow screens', () => {
+    const { tools } = createHarness({
+      overrideBuiltinRead: false,
+      overrideBuiltinGrep: false,
+      overrideBuiltinFind: true,
+    });
+    const theme = createTheme();
+
+    const rendered = tools.find((tool) => tool.name === 'find')!.renderCall!(
+      {
+        pattern: 'extensions/pi-fff-search/**/*rewrite*.ts',
+        path: '.',
+        limit: 20,
+      },
+      theme,
+      { cwd: '/Users/thinh/Projects/pi-toolbox' } as any,
+    );
+
+    const lines = renderTextTrimmed(rendered, 58).split('\n');
+    expect(lines).toEqual([
+      'find → fff_find_files  rewrite',
+      '  within=extensions/... · glob=**/*rewrite*.ts · limit=20',
+    ]);
+    expect(lines.every((line) => line.length <= 58)).toBe(true);
+  });
+
+  test('builtin find override renderCall uses a compact FFF rewrite summary by default', () => {
     const { tools } = createHarness({
       overrideBuiltinRead: false,
       overrideBuiltinGrep: false,
@@ -618,10 +735,7 @@ describe('pi-fff-search extension', () => {
     );
 
     expect(renderTextTrimmed(rendered, 220)).toBe(
-      [
-        'find extensions/**/index.test.ts in . (limit 20)',
-        '  via FFF: query=index · within=extensions · glob=**/index.test.ts · limit=20',
-      ].join('\n'),
+      'find → fff_find_files  index  within=extensions · glob=**/index.test.ts · limit=20',
     );
   });
 
@@ -799,7 +913,7 @@ describe('pi-fff-search extension', () => {
       { cwd: '/Users/example/workspace/repos/example-monorepo-repo' },
     );
 
-    expect(renderText(rendered)).toContain('within: projects/example-service/src');
+    expect(renderText(rendered)).toContain('within=projects/example-service/src');
     vi.unstubAllEnvs();
   });
 
@@ -821,10 +935,10 @@ describe('pi-fff-search extension', () => {
 
     expect(renderTextTrimmed(rendered, 45)).toBe(
       [
-        'FFF Find Files:  vim mode',
-        '  glob: **/*  ext: ts, md, json',
-        '  exclude: dist, coverage, node_modules',
-        '  limit: 100',
+        'fff_find_files  vim mode',
+        '  glob=**/* · ext=ts,md,json ·',
+        'exclude=dist,coverage,node_modules ·',
+        'limit=100',
       ].join('\n'),
     );
   });
@@ -1102,8 +1216,10 @@ describe('pi-fff-search extension', () => {
     );
 
     const text = renderText(rendered);
-    expect(text).toContain('FFF unavailable for this within path only');
-    expect(text).toContain('local search fallback');
+    expect(text).toContain(
+      '⚠ FFF unavailable for this path; local fallback used. Expand for allowlist fix.',
+    );
+    expect(text).not.toContain('To enable FFF here too');
     expect(text).toContain('1 files');
     expect(text).toContain('tests/sync-common-settings.test.ts');
     expect(text).not.toContain('Search failed');
@@ -1140,7 +1256,7 @@ describe('pi-fff-search extension', () => {
     );
 
     const renderedText = renderText(rendered);
-    expect(renderedText.match(/FFF unavailable for this within path only/g)?.length).toBe(1);
+    expect(renderedText.match(/FFF unavailable for this path/g)?.length).toBe(1);
     expect(renderedText).not.toContain('0 files');
     expect(renderedText).not.toContain('Search failed');
   });
@@ -3852,7 +3968,7 @@ describe('pi-fff-search extension', () => {
 describe('bash-rewrite pretty rendering', () => {
   const theme = createTheme();
 
-  test('renderBashRewritePreview shows compact "bash → fff_grep(...)" chip for grep commands', () => {
+  test('renderBashRewritePreview shows compact "bash → fff_grep" chip for grep commands', () => {
     const rendered = renderBashRewritePreview(
       { command: 'grep -rn "createLsToolDefinition" src/' },
       theme,
@@ -3861,14 +3977,14 @@ describe('bash-rewrite pretty rendering', () => {
     expect(rendered).not.toBeNull();
     const text = renderText(rendered);
     expect(text).toContain('bash →');
-    expect(text).toContain('fff_grep(');
+    expect(text).toContain('fff_grep  ');
     expect(text).toContain('createLsToolDefinition');
     expect(text).toContain('within=src/');
     // Compact chip is a single line — no newlines.
     expect(text.includes('\n')).toBe(false);
   });
 
-  test('renderBashRewritePreview shows compact "bash → fff_find_files(...)" chip for find commands', () => {
+  test('renderBashRewritePreview shows compact "bash → fff_find_files" chip for find commands', () => {
     const rendered = renderBashRewritePreview(
       { command: 'find src/ -name "*router*.ts"' },
       theme,
@@ -3877,7 +3993,7 @@ describe('bash-rewrite pretty rendering', () => {
     expect(rendered).not.toBeNull();
     const text = renderText(rendered);
     expect(text).toContain('bash →');
-    expect(text).toContain('fff_find_files(');
+    expect(text).toContain('fff_find_files  ');
     expect(text).toContain('router');
     expect(text).toContain('glob=*router*.ts');
     expect(text.includes('\n')).toBe(false);
