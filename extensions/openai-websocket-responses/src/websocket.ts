@@ -1,6 +1,7 @@
 import { shortHash, writeDebugLog } from './debug.ts';
 import type { OpenAIWebSocketResponsesSettings } from './settings.ts';
 import type { TransportDiagnosticsCollector } from './transport-diagnostics.ts';
+import { cloneHeadersWithTraceparent, type TraceContext } from './trace-context.ts';
 import type { ResponsesBody } from './body.ts';
 
 interface WebSocketLike {
@@ -30,6 +31,7 @@ interface SocketCacheEntry {
   keepalivePongTimer?: ReturnType<typeof setTimeout>;
   keepalivePongListener?: (...args: any[]) => void;
   onLifecycleEvent?: WebSocketLifecycleObserver;
+  traceContext?: TraceContext;
 }
 
 const IDLE_SOCKET_CACHE_TTL_MS = 15 * 60 * 1000;
@@ -66,6 +68,14 @@ export interface WebSocketConnectionMetadata {
   cacheStatus: WebSocketCacheStatus;
   cacheKeyHash?: string;
   localPort?: number;
+  connectionTraceparent?: string;
+  connectionTraceId?: string;
+  connectionSpanId?: string;
+}
+
+export interface WebSocketTraceOptions {
+  logicalTraceId: string;
+  nextSpan(): TraceContext;
 }
 
 export type WebSocketLifecycleEvent =
@@ -120,12 +130,16 @@ function getSocketConnectionMetadata(
   socket: WebSocketLike,
   cacheStatus: WebSocketCacheStatus,
   cacheKey: string | undefined,
+  traceContext?: TraceContext,
 ): WebSocketConnectionMetadata {
   return {
     connectionId: getSocketId(socket),
     cacheStatus,
     cacheKeyHash: shortHash(cacheKey),
     localPort: getSocketLocalPort(socket),
+    connectionTraceparent: traceContext?.traceparent,
+    connectionTraceId: traceContext?.traceId,
+    connectionSpanId: traceContext?.spanId,
   };
 }
 
@@ -146,11 +160,12 @@ function emitSocketOpen(
   cacheStatus: WebSocketCacheStatus,
   cacheKey: string | undefined,
   url: string,
+  traceContext?: TraceContext,
 ): void {
   openedSockets.add(socket);
   emitLifecycle(onLifecycleEvent, {
     type: 'open',
-    ...getSocketConnectionMetadata(socket, cacheStatus, cacheKey),
+    ...getSocketConnectionMetadata(socket, cacheStatus, cacheKey, traceContext),
     urlHash: shortHash(url) ?? '',
   });
 }
@@ -452,6 +467,44 @@ async function connectSocket(
   });
 }
 
+function traceDiagnosticFields(
+  traceContext: TraceContext | undefined,
+): Record<string, string | undefined> {
+  return {
+    traceparent: traceContext?.traceparent,
+    traceId: traceContext?.traceId,
+    spanId: traceContext?.spanId,
+  };
+}
+
+async function tracedConnectSocket(
+  request: {
+    url: string;
+    headers: Headers;
+    signal?: AbortSignal;
+    connectTimeoutMs: number;
+    WebSocketCtor?: WebSocketConstructorLike;
+    diagnostics?: TransportDiagnosticsCollector;
+  },
+  traceContext: TraceContext | undefined,
+): Promise<WebSocketLike> {
+  try {
+    return await connectSocket(
+      request.url,
+      cloneHeadersWithTraceparent(request.headers, traceContext),
+      request.signal,
+      request.connectTimeoutMs,
+      request.WebSocketCtor,
+    );
+  } catch (error) {
+    request.diagnostics?.record('ws_connect_error', {
+      message: error instanceof Error ? error.message : String(error),
+      ...traceDiagnosticFields(traceContext),
+    });
+    throw error;
+  }
+}
+
 async function acquireSocket(request: {
   url: string;
   headers: Headers;
@@ -462,24 +515,33 @@ async function acquireSocket(request: {
   WebSocketCtor?: WebSocketConstructorLike;
   onLifecycleEvent?: WebSocketLifecycleObserver;
   enableIdleKeepalive?: boolean;
+  trace?: WebSocketTraceOptions;
+  diagnostics?: TransportDiagnosticsCollector;
 }): Promise<{
   socket: WebSocketLike;
   connection: WebSocketConnectionMetadata;
   release(keep: boolean): void;
 }> {
   if (!request.cacheKey) {
-    writeDebugLog(request.settings, 'websocket.cache.disabled');
-    const socket = await connectSocket(
+    const traceContext = request.trace?.nextSpan();
+    writeDebugLog(request.settings, 'websocket.cache.disabled', {
+      logicalTraceId: request.trace?.logicalTraceId,
+      traceparent: traceContext?.traceparent,
+      traceId: traceContext?.traceId,
+      spanId: traceContext?.spanId,
+    });
+    const socket = await tracedConnectSocket(request, traceContext);
+    emitSocketOpen(
+      request.onLifecycleEvent,
+      socket,
+      'disabled',
+      undefined,
       request.url,
-      request.headers,
-      request.signal,
-      request.connectTimeoutMs,
-      request.WebSocketCtor,
+      traceContext,
     );
-    emitSocketOpen(request.onLifecycleEvent, socket, 'disabled', undefined, request.url);
     return {
       socket,
-      connection: getSocketConnectionMetadata(socket, 'disabled', undefined),
+      connection: getSocketConnectionMetadata(socket, 'disabled', undefined, traceContext),
       release: () => {
         emitSocketClose(request.onLifecycleEvent, socket, undefined, 'done');
         closeSilently(socket);
@@ -492,20 +554,26 @@ async function acquireSocket(request: {
     cached.idleTimer = undefined;
   }
   if (cached?.busy) {
+    const traceContext = request.trace?.nextSpan();
     writeDebugLog(request.settings, 'websocket.cache.busy', {
       cacheKeyHash: shortHash(request.cacheKey),
+      logicalTraceId: request.trace?.logicalTraceId,
+      traceparent: traceContext?.traceparent,
+      traceId: traceContext?.traceId,
+      spanId: traceContext?.spanId,
     });
-    const socket = await connectSocket(
+    const socket = await tracedConnectSocket(request, traceContext);
+    emitSocketOpen(
+      request.onLifecycleEvent,
+      socket,
+      'busy',
+      request.cacheKey,
       request.url,
-      request.headers,
-      request.signal,
-      request.connectTimeoutMs,
-      request.WebSocketCtor,
+      traceContext,
     );
-    emitSocketOpen(request.onLifecycleEvent, socket, 'busy', request.cacheKey, request.url);
     return {
       socket,
-      connection: getSocketConnectionMetadata(socket, 'busy', request.cacheKey),
+      connection: getSocketConnectionMetadata(socket, 'busy', request.cacheKey, traceContext),
       release: () => {
         emitSocketClose(request.onLifecycleEvent, socket, request.cacheKey, 'done');
         closeSilently(socket);
@@ -516,6 +584,10 @@ async function acquireSocket(request: {
     writeDebugLog(request.settings, 'websocket.cache.hit', {
       cacheKeyHash: shortHash(request.cacheKey),
       readyState: cached.socket.readyState,
+      logicalTraceId: request.trace?.logicalTraceId,
+      connectionTraceparent: cached.traceContext?.traceparent,
+      connectionTraceId: cached.traceContext?.traceId,
+      connectionSpanId: cached.traceContext?.spanId,
     });
     cached.busy = true;
     cached.onLifecycleEvent = request.onLifecycleEvent;
@@ -523,7 +595,12 @@ async function acquireSocket(request: {
     refSocket(cached.socket);
     return {
       socket: cached.socket,
-      connection: getSocketConnectionMetadata(cached.socket, 'hit', request.cacheKey),
+      connection: getSocketConnectionMetadata(
+        cached.socket,
+        'hit',
+        request.cacheKey,
+        cached.traceContext,
+      ),
       release: (keep) =>
         releaseCached(
           request.cacheKey!,
@@ -544,27 +621,34 @@ async function acquireSocket(request: {
     closeSilently(cached.socket);
     socketCache.delete(request.cacheKey);
   }
+  const traceContext = request.trace?.nextSpan();
   writeDebugLog(request.settings, 'websocket.cache.miss', {
     cacheKeyHash: shortHash(request.cacheKey),
+    logicalTraceId: request.trace?.logicalTraceId,
+    traceparent: traceContext?.traceparent,
+    traceId: traceContext?.traceId,
+    spanId: traceContext?.spanId,
   });
-  const socket = await connectSocket(
-    request.url,
-    request.headers,
-    request.signal,
-    request.connectTimeoutMs,
-    request.WebSocketCtor,
-  );
+  const socket = await tracedConnectSocket(request, traceContext);
   const cacheStatus = cached ? 'stale' : 'miss';
-  emitSocketOpen(request.onLifecycleEvent, socket, cacheStatus, request.cacheKey, request.url);
+  emitSocketOpen(
+    request.onLifecycleEvent,
+    socket,
+    cacheStatus,
+    request.cacheKey,
+    request.url,
+    traceContext,
+  );
   const entry: SocketCacheEntry = {
     socket,
     busy: true,
     onLifecycleEvent: request.onLifecycleEvent,
+    traceContext,
   };
   socketCache.set(request.cacheKey, entry);
   return {
     socket,
-    connection: getSocketConnectionMetadata(socket, cacheStatus, request.cacheKey),
+    connection: getSocketConnectionMetadata(socket, cacheStatus, request.cacheKey, traceContext),
     release: (keep) =>
       releaseCached(
         request.cacheKey!,
@@ -615,6 +699,7 @@ export async function runWebSocketResponse(
     onLifecycleEvent?: WebSocketLifecycleObserver;
     enableIdleKeepalive?: boolean;
     diagnostics?: TransportDiagnosticsCollector;
+    trace?: WebSocketTraceOptions;
   },
   onEvent: (
     event: Record<string, any>,
@@ -622,6 +707,8 @@ export async function runWebSocketResponse(
   ) => Promise<void> | void,
 ): Promise<WebSocketRunResult> {
   let lastError: unknown;
+  if (request.trace?.logicalTraceId)
+    request.diagnostics?.set({ logicalTraceId: request.trace.logicalTraceId });
   for (let attempt = 0; attempt <= request.settings.websocket.retries; attempt++) {
     request.diagnostics?.set({ attempts: attempt + 1 });
     request.diagnostics?.record(
@@ -655,6 +742,8 @@ export async function runWebSocketResponse(
         WebSocketCtor: request.WebSocketCtor,
         onLifecycleEvent: request.onLifecycleEvent,
         enableIdleKeepalive: request.enableIdleKeepalive,
+        trace: request.trace,
+        diagnostics: request.diagnostics,
       });
       request.diagnostics?.record(
         'ws_acquire',
@@ -918,7 +1007,11 @@ export async function runWebSocketResponse(
         );
         return { ...result, fallbackUsed: true };
       }
-      if (!acquired && !(error instanceof PreviousResponseNotFoundError)) {
+      if (
+        !acquired &&
+        !(error instanceof PreviousResponseNotFoundError) &&
+        !request.diagnostics?.hasEvent('ws_connect_error')
+      ) {
         request.diagnostics?.record('ws_connect_error', {
           attempt,
           message: error instanceof Error ? error.message : String(error),

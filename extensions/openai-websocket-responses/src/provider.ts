@@ -24,6 +24,12 @@ import { buildRequestHeaders, buildWebSocketHeaders } from './headers.ts';
 import { resolveRequestProfile } from './profile.ts';
 import { recoverResponseByRetrieve } from './retrieve-recovery.ts';
 import {
+  cloneHeadersWithTraceparent,
+  createTraceContext,
+  createTraceContextForTraceId,
+  type TraceContext,
+} from './trace-context.ts';
+import {
   assistantMessageToResponseItems,
   createResponsesEventProcessor,
   getOutputText,
@@ -92,6 +98,18 @@ function formatProviderError(error: unknown): string {
 
 type PersistUnattachedDiagnostic = (diagnostic: AssistantMessageDiagnostic) => void;
 
+function optionHeader(options: SimpleStreamOptions | undefined, name: string): string | undefined {
+  const headers = options?.headers ?? {};
+  const match = Object.entries(headers).find(([key]) => key.toLowerCase() === name.toLowerCase());
+  return typeof match?.[1] === 'string' ? match[1] : undefined;
+}
+
+function traceFields(trace: TraceContext | undefined): Record<string, string> {
+  return trace
+    ? { traceparent: trace.traceparent, traceId: trace.traceId, spanId: trace.spanId }
+    : {};
+}
+
 function persistMessageTransportDiagnostics(
   persist: PersistUnattachedDiagnostic | undefined,
   message: AssistantMessage,
@@ -141,6 +159,9 @@ export function createOpenAIWebSocketResponsesStream(
       let transportDiagnostics: TransportDiagnosticsCollector | undefined;
       try {
         const settings = settingsProvider();
+        const logicalTrace = settings.trace.enabled
+          ? createTraceContext(optionHeader(options, 'traceparent'))
+          : undefined;
         const profile = resolveRequestProfile(model, settings);
         const requestHeaders = buildRequestHeaders(model, options, profile);
         const websocketHeaders = buildWebSocketHeaders(model, options, profile);
@@ -169,6 +190,7 @@ export function createOpenAIWebSocketResponsesStream(
           previousResponseId:
             typeof body.previous_response_id === 'string' ? body.previous_response_id : undefined,
           url,
+          logicalTraceId: logicalTrace?.traceId,
         });
         writeDebugLog(settings, 'continuation.decision', {
           cacheKeyHash: shortHash(cacheKey),
@@ -176,6 +198,7 @@ export function createOpenAIWebSocketResponsesStream(
           fullInputItems: fullBody.input?.length ?? 0,
           sentInputItems: body.input?.length ?? 0,
           hasPreviousResponseId: typeof body.previous_response_id === 'string',
+          logicalTraceId: logicalTrace?.traceId,
         });
         if (
           continuationRequest.decision !== 'delta' &&
@@ -216,6 +239,12 @@ export function createOpenAIWebSocketResponsesStream(
               onLifecycleEvent,
               enableIdleKeepalive: shouldEnableIdleKeepalive?.() ?? false,
               diagnostics: transportDiagnostics,
+              trace: logicalTrace
+                ? {
+                    logicalTraceId: logicalTrace.traceId,
+                    nextSpan: () => createTraceContextForTraceId(logicalTrace.traceId),
+                  }
+                : undefined,
             },
             async (event, connection) => {
               await start(connection);
@@ -240,16 +269,20 @@ export function createOpenAIWebSocketResponsesStream(
           ) {
             throw error;
           }
+          const retrieveTrace = logicalTrace
+            ? createTraceContextForTraceId(logicalTrace.traceId)
+            : undefined;
           transportDiagnostics?.record('retrieve_recovery_start', {
             responseId: error.responseId,
             emittedTextBytes: new TextEncoder().encode(getOutputText(output)).byteLength,
+            ...traceFields(retrieveTrace),
           });
           try {
             const recoveryResult = await recoverResponseByRetrieve({
               model,
               settings,
               responseId: error.responseId,
-              headers: requestHeaders,
+              headers: cloneHeadersWithTraceparent(requestHeaders, retrieveTrace),
               emittedText: getOutputText(output),
               output,
               stream,
@@ -286,7 +319,7 @@ export function createOpenAIWebSocketResponsesStream(
         attachTransportDiagnostic(output, transportDiagnostics, {
           finalResponseId: output.responseId,
           finalTransport: 'websocket',
-          outcome: transportOutcome ?? 'websocket_transport_event_succeeded',
+          outcome: transportOutcome ?? 'completed',
         });
         if (output.stopReason === 'error') {
           pushFinalEvent(

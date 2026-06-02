@@ -35,6 +35,9 @@ export interface OpenAIWebSocketResponsesSettings {
     notFoundGraceMs: number;
     emitSyntheticDeltas: boolean;
   };
+  trace: {
+    enabled: boolean;
+  };
 }
 
 const DEFAULT_SETTINGS: OpenAIWebSocketResponsesSettings = {
@@ -60,6 +63,7 @@ const DEFAULT_SETTINGS: OpenAIWebSocketResponsesSettings = {
     notFoundGraceMs: 5000,
     emitSyntheticDeltas: true,
   },
+  trace: { enabled: true },
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -174,6 +178,7 @@ export function normalizeSettings(raw: unknown): OpenAIWebSocketResponsesSetting
   const websocket = isRecord(root.websocket) ? root.websocket : {};
   const debug = isRecord(root.debug) ? root.debug : {};
   const recovery = isRecord(root.recovery) ? root.recovery : {};
+  const trace = isRecord(root.trace) ? root.trace : {};
 
   return {
     patch: {
@@ -227,6 +232,9 @@ export function normalizeSettings(raw: unknown): OpenAIWebSocketResponsesSetting
         recovery.emitSyntheticDeltas,
         DEFAULT_SETTINGS.recovery.emitSyntheticDeltas,
       ),
+    },
+    trace: {
+      enabled: booleanValue(trace.enabled, DEFAULT_SETTINGS.trace.enabled),
     },
   };
 }

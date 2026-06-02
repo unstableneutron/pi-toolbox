@@ -90,7 +90,11 @@ export function buildSocketCacheKey(parts: SocketCacheKeyParts): string {
 }
 
 export function headersFingerprint(headers: Headers): string {
-  return JSON.stringify([...headers.entries()].sort(([a], [b]) => a.localeCompare(b)));
+  return JSON.stringify(
+    [...headers.entries()]
+      .filter(([key]) => key.toLowerCase() !== 'traceparent')
+      .sort(([a], [b]) => a.localeCompare(b)),
+  );
 }
 
 export function getContinuation(key: string | undefined): ContinuationState | undefined {

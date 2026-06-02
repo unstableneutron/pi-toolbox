@@ -57,6 +57,12 @@ import {
 } from './src/transport-diagnostics.ts';
 import { recoverResponseByRetrieve } from './src/retrieve-recovery.ts';
 import {
+  createTraceContext,
+  createTraceContextForTraceId,
+  isTraceparent,
+  parseTraceparent,
+} from './src/trace-context.ts';
+import {
   assistantMessageToResponseItems,
   extractResponseOutputText,
   processResponsesEvents,
@@ -226,7 +232,14 @@ describe('settings and patch matching', () => {
         notFoundGraceMs: 5000,
         emitSyntheticDeltas: true,
       },
+      trace: { enabled: true },
     });
+  });
+
+  it('normalizes trace settings as default-on with an explicit opt-out', () => {
+    expect(normalizeSettings(undefined).trace.enabled).toBe(true);
+    expect(normalizeSettings({ trace: { enabled: false } }).trace.enabled).toBe(false);
+    expect(normalizeSettings({ trace: { enabled: 'nope' } }).trace.enabled).toBe(true);
   });
 
   it('reads the openaiWebsocketResponses key from commented settings JSON', () => {
@@ -500,6 +513,27 @@ describe('URL and header helpers', () => {
     expect(websocketHeaders.get('content-type')).toBeNull();
     expect(websocketHeaders.get('accept')).toBeNull();
     expect(websocketHeaders.get('x-azure-deployment')).toBe('gpt-5.5');
+  });
+
+  it('creates valid trace contexts and continues inbound trace ids with a fresh span', () => {
+    const root = createTraceContext();
+    expect(root.traceparent).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/);
+    expect(root.traceId).not.toBe('00000000000000000000000000000000');
+    expect(root.spanId).not.toBe('0000000000000000');
+    expect(isTraceparent(root.traceparent)).toBe(true);
+
+    const child = createTraceContext(root.traceparent);
+    expect(child.traceId).toBe(root.traceId);
+    expect(child.spanId).not.toBe(root.spanId);
+    expect(parseTraceparent(child.traceparent)).toEqual(child);
+  });
+
+  it('omits traceparent from header fingerprints so tracing does not split socket caches', () => {
+    const base = new Headers({ authorization: 'Bearer token', 'x-model': 'gpt' });
+    const traced = new Headers(base);
+    traced.set('traceparent', createTraceContext().traceparent);
+
+    expect(headersFingerprint(traced)).toBe(headersFingerprint(base));
   });
 });
 
@@ -2568,6 +2602,181 @@ describe('WebSocket transport', () => {
     });
   });
 
+  it('records the attempted traceparent when websocket connect fails before open', async () => {
+    const logicalTraceId = 'fedcba0987654321fedcba0987654321';
+    class FakeWebSocket {
+      readyState = 0;
+      listeners = new Map<string, Set<(event: any) => void>>();
+
+      constructor(
+        readonly url: string,
+        readonly socketOptions: { headers?: Record<string, string> },
+      ) {
+        queueMicrotask(() => this.emit('error', { message: 'handshake failed' }));
+      }
+
+      send() {
+        throw new Error('should not send before open');
+      }
+
+      close() {
+        this.readyState = 3;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void) {
+        const listeners = this.listeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      removeEventListener(type: string, listener: (event: any) => void) {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      emit(type: string, event: any) {
+        for (const listener of this.listeners.get(type) ?? []) listener(event);
+      }
+    }
+
+    const diagnostics = createTransportDiagnostics({
+      configuredTransport: 'websocket',
+      requestId: 'owsr_trace_connect_error',
+      url: 'wss://example.test/responses',
+      logicalTraceId,
+    });
+
+    await expect(
+      runWebSocketResponse(
+        {
+          url: 'wss://example.test/responses',
+          headers: new Headers({ authorization: 'Bearer token' }),
+          body: { model: 'gpt', input: [] },
+          settings: normalizeSettings({ websocket: { retries: 0 } }),
+          WebSocketCtor: FakeWebSocket as any,
+          diagnostics,
+          trace: {
+            logicalTraceId,
+            nextSpan: () => createTraceContextForTraceId(logicalTraceId),
+          },
+        },
+        () => undefined,
+      ),
+    ).rejects.toThrow('handshake failed');
+
+    const message = makeAssistantMessage();
+    attachTransportDiagnostic(message, diagnostics, {
+      finalTransport: 'websocket',
+      outcome: 'transport_error',
+    });
+    const timeline = extractTransportDiagnostics(message)[0]?.details?.timeline as any[];
+    expect(timeline).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'ws_connect_error',
+          traceparent: expect.stringMatching(
+            /^00-fedcba0987654321fedcba0987654321-[0-9a-f]{16}-01$/,
+          ),
+          traceId: logicalTraceId,
+        }),
+      ]),
+    );
+  });
+
+  it('sends traceparent on new websocket connections and reports cached connection traces', async () => {
+    const logicalTraceId = '1234567890abcdef1234567890abcdef';
+    const instances: any[] = [];
+    class FakeWebSocket {
+      readyState = 1;
+      sent: string[] = [];
+      listeners = new Map<string, Set<(event: any) => void>>();
+
+      constructor(
+        readonly url: string,
+        readonly socketOptions: { headers?: Record<string, string> },
+      ) {
+        instances.push(this);
+        queueMicrotask(() => this.emit('open', {}));
+      }
+
+      send(data: string) {
+        this.sent.push(data);
+        const responseId = `resp_${this.sent.length}`;
+        queueMicrotask(() => {
+          this.emit('message', {
+            data: JSON.stringify({ type: 'response.created', response: { id: responseId } }),
+          });
+          this.emit('message', {
+            data: JSON.stringify({
+              type: 'response.completed',
+              response: { id: responseId, status: 'completed' },
+            }),
+          });
+        });
+      }
+
+      close() {
+        this.readyState = 3;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void) {
+        const listeners = this.listeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      removeEventListener(type: string, listener: (event: any) => void) {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      emit(type: string, event: any) {
+        for (const listener of this.listeners.get(type) ?? []) listener(event);
+      }
+    }
+
+    const diagnostics = createTransportDiagnostics({
+      configuredTransport: 'websocket-cached',
+      requestId: 'owsr_trace_cache',
+      url: 'wss://example.test/responses',
+      logicalTraceId,
+    });
+    const trace = {
+      logicalTraceId,
+      nextSpan: () => createTraceContextForTraceId(logicalTraceId),
+    };
+    const request = {
+      url: 'wss://example.test/responses',
+      headers: new Headers({ authorization: 'Bearer token' }),
+      body: { model: 'gpt', input: [] },
+      settings: normalizeSettings({ websocket: { retries: 0 } }),
+      cacheKey: 'trace-cache-key',
+      WebSocketCtor: FakeWebSocket as any,
+      diagnostics,
+      trace,
+    };
+
+    try {
+      await runWebSocketResponse(request, () => undefined);
+      await runWebSocketResponse(request, () => undefined);
+
+      expect(instances).toHaveLength(1);
+      const traceparent = instances[0].socketOptions.headers.traceparent;
+      expect(traceparent).toMatch(/^00-1234567890abcdef1234567890abcdef-[0-9a-f]{16}-01$/);
+      const message = makeAssistantMessage();
+      attachTransportDiagnostic(message, diagnostics, {
+        finalTransport: 'websocket',
+        outcome: 'completed',
+      });
+      expect(extractTransportDiagnostics(message)[0]?.details).toMatchObject({
+        logicalTraceId,
+        connectionTraceparent: traceparent,
+        connectionTraceId: logicalTraceId,
+        cacheStatus: 'hit',
+      });
+    } finally {
+      closeAllCachedWebSockets();
+    }
+  });
+
   it('passes connection metadata to response event handlers', async () => {
     const { WebSocketCtor } = makeWebSocketCtor(
       [
@@ -3103,6 +3312,162 @@ describe('provider transport diagnostics', () => {
     }
   });
 
+  it('adds trace context to provider websocket handshakes and compact success diagnostics', async () => {
+    const instances: any[] = [];
+    class FakeWebSocket {
+      readyState = 1;
+      listeners = new Map<string, Set<(event: any) => void>>();
+
+      constructor(
+        readonly url: string,
+        readonly socketOptions: { headers?: Record<string, string> },
+      ) {
+        instances.push(this);
+        queueMicrotask(() => this.emit('open', {}));
+      }
+
+      send() {
+        queueMicrotask(() => {
+          this.emit('message', {
+            data: JSON.stringify({ type: 'response.created', response: { id: 'resp_trace' } }),
+          });
+          this.emit('message', {
+            data: JSON.stringify({
+              type: 'response.completed',
+              response: { id: 'resp_trace', status: 'completed' },
+            }),
+          });
+        });
+      }
+
+      close() {
+        this.readyState = 3;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void) {
+        const listeners = this.listeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      removeEventListener(type: string, listener: (event: any) => void) {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      emit(type: string, event: any) {
+        for (const listener of this.listeners.get(type) ?? []) listener(event);
+      }
+    }
+
+    vi.doMock('ws', () => ({ WebSocket: FakeWebSocket, default: FakeWebSocket }));
+    try {
+      const streamFactory = createOpenAIWebSocketResponsesStream(() =>
+        normalizeSettings({ websocket: { retries: 0 } }),
+      );
+      const events = await collectStreamEvents(
+        streamFactory(makeModel(), { messages: [] }, {
+          apiKey: 'test-token',
+          sessionId: 'provider-trace-session',
+          transport: 'websocket-cached',
+        } as any),
+      );
+      const done = events.find((event) => event.type === 'done')?.message as AssistantMessage;
+      const traceparent = instances[0].socketOptions.headers.traceparent;
+      const parsed = parseTraceparent(traceparent);
+
+      expect(parsed).toBeDefined();
+      expect(extractTransportDiagnostics(done)[0]?.details).toMatchObject({
+        logicalTraceId: parsed?.traceId,
+        connectionTraceparent: traceparent,
+        connectionTraceId: parsed?.traceId,
+        finalResponseId: 'resp_trace',
+        finalTransport: 'websocket',
+        outcome: 'completed',
+      });
+      expect(extractTransportDiagnostics(done)[0]?.details?.timeline).toBeUndefined();
+    } finally {
+      vi.doUnmock('ws');
+      closeAllCachedWebSockets();
+    }
+  });
+
+  it('sends a same-trace new-span traceparent on retrieve recovery GETs', async () => {
+    const instances: any[] = [];
+    class FakeWebSocket {
+      readyState = 1;
+      listeners = new Map<string, Set<(event: any) => void>>();
+
+      constructor(
+        readonly url: string,
+        readonly socketOptions: { headers?: Record<string, string> },
+      ) {
+        instances.push(this);
+        queueMicrotask(() => this.emit('open', {}));
+      }
+
+      send() {
+        queueMicrotask(() => {
+          this.emit('message', {
+            data: JSON.stringify({ type: 'response.created', response: { id: 'resp_recover' } }),
+          });
+          this.emit('close', { code: 1006 });
+        });
+      }
+
+      close() {
+        this.readyState = 3;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void) {
+        const listeners = this.listeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      removeEventListener(type: string, listener: (event: any) => void) {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      emit(type: string, event: any) {
+        for (const listener of this.listeners.get(type) ?? []) listener(event);
+      }
+    }
+
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ id: 'resp_recover', status: 'completed', output: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+    );
+    vi.doMock('ws', () => ({ WebSocket: FakeWebSocket, default: FakeWebSocket }));
+    vi.stubGlobal('fetch', fetchImpl);
+    try {
+      const streamFactory = createOpenAIWebSocketResponsesStream(() =>
+        normalizeSettings({ websocket: { retries: 0, idleTimeoutMs: 0 } }),
+      );
+      await collectStreamEvents(
+        streamFactory(makeModel(), { messages: [] }, {
+          apiKey: 'test-token',
+          sessionId: 'provider-recovery-trace-session',
+          transport: 'websocket-cached',
+        } as any),
+      );
+
+      const websocketTrace = parseTraceparent(instances[0].socketOptions.headers.traceparent)!;
+      const retrieveOptions = (fetchImpl as any).mock.calls[0]?.[1] as { headers: Headers };
+      const retrieveTrace = parseTraceparent(
+        retrieveOptions.headers.get('traceparent') ?? undefined,
+      )!;
+      expect(retrieveTrace.traceId).toBe(websocketTrace.traceId);
+      expect(retrieveTrace.spanId).not.toBe(websocketTrace.spanId);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.doUnmock('ws');
+      closeAllCachedWebSockets();
+    }
+  });
+
   it('labels stale-cache success as transport events rather than retry success', async () => {
     const instances: any[] = [];
     class FakeWebSocket {
@@ -3350,6 +3715,7 @@ describe('transparent provider patching', () => {
     const websocketDiagnostics = createTransportDiagnostics({
       configuredTransport: 'auto',
       url: 'wss://example.test/responses',
+      logicalTraceId: 'abcdefabcdefabcdefabcdefabcdefab',
     });
     websocketDiagnostics.record('ws_close', { code: 1006, attempt: 0 });
     attachTransportDiagnostic(websocketMessage, websocketDiagnostics, {
@@ -3377,12 +3743,25 @@ describe('transparent provider patching', () => {
     );
 
     const events = await collectStreamEvents(
-      provider.streamSimple(makeModel({ id: 'gpt-5.5' }), { messages: [] }, { transport: 'auto' }),
+      provider.streamSimple(
+        makeModel({ id: 'gpt-5.5' }),
+        { messages: [] },
+        {
+          transport: 'auto',
+          headers: { Traceparent: '00-abcdefabcdefabcdefabcdefabcdefab-1111111111111111-01' },
+        },
+      ),
     );
 
     expect(websocketStream).toHaveBeenCalledTimes(1);
     expect(originalStreamSimple).toHaveBeenCalledTimes(1);
-    expect(originalStreamSimple.mock.calls[0]?.[2]).toMatchObject({ transport: 'sse' });
+    expect(originalStreamSimple.mock.calls[0]?.[2]).toMatchObject({
+      transport: 'sse',
+      headers: {
+        traceparent: expect.stringMatching(/^00-abcdefabcdefabcdefabcdefabcdefab-[0-9a-f]{16}-01$/),
+      },
+    });
+    expect(originalStreamSimple.mock.calls[0]?.[2]?.headers).not.toHaveProperty('Traceparent');
     expect(events.map((event) => event.type)).toEqual(['start', 'done']);
     expect(events[1]?.message).toBe(originalMessage);
     expect(extractTransportDiagnostics(events[1]?.message)[0]?.details).toMatchObject({

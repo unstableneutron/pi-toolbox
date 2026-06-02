@@ -14,6 +14,7 @@ import {
 import { shouldPatchModel } from './match.ts';
 import type { OpenAIWebSocketResponsesSettings } from './settings.ts';
 import { extractTransportDiagnostics, mergeTransportDiagnostics } from './transport-diagnostics.ts';
+import { createTraceContextForTraceId, type TraceContext } from './trace-context.ts';
 
 type StreamSimple = (
   model: Model<Api>,
@@ -37,14 +38,46 @@ function canFallbackToSse(options: StreamOptions | undefined): boolean {
   return options?.transport === undefined || options.transport === 'auto';
 }
 
-function sseOptions<TOptions extends StreamOptions>(options: TOptions | undefined): TOptions {
-  return { ...options, transport: 'sse' } as TOptions;
+function traceFromDiagnostics(
+  diagnostics: ReturnType<typeof extractTransportDiagnostics>,
+): TraceContext | undefined {
+  const traceId = diagnostics.find(
+    (diagnostic) => typeof diagnostic.details?.logicalTraceId === 'string',
+  )?.details?.logicalTraceId;
+  return typeof traceId === 'string' ? createTraceContextForTraceId(traceId) : undefined;
+}
+
+function traceFields(trace: TraceContext | undefined): Record<string, string> {
+  return trace
+    ? { traceparent: trace.traceparent, traceId: trace.traceId, spanId: trace.spanId }
+    : {};
+}
+
+function headersWithoutTraceparent(
+  headers: StreamOptions['headers'] | undefined,
+): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(headers ?? {}).filter(([key]) => key.toLowerCase() !== 'traceparent'),
+  );
+}
+
+function sseOptions<TOptions extends StreamOptions>(
+  options: TOptions | undefined,
+  trace: TraceContext | undefined,
+): TOptions {
+  if (!trace) return { ...options, transport: 'sse' } as TOptions;
+  return {
+    ...options,
+    transport: 'sse',
+    headers: { ...headersWithoutTraceparent(options?.headers), traceparent: trace.traceparent },
+  } as unknown as TOptions;
 }
 
 async function pipeStream(
   source: AssistantMessageEventStream,
   target: AssistantMessageEventStream,
   fallbackDiagnostics = [] as ReturnType<typeof extractTransportDiagnostics>,
+  fallbackTrace?: TraceContext,
 ): Promise<void> {
   try {
     for await (const event of source) {
@@ -54,7 +87,12 @@ async function pipeStream(
           finalResponseId: event.message.responseId,
           finalTransport: 'sse',
           outcome: 'sse_fallback_after_websocket_failure',
-          timelineEvent: { type: 'sse_fallback', reason: 'websocket_failed_before_stream_start' },
+          ...traceFields(fallbackTrace),
+          timelineEvent: {
+            type: 'sse_fallback',
+            reason: 'websocket_failed_before_stream_start',
+            ...traceFields(fallbackTrace),
+          },
         });
       }
       if (fallbackDiagnostics.length > 0 && event.type === 'error') {
@@ -63,7 +101,12 @@ async function pipeStream(
           finalResponseId: event.error.responseId,
           finalTransport: 'sse',
           outcome: 'sse_fallback_after_websocket_failure',
-          timelineEvent: { type: 'sse_fallback', reason: 'websocket_failed_before_stream_start' },
+          ...traceFields(fallbackTrace),
+          timelineEvent: {
+            type: 'sse_fallback',
+            reason: 'websocket_failed_before_stream_start',
+            ...traceFields(fallbackTrace),
+          },
         });
       }
       target.push(event);
@@ -78,7 +121,7 @@ function streamWithAutoSseFallback<TOptions extends StreamOptions>(
   websocketStream: StreamForOptions<TOptions>,
   originalStream: StreamForOptions<TOptions>,
 ): AssistantMessageEventStream {
-  if (isSseTransport(options)) return originalStream(sseOptions(options));
+  if (isSseTransport(options)) return originalStream(sseOptions(options, undefined));
   if (!canFallbackToSse(options)) return websocketStream(options);
 
   const proxy = createAssistantMessageEventStream();
@@ -88,10 +131,13 @@ function streamWithAutoSseFallback<TOptions extends StreamOptions>(
       const source = websocketStream(options);
       for await (const event of source) {
         if (!started && event.type === 'error') {
+          const fallbackDiagnostics = extractTransportDiagnostics(event.error);
+          const fallbackTrace = traceFromDiagnostics(fallbackDiagnostics);
           await pipeStream(
-            originalStream(sseOptions(options)),
+            originalStream(sseOptions(options, fallbackTrace)),
             proxy,
-            extractTransportDiagnostics(event.error),
+            fallbackDiagnostics,
+            fallbackTrace,
           );
           return;
         }
@@ -100,10 +146,13 @@ function streamWithAutoSseFallback<TOptions extends StreamOptions>(
       }
     } catch (error) {
       if (!started) {
+        const fallbackDiagnostics = extractTransportDiagnostics(error as { diagnostics?: any[] });
+        const fallbackTrace = traceFromDiagnostics(fallbackDiagnostics);
         await pipeStream(
-          originalStream(sseOptions(options)),
+          originalStream(sseOptions(options, fallbackTrace)),
           proxy,
-          extractTransportDiagnostics(error as { diagnostics?: any[] }),
+          fallbackDiagnostics,
+          fallbackTrace,
         );
         return;
       }

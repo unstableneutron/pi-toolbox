@@ -40,6 +40,7 @@ interface TransportDiagnosticsInit {
   requestBytes?: number;
   url?: string;
   previousResponseId?: string;
+  logicalTraceId?: string;
 }
 
 export interface TransportDiagnosticFields {
@@ -57,6 +58,13 @@ export interface TransportDiagnosticFields {
   responseIdSeen?: boolean;
   url?: string;
   websocketResponseId?: string;
+  logicalTraceId?: string;
+  traceparent?: string;
+  traceId?: string;
+  spanId?: string;
+  connectionTraceparent?: string;
+  connectionTraceId?: string;
+  connectionSpanId?: string;
 }
 
 export interface TransportDiagnosticsCollector {
@@ -141,6 +149,7 @@ export function createTransportDiagnostics(
     previousResponseId: init.previousResponseId,
     requestBytes: init.requestBytes,
     url: sanitizedUrl,
+    logicalTraceId: init.logicalTraceId,
   };
   const eventTypes = new Set<string>();
   let significant = false;
@@ -171,6 +180,17 @@ export function createTransportDiagnostics(
         fields.attempts = Math.max(fields.attempts ?? 0, details.attempt + 1);
       if (typeof details.connectionId === 'string') fields.connectionId = details.connectionId;
       if (typeof details.cacheStatus === 'string') fields.cacheStatus = details.cacheStatus;
+      if (typeof details.logicalTraceId === 'string')
+        fields.logicalTraceId = details.logicalTraceId;
+      if (typeof details.traceparent === 'string') fields.traceparent = details.traceparent;
+      if (typeof details.traceId === 'string') fields.traceId = details.traceId;
+      if (typeof details.spanId === 'string') fields.spanId = details.spanId;
+      if (typeof details.connectionTraceparent === 'string')
+        fields.connectionTraceparent = details.connectionTraceparent;
+      if (typeof details.connectionTraceId === 'string')
+        fields.connectionTraceId = details.connectionTraceId;
+      if (typeof details.connectionSpanId === 'string')
+        fields.connectionSpanId = details.connectionSpanId;
     },
 
     set(nextFields) {
@@ -178,15 +198,19 @@ export function createTransportDiagnostics(
     },
 
     toDiagnostic(options = {}) {
-      if (!significant) return undefined;
       const merged = { ...fields, ...diagnosticFields(options as Record<string, unknown>) };
+      const hasTraceContext =
+        typeof merged.logicalTraceId === 'string' ||
+        typeof merged.traceparent === 'string' ||
+        typeof merged.connectionTraceparent === 'string';
+      if (!significant && !hasTraceContext) return undefined;
       const details = withoutUndefined({
         ...merged,
         requestId,
         responseIdSeen: merged.responseIdSeen ?? typeof merged.websocketResponseId === 'string',
         url: sanitizedUrl,
         urlHash: shortHash(sanitizedUrl),
-        timeline,
+        timeline: significant ? timeline : undefined,
       });
       const diagnostic: AssistantMessageDiagnostic = {
         type: TRANSPORT_DIAGNOSTIC_TYPE,
