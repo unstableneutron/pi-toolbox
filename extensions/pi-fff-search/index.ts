@@ -128,6 +128,12 @@ const EXPENSIVE_BASH_TOKEN_PATTERN = new RegExp(
 const ALLOWLIST_HINTS = ['~/.pi', '~/.pi/agent', '~/.codex', '~/.claude', '~/.amp'];
 const DAEMON_RESTART_NOTICE =
   'Notice: FFF daemon config changed; restarted the daemon and retried the search once.';
+const COMPACT_READ_RESOURCE_FILE_NAMES = new Set([
+  'AGENTS.md',
+  'AGENTS.MD',
+  'CLAUDE.md',
+  'CLAUDE.MD',
+]);
 
 function stripSchemaFields(schema: TSchema, hiddenFields: string[]): TSchema {
   const hidden = new Set(hiddenFields);
@@ -2082,6 +2088,72 @@ type ReadCallTheme = {
   fg: (...args: any[]) => string;
 };
 
+type CompactReadClassification =
+  | { kind: 'skill'; label: string }
+  | { kind: 'package'; label: string }
+  | { kind: 'resource'; label: string };
+
+function toPosixPath(filePath: string): string {
+  return filePath.split(path.sep).join('/');
+}
+
+function getReadPath(args: Record<string, unknown>): string {
+  const rawPath = args.file_path ?? args.path;
+  return typeof rawPath === 'string' ? rawPath : '';
+}
+
+function getNodePackageReadClassification(absolutePath: string): CompactReadClassification | null {
+  const marker = '/node_modules/';
+  const normalized = absolutePath.split(path.sep).join('/');
+  const markerIndex = normalized.lastIndexOf(marker);
+  if (markerIndex === -1) return null;
+
+  const packagePath = normalized.slice(markerIndex + marker.length);
+  const parts = packagePath.split('/').filter((part) => part.length > 0);
+  const first = parts[0];
+  if (!first) return null;
+
+  if (first.startsWith('@')) {
+    const second = parts[1];
+    if (!second) return null;
+    return { kind: 'package', label: [first, second, ...parts.slice(2)].join('/') };
+  }
+
+  return { kind: 'package', label: parts.join('/') };
+}
+
+function formatPathRelativeToCwdOrAbsolute(absolutePath: string, cwd?: string): string {
+  if (!cwd) return absolutePath;
+  const relativePath = path.relative(cwd, absolutePath);
+  return relativePath && !relativePath.startsWith('..') && !path.isAbsolute(relativePath)
+    ? toPosixPath(relativePath)
+    : absolutePath;
+}
+
+function getCompactReadClassification(
+  args: Record<string, unknown>,
+  cwd?: string,
+): CompactReadClassification | null {
+  const rawPath = getReadPath(args);
+  if (!rawPath) return null;
+
+  const absolutePath = path.resolve(cwd ?? process.cwd(), rawPath);
+  const fileName = path.basename(absolutePath);
+
+  if (fileName === 'SKILL.md') {
+    return { kind: 'skill', label: path.basename(path.dirname(absolutePath)) || fileName };
+  }
+
+  if (COMPACT_READ_RESOURCE_FILE_NAMES.has(fileName)) {
+    return { kind: 'resource', label: formatPathRelativeToCwdOrAbsolute(absolutePath, cwd) };
+  }
+
+  const packageClassification = getNodePackageReadClassification(absolutePath);
+  if (packageClassification) return packageClassification;
+
+  return null;
+}
+
 function formatBuiltinReadLineRange(args: Record<string, unknown>, theme: ReadCallTheme): string {
   if (args.offset === undefined && args.limit === undefined) {
     return '';
@@ -2092,6 +2164,30 @@ function formatBuiltinReadLineRange(args: Record<string, unknown>, theme: ReadCa
   return theme.fg('warning', `:${startLine}${endLine ? `-${endLine}` : ''}`);
 }
 
+function formatCompactReadCall(
+  classification: CompactReadClassification,
+  args: Record<string, unknown>,
+  theme: ReadCallTheme,
+): string {
+  const expandHint = theme.fg('dim', ' (ctrl+o to expand)');
+  if (classification.kind === 'skill') {
+    return (
+      theme.fg('customMessageLabel', `${theme.bold('[skill]')} `) +
+      theme.fg('customMessageText', classification.label) +
+      formatBuiltinReadLineRange(args, theme) +
+      expandHint
+    );
+  }
+
+  return (
+    theme.fg('toolTitle', theme.bold(`read ${classification.kind}`)) +
+    ' ' +
+    theme.fg('accent', classification.label) +
+    formatBuiltinReadLineRange(args, theme) +
+    expandHint
+  );
+}
+
 function formatBuiltinReadCallSummary(
   args: Record<string, unknown>,
   theme: ReadCallTheme,
@@ -2099,8 +2195,13 @@ function formatBuiltinReadCallSummary(
   width?: number,
   showExpandHint = false,
 ): string {
+  const compactClassification = showExpandHint ? getCompactReadClassification(args, cwd) : null;
+  if (compactClassification) {
+    return formatCompactReadCall(compactClassification, args, theme);
+  }
+
   const title = theme.fg('toolTitle', theme.bold('read'));
-  const pathValue = typeof args.path === 'string' ? args.path : '';
+  const pathValue = getReadPath(args);
   if (!pathValue) {
     return title;
   }
@@ -2113,16 +2214,31 @@ function formatBuiltinReadCallSummary(
     const endLine = typeof args.limit === 'number' ? startLine + args.limit - 1 : '';
     return `:${startLine}${endLine ? `-${endLine}` : ''}`;
   })();
-  const expandHintText = showExpandHint ? ' (ctrl+o to expand)' : '';
+  const fullExpandHintText = showExpandHint ? ' (ctrl+o to expand)' : '';
   const shortenedPath = shortenDisplayPath(pathValue, cwd);
-  const pathBudget = width
-    ? Math.max(24, width - 'read '.length - rawRange.length - expandHintText.length)
-    : 0;
-  const displayPath =
-    pathBudget > 0 ? collapseMiddlePath(shortenedPath, pathBudget) : shortenedPath;
-  const expandHint = expandHintText ? theme.fg('dim', expandHintText) : '';
+  const renderParts = (hintText: string) => {
+    const fixedWidth = 'read '.length + rawRange.length + hintText.length;
+    const pathBudget = width ? Math.max(1, width - fixedWidth) : 0;
+    const displayPath =
+      pathBudget > 0 ? collapseMiddlePath(shortenedPath, pathBudget) : shortenedPath;
+    return {
+      displayPath,
+      hintText,
+      pathBudget,
+      visibleWidth: fixedWidth + displayPath.length,
+    };
+  };
 
-  return `${title} ${theme.fg('accent', displayPath)}${formatBuiltinReadLineRange(args, theme)}${expandHint}`;
+  const fullHintParts = renderParts(fullExpandHintText);
+  const parts =
+    fullExpandHintText &&
+    width &&
+    (fullHintParts.visibleWidth > width || fullHintParts.pathBudget < 24)
+      ? renderParts('')
+      : fullHintParts;
+  const expandHint = parts.hintText ? theme.fg('dim', parts.hintText) : '';
+
+  return `${title} ${theme.fg('accent', parts.displayPath)}${formatBuiltinReadLineRange(args, theme)}${expandHint}`;
 }
 
 function wrapBuiltinReadCallRenderer(args: {

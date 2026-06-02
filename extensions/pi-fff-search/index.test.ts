@@ -787,6 +787,37 @@ describe('pi-fff-search extension', () => {
     );
   });
 
+  test('builtin read override hides expand hint before it wraps on narrow screens', () => {
+    const { tools } = createHarness({
+      overrideBuiltinRead: true,
+      overrideBuiltinGrep: false,
+      overrideBuiltinFind: false,
+      rewriteBuiltinBash: false,
+    });
+    const theme = createTheme();
+    const read = tools.find((tool) => tool.name === 'read')!;
+
+    const call = read.renderCall!(
+      {
+        path: '/Users/example/.cache/aube/virtual-store/@earendil-works+pi-coding-agent/dist/core/interactive-mode.js',
+        offset: 2508,
+        limit: 50,
+      },
+      theme,
+      {
+        cwd: '/Users/example/Projects/pi-toolbox',
+        expanded: false,
+      } as any,
+    );
+
+    const lines = renderTextTrimmed(call, 54).split('\n');
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('read ');
+    expect(lines[0]).toContain(':2508-2557');
+    expect(lines[0]).not.toContain('ctrl+o');
+    expect(lines[0]!.length).toBeLessThanOrEqual(54);
+  });
+
   test('builtin read override preserves title, path, and range colors', () => {
     const { tools } = createHarness({
       overrideBuiltinRead: true,
@@ -802,8 +833,137 @@ describe('pi-fff-search extension', () => {
       expanded: false,
     } as any);
 
-    expect(renderTextTrimmed(call, 120)).toBe(
+    expect(renderTextTrimmed(call, 500)).toBe(
       '<toolTitle><b>read</b></toolTitle> <accent>src/router.ts</accent><warning>:20-24</warning><dim> (ctrl+o to expand)</dim>',
+    );
+  });
+
+  test('builtin read override preserves native compact skill-file rendering', () => {
+    const { tools } = createHarness({
+      overrideBuiltinRead: true,
+      overrideBuiltinGrep: false,
+      overrideBuiltinFind: false,
+      rewriteBuiltinBash: false,
+    });
+    const theme = createTaggedTheme();
+    const read = tools.find((tool) => tool.name === 'read')!;
+
+    const call = read.renderCall!(
+      { path: '/Users/example/.pi/agent/skills/brainstorming/SKILL.md', offset: 10, limit: 5 },
+      theme,
+      { cwd: '/repo', expanded: false } as any,
+    );
+
+    expect(renderTextTrimmed(call, 500)).toBe(
+      '<customMessageLabel><b>[skill]</b> </customMessageLabel><customMessageText>brainstorming</customMessageText><warning>:10-14</warning><dim> (ctrl+o to expand)</dim>',
+    );
+  });
+
+  test('builtin read override preserves native compact resource-file rendering', () => {
+    const { tools } = createHarness({
+      overrideBuiltinRead: true,
+      overrideBuiltinGrep: false,
+      overrideBuiltinFind: false,
+      rewriteBuiltinBash: false,
+    });
+    const theme = createTaggedTheme();
+    const read = tools.find((tool) => tool.name === 'read')!;
+
+    const call = read.renderCall!({ path: 'AGENTS.md' }, theme, {
+      cwd: '/repo',
+      expanded: false,
+    } as any);
+
+    expect(renderTextTrimmed(call, 500)).toBe(
+      '<toolTitle><b>read resource</b></toolTitle> <accent>AGENTS.md</accent><dim> (ctrl+o to expand)</dim>',
+    );
+  });
+
+  test('builtin read override compacts scoped package paths', () => {
+    const { tools } = createHarness({
+      overrideBuiltinRead: true,
+      overrideBuiltinGrep: false,
+      overrideBuiltinFind: false,
+      rewriteBuiltinBash: false,
+    });
+    const theme = createTaggedTheme();
+    const read = tools.find((tool) => tool.name === 'read')!;
+
+    const call = read.renderCall!(
+      { path: '/repo/node_modules/@earendil-works/pi-coding-agent/docs/skills.md' },
+      theme,
+      {
+        cwd: '/repo',
+        expanded: false,
+      } as any,
+    );
+
+    expect(renderTextTrimmed(call, 500)).toBe(
+      '<toolTitle><b>read package</b></toolTitle> <accent>@earendil-works/pi-coding-agent/docs/skills.md</accent><dim> (ctrl+o to expand)</dim>',
+    );
+  });
+
+  test('builtin read override recognizes package paths from another install root', () => {
+    const { tools } = createHarness({
+      overrideBuiltinRead: true,
+      overrideBuiltinGrep: false,
+      overrideBuiltinFind: false,
+      rewriteBuiltinBash: false,
+    });
+    const theme = createTaggedTheme();
+    const read = tools.find((tool) => tool.name === 'read')!;
+
+    const call = read.renderCall!(
+      {
+        path: '/tmp/virtual-store/@earendil-works+pi-coding-agent@0.78.0/node_modules/@earendil-works/pi-coding-agent/docs/skills.md',
+      },
+      theme,
+      { cwd: '/repo', expanded: false } as any,
+    );
+
+    expect(renderTextTrimmed(call, 500)).toBe(
+      '<toolTitle><b>read package</b></toolTitle> <accent>@earendil-works/pi-coding-agent/docs/skills.md</accent><dim> (ctrl+o to expand)</dim>',
+    );
+  });
+
+  test('builtin read override compacts unscoped package paths', () => {
+    const { tools } = createHarness({
+      overrideBuiltinRead: true,
+      overrideBuiltinGrep: false,
+      overrideBuiltinFind: false,
+      rewriteBuiltinBash: false,
+    });
+    const theme = createTaggedTheme();
+    const read = tools.find((tool) => tool.name === 'read')!;
+
+    const call = read.renderCall!(
+      { path: '/repo/node_modules/zod/v4/core/api.js', offset: 2, limit: 3 },
+      theme,
+      { cwd: '/repo', expanded: false } as any,
+    );
+
+    expect(renderTextTrimmed(call, 500)).toBe(
+      '<toolTitle><b>read package</b></toolTitle> <accent>zod/v4/core/api.js</accent><warning>:2-4</warning><dim> (ctrl+o to expand)</dim>',
+    );
+  });
+
+  test('builtin read override does not use package compaction in expanded mode', () => {
+    const { tools } = createHarness({
+      overrideBuiltinRead: true,
+      overrideBuiltinGrep: false,
+      overrideBuiltinFind: false,
+      rewriteBuiltinBash: false,
+    });
+    const theme = createTaggedTheme();
+    const read = tools.find((tool) => tool.name === 'read')!;
+
+    const call = read.renderCall!({ path: '/repo/node_modules/zod/v4/core/api.js' }, theme, {
+      cwd: '/repo',
+      expanded: true,
+    } as any);
+
+    expect(renderTextTrimmed(call, 120)).toBe(
+      '<toolTitle><b>read</b></toolTitle> <accent>node_modules/zod/v4/core/api.js</accent>',
     );
   });
 
