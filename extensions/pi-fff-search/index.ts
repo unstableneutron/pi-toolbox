@@ -31,7 +31,7 @@ import {
   type SearchCoordinatorResult,
 } from 'fff-router';
 import { clampMatchText } from './match-heuristics';
-import { chooseOptionalSuffix } from '../shared/tui-width';
+import { DEFAULT_EXPAND_HINT_SUFFIXES, chooseOptionalSuffix } from '../shared/tui-width';
 import { tryRewriteBash, type RewriteDecision, type RewriteTool } from './bash-rewrite';
 import {
   type FallbackSpillInfo,
@@ -2181,8 +2181,9 @@ function formatCompactReadCall(
   const suffixChoice = chooseOptionalSuffix({
     width,
     fixedWidth: plainPrefix.length + rawRange.length,
-    suffixes: [' (ctrl+o to expand)', ''],
+    suffixes: DEFAULT_EXPAND_HINT_SUFFIXES,
     minPrimaryWidth: 24,
+    preferredPrimaryWidth: classification.label.length,
   });
   const displayLabel =
     Number.isFinite(suffixChoice.primaryBudget) && suffixChoice.primaryBudget > 0
@@ -2236,13 +2237,13 @@ function formatBuiltinReadCallSummary(
     const endLine = typeof args.limit === 'number' ? startLine + args.limit - 1 : '';
     return `:${startLine}${endLine ? `-${endLine}` : ''}`;
   })();
-  const fullExpandHintText = showExpandHint ? ' (ctrl+o to expand)' : '';
   const displayBasePath = showExpandHint ? shortenDisplayPath(pathValue, cwd) : pathValue;
   const suffixChoice = chooseOptionalSuffix({
     width,
     fixedWidth: 'read '.length + rawRange.length,
-    suffixes: fullExpandHintText ? [fullExpandHintText, ''] : [''],
+    suffixes: showExpandHint ? DEFAULT_EXPAND_HINT_SUFFIXES : [''],
     minPrimaryWidth: 24,
+    preferredPrimaryWidth: displayBasePath.length,
   });
   const pathBudget = width ? suffixChoice.primaryBudget : 0;
   const displayPath =

@@ -890,6 +890,24 @@ describe('pi-fff-search extension', () => {
     expect(lines[0]!.length).toBeLessThanOrEqual(48);
   });
 
+  test('builtin read override shortens generic expand hint before truncating the full path', () => {
+    const { tools } = createHarness({
+      overrideBuiltinRead: true,
+      overrideBuiltinGrep: false,
+      overrideBuiltinFind: false,
+      rewriteBuiltinBash: false,
+    });
+    const theme = createTheme();
+    const read = tools.find((tool) => tool.name === 'read')!;
+
+    const call = read.renderCall!({ path: 'src/router.ts', offset: 20, limit: 5 }, theme, {
+      cwd: '/repo',
+      expanded: false,
+    } as any);
+
+    expect(renderTextTrimmed(call, 42)).toBe('read src/router.ts:20-24 (ctrl+o)');
+  });
+
   test('builtin read override preserves native compact skill-file rendering', () => {
     const { tools } = createHarness({
       overrideBuiltinRead: true,
@@ -909,6 +927,25 @@ describe('pi-fff-search extension', () => {
     expect(renderTextTrimmed(call, 500)).toBe(
       '<customMessageLabel><b>[skill]</b> </customMessageLabel><customMessageText>brainstorming</customMessageText><warning>:10-14</warning><dim> (ctrl+o to expand)</dim>',
     );
+  });
+
+  test('builtin read override shortens compact skill expand hint before truncating the full skill name', () => {
+    const { tools } = createHarness({
+      overrideBuiltinRead: true,
+      overrideBuiltinGrep: false,
+      overrideBuiltinFind: false,
+      rewriteBuiltinBash: false,
+    });
+    const theme = createTheme();
+    const read = tools.find((tool) => tool.name === 'read')!;
+
+    const call = read.renderCall!(
+      { path: '/Users/example/.pi/agent/skills/verification-before-completion/SKILL.md' },
+      theme,
+      { cwd: '/repo', expanded: false } as any,
+    );
+
+    expect(renderTextTrimmed(call, 51)).toBe('[skill] verification-before-completion (ctrl+o)');
   });
 
   test('builtin read override preserves native compact resource-file rendering', () => {

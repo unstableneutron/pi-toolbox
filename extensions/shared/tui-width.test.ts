@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 
 import {
+  DEFAULT_EXPAND_HINT_SUFFIXES,
   chooseOptionalSuffix,
   clampRenderedLineToWidth,
   clampRenderedLinesToWidth,
@@ -46,6 +47,18 @@ describe('shared TUI width helpers', () => {
         minPrimaryWidth: 24,
       }),
     ).toEqual({ suffix: '', primaryBudget: 39 });
+  });
+
+  test('prefers shorter expand hints when they preserve the preferred primary width', () => {
+    expect(
+      chooseOptionalSuffix({
+        width: 51,
+        fixedWidth: '[skill] '.length,
+        suffixes: DEFAULT_EXPAND_HINT_SUFFIXES,
+        minPrimaryWidth: 24,
+        preferredPrimaryWidth: 'verification-before-completion'.length,
+      }),
+    ).toEqual({ suffix: ' (ctrl+o)', primaryBudget: 34 });
   });
 
   test('falls back to the final suffix and at least one primary column on tiny widths', () => {
