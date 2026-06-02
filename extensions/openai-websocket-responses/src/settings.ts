@@ -18,7 +18,12 @@ export interface OpenAIWebSocketResponsesSettings {
     queryParamsByProvider: Record<string, Record<string, string>>;
     queryParamsByProviderModel: Record<string, Record<string, string>>;
   };
-  websocket: { retries: number; connectTimeoutMs: number; idleTimeoutMs: number };
+  websocket: {
+    retries: number;
+    connectTimeoutMs: number;
+    firstEventTimeoutMs: number;
+    idleTimeoutMs: number;
+  };
   debug: {
     enabled: boolean;
     logFile: string | undefined;
@@ -46,7 +51,7 @@ const DEFAULT_SETTINGS: OpenAIWebSocketResponsesSettings = {
     queryParamsByProvider: {},
     queryParamsByProviderModel: {},
   },
-  websocket: { retries: 2, connectTimeoutMs: 15000, idleTimeoutMs: 0 },
+  websocket: { retries: 2, connectTimeoutMs: 15000, firstEventTimeoutMs: 60000, idleTimeoutMs: 0 },
   debug: { enabled: false, logFile: undefined },
   recovery: {
     enabled: true,
@@ -192,6 +197,10 @@ export function normalizeSettings(raw: unknown): OpenAIWebSocketResponsesSetting
       connectTimeoutMs: nonNegativeNumber(
         websocket.connectTimeoutMs,
         DEFAULT_SETTINGS.websocket.connectTimeoutMs,
+      ),
+      firstEventTimeoutMs: nonNegativeNumber(
+        websocket.firstEventTimeoutMs,
+        DEFAULT_SETTINGS.websocket.firstEventTimeoutMs,
       ),
       idleTimeoutMs: nonNegativeNumber(
         websocket.idleTimeoutMs,

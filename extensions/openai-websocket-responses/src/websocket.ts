@@ -366,6 +366,13 @@ function isTerminalEvent(type: string | undefined): boolean {
   );
 }
 
+function shouldKeepSocketAfterTerminalEvent(event: Record<string, any>): boolean {
+  if (event.type === 'response.completed') return true;
+  if (event.type !== 'response.done') return false;
+  const status = typeof event.response?.status === 'string' ? event.response.status : undefined;
+  return status === undefined || status === 'completed';
+}
+
 function previousResponseNotFoundMessage(event: Record<string, any>): string | undefined {
   const error = event.error ?? {};
   if (event.type !== 'error' || error.code !== 'previous_response_not_found') return undefined;
@@ -662,8 +669,10 @@ export async function runWebSocketResponse(
         let terminal = false;
         let settled = false;
         let processing = Promise.resolve();
+        let firstEventTimer: ReturnType<typeof setTimeout> | undefined;
         let idleTimer: ReturnType<typeof setTimeout> | undefined;
         const cleanup = () => {
+          if (firstEventTimer) clearTimeout(firstEventTimer);
           if (idleTimer) clearTimeout(idleTimer);
           socket.removeEventListener('message', onMessage);
           socket.removeEventListener('error', onError);
@@ -682,6 +691,25 @@ export async function runWebSocketResponse(
           cleanup();
           reject(error);
         };
+        const armFirstEventTimer = () => {
+          if (firstEventTimer) clearTimeout(firstEventTimer);
+          if (request.settings.websocket.firstEventTimeoutMs > 0) {
+            firstEventTimer = setTimeout(
+              () =>
+                rejectNow(
+                  new Error(
+                    `WebSocket first-event timeout after ${request.settings.websocket.firstEventTimeoutMs}ms`,
+                  ),
+                ),
+              request.settings.websocket.firstEventTimeoutMs,
+            );
+          }
+        };
+        const clearFirstEventTimer = () => {
+          if (!firstEventTimer) return;
+          clearTimeout(firstEventTimer);
+          firstEventTimer = undefined;
+        };
         const armIdleTimer = () => {
           if (idleTimer) clearTimeout(idleTimer);
           if (request.settings.websocket.idleTimeoutMs > 0) {
@@ -699,6 +727,7 @@ export async function runWebSocketResponse(
         const handleParsedMessage = (parsed: Record<string, any>) => {
           const previousResponseError = previousResponseNotFoundMessage(parsed);
           if (previousResponseError) throw new PreviousResponseNotFoundError(previousResponseError);
+          if (eventCount === 0) clearFirstEventTimer();
           eventCount++;
           const nextResponseId = extractResponseId(parsed);
           if (nextResponseId && nextResponseId !== responseId) {
@@ -715,6 +744,7 @@ export async function runWebSocketResponse(
           const terminalEvent = isTerminalEvent(parsed.type);
           if (terminalEvent) {
             terminal = true;
+            if (!shouldKeepSocketAfterTerminalEvent(parsed)) keepSocket = false;
             request.diagnostics?.record(
               parsed.type === 'response.completed' ? 'response_completed' : 'response_terminal',
               { attempt, responseId, eventCount, eventType: parsed.type },
@@ -837,6 +867,7 @@ export async function runWebSocketResponse(
           onAbort();
           return;
         }
+        armFirstEventTimer();
         armIdleTimer();
         try {
           const payload = JSON.stringify({ type: 'response.create', ...request.body });

@@ -9,6 +9,19 @@ import {
 } from '@earendil-works/pi-ai';
 import { describe, expect, it, vi } from 'vitest';
 
+const wsModuleMock = vi.hoisted(() => ({
+  WebSocketCtor: undefined as any,
+}));
+
+vi.mock('ws', () => ({
+  get WebSocket() {
+    return wsModuleMock.WebSocketCtor;
+  },
+  get default() {
+    return wsModuleMock.WebSocketCtor;
+  },
+}));
+
 import {
   createIdleKeepaliveActivityTracker,
   formatWebSocketStatus,
@@ -21,6 +34,7 @@ import {
   buildContinuationRequestBody,
   buildSocketCacheKey,
   clearAllContinuations,
+  clearContinuation,
   getContinuation,
   headersFingerprint,
   requestBodyForContinuationComparison,
@@ -199,7 +213,12 @@ describe('settings and patch matching', () => {
     expect(normalizeSettings(undefined)).toMatchObject({
       patch: { enabled: false, apis: ['openai-responses', 'openai-codex-responses'] },
       request: { queryParams: {} },
-      websocket: { retries: 2, connectTimeoutMs: 15000, idleTimeoutMs: 0 },
+      websocket: {
+        retries: 2,
+        connectTimeoutMs: 15000,
+        firstEventTimeoutMs: 60000,
+        idleTimeoutMs: 0,
+      },
       recovery: {
         enabled: true,
         pollIntervalMs: 1000,
@@ -655,6 +674,45 @@ describe('body and continuation helpers', () => {
     });
   });
 
+  it('does not replay tool calls from length-truncated assistant messages', () => {
+    const model = makeModel();
+    const truncated = makeAssistantMessage(model);
+    truncated.stopReason = 'length';
+    truncated.content.push(
+      { type: 'text', text: 'Partial answer' },
+      { type: 'toolCall', id: 'call_1|fc_1', name: 'bash', arguments: { command: 'echo cut' } },
+    );
+
+    const body = buildResponsesBody(model, {
+      messages: [
+        { role: 'user', content: 'inspect', timestamp: 1 },
+        truncated,
+        {
+          role: 'toolResult',
+          toolCallId: 'call_1|fc_1',
+          toolName: 'bash',
+          content: [{ type: 'text', text: 'orphan' }],
+          isError: false,
+          timestamp: 2,
+        },
+        { role: 'user', content: 'retry', timestamp: 2 },
+      ],
+    });
+
+    expect(body.input).toEqual([
+      { role: 'user', content: [{ type: 'input_text', text: 'inspect' }] },
+      expect.objectContaining({ type: 'message', content: expect.any(Array) }),
+      { role: 'user', content: [{ type: 'input_text', text: 'retry' }] },
+    ]);
+    expect(body.input).not.toContainEqual(expect.objectContaining({ type: 'function_call' }));
+    expect(body.input).not.toContainEqual(
+      expect.objectContaining({ type: 'function_call_output' }),
+    );
+    expect(assistantMessageToResponseItems(truncated)).toEqual([
+      expect.objectContaining({ type: 'message', content: expect.any(Array) }),
+    ]);
+  });
+
   it('can clear all continuation state on session shutdown', () => {
     setContinuation('key', {
       lastRequestBody: { model: 'gpt', input: [] },
@@ -802,6 +860,7 @@ describe('Responses adapter and retrieve recovery', () => {
   it('adds synthetic error tool results for unmatched assistant tool calls', () => {
     const model = makeModel();
     const assistant = makeAssistantMessage(model);
+    assistant.stopReason = 'toolUse';
     assistant.content.push({
       type: 'toolCall',
       id: 'call_1|fc_1',
@@ -837,6 +896,57 @@ describe('Responses adapter and retrieve recovery', () => {
 
     expect(output.responseId).toBe('resp_incomplete');
     expect(output.stopReason).toBe('length');
+  });
+
+  it('strips streamed tool calls when the response is incomplete', async () => {
+    const model = makeModel();
+    const output = makeAssistantMessage(model);
+    const stream = createAssistantMessageEventStream();
+
+    await processResponsesEvents(
+      events(
+        { type: 'response.created', response: { id: 'resp_incomplete' } },
+        { type: 'response.output_item.added', item: { type: 'message', id: 'msg_1' } },
+        { type: 'response.output_text.delta', delta: 'I will inspect' },
+        {
+          type: 'response.output_item.done',
+          item: {
+            type: 'message',
+            id: 'msg_1',
+            content: [{ type: 'output_text', text: 'I will inspect' }],
+          },
+        },
+        {
+          type: 'response.output_item.added',
+          item: {
+            type: 'function_call',
+            id: 'fc_1',
+            call_id: 'call_1',
+            name: 'bash',
+            arguments: '',
+          },
+        },
+        { type: 'response.function_call_arguments.delta', delta: '{"command":"for path in /alpha' },
+        {
+          type: 'response.incomplete',
+          response: {
+            id: 'resp_incomplete',
+            status: 'incomplete',
+            incomplete_details: { reason: 'max_output_tokens' },
+          },
+        },
+      ),
+      output,
+      stream,
+      model,
+    );
+
+    expect(output.responseId).toBe('resp_incomplete');
+    expect(output.stopReason).toBe('length');
+    expect(output.content).toEqual([
+      expect.objectContaining({ type: 'text', text: 'I will inspect' }),
+    ]);
+    expect(output.content).not.toContainEqual(expect.objectContaining({ type: 'toolCall' }));
   });
 
   it('recovers reasoning items from retrieve snapshots for later continuation', async () => {
@@ -1259,6 +1369,334 @@ describe('WebSocket transport', () => {
     }
     return { WebSocketCtor: FakeWebSocket as any, instances };
   }
+
+  it('fails fast when no first response event arrives', async () => {
+    vi.useFakeTimers();
+    class FakeWebSocket {
+      readyState = 1;
+      sent: string[] = [];
+      listeners = new Map<string, Set<(event: any) => void>>();
+
+      constructor() {
+        queueMicrotask(() => this.emit('open', {}));
+      }
+
+      send(data: string) {
+        this.sent.push(data);
+      }
+
+      close() {
+        this.readyState = 3;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void) {
+        const listeners = this.listeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      removeEventListener(type: string, listener: (event: any) => void) {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      emit(type: string, event: any) {
+        for (const listener of this.listeners.get(type) ?? []) listener(event);
+      }
+    }
+
+    try {
+      const run = runWebSocketResponse(
+        {
+          url: 'wss://example.test/responses',
+          headers: new Headers(),
+          body: { model: 'gpt', input: [] },
+          settings: normalizeSettings({
+            websocket: { retries: 0, firstEventTimeoutMs: 25, idleTimeoutMs: 0 },
+          }),
+          WebSocketCtor: FakeWebSocket as any,
+        },
+        () => undefined,
+      );
+      const settled = run.then(
+        () => 'resolved',
+        (error: unknown) => (error instanceof Error ? error.message : String(error)),
+      );
+
+      await vi.advanceTimersByTimeAsync(25);
+      await Promise.resolve();
+      const state = await Promise.race([settled, Promise.resolve('pending')]);
+      expect(state).toBe('WebSocket first-event timeout after 25ms');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ['response.incomplete', { status: 'incomplete' }],
+    ['response.failed', { status: 'failed' }],
+    ['response.cancelled', { status: 'cancelled' }],
+    ['response.done', { status: 'incomplete' }],
+  ])('evicts cached sockets after %s terminal responses', async (eventType, response) => {
+    const instances: any[] = [];
+    class FakeWebSocket {
+      readyState = 1;
+      sent: string[] = [];
+      listeners = new Map<string, Set<(event: any) => void>>();
+
+      constructor() {
+        instances.push(this);
+        queueMicrotask(() => this.emit('open', {}));
+      }
+
+      send(data: string) {
+        this.sent.push(data);
+        const responseId = `resp_${instances.length}`;
+        queueMicrotask(() => {
+          this.emit('message', {
+            data: JSON.stringify({ type: 'response.created', response: { id: responseId } }),
+          });
+          this.emit('message', {
+            data: JSON.stringify({
+              type: eventType,
+              response: { id: responseId, ...response },
+            }),
+          });
+        });
+      }
+
+      close() {
+        this.readyState = 3;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void) {
+        const listeners = this.listeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      removeEventListener(type: string, listener: (event: any) => void) {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      emit(type: string, event: any) {
+        for (const listener of this.listeners.get(type) ?? []) listener(event);
+      }
+    }
+
+    const request = {
+      url: 'wss://example.test/responses',
+      headers: new Headers(),
+      body: { model: 'gpt', input: [] },
+      settings: normalizeSettings({ websocket: { retries: 0, firstEventTimeoutMs: 0 } }),
+      cacheKey: `terminal-evicts-cache-key-${eventType}`,
+      WebSocketCtor: FakeWebSocket as any,
+    };
+
+    try {
+      await runWebSocketResponse(request, () => undefined);
+      await runWebSocketResponse(request, () => undefined);
+
+      expect(instances).toHaveLength(2);
+    } finally {
+      closeAllCachedWebSockets();
+    }
+  });
+
+  it('clears continuation state and suppresses incomplete tool calls in provider streams', async () => {
+    const instances: any[] = [];
+    const sentBodies: any[] = [];
+    class FakeWebSocket {
+      readyState = 1;
+      listeners = new Map<string, Set<(event: any) => void>>();
+
+      constructor() {
+        instances.push(this);
+        queueMicrotask(() => this.emit('open', {}));
+      }
+
+      send(data: string) {
+        sentBodies.push(JSON.parse(data));
+        queueMicrotask(() => {
+          this.emit('message', {
+            data: JSON.stringify({ type: 'response.created', response: { id: 'resp_cut' } }),
+          });
+          this.emit('message', {
+            data: JSON.stringify({
+              type: 'response.output_item.added',
+              item: {
+                type: 'function_call',
+                id: 'fc_1',
+                call_id: 'call_1',
+                name: 'bash',
+                arguments: '',
+              },
+            }),
+          });
+          this.emit('message', {
+            data: JSON.stringify({
+              type: 'response.function_call_arguments.delta',
+              delta: '{"command":"for path in /alpha',
+            }),
+          });
+          this.emit('message', {
+            data: JSON.stringify({
+              type: 'response.incomplete',
+              response: { id: 'resp_cut', status: 'incomplete' },
+            }),
+          });
+        });
+      }
+
+      close() {
+        this.readyState = 3;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void) {
+        const listeners = this.listeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      removeEventListener(type: string, listener: (event: any) => void) {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      emit(type: string, event: any) {
+        for (const listener of this.listeners.get(type) ?? []) listener(event);
+      }
+    }
+
+    const model = makeCodexModel();
+    const options = { apiKey: 'sk-test', sessionId: 'session-incomplete' } as any;
+    const settings = normalizeSettings({ websocket: { retries: 0, firstEventTimeoutMs: 0 } });
+    const websocketHeaders = buildWebSocketHeaders(model, options, 'codex');
+    const url = resolveWebSocketResponsesUrl(model, settings, websocketHeaders, 'codex');
+    const cacheKey = buildSocketCacheKey({
+      sessionId: options.sessionId,
+      url,
+      provider: model.provider,
+      modelId: model.id,
+      headersFingerprint: headersFingerprint(websocketHeaders),
+    });
+    setContinuation(cacheKey, {
+      lastRequestBody: buildResponsesBody(
+        model,
+        { messages: [{ role: 'user', content: 'first', timestamp: 1 }] },
+        options,
+        'codex',
+      ),
+      lastResponseId: 'resp_previous',
+      lastResponseItems: [],
+    });
+    wsModuleMock.WebSocketCtor = FakeWebSocket as any;
+
+    try {
+      const stream = createOpenAIWebSocketResponsesStream(() => settings)(
+        model,
+        {
+          messages: [
+            { role: 'user', content: 'first', timestamp: 1 },
+            { role: 'user', content: 'next', timestamp: 2 },
+          ],
+        },
+        options,
+      );
+      const seen: any[] = [];
+      for await (const event of stream) seen.push(event);
+
+      const done = seen.find((event) => event.type === 'done');
+      expect(done?.reason).toBe('length');
+      expect(done?.message.content).not.toContainEqual(
+        expect.objectContaining({ type: 'toolCall' }),
+      );
+      expect(getContinuation(cacheKey)).toBeUndefined();
+      expect(sentBodies[0]).toMatchObject({ previous_response_id: 'resp_previous' });
+      expect(instances).toHaveLength(1);
+    } finally {
+      wsModuleMock.WebSocketCtor = undefined;
+      clearContinuation(cacheKey);
+      closeAllCachedWebSockets();
+    }
+  });
+
+  it('clears continuation and emits error when response.done carries failed status', async () => {
+    class FakeWebSocket {
+      readyState = 1;
+      listeners = new Map<string, Set<(event: any) => void>>();
+
+      constructor() {
+        queueMicrotask(() => this.emit('open', {}));
+      }
+
+      send() {
+        queueMicrotask(() => {
+          this.emit('message', {
+            data: JSON.stringify({ type: 'response.created', response: { id: 'resp_failed' } }),
+          });
+          this.emit('message', {
+            data: JSON.stringify({
+              type: 'response.done',
+              response: { id: 'resp_failed', status: 'failed' },
+            }),
+          });
+        });
+      }
+
+      close() {
+        this.readyState = 3;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void) {
+        const listeners = this.listeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      removeEventListener(type: string, listener: (event: any) => void) {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      emit(type: string, event: any) {
+        for (const listener of this.listeners.get(type) ?? []) listener(event);
+      }
+    }
+
+    const model = makeCodexModel();
+    const options = { apiKey: 'sk-test', sessionId: 'session-failed-done' } as any;
+    const settings = normalizeSettings({ websocket: { retries: 0, firstEventTimeoutMs: 0 } });
+    const websocketHeaders = buildWebSocketHeaders(model, options, 'codex');
+    const url = resolveWebSocketResponsesUrl(model, settings, websocketHeaders, 'codex');
+    const cacheKey = buildSocketCacheKey({
+      sessionId: options.sessionId,
+      url,
+      provider: model.provider,
+      modelId: model.id,
+      headersFingerprint: headersFingerprint(websocketHeaders),
+    });
+    setContinuation(cacheKey, {
+      lastRequestBody: buildResponsesBody(model, { messages: [] }, options, 'codex'),
+      lastResponseId: 'resp_previous',
+      lastResponseItems: [],
+    });
+    wsModuleMock.WebSocketCtor = FakeWebSocket as any;
+
+    try {
+      const stream = createOpenAIWebSocketResponsesStream(() => settings)(
+        model,
+        { messages: [] },
+        options,
+      );
+      const seen: any[] = [];
+      for await (const event of stream) seen.push(event);
+
+      expect(seen.at(-1)).toMatchObject({ type: 'error', reason: 'error' });
+      expect(getContinuation(cacheKey)).toBeUndefined();
+    } finally {
+      wsModuleMock.WebSocketCtor = undefined;
+      clearContinuation(cacheKey);
+      closeAllCachedWebSockets();
+    }
+  });
 
   it('swallows ws abortHandshake errors when aborting during connect', async () => {
     const controller = new AbortController();
@@ -1755,7 +2193,7 @@ describe('WebSocket transport', () => {
       url: 'wss://example.test/responses',
       headers: new Headers(),
       body: { model: 'gpt', input: [] },
-      settings: normalizeSettings({ websocket: { retries: 0 } }),
+      settings: normalizeSettings({ websocket: { retries: 0, firstEventTimeoutMs: 0 } }),
       cacheKey: 'busy-no-ping-cache-key',
       enableIdleKeepalive: true,
       WebSocketCtor: FakeWebSocket as any,

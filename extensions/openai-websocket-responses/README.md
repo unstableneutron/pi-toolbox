@@ -39,6 +39,7 @@ Configure the extension in `~/.pi/agent/settings.json`:
     "websocket": {
       "retries": 2,
       "connectTimeoutMs": 15000,
+      "firstEventTimeoutMs": 60000,
       "idleTimeoutMs": 0
     },
     "debug": {
@@ -61,9 +62,9 @@ Defaults: `patch.enabled` is `false`; `patch.apis` is
 `patch.providerModels`, and `patch.excludeProviderModels` are empty arrays;
 `request.profile` is `"auto"`; `request.queryParams`,
 `request.queryParamsByProvider`, and `request.queryParamsByProviderModel` are
-empty; WebSocket defaults are `retries: 2`, `connectTimeoutMs: 15000`, and
-`idleTimeoutMs: 0`; debug logging is disabled; recovery defaults are shown
-above. Keep `providerModels` narrow when request query params contain
+empty; WebSocket defaults are `retries: 2`, `connectTimeoutMs: 15000`,
+`firstEventTimeoutMs: 60000`, and `idleTimeoutMs: 0`; debug logging is disabled;
+recovery defaults are shown above. Keep `providerModels` narrow when request query params contain
 deployment-specific values.
 
 For the current Azure/LFM WSS route, `api-version` alone is not enough. The

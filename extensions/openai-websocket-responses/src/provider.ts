@@ -272,12 +272,15 @@ export function createOpenAIWebSocketResponsesStream(
           }
         }
 
-        if (output.responseId) {
+        const canContinue = output.stopReason === 'stop' || output.stopReason === 'toolUse';
+        if (canContinue && output.responseId) {
           setContinuation(cacheKey, {
             lastRequestBody: fullBody,
             lastResponseId: output.responseId,
             lastResponseItems: assistantMessageToResponseItems(output),
           });
+        } else {
+          clearContinuation(cacheKey);
         }
         if (options?.signal?.aborted) throw new Error('Request was aborted');
         attachTransportDiagnostic(output, transportDiagnostics, {
@@ -285,6 +288,15 @@ export function createOpenAIWebSocketResponsesStream(
           finalTransport: 'websocket',
           outcome: transportOutcome ?? 'websocket_transport_event_succeeded',
         });
+        if (output.stopReason === 'error') {
+          pushFinalEvent(
+            stream,
+            { type: 'error', reason: 'error', error: output },
+            output,
+            persistUnattachedDiagnostic,
+          );
+          return;
+        }
         pushFinalEvent(
           stream,
           {

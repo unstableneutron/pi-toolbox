@@ -214,7 +214,9 @@ function assistantMessageItems(
       });
       continue;
     }
-    if (block.type === 'toolCall') output.push(functionCallInput(block));
+    if (message.stopReason === 'toolUse' && block.type === 'toolCall') {
+      output.push(functionCallInput(block));
+    }
   }
   return output;
 }
@@ -262,17 +264,20 @@ export function buildResponsesInput<TApi extends Api>(
         continue;
       }
       input.push(...assistantMessageItems(message, assistantIndex));
-      pendingToolCalls = message.content.filter(
-        (block): block is ToolCall => block.type === 'toolCall',
-      );
+      pendingToolCalls =
+        message.stopReason === 'toolUse'
+          ? message.content.filter((block): block is ToolCall => block.type === 'toolCall')
+          : [];
       existingToolResultIds = new Set();
       assistantIndex++;
       continue;
     }
 
     if (message.role === 'toolResult') {
-      existingToolResultIds.add(message.toolCallId);
-      input.push(toolResultInput(message));
+      if (pendingToolCalls.some((toolCall) => toolCall.id === message.toolCallId)) {
+        existingToolResultIds.add(message.toolCallId);
+        input.push(toolResultInput(message));
+      }
     }
   }
 
@@ -295,6 +300,10 @@ function mapStopReason(status: string | undefined): AssistantMessage['stopReason
   if (status === 'incomplete') return 'length';
   if (status === 'failed' || status === 'cancelled') return 'error';
   return 'stop';
+}
+
+function stripToolCalls(output: AssistantMessage): void {
+  output.content = output.content.filter((block) => block.type !== 'toolCall');
 }
 
 function blockIndex(output: AssistantMessage): number {
@@ -354,6 +363,10 @@ export function applyCompletedResponse<TApi extends Api>(
   output.responseId = response.id ?? output.responseId;
   applyResponseUsage(output, model, response.usage);
   output.stopReason = mapStopReason(response.status);
+  if (output.stopReason === 'length') {
+    stripToolCalls(output);
+    return;
+  }
   if (output.content.some((block) => block.type === 'toolCall') && output.stopReason === 'stop') {
     output.stopReason = 'toolUse';
   }
@@ -848,7 +861,7 @@ export function assistantMessageToResponseItems(output: AssistantMessage): unkno
         id,
         ...(phase ? { phase } : {}),
       });
-    } else if (block.type === 'toolCall') {
+    } else if (output.stopReason === 'toolUse' && block.type === 'toolCall') {
       items.push(functionCallInput(block));
     }
   }
