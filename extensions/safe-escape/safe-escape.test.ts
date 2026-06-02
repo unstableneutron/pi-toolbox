@@ -17,7 +17,7 @@ import safeEscape, {
 
 const config: GuardConfig = {
   warningTimeoutMs: 2000,
-  escBypassCount: 3,
+  escBypassCount: 2,
   escBypassWindowMs: 1200,
   escDebounceMs: 75,
   busyStaleResetMs: 5000,
@@ -132,7 +132,7 @@ function createBehaviorHarness(overrides: Partial<SafeEscapeBehaviorHooks> = {})
 }
 
 describe('recordEscPress', () => {
-  test('requires three presses inside the bypass window', () => {
+  test('requires two presses inside the bypass window', () => {
     let presses: number[] = [];
 
     let result = recordEscPress(presses, 1000, config);
@@ -140,10 +140,6 @@ describe('recordEscPress', () => {
     expect(result.triggerInterrupt).toBe(false);
 
     result = recordEscPress(presses, 1300, config);
-    presses = result.timestamps;
-    expect(result.triggerInterrupt).toBe(false);
-
-    result = recordEscPress(presses, 1800, config);
     expect(result.triggerInterrupt).toBe(true);
   });
 
@@ -351,12 +347,12 @@ describe('input parsing and warning rendering helpers', () => {
 
   test('warning text line uses uppercase ESC and includes countdown', () => {
     expect(formatWarningTextLine('auto-dismisses in 2.9s', 120)).toBe(
-      '⚠ Busy — press ESC ESC quickly to interrupt (auto-dismisses in 2.9s)',
+      '⚠ Busy — press ESC again to interrupt (auto-dismisses in 2.9s)',
     );
   });
 
   test('warning text line falls back to compact copy on narrow widths', () => {
-    expect(formatWarningTextLine('2.9s', 34)).toBe('⚠ Busy — ESC ESC to interrupt (2.9s)');
+    expect(formatWarningTextLine('2.9s', 36)).toBe('⚠ Busy — ESC again to interrupt (2.9s)');
   });
 
   test('warning bar shrinks from right to left', () => {
@@ -581,7 +577,7 @@ describe('safeEscape integration through the registered behavior', () => {
       const [line1, line2] = widget.render(120);
 
       expect(line1).toContain('<warning>⚠ Busy</warning>');
-      expect(line1).toContain('<text> — press ESC ESC quickly to interrupt');
+      expect(line1).toContain('<text> — press ESC again to interrupt');
       expect(line2).toContain('<muted>');
       expect(line2).toContain('<dim>');
     });
@@ -616,12 +612,12 @@ describe('safeEscape integration through the registered behavior', () => {
 
       expect(setStatus).toHaveBeenCalledWith(
         'safe-escape',
-        expect.stringContaining('ESC ESC to interrupt'),
+        expect.stringContaining('ESC again to interrupt'),
       );
     });
   });
 
-  test('third ESC aborts only after the first warns and the second only arms', async () => {
+  test('second ESC aborts after the first warns', async () => {
     vi.useFakeTimers();
     await withInteractiveTTY(async () => {
       const { pi, handlers } = createExtensionHarness();
@@ -647,10 +643,6 @@ describe('safeEscape integration through the registered behavior', () => {
 
       behavior.beforeHandleInput?.('\x1b', editor);
       setWidget.mockClear();
-
-      vi.advanceTimersByTime(100);
-      behavior.beforeHandleInput?.('\x1b', editor);
-      expect(ctx.abort).not.toHaveBeenCalled();
 
       vi.advanceTimersByTime(100);
       behavior.beforeHandleInput?.('\x1b', editor);

@@ -48,12 +48,12 @@ export type GuardEvent =
   | { type: 'confirm' }
   | { type: 'hard-reset' };
 
-export const SAFE_ESCAPE_CONTRACT = '1st ESC = show warning, 2nd ESC = arm only, 3rd ESC = cancel';
+export const SAFE_ESCAPE_CONTRACT = '1st ESC = show warning, 2nd ESC = cancel';
 
 const MAX_DEBUG_EVENTS = 40;
 const DEFAULT_CONFIG: GuardConfig = {
   warningTimeoutMs: 2000,
-  escBypassCount: 3,
+  escBypassCount: 2,
   escBypassWindowMs: 1200,
   escDebounceMs: 75,
   busyStaleResetMs: 5000,
@@ -161,10 +161,10 @@ function compactCountdownLabel(countdown: string): string {
 
 export function formatWarningTextLine(countdown: string, width: number): string {
   const safeWidth = Math.max(1, width);
-  const full = `⚠ Busy — press ESC ESC quickly to interrupt (${countdown})`;
+  const full = `⚠ Busy — press ESC again to interrupt (${countdown})`;
   if (visibleWidth(full) <= safeWidth) return full;
 
-  return `⚠ Busy — ESC ESC to interrupt (${compactCountdownLabel(countdown)})`;
+  return `⚠ Busy — ESC again to interrupt (${compactCountdownLabel(countdown)})`;
 }
 
 export function formatWarningBar(width: number, fraction: number): string {
@@ -180,7 +180,7 @@ function formatCountdownLabel(deadlineAt: number, now: number): string {
 }
 
 function buildStatusLine(deadlineAt: number, now: number): string {
-  return `Busy — press ESC ESC to interrupt • ${formatCountdownLabel(deadlineAt, now)}`;
+  return `Busy — press ESC again to interrupt • ${formatCountdownLabel(deadlineAt, now)}`;
 }
 
 function buildWarningWidgetLines(
