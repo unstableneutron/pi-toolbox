@@ -187,14 +187,19 @@ export function registerComputerUseTools(
       async execute(
         _toolCallId: string,
         params: any,
-        _signal: AbortSignal | undefined,
+        signal: AbortSignal | undefined,
         _onUpdate: unknown,
         ctx: ExtensionContext,
       ) {
         const call = spec.codexTool
           ? { codexTool: spec.codexTool, arguments: params }
           : buildComputerActionCall(params);
-        const { threadId, rawResult } = await session.callTool(ctx, call.codexTool, call.arguments);
+        const { threadId, rawResult } = await session.callTool(
+          ctx,
+          call.codexTool,
+          call.arguments,
+          signal,
+        );
         return toPiToolResult({
           threadId,
           rawResult,

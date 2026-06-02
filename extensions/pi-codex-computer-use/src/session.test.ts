@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 
 import { ComputerUseSession } from './session';
 
@@ -22,6 +22,7 @@ function makeSessionWithClient(responses: unknown[]) {
   const session = new ComputerUseSession();
   const calls: unknown[] = [];
   const client = {
+    close: vi.fn(),
     setElicitationHandler() {
       return () => {};
     },
@@ -95,6 +96,106 @@ describe('ComputerUseSession.callMcpTool', () => {
     await session.callTool({ cwd: '/tmp', hasUI: false } as any, 'list_apps', {});
 
     expect(calls[0]).not.toHaveProperty('_meta');
+  });
+
+  test('passes AbortSignal to the shared app-server client for every MCP call', async () => {
+    const rawNodeResult = { content: [{ type: 'text', text: 'hello from node' }] };
+    const controller = new AbortController();
+    const { session, calls } = makeSessionWithClient([rawNodeResult]);
+
+    await session.callMcpTool(
+      { cwd: '/tmp', hasUI: false } as any,
+      {
+        server: 'node_repl',
+        tool: 'js',
+        arguments: { code: '1 + 1' },
+      },
+      controller.signal,
+    );
+
+    expect(calls[0]).toHaveProperty('signal', controller.signal);
+  });
+
+  test('resets the shared app-server bridge when a direct MCP tool call aborts', async () => {
+    const session = new ComputerUseSession();
+    const close = vi.fn();
+    (session as any).client = {
+      close,
+      setElicitationHandler() {
+        return () => {};
+      },
+      async callMcpTool() {
+        throw new Error('Operation aborted');
+      },
+    };
+    (session as any).threadId = 'thread-1';
+
+    await expect(
+      session.callMcpTool(
+        { cwd: '/tmp', hasUI: false } as any,
+        { server: 'node_repl', tool: 'js', timeoutMs: 5000 },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow('Operation aborted');
+
+    expect(close).toHaveBeenCalledTimes(1);
+    expect((session as any).client).toBeUndefined();
+    expect((session as any).threadId).toBeUndefined();
+  });
+
+  test('resets the shared app-server bridge when a direct MCP tool call times out', async () => {
+    const session = new ComputerUseSession();
+    const close = vi.fn();
+    (session as any).client = {
+      close,
+      setElicitationHandler() {
+        return () => {};
+      },
+      async callMcpTool() {
+        throw new Error('mcpServer/tool/call timed out after 30000ms');
+      },
+    };
+    (session as any).threadId = 'thread-1';
+
+    await expect(
+      session.callMcpTool({ cwd: '/tmp', hasUI: false } as any, {
+        server: 'node_repl',
+        tool: 'js',
+        timeoutMs: 5000,
+      }),
+    ).rejects.toThrow('timed out');
+
+    expect(close).toHaveBeenCalledTimes(1);
+    expect((session as any).client).toBeUndefined();
+    expect((session as any).threadId).toBeUndefined();
+  });
+
+  test('resets the Chrome app-server bridge when a Chrome backend MCP tool call aborts', async () => {
+    const session = new ComputerUseSession();
+    const close = vi.fn();
+    (session as any).chromeClient = {
+      close,
+      setElicitationHandler() {
+        return () => {};
+      },
+      async callMcpTool() {
+        throw new Error('Operation aborted');
+      },
+    };
+    (session as any).chromeThreadId = 'chrome-thread-1';
+
+    await expect(
+      session.callBrowserMcpTool(
+        { cwd: '/tmp', hasUI: false } as any,
+        'chrome',
+        { server: 'node_repl', tool: 'js', timeoutMs: 5000 },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow('Operation aborted');
+
+    expect(close).toHaveBeenCalledTimes(1);
+    expect((session as any).chromeClient).toBeUndefined();
+    expect((session as any).chromeThreadId).toBeUndefined();
   });
 });
 

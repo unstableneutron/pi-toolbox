@@ -321,14 +321,20 @@ async function runNodeReplJs(
   piName: string,
   backend: BrowserBackend,
   code: string,
+  signal?: AbortSignal,
 ) {
   const timeoutMs = 120_000;
-  const { threadId, rawResult } = await session.callBrowserMcpTool(ctx, backend, {
-    server: NODE_REPL_SERVER,
-    tool: NODE_REPL_JS_TOOL,
-    arguments: buildNodeReplJsArguments(code, timeoutMs),
-    timeoutMs: timeoutMs + 5_000,
-  });
+  const { threadId, rawResult } = await session.callBrowserMcpTool(
+    ctx,
+    backend,
+    {
+      server: NODE_REPL_SERVER,
+      tool: NODE_REPL_JS_TOOL,
+      arguments: buildNodeReplJsArguments(code, timeoutMs),
+      timeoutMs: timeoutMs + 5_000,
+    },
+    signal,
+  );
   return toCodexBrowserToolResult({ threadId, rawResult, piName });
 }
 
@@ -361,7 +367,7 @@ export function registerCodexBrowserTools(
       async execute(
         _toolCallId: string,
         params: any,
-        _signal: AbortSignal | undefined,
+        signal: AbortSignal | undefined,
         _onUpdate: unknown,
         ctx: ExtensionContext,
       ) {
@@ -374,6 +380,7 @@ export function registerCodexBrowserTools(
             spec.piName,
             input.backend,
             buildCodexBrowserListScript(input),
+            signal,
           );
         }
 
@@ -383,6 +390,7 @@ export function registerCodexBrowserTools(
           spec.piName,
           input.backend,
           buildCodexBrowserEvalScript({ ...input, script: params.script }),
+          signal,
         );
       },
     });

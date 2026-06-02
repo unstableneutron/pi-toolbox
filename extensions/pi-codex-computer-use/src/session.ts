@@ -14,8 +14,23 @@ const NODE_REPL_SERVER = 'node_repl';
 const RETRYABLE_OBSERVATION_TOOLS = new Set(['list_apps', 'get_app_state']);
 const TRANSIENT_PROCESS_ERROR = /NSOSStatusErrorDomain Code=-600|procNotFound/;
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(new Error('Operation aborted'));
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    };
+    const onAbort = () => {
+      cleanup();
+      reject(new Error('Operation aborted'));
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 function getRawResultText(rawResult: any): string {
@@ -44,6 +59,11 @@ function isRetryableMcpError(server: string, codexTool: string, message: string)
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function shouldResetBridgeAfterError(error: unknown): boolean {
+  const message = getErrorMessage(error);
+  return message.includes('Operation aborted') || message.includes('timed out after');
 }
 
 function formatPathStatus(label: string, filePath: string | undefined): string {
@@ -237,21 +257,27 @@ export class ComputerUseSession {
     ctx: ExtensionContext,
     codexTool: string,
     args: unknown,
+    signal?: AbortSignal,
   ): Promise<{ threadId: string; rawResult: any }> {
-    return await this.callMcpTool(ctx, {
-      server: COMPUTER_USE_SERVER,
-      tool: codexTool,
-      arguments: args,
-      timeoutMs: 120_000,
-    });
+    return await this.callMcpTool(
+      ctx,
+      {
+        server: COMPUTER_USE_SERVER,
+        tool: codexTool,
+        arguments: args,
+        timeoutMs: 30_000,
+      },
+      signal,
+    );
   }
 
   async callMcpTool(
     ctx: ExtensionContext,
     input: CodexMcpToolCall,
+    signal?: AbortSignal,
   ): Promise<{ threadId: string; rawResult: any }> {
     const client = await this.getClient();
-    const threadId = await this.getThreadId(ctx, client);
+    const threadId = await this.getThreadId(ctx, client, signal);
     const restore = client.setElicitationHandler((params) =>
       answerComputerUseElicitation(params, ctx),
     );
@@ -263,6 +289,7 @@ export class ComputerUseSession {
           tool: input.tool,
           arguments: input.arguments,
           timeoutMs: input.timeoutMs ?? 120_000,
+          signal,
           ...(input.server === NODE_REPL_SERVER
             ? { _meta: buildNodeReplRequestMeta(threadId, this.nextNodeReplTurnNumber++) }
             : {}),
@@ -272,12 +299,17 @@ export class ComputerUseSession {
           return { threadId, rawResult };
         }
         if (attempt === 0 && isRetryableMcpError(input.server, input.tool, errorMessage)) {
-          await sleep(250);
+          await sleep(250, signal);
           continue;
         }
         throw new Error(`Codex MCP ${input.server}.${input.tool} failed: ${errorMessage}`);
       }
       throw new Error(`Codex MCP ${input.server}.${input.tool} failed unexpectedly`);
+    } catch (error) {
+      if (shouldResetBridgeAfterError(error)) {
+        this.resetDefaultBridge();
+      }
+      throw error;
     } finally {
       restore();
     }
@@ -287,13 +319,14 @@ export class ComputerUseSession {
     ctx: ExtensionContext,
     backend: BrowserBackend,
     input: CodexMcpToolCall,
+    signal?: AbortSignal,
   ): Promise<{ threadId: string; rawResult: any }> {
     if (backend !== 'chrome') {
-      return await this.callMcpTool(ctx, input);
+      return await this.callMcpTool(ctx, input, signal);
     }
 
     const client = await this.getChromeClient();
-    const threadId = await this.getChromeThreadId(ctx, client);
+    const threadId = await this.getChromeThreadId(ctx, client, signal);
     const restore = client.setElicitationHandler((params) =>
       answerComputerUseElicitation(params, ctx),
     );
@@ -304,6 +337,7 @@ export class ComputerUseSession {
         tool: input.tool,
         arguments: input.arguments,
         timeoutMs: input.timeoutMs ?? 120_000,
+        signal,
         ...(input.server === NODE_REPL_SERVER
           ? { _meta: buildNodeReplRequestMeta(threadId, this.nextNodeReplTurnNumber++) }
           : {}),
@@ -313,17 +347,30 @@ export class ComputerUseSession {
         throw new Error(`Codex MCP ${input.server}.${input.tool} failed: ${errorMessage}`);
       }
       return { threadId, rawResult };
+    } catch (error) {
+      if (shouldResetBridgeAfterError(error)) {
+        this.resetChromeBridge();
+      }
+      throw error;
     } finally {
       restore();
     }
   }
 
   close(): void {
+    this.resetDefaultBridge();
+    this.resetChromeBridge();
+  }
+
+  private resetDefaultBridge(): void {
     this.client?.close();
-    this.chromeClient?.close();
     this.client = undefined;
-    this.chromeClient = undefined;
     this.threadId = undefined;
+  }
+
+  private resetChromeBridge(): void {
+    this.chromeClient?.close();
+    this.chromeClient = undefined;
     this.chromeThreadId = undefined;
   }
 
@@ -339,11 +386,16 @@ export class ComputerUseSession {
     return this.client;
   }
 
-  private async getThreadId(ctx: ExtensionContext, client: CodexAppServerClient): Promise<string> {
+  private async getThreadId(
+    ctx: ExtensionContext,
+    client: CodexAppServerClient,
+    signal?: AbortSignal,
+  ): Promise<string> {
     if (!this.threadId) {
       this.threadId = await client.startThread({
         cwd: ctx.cwd ?? process.cwd(),
         name: 'Pi Computer Use',
+        signal,
       });
     }
     return this.threadId;
@@ -364,11 +416,13 @@ export class ComputerUseSession {
   private async getChromeThreadId(
     ctx: ExtensionContext,
     client: CodexAppServerWebSocketClient,
+    signal?: AbortSignal,
   ): Promise<string> {
     if (!this.chromeThreadId) {
       this.chromeThreadId = await client.startThread({
         cwd: ctx.cwd ?? process.cwd(),
         name: 'Pi Chrome Browser',
+        signal,
       });
     }
     return this.chromeThreadId;

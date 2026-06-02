@@ -160,12 +160,18 @@ describe('toCodexBrowserToolResult', () => {
 });
 
 describe('registerCodexBrowserTools', () => {
-  test('routes Chrome backend node_repl calls through the Chrome browser bridge', async () => {
+  test('routes Chrome backend node_repl calls through the Chrome browser bridge with abort signal', async () => {
     const registered: any[] = [];
     const calls: any[] = [];
+    const controller = new AbortController();
     const session = {
-      async callBrowserMcpTool(_ctx: unknown, backend: string, input: unknown) {
-        calls.push({ backend, input });
+      async callBrowserMcpTool(
+        _ctx: unknown,
+        backend: string,
+        input: unknown,
+        signal: AbortSignal,
+      ) {
+        calls.push({ backend, input, signal });
         return {
           threadId: 'chrome-thread',
           rawResult: { content: [{ type: 'text', text: 'chrome result' }] },
@@ -184,7 +190,7 @@ describe('registerCodexBrowserTools', () => {
     const result = await listTool.execute(
       'tool-call-1',
       { backend: 'chrome' },
-      undefined,
+      controller.signal,
       undefined,
       {
         cwd: '/tmp/project',
@@ -195,5 +201,6 @@ describe('registerCodexBrowserTools', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0].backend).toBe('chrome');
     expect(calls[0].input).toMatchObject({ server: 'node_repl', tool: 'js' });
+    expect(calls[0].signal).toBe(controller.signal);
   });
 });

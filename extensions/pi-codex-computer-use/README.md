@@ -14,6 +14,13 @@ Pi tool call
   -> Codex Computer Use.app / SkyComputerUseClient or browser-client runtime
 ```
 
+Abort handling is implemented at the shared bridge layer, not per tool. When Pi
+aborts any Computer Use or browser tool call, the extension sends a best-effort
+MCP-style `notifications/cancelled` notification for the in-flight app-server
+request, waits up to 50ms for the transport write to flush, rejects locally with
+`Operation aborted`, and resets the affected bridge so the next call starts from
+a fresh app-server/thread. App-server timeouts use the same reset path.
+
 ## Tools
 
 The extension exposes compact Pi-facing surfaces over Codex's native Computer Use
@@ -65,11 +72,33 @@ The extension resolves `scripts/browser-client.mjs` in this order:
 2. the highest version-like cache directory under that plugin
 3. the installed Codex.app bundled plugin path
 
-Use `/codex-computer-use-status` in Pi to inspect resolved Codex paths,
-Computer Use assets, browser-client scripts, app-server state, thread state, and
-summarized MCP server/tool status. Use `/codex-computer-use-status verbose` to
-also write the raw diagnostic JSON to a temporary file; verbose mode prints the
-file path instead of dumping full MCP schemas into the status output.
+Use `/codex-computer-use-doctor` for actionable setup checks. It verifies the
+Codex Computer Use app/helper paths, bundle identities, TCC permissions, helper
+process state, and display capture readiness. In Pi's TUI it opens an
+input-capturing doctor view with colored check results and actions. `Re-check`
+is always available, all check lines render directly in the view, and any
+assistable issue appears as a selectable action: opening the matching System
+Settings pane for missing Screen Recording or Accessibility permission, or
+starting a short `caffeinate -dimsu -t 600` guard when the display appears
+asleep.
+
+## Elicitation auto-approval
+
+Pi auto-approves Codex app-server elicitations for this extension by default.
+This avoids races where a short-lived Computer Use or browser bridge closes while
+waiting for a manual approval prompt. Override with
+`PI_CODEX_COMPUTER_USE_AUTO_APPROVE`:
+
+| Value                     | Behavior                                        |
+| ------------------------- | ----------------------------------------------- |
+| unset, empty, or `all`    | Auto-approve `computer-use` and `node_repl`     |
+| `0`, `false`, `no`, `off` | Disable auto-approval; ask Pi UI when available |
+| `computer-use`            | Auto-approve native Computer Use only           |
+| `node_repl`               | Auto-approve browser/runtime Node REPL only     |
+| `computer-use,node_repl`  | Auto-approve both explicit server names         |
+
+For compatibility with an early typo, `PI_CODEX_COMPUTER_PUSE_AUTO_APPROVE` is
+also accepted when the canonical variable is unset.
 
 ## Codex Desktop app-server wrapper
 

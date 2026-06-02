@@ -1,18 +1,9 @@
 import { describe, expect, test } from 'vitest';
 
-import piComputerUseExtension, { parseStatusCommandOptions } from './index';
-
-describe('parseStatusCommandOptions', () => {
-  test('detects verbose mode from command args', () => {
-    expect(parseStatusCommandOptions(['verbose'])).toEqual({ verbose: true });
-    expect(parseStatusCommandOptions(['--verbose'])).toEqual({ verbose: true });
-    expect(parseStatusCommandOptions('verbose')).toEqual({ verbose: true });
-    expect(parseStatusCommandOptions([])).toEqual({ verbose: false });
-  });
-});
+import piComputerUseExtension from './index';
 
 describe('pi-codex-computer-use extension commands', () => {
-  test('registers the diagnostic status slash command', () => {
+  test('registers the doctor slash command only', () => {
     const commands = new Map<string, unknown>();
     const pi = {
       registerTool() {},
@@ -24,7 +15,8 @@ describe('pi-codex-computer-use extension commands', () => {
 
     piComputerUseExtension(pi as any);
 
-    expect(commands.has('codex-computer-use-status')).toBe(true);
+    expect(commands.has('codex-computer-use-doctor')).toBe(true);
+    expect(commands.has('codex-computer-use-status')).toBe(false);
     expect(commands.has('computer-use')).toBe(false);
   });
 });

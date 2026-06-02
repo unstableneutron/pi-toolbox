@@ -15,7 +15,6 @@ interface JsonRpcMessage {
 interface PendingRequest {
   resolve: (value: any) => void;
   reject: (error: Error) => void;
-  timer: ReturnType<typeof setTimeout>;
 }
 
 interface CodexAppServerClientOptions {
@@ -28,6 +27,7 @@ interface CodexAppServerClientOptions {
 interface CodexThreadStartOptions {
   cwd: string;
   name?: string;
+  signal?: AbortSignal;
 }
 
 interface CodexAppServerProcessInfo {
@@ -40,9 +40,50 @@ interface CodexAppServerProcessInfo {
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const THREAD_START_TIMEOUT_MS = 60_000;
+const CANCEL_NOTIFICATION_GRACE_MS = 50;
+
+function createOperationAbortedError(): Error {
+  return new Error('Operation aborted');
+}
+
+function buildCancellationNotification(requestId: number | string, reason: string): unknown {
+  return {
+    method: 'notifications/cancelled',
+    params: {
+      requestId,
+      reason,
+    },
+  };
+}
 
 function sendJsonLine(stream: NodeJS.WritableStream, value: unknown): void {
   stream.write(`${JSON.stringify(value)}\n`);
+}
+
+function waitForGracefulWrite(
+  write: (callback: (error?: Error | null) => void) => void,
+): Promise<void> {
+  return new Promise((resolve) => {
+    let resolved = false;
+    const finish = () => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(finish, CANCEL_NOTIFICATION_GRACE_MS);
+    try {
+      write(finish);
+    } catch {
+      finish();
+    }
+  });
+}
+
+function sendJsonLineAndWaitForFlush(stream: NodeJS.WritableStream, value: unknown): Promise<void> {
+  return waitForGracefulWrite((callback) => {
+    stream.write(`${JSON.stringify(value)}\n`, callback);
+  });
 }
 
 function encodeClientWebSocketFrame(value: unknown): Buffer {
@@ -187,7 +228,6 @@ export class CodexAppServerClient {
     this.process.on('exit', (code, signal) => {
       const error = new Error(`Codex app-server exited (${code ?? signal ?? 'unknown'})`);
       for (const pending of this.pending.values()) {
-        clearTimeout(pending.timer);
         pending.reject(error);
       }
       this.pending.clear();
@@ -221,6 +261,7 @@ export class CodexAppServerClient {
           'Pi-created Codex native tool bridge thread. Only execute Computer Use and browser Node REPL MCP calls requested by Pi.',
       },
       THREAD_START_TIMEOUT_MS,
+      options.signal,
     );
     const threadId = response?.thread?.id;
     if ('string' !== typeof threadId || threadId.length === 0) {
@@ -240,6 +281,7 @@ export class CodexAppServerClient {
     tool: string;
     arguments?: unknown;
     timeoutMs?: number;
+    signal?: AbortSignal;
     _meta?: Record<string, unknown>;
   }): Promise<any> {
     await this.init();
@@ -253,6 +295,7 @@ export class CodexAppServerClient {
         ...(input._meta ? { _meta: input._meta } : {}),
       },
       input.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+      input.signal,
     );
   }
 
@@ -303,15 +346,59 @@ export class CodexAppServerClient {
     method: string,
     params?: unknown,
     timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+    signal?: AbortSignal,
   ): Promise<any> {
+    if (signal?.aborted) {
+      return Promise.reject(createOperationAbortedError());
+    }
+
     const id = this.nextId++;
     sendJsonLine(this.process.stdin, { id, method, params });
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+      let settled = false;
+      const cleanup = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+      };
+      const beginSettle = () => {
+        if (settled) return false;
+        settled = true;
         this.pending.delete(id);
-        reject(new Error(`${method} timed out after ${timeoutMs}ms`));
+        cleanup();
+        return true;
+      };
+      const settle = (run: () => void) => {
+        if (!beginSettle()) return;
+        run();
+      };
+      const sendCancellation = (reason: string): Promise<void> => {
+        if (method === 'initialize' || this.process.killed || this.process.stdin.destroyed) {
+          return Promise.resolve();
+        }
+        return sendJsonLineAndWaitForFlush(
+          this.process.stdin,
+          buildCancellationNotification(id, reason),
+        );
+      };
+      const fail = (error: Error, cancelReason?: string) => {
+        if (!cancelReason) {
+          settle(() => reject(error));
+          return;
+        }
+        if (!beginSettle()) return;
+        void sendCancellation(cancelReason).then(() => reject(error));
+      };
+      const onAbort = () => fail(createOperationAbortedError(), 'Operation aborted');
+      const timer = setTimeout(() => {
+        const message = `${method} timed out after ${timeoutMs}ms`;
+        fail(new Error(message), message);
       }, timeoutMs);
-      this.pending.set(id, { resolve, reject, timer });
+
+      signal?.addEventListener('abort', onAbort, { once: true });
+      this.pending.set(id, {
+        resolve: (value) => settle(() => resolve(value)),
+        reject: (error) => fail(error),
+      });
     });
   }
 
@@ -338,8 +425,6 @@ export class CodexAppServerClient {
 
     if (message.id !== undefined && this.pending.has(message.id)) {
       const pending = this.pending.get(message.id)!;
-      this.pending.delete(message.id);
-      clearTimeout(pending.timer);
       if (message.error) {
         pending.reject(new Error(message.error.message ?? JSON.stringify(message.error)));
       } else {
@@ -415,6 +500,7 @@ export class CodexAppServerWebSocketClient {
           'Pi-created Codex Chrome Extension browser bridge thread. Only execute browser Node REPL MCP calls requested by Pi.',
       },
       THREAD_START_TIMEOUT_MS,
+      options.signal,
     );
     const threadId = response?.thread?.id;
     if ('string' !== typeof threadId || threadId.length === 0) {
@@ -434,6 +520,7 @@ export class CodexAppServerWebSocketClient {
     tool: string;
     arguments?: unknown;
     timeoutMs?: number;
+    signal?: AbortSignal;
     _meta?: Record<string, unknown>;
   }): Promise<any> {
     await this.init();
@@ -447,6 +534,7 @@ export class CodexAppServerWebSocketClient {
         ...(input._meta ? { _meta: input._meta } : {}),
       },
       input.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+      input.signal,
     );
   }
 
@@ -567,15 +655,59 @@ export class CodexAppServerWebSocketClient {
     method: string,
     params?: unknown,
     timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+    signal?: AbortSignal,
   ): Promise<any> {
+    if (signal?.aborted) {
+      return Promise.reject(createOperationAbortedError());
+    }
+
     const id = this.nextId++;
     this.sendJson(params === undefined ? { id, method } : { id, method, params });
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+      let settled = false;
+      const cleanup = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+      };
+      const beginSettle = () => {
+        if (settled) return false;
+        settled = true;
         this.pending.delete(id);
-        reject(new Error(`${method} timed out after ${timeoutMs}ms`));
+        cleanup();
+        return true;
+      };
+      const settle = (run: () => void) => {
+        if (!beginSettle()) return;
+        run();
+      };
+      const sendCancellation = (reason: string): Promise<void> => {
+        if (method === 'initialize' || !this.socket || this.socket.destroyed) {
+          return Promise.resolve();
+        }
+        const notification = buildCancellationNotification(id, reason);
+        return waitForGracefulWrite((callback) => {
+          this.socket!.write(encodeClientWebSocketFrame(notification), callback);
+        });
+      };
+      const fail = (error: Error, cancelReason?: string) => {
+        if (!cancelReason) {
+          settle(() => reject(error));
+          return;
+        }
+        if (!beginSettle()) return;
+        void sendCancellation(cancelReason).then(() => reject(error));
+      };
+      const onAbort = () => fail(createOperationAbortedError(), 'Operation aborted');
+      const timer = setTimeout(() => {
+        const message = `${method} timed out after ${timeoutMs}ms`;
+        fail(new Error(message), message);
       }, timeoutMs);
-      this.pending.set(id, { resolve, reject, timer });
+
+      signal?.addEventListener('abort', onAbort, { once: true });
+      this.pending.set(id, {
+        resolve: (value) => settle(() => resolve(value)),
+        reject: (error) => fail(error),
+      });
     });
   }
 
@@ -610,8 +742,6 @@ export class CodexAppServerWebSocketClient {
 
     if (message.id !== undefined && this.pending.has(message.id)) {
       const pending = this.pending.get(message.id)!;
-      this.pending.delete(message.id);
-      clearTimeout(pending.timer);
       if (message.error) {
         pending.reject(new Error(message.error.message ?? JSON.stringify(message.error)));
       } else {
@@ -637,7 +767,6 @@ export class CodexAppServerWebSocketClient {
 
   private rejectAll(error: Error): void {
     for (const pending of this.pending.values()) {
-      clearTimeout(pending.timer);
       pending.reject(error);
     }
     this.pending.clear();
