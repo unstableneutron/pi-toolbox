@@ -1,9 +1,15 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import type { AutocompleteProvider } from '@earendil-works/pi-tui';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import skillShortcut, {
   createSkillAutocompleteProvider,
   extractDollarPrefix,
+  installConsecutiveSkillBlockPromptPatch,
+  splitConsecutiveSkillBlocksInPromptMessages,
+  splitLeadingSkillBlocks,
   transformSkillShortcutInput,
 } from './index';
 import { clearEditorBehaviors, getEditorBehaviors } from '../shared/editor-behaviors';
@@ -22,6 +28,7 @@ function createExtensionHarness() {
   const handlers = new Map<string, (event: any, ctx: any) => Promise<void> | void>();
   const addAutocompleteProvider = vi.fn();
   const setEditorComponent = vi.fn();
+  const sendUserMessage = vi.fn();
 
   const pi = {
     on(event: string, handler: (event: any, ctx: any) => Promise<void> | void) {
@@ -36,6 +43,7 @@ function createExtensionHarness() {
         },
       ];
     },
+    sendUserMessage,
   };
 
   const ctx = {
@@ -51,7 +59,23 @@ function createExtensionHarness() {
     handlers,
     addAutocompleteProvider,
     setEditorComponent,
+    sendUserMessage,
   };
+}
+
+function createSkillFile(name: string, body: string) {
+  const dir = mkdtempSync(join(tmpdir(), `skill-shortcut-${name}-`));
+  const path = join(dir, 'SKILL.md');
+  writeFileSync(path, `---\nname: ${name}\ndescription: Test skill\n---\n\n${body}\n`, 'utf8');
+  return {
+    dir,
+    path,
+    cleanup: () => rmSync(dir, { force: true, recursive: true }),
+  };
+}
+
+function skillBlock(name: string, body = `# ${name}`) {
+  return `<skill name="${name}" location="/tmp/${name}/SKILL.md">\nReferences are relative to /tmp/${name}.\n\n${body}\n</skill>`;
 }
 
 describe('skill-shortcut helpers', () => {
@@ -74,6 +98,77 @@ describe('skill-shortcut helpers', () => {
     expect(transformSkillShortcutInput('  use $agent-browser now  ', ['agent-browser'])).toBe(
       '  use /skill:agent-browser now  ',
     );
+  });
+
+  test('parses consecutive leading skill blocks and trailing user text', () => {
+    const first = skillBlock('agent-browser');
+    const second = skillBlock('systematic-debugging');
+
+    expect(splitLeadingSkillBlocks(`${first}\n\n${second}\n\nDebug this`)).toEqual({
+      skillBlocks: [first, second],
+      userText: 'Debug this',
+    });
+  });
+
+  test('splits a user prompt with consecutive skill blocks into native user messages', () => {
+    const first = skillBlock('agent-browser');
+    const second = skillBlock('systematic-debugging');
+    const image = { type: 'image' as const, data: 'abc', mimeType: 'image/png' };
+
+    const result = splitConsecutiveSkillBlocksInPromptMessages([
+      {
+        role: 'user',
+        content: [{ type: 'text', text: `${first}\n\n${second}\n\nDebug this` }, image],
+        timestamp: 123,
+      },
+    ] as any);
+
+    expect(result).toEqual([
+      { role: 'user', content: [{ type: 'text', text: first }], timestamp: 123 },
+      { role: 'user', content: [{ type: 'text', text: second }], timestamp: 123 },
+      { role: 'user', content: [{ type: 'text', text: 'Debug this' }, image], timestamp: 123 },
+    ]);
+  });
+
+  test('does not split single skill blocks so native /skill rendering stays unchanged', () => {
+    const first = skillBlock('agent-browser');
+    const messages = [
+      {
+        role: 'user' as const,
+        content: [{ type: 'text' as const, text: `${first}\n\nDebug this` }],
+      },
+    ];
+
+    expect(splitConsecutiveSkillBlocksInPromptMessages(messages as any)).toBe(messages);
+  });
+
+  test('runtime prompt patch splits once and is idempotent', async () => {
+    const first = skillBlock('agent-browser');
+    const second = skillBlock('systematic-debugging');
+    const calls: any[] = [];
+
+    class FakeAgentSession {
+      async _runAgentPrompt(messages: any) {
+        calls.push(messages);
+      }
+    }
+
+    installConsecutiveSkillBlockPromptPatch(FakeAgentSession as any);
+    installConsecutiveSkillBlockPromptPatch(FakeAgentSession as any);
+
+    await (new FakeAgentSession() as any)._runAgentPrompt([
+      {
+        role: 'user',
+        content: [{ type: 'text', text: `${first}\n\n${second}\n\nDebug this` }],
+      },
+    ]);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual([
+      { role: 'user', content: [{ type: 'text', text: first }] },
+      { role: 'user', content: [{ type: 'text', text: second }] },
+      { role: 'user', content: [{ type: 'text', text: 'Debug this' }] },
+    ]);
   });
 });
 
@@ -335,5 +430,117 @@ describe('extension registration', () => {
     expect(inputHandler?.({ text: 'use $missing now' }, harness.ctx as any)).toEqual({
       action: 'continue',
     });
+  });
+
+  test('input handler handles embedded skill commands by sending expanded skill XML', async () => {
+    const skill = createSkillFile('agent-browser', '# Agent Browser\n\nOpen browser tooling.');
+    const harness = createExtensionHarness();
+    vi.spyOn(harness.pi, 'getCommands').mockReturnValue([
+      {
+        source: 'skill',
+        name: 'skill:agent-browser',
+        description: 'Open browser tooling',
+        sourceInfo: {
+          path: skill.path,
+          source: skill.path,
+          scope: 'project',
+          origin: 'top-level',
+          baseDir: skill.dir,
+        },
+      },
+    ] as any);
+
+    try {
+      skillShortcut(harness.pi as any);
+      await harness.handlers.get('session_start')?.({ type: 'session_start' }, harness.ctx);
+
+      const inputHandler = harness.handlers.get('input');
+      expect(inputHandler?.({ text: 'use /skill:agent-browser now' }, harness.ctx as any)).toEqual({
+        action: 'handled',
+      });
+      expect(harness.sendUserMessage).toHaveBeenCalledWith(
+        expect.stringContaining(`<skill name="agent-browser" location="${skill.path}">`),
+        undefined,
+      );
+      expect(harness.sendUserMessage.mock.calls[0]?.[0]).toContain(
+        `References are relative to ${skill.dir}.`,
+      );
+      expect(harness.sendUserMessage.mock.calls[0]?.[0]).toContain('# Agent Browser');
+      expect(harness.sendUserMessage.mock.calls[0]?.[0]).toContain('use [skill:agent-browser] now');
+    } finally {
+      skill.cleanup();
+    }
+  });
+
+  test('input handler deduplicates repeated skill mentions by name', async () => {
+    const skill = createSkillFile('agent-browser', '# Agent Browser\n\nOpen browser tooling.');
+    const harness = createExtensionHarness();
+    vi.spyOn(harness.pi, 'getCommands').mockReturnValue([
+      {
+        source: 'skill',
+        name: 'skill:agent-browser',
+        description: 'Open browser tooling',
+        sourceInfo: {
+          path: skill.path,
+          source: skill.path,
+          scope: 'project',
+          origin: 'top-level',
+          baseDir: skill.dir,
+        },
+      },
+    ] as any);
+
+    try {
+      skillShortcut(harness.pi as any);
+      await harness.handlers.get('session_start')?.({ type: 'session_start' }, harness.ctx);
+
+      const inputHandler = harness.handlers.get('input');
+      expect(
+        inputHandler?.(
+          { text: 'use /skill:agent-browser and /skill:agent-browser now' },
+          harness.ctx as any,
+        ),
+      ).toEqual({ action: 'handled' });
+
+      const sent = harness.sendUserMessage.mock.calls[0]?.[0] as string;
+      expect(sent.match(/<skill name="agent-browser"/g)).toHaveLength(1);
+      expect(sent).toContain('use [skill:agent-browser] and [skill:agent-browser] now');
+    } finally {
+      skill.cleanup();
+    }
+  });
+
+  test('input handler ignores extension-originated messages to avoid recursion', async () => {
+    const skill = createSkillFile('agent-browser', '# Agent Browser');
+    const harness = createExtensionHarness();
+    vi.spyOn(harness.pi, 'getCommands').mockReturnValue([
+      {
+        source: 'skill',
+        name: 'skill:agent-browser',
+        sourceInfo: {
+          path: skill.path,
+          source: skill.path,
+          scope: 'project',
+          origin: 'top-level',
+          baseDir: skill.dir,
+        },
+      },
+    ] as any);
+
+    try {
+      skillShortcut(harness.pi as any);
+      await harness.handlers.get('session_start')?.({ type: 'session_start' }, harness.ctx);
+
+      const inputHandler = harness.handlers.get('input');
+      expect(
+        inputHandler?.(
+          { text: 'use /skill:agent-browser now', source: 'extension' },
+          harness.ctx as any,
+        ),
+      ).toEqual({ action: 'continue' });
+      expect(harness.sendUserMessage).not.toHaveBeenCalled();
+    } finally {
+      skill.cleanup();
+    }
   });
 });
