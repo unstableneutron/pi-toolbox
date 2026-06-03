@@ -4,14 +4,17 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
+  applyPiCodexGoalPostCompactionUserFollowupPatch,
   applyPiCodingAgentResolverPatch,
   applyPiContinuousLearningPatch,
   applyPiMermaidPatch,
   applyPiSubagentsIntercomDetachPatch,
   buildPiCodingAgentResolverReplacement,
   compareVersions,
+  findInstalledNpmPackagePath,
   formatPackageManagerCommand,
   getPackageManagerCommandCandidates,
+  isPiCodexGoalPostCompactionUserFollowupPatchApplied,
   isPiCodingAgentResolverPatchApplied,
   isPiContinuousLearningPatchApplied,
   isPiMermaidPatchApplied,
@@ -56,6 +59,20 @@ describe('parsePiListOutput', () => {
       { source: 'npm:pi-rtk-optimizer', installedPath: '/abs/path/to/pi-rtk-optimizer' },
       { source: 'https://github.com/example/repo', installedPath: '/abs/path/to/repo' },
     ]);
+  });
+});
+
+describe('findInstalledNpmPackagePath', () => {
+  it('matches version-qualified npm extension sources from pi list', () => {
+    expect(
+      findInstalledNpmPackagePath(
+        [
+          { source: 'npm:pi-codex-goal@0.1.21', installedPath: '/tmp/pi-codex-goal' },
+          { source: 'npm:pi-subagents', installedPath: '/tmp/pi-subagents' },
+        ],
+        'pi-codex-goal',
+      ),
+    ).toBe('/tmp/pi-codex-goal');
   });
 });
 
@@ -499,6 +516,140 @@ describe('pi-subagents intercom detach patching', () => {
     const packageRoot = setupFakePackage('1.0.0', 'export function changedUpstream() {}\n');
     await expect(applyPiSubagentsIntercomDetachPatch({ packageRoot })).rejects.toThrow(
       /target text for pi-subagents intercom detach patch not found/i,
+    );
+  });
+});
+
+describe('pi-codex-goal post-compaction continuation patching', () => {
+  const FIXTURE_CONTENT = [
+    'import type {',
+    '  ExtensionContext,',
+    '  ExtensionHandler,',
+    '  SessionBeforeCompactEvent,',
+    '  SessionCompactEvent,',
+    '  SessionShutdownEvent,',
+    '  SessionStartEvent,',
+    '  SessionTreeEvent,',
+    '} from "@earendil-works/pi-coding-agent";',
+    '',
+    'import { compactContinuationPrompt } from "./prompts.js";',
+    'import { recoveryPhaseBlocksContinuation } from "./recovery-machine.js";',
+    'import { isRecoveryPendingAttention, reasonFromRecoveryPendingAttention } from "./recovery.js";',
+    'import { applyStaleQueuedWorkEffects, runStaleQueuedWorkPlan } from "./goal-runtime-event-utils.js";',
+    'import type { GoalRuntimeSessionHandlerContext } from "./goal-runtime-event-handler-types.js";',
+    '',
+    'export function createSessionEventHandlers(deps: GoalRuntimeSessionHandlerContext) {',
+    '  const {',
+    '    pi,',
+    '    runtimeState,',
+    '    stateController,',
+    '    continuation,',
+    '    goalAccounting,',
+    '    recoveryRuntime,',
+    '    status,',
+    '    resetErrorRecovery,',
+    '  } = deps;',
+    '',
+    '  return {',
+    '    onSessionCompact: (async (_event, ctx) => {',
+    '      if (runStaleQueuedWorkPlan(runtimeState.staleQueuedWorkGuard.planSessionCompact(), ctx, deps)) {',
+    '        return;',
+    '      }',
+    '',
+    '      stateController.flushGoalPersistence("runtime");',
+    '      recoveryRuntime.onSessionCompact();',
+    '      status.refreshUi(ctx);',
+    '      if (!recoveryPhaseBlocksContinuation(runtimeState.recoveryState.phase)) {',
+    '        continuation.maybeContinueAfterCurrentEvent(ctx);',
+    '      }',
+    '    }) satisfies ExtensionHandler<SessionCompactEvent>,',
+    '  };',
+    '}',
+    '',
+  ].join('\n');
+
+  function setupFakePackage(version: string, handlerContent = FIXTURE_CONTENT): string {
+    const packageRoot = makeTempDir('pi-codex-goal-');
+    writeFileSync(
+      join(packageRoot, 'package.json'),
+      JSON.stringify({ name: 'pi-codex-goal', version }, null, 2),
+    );
+    mkdirSync(join(packageRoot, 'src'), { recursive: true });
+    writeFileSync(join(packageRoot, 'src', 'goal-runtime-session-handlers.ts'), handlerContent);
+    return packageRoot;
+  }
+
+  it('reports unpatched fixture as not yet patched', () => {
+    const packageRoot = setupFakePackage('0.1.21');
+    expect(isPiCodexGoalPostCompactionUserFollowupPatchApplied(packageRoot)).toBe(false);
+  });
+
+  it('queues a user follow-up after host-overflow compaction before hidden continuation gating', async () => {
+    const packageRoot = setupFakePackage('0.1.21');
+    const result = await applyPiCodexGoalPostCompactionUserFollowupPatch({ packageRoot });
+
+    expect(result).toMatchObject({
+      status: 'applied',
+      packageRoot,
+      version: '0.1.21',
+    });
+    expect(result.patchPath).toBe(join(packageRoot, 'src', 'goal-runtime-session-handlers.ts'));
+
+    const patched = readFileSync(
+      join(packageRoot, 'src', 'goal-runtime-session-handlers.ts'),
+      'utf8',
+    );
+    expect(patched).toContain(
+      '__pi_update_extensions:pi-codex-goal-post-compaction-user-followup__',
+    );
+    expect(patched).toContain('const postCompactionGoal = stateController.getGoal();');
+    expect(patched).toContain(
+      'runtimeState.recoveryState.phase.kind === "hostOverflowRecoveringNeedsUserStart"',
+    );
+    expect(patched).toContain(
+      'pi.sendUserMessage(compactContinuationPrompt(postCompactionGoal), {',
+    );
+    expect(patched).toContain('deliverAs: "followUp"');
+    expect(patched.indexOf('pi.sendUserMessage')).toBeLessThan(
+      patched.indexOf('continuation.maybeContinueAfterCurrentEvent(ctx);'),
+    );
+    expect(isPiCodexGoalPostCompactionUserFollowupPatchApplied(packageRoot)).toBe(true);
+  });
+
+  it('is idempotent after patching', async () => {
+    const packageRoot = setupFakePackage('0.1.21');
+    await applyPiCodexGoalPostCompactionUserFollowupPatch({ packageRoot });
+    const second = await applyPiCodexGoalPostCompactionUserFollowupPatch({ packageRoot });
+
+    expect(second).toMatchObject({
+      status: 'already-applied',
+      packageRoot,
+      version: '0.1.21',
+    });
+  });
+
+  it('supports dry-run without mutating the extension', async () => {
+    const packageRoot = setupFakePackage('0.1.21');
+    const handlerPath = join(packageRoot, 'src', 'goal-runtime-session-handlers.ts');
+    const original = readFileSync(handlerPath, 'utf8');
+
+    const result = await applyPiCodexGoalPostCompactionUserFollowupPatch({
+      packageRoot,
+      dryRun: true,
+    });
+    expect(result).toMatchObject({
+      status: 'would-apply',
+      packageRoot,
+      version: '0.1.21',
+    });
+    expect(readFileSync(handlerPath, 'utf8')).toBe(original);
+    expect(isPiCodexGoalPostCompactionUserFollowupPatchApplied(packageRoot)).toBe(false);
+  });
+
+  it('throws a descriptive error when the target text is missing', async () => {
+    const packageRoot = setupFakePackage('1.0.0', 'export function changedUpstream() {}\n');
+    await expect(applyPiCodexGoalPostCompactionUserFollowupPatch({ packageRoot })).rejects.toThrow(
+      /target text for pi-codex-goal post-compaction user follow-up patch not found/i,
     );
   });
 });

@@ -807,6 +807,126 @@ export async function applyPiSubagentsIntercomDetachPatch(
   return { status: 'applied', packageRoot, version, patchPath: filePath };
 }
 
+// ---------------------------------------------------------------------------
+// pi-codex-goal post-compaction continuation patch
+//
+// pi-codex-goal@0.1.21 can enter host-overflow recovery after a large
+// assistant(stop) turn, let the host auto-compact, and then block its normal
+// hidden continuation because the recovery phase requires a user-started turn.
+// If no user-like follow-up is queued after compaction, Pi may attempt a bare
+// agent.continue() from an assistant tail and fail with
+// "Cannot continue from message role: assistant".
+//
+// The hotfix queues the active goal continuation as a user follow-up after
+// host-overflow compaction, before the normal hidden-continuation gate.
+// ---------------------------------------------------------------------------
+
+const PI_CODEX_GOAL_PACKAGE_NAME = 'pi-codex-goal';
+const PI_CODEX_GOAL_SESSION_HANDLERS_RELATIVE_PATH = 'src/goal-runtime-session-handlers.ts';
+const PI_CODEX_GOAL_POST_COMPACTION_USER_FOLLOWUP_PATCH_MARKER =
+  '__pi_update_extensions:pi-codex-goal-post-compaction-user-followup__';
+const PI_CODEX_GOAL_POST_COMPACTION_USER_FOLLOWUP_TARGET = [
+  '      recoveryRuntime.onSessionCompact();',
+  '      status.refreshUi(ctx);',
+  '      if (!recoveryPhaseBlocksContinuation(runtimeState.recoveryState.phase)) {',
+  '        continuation.maybeContinueAfterCurrentEvent(ctx);',
+  '      }',
+].join('\n');
+
+function buildPiCodexGoalPostCompactionUserFollowupReplacement(): string {
+  return [
+    '      recoveryRuntime.onSessionCompact();',
+    '      status.refreshUi(ctx);',
+    `      // ${PI_CODEX_GOAL_POST_COMPACTION_USER_FOLLOWUP_PATCH_MARKER}`,
+    '      const postCompactionGoal = stateController.getGoal();',
+    '      if (',
+    '        postCompactionGoal?.status === "active" &&',
+    '        runtimeState.recoveryState.phase.kind === "hostOverflowRecoveringNeedsUserStart"',
+    '      ) {',
+    '        pi.sendUserMessage(compactContinuationPrompt(postCompactionGoal), {',
+    '          deliverAs: "followUp",',
+    '        });',
+    '        return;',
+    '      }',
+    '      if (!recoveryPhaseBlocksContinuation(runtimeState.recoveryState.phase)) {',
+    '        continuation.maybeContinueAfterCurrentEvent(ctx);',
+    '      }',
+  ].join('\n');
+}
+
+function isPiCodexGoalPostCompactionUserFollowupSemanticallyPatched(content: string): boolean {
+  return (
+    content.includes('const postCompactionGoal = stateController.getGoal();') &&
+    content.includes(
+      'runtimeState.recoveryState.phase.kind === "hostOverflowRecoveringNeedsUserStart"',
+    ) &&
+    content.includes('pi.sendUserMessage(compactContinuationPrompt(postCompactionGoal), {') &&
+    content.includes('deliverAs: "followUp"')
+  );
+}
+
+export function isPiCodexGoalPostCompactionUserFollowupPatchApplied(packageRoot: string): boolean {
+  const filePath = join(packageRoot, PI_CODEX_GOAL_SESSION_HANDLERS_RELATIVE_PATH);
+  if (!existsSync(filePath)) return false;
+  const content = readFileSync(filePath, 'utf8');
+  return (
+    content.includes(PI_CODEX_GOAL_POST_COMPACTION_USER_FOLLOWUP_PATCH_MARKER) ||
+    isPiCodexGoalPostCompactionUserFollowupSemanticallyPatched(content)
+  );
+}
+
+export async function applyPiCodexGoalPostCompactionUserFollowupPatch(
+  options: { dryRun?: boolean; packageRoot?: string; cwd?: string } = {},
+): Promise<ApplyPatchResult> {
+  const packageRoot =
+    options.packageRoot ?? findGlobalPackagePath(PI_CODEX_GOAL_PACKAGE_NAME, { cwd: options.cwd });
+  if (!packageRoot) {
+    throw new Error(
+      `Could not locate installed ${PI_CODEX_GOAL_PACKAGE_NAME} via configured package manager, aube, or pnpm`,
+    );
+  }
+
+  const version = getPackageVersion(packageRoot) ?? 'unknown';
+  const filePath = join(packageRoot, PI_CODEX_GOAL_SESSION_HANDLERS_RELATIVE_PATH);
+  if (!existsSync(filePath)) {
+    throw new Error(`pi-codex-goal@${version}: session handler file not found at ${filePath}`);
+  }
+
+  if (isPiCodexGoalPostCompactionUserFollowupPatchApplied(packageRoot)) {
+    return { status: 'already-applied', packageRoot, version, patchPath: filePath };
+  }
+
+  const content = readFileSync(filePath, 'utf8');
+  if (!content.includes(PI_CODEX_GOAL_POST_COMPACTION_USER_FOLLOWUP_TARGET)) {
+    throw new Error(
+      `pi-codex-goal@${version}: target text for pi-codex-goal post-compaction user follow-up patch not found at ${filePath}. ` +
+        'Upstream may have changed; update pi-update-extensions.ts.',
+    );
+  }
+
+  if (options.dryRun) {
+    return { status: 'would-apply', packageRoot, version, patchPath: filePath };
+  }
+
+  const patched = content.replace(
+    PI_CODEX_GOAL_POST_COMPACTION_USER_FOLLOWUP_TARGET,
+    buildPiCodexGoalPostCompactionUserFollowupReplacement(),
+  );
+  writeFileSync(filePath, patched);
+  return { status: 'applied', packageRoot, version, patchPath: filePath };
+}
+
+export function findInstalledNpmPackagePath(
+  installedPackages: readonly InstalledPackage[],
+  packageName: string,
+): string | undefined {
+  const exactSource = `npm:${packageName}`;
+  const versionedSourcePrefix = `${exactSource}@`;
+  return installedPackages.find(
+    (entry) => entry.source === exactSource || entry.source.startsWith(versionedSourcePrefix),
+  )?.installedPath;
+}
+
 export function getInstalledPackage(
   installedPackages: readonly InstalledPackage[],
   source: string,
@@ -1448,6 +1568,25 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     } catch (error) {
       console.error(
         `Skipped pi-continuous-learning compatibility patch: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    try {
+      const codexGoalResult = await applyPiCodexGoalPostCompactionUserFollowupPatch({
+        dryRun,
+        cwd: REPO_ROOT,
+        packageRoot: findInstalledNpmPackagePath(installedPackages, 'pi-codex-goal'),
+      });
+      const label =
+        codexGoalResult.status === 'already-applied'
+          ? `Already applied: pi-codex-goal post-compaction continuation patch (${codexGoalResult.version})`
+          : codexGoalResult.status === 'would-apply'
+            ? `Would apply: pi-codex-goal post-compaction continuation patch (${codexGoalResult.version})`
+            : `${codexGoalResult.status}: pi-codex-goal post-compaction continuation patch (${codexGoalResult.version}) via ${codexGoalResult.patchPath}`;
+      console.log(label);
+    } catch (error) {
+      console.error(
+        `Skipped pi-codex-goal post-compaction continuation patch: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
 
