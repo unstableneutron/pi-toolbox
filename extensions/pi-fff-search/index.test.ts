@@ -1036,6 +1036,83 @@ describe('pi-fff-search extension', () => {
     );
   });
 
+  test('builtin read override compacts gitchamber package paths', () => {
+    const { tools } = createHarness({
+      overrideBuiltinRead: true,
+      overrideBuiltinGrep: false,
+      overrideBuiltinFind: false,
+      rewriteBuiltinBash: false,
+    });
+    const theme = createTaggedTheme();
+    const read = tools.find((tool) => tool.name === 'read')!;
+
+    const call = read.renderCall!(
+      {
+        path: '/repo/node_modules/.gitchamber/github.com/earendil-works/pi-mono/packages/coding-agent/src/core/package-manager.ts',
+        offset: 595,
+        limit: 75,
+      },
+      theme,
+      { cwd: '/repo', expanded: false } as any,
+    );
+
+    expect(renderTextTrimmed(call, 500)).toBe(
+      '<toolTitle><b>gitchamber</b></toolTitle> <accent>github.com/earendil-works/pi-mono/packages/coding-agent/src/core/package-manager.ts</accent><warning>:595-669</warning><dim> (ctrl+o to expand)</dim>',
+    );
+  });
+
+  test('builtin read override drops the gitchamber host before truncating path segments', () => {
+    const { tools } = createHarness({
+      overrideBuiltinRead: true,
+      overrideBuiltinGrep: false,
+      overrideBuiltinFind: false,
+      rewriteBuiltinBash: false,
+    });
+    const theme = createTheme();
+    const read = tools.find((tool) => tool.name === 'read')!;
+
+    const call = read.renderCall!(
+      {
+        path: '/repo/node_modules/.gitchamber/github.com/earendil-works/pi-mono/packages/coding-agent/src/core/package-manager.ts',
+        offset: 595,
+        limit: 75,
+      },
+      theme,
+      { cwd: '/repo', expanded: false } as any,
+    );
+
+    expect(renderTextTrimmed(call, 110)).toBe(
+      'gitchamber earendil-works/pi-mono/packages/coding-agent/src/core/package-manager.ts:595-669 (ctrl+o to expand)',
+    );
+  });
+
+  test('builtin read override preserves gitchamber owner and filename when truncating', () => {
+    const { tools } = createHarness({
+      overrideBuiltinRead: true,
+      overrideBuiltinGrep: false,
+      overrideBuiltinFind: false,
+      rewriteBuiltinBash: false,
+    });
+    const theme = createTheme();
+    const read = tools.find((tool) => tool.name === 'read')!;
+
+    const call = read.renderCall!(
+      {
+        path: '/repo/node_modules/.gitchamber/github.com/earendil-works/pi-mono/packages/coding-agent/src/core/package-manager.ts',
+        offset: 595,
+        limit: 75,
+      },
+      theme,
+      { cwd: '/repo', expanded: false } as any,
+    );
+
+    const lines = renderTextTrimmed(call, 72).split('\n');
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('gitchamber earendil-works/');
+    expect(lines[0]).toContain('/package-manager.ts:595-669');
+    expect(lines[0]!.length).toBeLessThanOrEqual(72);
+  });
+
   test('builtin read override shows the original package path in expanded mode', () => {
     const { tools } = createHarness({
       overrideBuiltinRead: true,

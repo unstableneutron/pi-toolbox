@@ -2092,6 +2092,7 @@ type ReadCallTheme = {
 type CompactReadClassification =
   | { kind: 'skill'; label: string }
   | { kind: 'package'; label: string }
+  | { kind: 'gitchamber'; label: string }
   | { kind: 'resource'; label: string };
 
 function toPosixPath(filePath: string): string {
@@ -2113,6 +2114,11 @@ function getNodePackageReadClassification(absolutePath: string): CompactReadClas
   const parts = packagePath.split('/').filter((part) => part.length > 0);
   const first = parts[0];
   if (!first) return null;
+
+  if (first === '.gitchamber') {
+    const sourcePath = parts.slice(1).join('/');
+    return sourcePath ? { kind: 'gitchamber', label: sourcePath } : null;
+  }
 
   if (first.startsWith('@')) {
     const second = parts[1];
@@ -2177,19 +2183,21 @@ function formatCompactReadCall(
     const endLine = typeof args.limit === 'number' ? startLine + args.limit - 1 : '';
     return `:${startLine}${endLine ? `-${endLine}` : ''}`;
   })();
-  const plainPrefix = classification.kind === 'skill' ? '[skill] ' : `read ${classification.kind} `;
+  const plainPrefix =
+    classification.kind === 'skill'
+      ? '[skill] '
+      : `${formatCompactReadTitle(classification.kind)} `;
+  const fixedWidth = plainPrefix.length + rawRange.length;
   const suffixChoice = chooseOptionalSuffix({
     width,
-    fixedWidth: plainPrefix.length + rawRange.length,
+    fixedWidth,
     suffixes: DEFAULT_EXPAND_HINT_SUFFIXES,
-    minPrimaryWidth: 24,
-    preferredPrimaryWidth: classification.label.length,
+    minPrimaryWidth: getCompactReadMinimumPrimaryWidth(classification),
+    preferredPrimaryWidth: getCompactReadPreferredPrimaryWidth(classification, width, fixedWidth),
   });
   const displayLabel =
     Number.isFinite(suffixChoice.primaryBudget) && suffixChoice.primaryBudget > 0
-      ? normalizeCompactCollapsedPath(
-          collapseMiddlePath(classification.label, suffixChoice.primaryBudget),
-        )
+      ? formatCompactReadLabel(classification, suffixChoice.primaryBudget)
       : classification.label;
   const expandHint = suffixChoice.suffix ? theme.fg('dim', suffixChoice.suffix) : '';
 
@@ -2203,12 +2211,76 @@ function formatCompactReadCall(
   }
 
   return (
-    theme.fg('toolTitle', theme.bold(`read ${classification.kind}`)) +
+    theme.fg('toolTitle', theme.bold(formatCompactReadTitle(classification.kind))) +
     ' ' +
     theme.fg('accent', displayLabel) +
     formatBuiltinReadLineRange(args, theme) +
     expandHint
   );
+}
+
+function formatCompactReadLabel(
+  classification: CompactReadClassification,
+  primaryBudget: number,
+): string {
+  if (classification.kind === 'gitchamber') {
+    return formatGitchamberReadLabel(classification.label, primaryBudget);
+  }
+
+  return normalizeCompactCollapsedPath(collapseMiddlePath(classification.label, primaryBudget));
+}
+
+function formatGitchamberReadLabel(label: string, primaryBudget: number): string {
+  if (label.length <= primaryBudget) {
+    return label;
+  }
+
+  const hostlessLabel = getHostlessGitchamberLabel(label);
+  if (hostlessLabel.length <= primaryBudget) {
+    return hostlessLabel;
+  }
+
+  return normalizeCompactCollapsedPath(collapseMiddlePath(hostlessLabel, primaryBudget));
+}
+
+function getHostlessGitchamberLabel(label: string): string {
+  return label.startsWith('github.com/') ? label.slice('github.com/'.length) : label;
+}
+
+function formatCompactReadTitle(kind: CompactReadClassification['kind']): string {
+  return kind === 'gitchamber' ? 'gitchamber' : `read ${kind}`;
+}
+
+function getCompactReadPreferredPrimaryWidth(
+  classification: CompactReadClassification,
+  width: number | undefined,
+  fixedWidth: number,
+): number {
+  if (classification.kind !== 'gitchamber') {
+    return classification.label.length;
+  }
+
+  const fullExpandHint = DEFAULT_EXPAND_HINT_SUFFIXES[0] ?? '';
+  if (
+    typeof width === 'number' &&
+    Number.isFinite(width) &&
+    fixedWidth + classification.label.length + fullExpandHint.length <= width
+  ) {
+    return classification.label.length;
+  }
+
+  return getHostlessGitchamberLabel(classification.label).length;
+}
+
+function getCompactReadMinimumPrimaryWidth(classification: CompactReadClassification): number {
+  if (classification.kind !== 'gitchamber') {
+    return 24;
+  }
+
+  const hostlessLabel = getHostlessGitchamberLabel(classification.label);
+  const owner = hostlessLabel.split('/')[0] ?? '';
+  const filename = hostlessLabel.split('/').pop() ?? '';
+  return Math.max(24, Math.min(hostlessLabel.length, `${owner}/.../${filename}`.length));
 }
 
 function formatBuiltinReadCallSummary(
