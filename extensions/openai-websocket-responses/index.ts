@@ -10,7 +10,11 @@ import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-a
 import { installOpenAICodexTransportMetadataPatch } from './codex-transport-metadata';
 import { clearAllContinuations } from './src/continuation-cache.ts';
 import { installOpenAIWebSocketResponsesPatch } from './src/patch.ts';
-import { API, createOpenAIWebSocketResponsesStream } from './src/provider.ts';
+import {
+  API,
+  createOpenAIWebSocketResponsesStream,
+  type MissingCodexAccountIdWarningEvent,
+} from './src/provider.ts';
 import { readOpenAIWebSocketResponsesSettings } from './src/settings.ts';
 import {
   closeAllCachedWebSockets,
@@ -30,6 +34,10 @@ interface InputEventLike {
 
 interface UIContextLike {
   hasUI?: boolean;
+}
+
+interface NotifyContextLike extends UIContextLike {
+  ui: Pick<ExtensionContext['ui'], 'notify'>;
 }
 
 type WebSocketStreamSimple = (
@@ -79,6 +87,25 @@ function cacheStatusLabel(status: WebSocketCacheStatus): string {
 export function formatWebSocketStatus(event: WebSocketLifecycleEvent): string | undefined {
   if (event.type !== 'open' || !event.cacheKeyHash) return undefined;
   return `WebSocket ${event.connectionId} connected · ${cacheStatusLabel(event.cacheStatus)}`;
+}
+
+export function createMissingCodexAccountIdNotifier(
+  getContext: () => NotifyContextLike | undefined,
+): (event: MissingCodexAccountIdWarningEvent) => void {
+  const warned = new Set<string>();
+  return (event) => {
+    const ctx = getContext();
+    if (!ctx?.hasUI) return;
+
+    const key = `${event.model.provider}:${event.url}`;
+    if (warned.has(key)) return;
+    warned.add(key);
+
+    ctx.ui.notify(
+      `OpenAI Codex WebSocket is using the direct ChatGPT Codex backend without chatgpt-account-id. Pi could not derive it from the JWT, so requests may fail or use the wrong ChatGPT account. URL: ${event.url}`,
+      'warning',
+    );
+  };
 }
 
 export function createIdleKeepaliveActivityTracker(now = () => Date.now()) {
@@ -149,11 +176,13 @@ export default function (pi: ExtensionAPI) {
   };
 
   const settingsProvider = () => readOpenAIWebSocketResponsesSettings();
+  const notifyMissingCodexAccountId = createMissingCodexAccountIdNotifier(() => currentCtx);
   const streamWebSocket = createOpenAIWebSocketResponsesStream(
     settingsProvider,
     onLifecycleEvent,
     () => idleKeepaliveActivity.shouldEnable(),
     (diagnostic) => pi.appendEntry(WEBSOCKET_DIAGNOSTIC_ENTRY, diagnostic),
+    notifyMissingCodexAccountId,
   );
   const installTransparentPatch = () => {
     installOpenAIWebSocketResponsesPatch(settingsProvider, streamWebSocket);

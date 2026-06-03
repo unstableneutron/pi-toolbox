@@ -43,9 +43,9 @@ export interface OpenAIWebSocketResponsesSettings {
 
 const DEFAULT_SETTINGS: OpenAIWebSocketResponsesSettings = {
   patch: {
-    enabled: false,
+    enabled: true,
     apis: ['openai-responses', 'openai-codex-responses'],
-    providers: [],
+    providers: ['openai', 'openai-codex'],
     providerModels: [],
     excludeProviderModels: [],
   },

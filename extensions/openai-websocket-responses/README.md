@@ -19,8 +19,8 @@ Configure the extension in `~/.pi/agent/settings.json`:
     "patch": {
       "enabled": true,
       "apis": ["openai-responses", "openai-codex-responses"],
-      "providers": [],
-      "providerModels": ["facade/gpt-5.5-nomoderation"],
+      "providers": ["openai", "openai-codex"],
+      "providerModels": [],
       "excludeProviderModels": []
     },
     "request": {
@@ -61,12 +61,13 @@ Configure the extension in `~/.pi/agent/settings.json`:
 }
 ```
 
-Defaults: `patch.enabled` is `false`; `patch.apis` is
-`["openai-responses", "openai-codex-responses"]`; `patch.providers`,
-`patch.providerModels`, and `patch.excludeProviderModels` are empty arrays;
-`request.profile` is `"auto"`; `request.queryParams`,
-`request.queryParamsByProvider`, `request.queryParamsByProviderModel`, and
-`request.storeByProviderModel` are empty; WebSocket defaults are `retries: 2`, `connectTimeoutMs: 15000`,
+Defaults: `patch.enabled` is `true`; `patch.apis` is
+`["openai-responses", "openai-codex-responses"]`; `patch.providers` is
+`["openai", "openai-codex"]`; `patch.providerModels` and
+`patch.excludeProviderModels` are empty arrays; `request.profile` is `"auto"`;
+`request.queryParams`, `request.queryParamsByProvider`,
+`request.queryParamsByProviderModel`, and `request.storeByProviderModel` are
+empty; WebSocket defaults are `retries: 2`, `connectTimeoutMs: 15000`,
 `firstEventTimeoutMs: 60000`, and `idleTimeoutMs: 0`; debug logging is disabled;
 recovery defaults are shown above. Keep `providerModels` narrow when request query params contain
 deployment-specific values.
@@ -89,13 +90,23 @@ If a template cannot be resolved, that query param is omitted.
 `request.queryParamsByProviderModel` add URL query params. Use provider or
 provider/model-scoped params when patching both Azure and Codex models, so Azure
 routing values do not leak into Codex URLs. Provider/model keys support `*`
-globs such as `facade/gpt-5*`. Azure routing values such as `x-azure-region`,
-`x-azure-resource-bucket`, and `x-azure-deployment` remain headers.
+globs such as `facade/gpt-5*`. `patch.providers` also supports globs; for
+example, `["*"]` means every provider whose API is listed in `patch.apis`.
+Azure routing values such as `x-azure-region`, `x-azure-resource-bucket`, and
+`x-azure-deployment` remain headers.
 
 `request.storeByProviderModel` overrides the non-Codex `store` default by
 provider/model glob. For example, `"facade/productivity/gpt-5*": false` forces
 matching facade productivity models to use stateless Responses requests. Codex
 profile requests ignore store overrides and always use `store: false`.
+
+The extension intentionally has no built-in model-family allowlist. WebSocket
+compatibility depends on the configured provider endpoint and model deployment.
+Use provider-level defaults for known OpenAI Responses/Codex Responses providers,
+use `providerModels` for proxy/facade routes where only some deployments are WSS
+compatible, and use `excludeProviderModels` for any model that fails on WebSocket.
+Do not assume legacy model families such as `gpt-4*` support this transport
+without a smoke test against the exact provider/model route.
 
 `request.profile` controls endpoint-specific request shaping:
 

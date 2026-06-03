@@ -5,11 +5,33 @@ import { resolveRequestProfile, type ResolvedRequestProfile } from './profile.ts
 const JWT_CLAIM_PATH = 'https://api.openai.com/auth';
 const OPENAI_BETA_RESPONSES_WEBSOCKETS = 'responses_websockets=2026-02-06';
 
+interface RuntimeOsModule {
+  platform(): string;
+  release(): string;
+  arch(): string;
+}
+
+type RuntimeProcess = {
+  versions?: { node?: string; bun?: string };
+  getBuiltinModule?: (specifier: string) => RuntimeOsModule | undefined;
+};
+
 type OpenAIWebSocketResponsesHeaderOptions = SimpleStreamOptions & { sessionId?: string };
 
 function createRequestId(): string {
   if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID();
   return `openai_websocket_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function runtimeOs(): RuntimeOsModule | undefined {
+  const runtimeProcess = (globalThis as typeof globalThis & { process?: RuntimeProcess }).process;
+  if (!runtimeProcess?.versions?.node && !runtimeProcess?.versions?.bun) return undefined;
+  return runtimeProcess.getBuiltinModule?.('node:os') ?? runtimeProcess.getBuiltinModule?.('os');
+}
+
+function codexUserAgent(): string {
+  const os = runtimeOs();
+  return os ? `pi (${os.platform()} ${os.release()}; ${os.arch()})` : 'pi (browser)';
 }
 
 function decodeBase64Json(segment: string): Record<string, any> | undefined {
@@ -50,7 +72,7 @@ function applyCodexBaseHeaders(
   const accountId = extractAccountId(token) ?? headers.get('chatgpt-account-id');
   if (accountId) headers.set('chatgpt-account-id', accountId);
   headers.set('originator', 'pi');
-  headers.set('user-agent', 'pi (browser)');
+  headers.set('user-agent', codexUserAgent());
 }
 
 export function buildRequestHeaders(

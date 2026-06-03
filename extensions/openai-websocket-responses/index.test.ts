@@ -217,9 +217,15 @@ describe('transport diagnostics', () => {
 });
 
 describe('settings and patch matching', () => {
-  it('defaults to explicit API enabled and transparent patch disabled', () => {
+  it('defaults to transparent patching for OpenAI Responses providers', () => {
     expect(normalizeSettings(undefined)).toMatchObject({
-      patch: { enabled: false, apis: ['openai-responses', 'openai-codex-responses'] },
+      patch: {
+        enabled: true,
+        apis: ['openai-responses', 'openai-codex-responses'],
+        providers: ['openai', 'openai-codex'],
+        providerModels: [],
+        excludeProviderModels: [],
+      },
       request: { queryParams: {}, storeByProviderModel: {} },
       websocket: {
         retries: 2,
@@ -349,6 +355,22 @@ describe('settings and patch matching', () => {
     expect(shouldPatchModel(makeModel({ id: 'gpt-5.5' }), settings)).toBe(true);
     expect(shouldPatchModel(makeModel({ id: 'gpt-4.1' }), settings)).toBe(false);
     expect(shouldPatchModel(makeModel({ api: 'anthropic-messages' }), settings)).toBe(false);
+  });
+
+  it('treats provider star as all providers for the configured APIs', () => {
+    const settings = normalizeSettings({
+      patch: {
+        enabled: true,
+        apis: ['openai-responses'],
+        providers: ['*'],
+      },
+    });
+
+    expect(shouldPatchModel(makeModel({ provider: 'facade' }), settings)).toBe(true);
+    expect(shouldPatchModel(makeModel({ provider: 'openai' }), settings)).toBe(true);
+    expect(shouldPatchModel(makeCodexModel({ api: 'openai-codex-responses' }), settings)).toBe(
+      false,
+    );
   });
 });
 
@@ -3828,7 +3850,7 @@ describe('transparent provider patching', () => {
 
   it('routes matching models to the websocket stream and delegates non-matching models', async () => {
     const settings = normalizeSettings({
-      patch: { enabled: true, providerModels: ['facade/gpt-5*'] },
+      patch: { enabled: true, providers: [], providerModels: ['facade/gpt-5*'] },
     });
     const websocketStream = vi.fn((_model: Model<any>, _context: any) =>
       createAssistantMessageEventStream(),

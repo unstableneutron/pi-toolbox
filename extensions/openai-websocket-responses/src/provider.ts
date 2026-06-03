@@ -51,6 +51,31 @@ import {
 
 export const API = 'openai-websocket-responses';
 
+const DIRECT_CODEX_BACKEND_HOST = 'chatgpt.com';
+const DIRECT_CODEX_BACKEND_PATH = '/backend-api/codex/responses';
+
+export interface MissingCodexAccountIdWarningEvent {
+  url: string;
+  model: Model<Api>;
+}
+
+type MissingCodexAccountIdWarningHandler = (event: MissingCodexAccountIdWarningEvent) => void;
+
+function isDirectChatGPTCodexBackendUrl(rawUrl: string): boolean {
+  try {
+    const url = new URL(rawUrl);
+    return url.hostname === DIRECT_CODEX_BACKEND_HOST && url.pathname === DIRECT_CODEX_BACKEND_PATH;
+  } catch {
+    return false;
+  }
+}
+
+function shouldWarnMissingCodexAccountId(profile: string, url: string, headers: Headers): boolean {
+  return (
+    profile === 'codex' && !headers.has('chatgpt-account-id') && isDirectChatGPTCodexBackendUrl(url)
+  );
+}
+
 export function buildWebSocketResponseHeaders(
   connection: WebSocketConnectionMetadata,
   requestUrl: string,
@@ -146,6 +171,7 @@ export function createOpenAIWebSocketResponsesStream(
   onLifecycleEvent?: WebSocketLifecycleObserver,
   shouldEnableIdleKeepalive?: () => boolean,
   persistUnattachedDiagnostic?: PersistUnattachedDiagnostic,
+  onMissingCodexAccountId?: MissingCodexAccountIdWarningHandler,
 ): (
   model: Model<Api>,
   context: Context,
@@ -166,6 +192,13 @@ export function createOpenAIWebSocketResponsesStream(
         const requestHeaders = buildRequestHeaders(model, options, profile);
         const websocketHeaders = buildWebSocketHeaders(model, options, profile);
         const url = resolveWebSocketResponsesUrl(model, settings, websocketHeaders, profile);
+        if (shouldWarnMissingCodexAccountId(profile, url, websocketHeaders)) {
+          try {
+            onMissingCodexAccountId?.({ url, model });
+          } catch {
+            // TUI warnings are best-effort and must not affect model streaming.
+          }
+        }
         if (!websocketHeaders.has('authorization'))
           throw new Error(`Missing Authorization header for ${url}`);
 
