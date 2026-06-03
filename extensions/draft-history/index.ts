@@ -1,10 +1,13 @@
-import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { Key, matchesKey } from '@earendil-works/pi-tui';
 
 import { registerExtensionEditorBehavior, type EditorBehavior } from '../shared/editor-behaviors';
 
-const CANDIDATE_INPUTS = new Set(['\x03', '\x15', '\x0b']);
+const CANDIDATE_KEYS = [Key.ctrl('c'), Key.ctrl('u'), Key.ctrl('k')];
 const MIN_WORDS = 2;
-const MIN_NON_WHITESPACE_CHARS = 10;
+const MIN_NON_WHITESPACE_CHARS = 8;
+const STATUS_KEY = 'draft-history';
+const SAVED_STATUS_MS = 4000;
 
 type DraftHistoryEditor = {
   getText?: () => string;
@@ -13,7 +16,7 @@ type DraftHistoryEditor = {
 };
 
 export function isCandidateDraftHistoryInput(data: string): boolean {
-  return CANDIDATE_INPUTS.has(data);
+  return CANDIDATE_KEYS.some((key) => matchesKey(data, key));
 }
 
 export function isMeaningfulDraftHistoryText(text: string): boolean {
@@ -29,7 +32,13 @@ function readEditorText(editor: DraftHistoryEditor): string | undefined {
   return editor.getExpandedText?.() ?? editor.getText?.();
 }
 
-export function createDraftHistoryBehavior(): EditorBehavior {
+type DraftHistoryBehaviorOptions = {
+  onDraftSaved?: (text: string) => void;
+};
+
+export function createDraftHistoryBehavior(
+  options: DraftHistoryBehaviorOptions = {},
+): EditorBehavior {
   const pendingTextByEditor = new WeakMap<object, string>();
 
   return {
@@ -67,6 +76,7 @@ export function createDraftHistoryBehavior(): EditorBehavior {
         const restored = before.trim();
         if (restored !== after.trim()) {
           draftEditor.addToHistory?.(restored);
+          options.onDraftSaved?.(restored);
         }
       } catch {
         // Do not interfere with normal editor behavior if history capture fails.
@@ -76,5 +86,41 @@ export function createDraftHistoryBehavior(): EditorBehavior {
 }
 
 export default function draftHistory(pi: ExtensionAPI) {
-  registerExtensionEditorBehavior(pi, createDraftHistoryBehavior());
+  let currentCtx: ExtensionContext | undefined;
+  let statusTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function clearStatusTimer() {
+    if (statusTimer) {
+      clearTimeout(statusTimer);
+      statusTimer = undefined;
+    }
+  }
+
+  function setTemporaryStatus(message: string, timeoutMs: number) {
+    if (!currentCtx?.hasUI) return;
+
+    clearStatusTimer();
+    currentCtx.ui.setStatus(STATUS_KEY, message);
+    statusTimer = setTimeout(() => {
+      statusTimer = undefined;
+      currentCtx?.ui.setStatus(STATUS_KEY, undefined);
+    }, timeoutMs);
+  }
+
+  registerExtensionEditorBehavior(
+    pi,
+    createDraftHistoryBehavior({
+      onDraftSaved: () => setTemporaryStatus('Saved cleared draft. Press ↑ to restore it.', SAVED_STATUS_MS),
+    }),
+  );
+
+  pi.on('session_start', (_event, ctx) => {
+    currentCtx = ctx;
+  });
+
+  pi.on('session_shutdown', () => {
+    clearStatusTimer();
+    currentCtx?.ui.setStatus(STATUS_KEY, undefined);
+    currentCtx = undefined;
+  });
 }
