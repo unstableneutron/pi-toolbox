@@ -12,6 +12,10 @@
       "entry": ["index.ts"],
       "project": ["**/*.ts"]
     },
+    "extensions/pi-codex-computer-use": {
+      "entry": ["src/extension.ts", "extensions/codex-computer-use/index.ts"],
+      "project": ["**/*.ts"]
+    },
     "extensions/pi-fff-search": {
       "entry": ["index.ts", "scripts/*.ts"],
       "project": ["**/*.ts"]

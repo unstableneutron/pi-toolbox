@@ -125,6 +125,35 @@ describe('buildCodexComputerUseDoctorReport', () => {
     ]);
   });
 
+  test('includes extension enablement status when provided', async () => {
+    const report = await buildCodexComputerUseDoctorReport({
+      paths,
+      extensionEnablement: { enabled: false, source: 'default' },
+      deps: {
+        exists: () => true,
+        readBundleInfo: async () => ({
+          bundleId: 'com.openai.sky.CUAService',
+          teamIdentifier: '2DC432GLL2',
+          version: '1.0',
+          build: '799',
+        }),
+        readTccRows: async () => okTccRows,
+        readDisplayState: async () => ({ displayAsleep: false }),
+        findProcesses: async () => [],
+        readComputerUsePluginStatus: async () => ({
+          appBundledMarketplaceHasPlugin: true,
+          cacheHasPlugin: true,
+          enabled: true,
+          installed: true,
+        }),
+      },
+    });
+
+    expect(report.text).toContain('Extension:');
+    expect(report.text).toContain('✗ pi-codex-computer-use disabled (default)');
+    expect(report.text).toContain('Tools and plugin skills are not injected while disabled.');
+  });
+
   test('classifies a missing Computer Use plugin as a guided install fix', async () => {
     const report = await buildCodexComputerUseDoctorReport({
       paths,

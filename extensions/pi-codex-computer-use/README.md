@@ -3,6 +3,66 @@
 Pi extension that exposes Codex.app's bundled native Computer Use and browser
 runtime MCP surfaces.
 
+This package loads a small control command by default, but Codex Computer Use is
+**disabled by default**. While disabled, it does not inject Computer Use tools or
+plugin skills into the agent prompt. Enable it only in the sessions, projects, or
+user profile where you want Codex Computer Use available:
+
+```json
+{
+  "packages": [
+    {
+      "source": "pi-codex-computer-use"
+    }
+  ]
+}
+```
+
+Use the state-specific command shown by Pi: `/codex-computer-use-enable` appears
+while disabled, and `/codex-computer-use-disable` appears while enabled. The
+command opens a `/settings`-style editor where Enter/Space cycles each level
+through `unset`, `true`, and `false`; choose `Save` to persist and reload:
+
+- `This session` writes a sidecar file next to the current session file.
+- `This project` writes `.pi/settings.json` in the current project.
+- `All sessions for this user` writes `~/.pi/agent/settings.json`.
+
+The persisted setting uses:
+
+```json
+{
+  "codexComputerUse": { "enabled": true }
+}
+```
+
+For local development from this repository, point the package source at the
+extension directory instead of the npm package name:
+
+```json
+{
+  "packages": [
+    {
+      "source": "/path/to/pi-toolbox/extensions/pi-codex-computer-use"
+    }
+  ]
+}
+```
+
+If the broader `pi-toolbox` package is loaded globally, the control command is
+available but the tools and skills remain disabled until `/codex-computer-use`
+enables them for the current session, project, or user.
+
+You can also load the extension directly in a specific project with an explicit
+local extension path:
+
+```json
+{
+  "extensions": [
+    "/path/to/pi-toolbox/extensions/pi-codex-computer-use/extensions/codex-computer-use/index.ts"
+  ]
+}
+```
+
 This package does **not** ship a separate macOS automation helper. It reuses the
 installed Codex.app stack as-is:
 
@@ -72,6 +132,29 @@ The extension resolves `scripts/browser-client.mjs` in this order:
 2. the highest version-like cache directory under that plugin
 3. the installed Codex.app bundled plugin path
 
+## Skills
+
+The package ships only one Pi-specific overlay skill, `codex-computer-use`, which
+explains the compact Pi tool names. The vendor Codex skills are not copied into
+this repository. Instead, while this extension is loaded, it dynamically exposes
+matching skills from the installed Codex plugin sources during Pi resource
+discovery:
+
+1. `~/.codex/plugins/cache/openai-bundled/<plugin>/latest/skills/<skill>`
+2. the highest version-like cache directory under that plugin
+3. the installed Codex.app bundled plugin path
+
+Currently exposed plugin skills when available:
+
+- `computer-use` from `computer-use@openai-bundled`
+- `control-in-app-browser` from `browser@openai-bundled`
+- `control-chrome` from `chrome@openai-bundled`
+
+Because these skills are provided by the extension's `resources_discover` hook,
+unloading or uninstalling this extension also removes them from Pi. After
+installing or updating Codex plugins, run `/reload` so Pi refreshes discovered
+skill paths.
+
 Use `/codex-computer-use-doctor` for actionable setup checks. It verifies the
 Codex Computer Use app/helper paths, bundle identities, TCC permissions, helper
 process state, and display capture readiness. In Pi's TUI it opens an
@@ -130,32 +213,6 @@ codex app-server --listen unix://$PI_CODEX_DESKTOP_APP_SERVER_SOCKET --analytics
 Then it bridges Desktop stdio JSON-RPC to the Unix-socket WebSocket transport.
 Use the exposed socket with `scripts/codex-control.mjs --socket ...` for
 additional same-process clients.
-
-## Sync bundled Codex skills
-
-The `skills/` directory is copied from the installed Codex.app bundled plugins.
-Refresh it after updating Codex.app with:
-
-```bash
-aubr -C extensions/pi-codex-computer-use sync:skills
-```
-
-Override the Codex.app location when needed:
-
-```bash
-PI_COMPUTER_USE_CODEX_APP=/path/to/Codex.app \
-  aubr -C extensions/pi-codex-computer-use sync:skills
-```
-
-Currently synced skills:
-
-- `computer-use`
-- `control-in-app-browser`
-- `control-chrome`
-
-This package also includes a Pi-specific overlay skill, `codex-computer-use`,
-that explains the compact tool names. The sync command refreshes only the
-vendor-copied Codex skills.
 
 ## Development
 

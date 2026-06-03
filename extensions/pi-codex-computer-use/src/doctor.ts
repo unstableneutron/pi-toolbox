@@ -7,6 +7,10 @@ import { promisify } from 'node:util';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 
 import { getCodexComputerUsePaths } from './codex-paths';
+import {
+  formatCodexComputerUseEnablementStatus,
+  type CodexComputerUseEnablementStatus,
+} from './enablement';
 import { DoctorReportView, type DoctorViewAction } from './doctor-ui';
 
 const execFileAsync = promisify(execFile);
@@ -97,6 +101,7 @@ export interface CodexComputerUseDoctorDeps {
 
 export interface CodexComputerUseDoctorOptions {
   deps?: CodexComputerUseDoctorDeps;
+  extensionEnablement?: Pick<CodexComputerUseEnablementStatus, 'enabled' | 'source'>;
   paths?: CodexComputerUsePathsForDoctor;
 }
 
@@ -410,7 +415,12 @@ function formatDoctorReportText(lines: string[], fixableIssues: DoctorFixableIss
     }
   }
 
-  return [lines[0]!, '', ...summary, '', ...lines.slice(2)].join('\n');
+  const body = lines.slice(2);
+  const extensionBlockEnd = body[0] === 'Extension:' ? body.indexOf('') : -1;
+  const extensionBlock = extensionBlockEnd >= 0 ? body.slice(0, extensionBlockEnd) : [];
+  const remainingBody = extensionBlockEnd >= 0 ? body.slice(extensionBlockEnd + 1) : body;
+
+  return [lines[0]!, '', ...extensionBlock, '', ...summary, '', ...remainingBody].join('\n');
 }
 
 export async function buildCodexComputerUseDoctorReport(
@@ -422,6 +432,17 @@ export async function buildCodexComputerUseDoctorReport(
   const helperApp = helperAppPath(paths);
   const lines = ['Codex Computer Use doctor', ''];
   const fixableIssues: DoctorFixableIssue[] = [];
+
+  if (options.extensionEnablement) {
+    lines.push('Extension:');
+    lines.push(
+      `${boolMark(options.extensionEnablement.enabled)} pi-codex-computer-use ${formatCodexComputerUseEnablementStatus(options.extensionEnablement)}`,
+    );
+    if (!options.extensionEnablement.enabled) {
+      lines.push('  Tools and plugin skills are not injected while disabled.');
+    }
+    lines.push('');
+  }
 
   const codexAppExists = exists(paths.codexApp);
   const codexExecutableExists = exists(paths.codexExecutable);

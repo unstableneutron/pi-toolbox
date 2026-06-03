@@ -50,8 +50,7 @@
       "./extensions"
     ],
     "skills": [
-      "./skills",
-      "./extensions/*/skills"
+      "./skills"
     ],
     "prompts": [
       "./prompts"

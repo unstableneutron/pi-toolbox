@@ -4,7 +4,7 @@ import path from 'node:path';
 
 const DEFAULT_CODEX_APP = '/Applications/Codex.app';
 
-interface CodexComputerUsePathOptions {
+export interface CodexComputerUsePathOptions {
   codexApp?: string;
   codexExecutable?: string;
   codexHome?: string;
@@ -31,14 +31,23 @@ interface ResolveCodexPluginScriptOptions {
   scriptRelativePath: string;
 }
 
+interface ResolveCodexPluginPathOptions {
+  codexApp: string;
+  codexHome: string;
+  plugin: string;
+  relativePath: string;
+  type: 'directory' | 'file';
+}
+
 const PLUGIN_DIRECTORY_COLLATOR = new Intl.Collator('en', {
   numeric: true,
   sensitivity: 'base',
 });
 
-function isFile(filePath: string): boolean {
+function pathHasType(filePath: string, type: 'directory' | 'file'): boolean {
   try {
-    return fs.statSync(filePath).isFile();
+    const stats = fs.statSync(filePath);
+    return type === 'directory' ? stats.isDirectory() : stats.isFile();
   } catch {
     return false;
   }
@@ -55,25 +64,26 @@ function listDirectories(directory: string): string[] {
   }
 }
 
-export function resolveCodexPluginScript({
+export function resolveCodexPluginPath({
   codexApp,
   codexHome,
   plugin,
-  scriptRelativePath,
-}: ResolveCodexPluginScriptOptions): string | undefined {
+  relativePath,
+  type,
+}: ResolveCodexPluginPathOptions): string | undefined {
   const cacheRoot = path.join(codexHome, 'plugins/cache/openai-bundled', plugin);
-  const latestCandidate = path.join(cacheRoot, 'latest', scriptRelativePath);
-  if (isFile(latestCandidate)) {
+  const latestCandidate = path.join(cacheRoot, 'latest', relativePath);
+  if (pathHasType(latestCandidate, type)) {
     return latestCandidate;
   }
 
   const versionedCandidates = listDirectories(cacheRoot)
     .filter((name) => name !== 'latest')
     .sort((left, right) => PLUGIN_DIRECTORY_COLLATOR.compare(right, left))
-    .map((name) => path.join(cacheRoot, name, scriptRelativePath));
+    .map((name) => path.join(cacheRoot, name, relativePath));
 
   for (const candidate of versionedCandidates) {
-    if (isFile(candidate)) {
+    if (pathHasType(candidate, type)) {
       return candidate;
     }
   }
@@ -82,9 +92,24 @@ export function resolveCodexPluginScript({
     codexApp,
     'Contents/Resources/plugins/openai-bundled/plugins',
     plugin,
-    scriptRelativePath,
+    relativePath,
   );
-  return isFile(bundledCandidate) ? bundledCandidate : undefined;
+  return pathHasType(bundledCandidate, type) ? bundledCandidate : undefined;
+}
+
+export function resolveCodexPluginScript({
+  codexApp,
+  codexHome,
+  plugin,
+  scriptRelativePath,
+}: ResolveCodexPluginScriptOptions): string | undefined {
+  return resolveCodexPluginPath({
+    codexApp,
+    codexHome,
+    plugin,
+    relativePath: scriptRelativePath,
+    type: 'file',
+  });
 }
 
 export function getCodexComputerUsePaths(

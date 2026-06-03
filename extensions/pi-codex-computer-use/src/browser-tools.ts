@@ -242,7 +242,7 @@ function getBrowserClientPath(backend: BrowserBackend): string {
   const script = paths.browserClientScripts[backend];
   if (!script) {
     throw new Error(
-      `Codex ${backend} browser-client.mjs was not found. Refresh Codex.app bundled plugins or run pnpm run sync:skills, then retry.`,
+      `Codex ${backend} browser-client.mjs was not found. Install or update the matching Codex.app bundled plugin, then retry.`,
     );
   }
   return script;

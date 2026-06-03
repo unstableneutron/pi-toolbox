@@ -1,6 +1,6 @@
 {
   "name": "pi-codex-computer-use",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Pi extension that exposes Codex.app's native Computer Use and browser MCP surfaces",
   "keywords": [
     "codex",
@@ -17,8 +17,7 @@
     "fix": "aubr fix:lint && aubr fix:format",
     "fix:lint": "oxlint -c .oxlintrc.json --type-aware --type-check --fix --fix-suggestions --fix-dangerously .",
     "fix:format": "oxfmt -c .oxfmtrc.json .",
-    "test": "vitest run",
-    "sync:skills": "node scripts/sync-codex-skills.mjs"
+    "test": "vitest run"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "^0.78.0",
@@ -44,10 +43,7 @@
   },
   "pi": {
     "extensions": [
-      "./index.ts"
-    ],
-    "skills": [
-      "./skills"
+      "./extensions/codex-computer-use/index.ts"
     ]
   }
 }
