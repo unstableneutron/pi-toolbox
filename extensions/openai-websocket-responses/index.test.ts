@@ -710,6 +710,91 @@ describe('body and continuation helpers', () => {
     });
   });
 
+  it('uses tool output delta when strict prefix matching drifts after parallel tool calls', () => {
+    const previous = buildResponsesBody(makeModel(), {
+      messages: [{ role: 'user', content: 'inspect two files', timestamp: 1 }],
+    });
+    const callA = {
+      type: 'function_call',
+      id: 'fc_a',
+      call_id: 'call_a',
+      name: 'read',
+      arguments: JSON.stringify({ path: 'a.ts' }),
+    };
+    const callB = {
+      type: 'function_call',
+      id: 'fc_b',
+      call_id: 'call_b',
+      name: 'grep',
+      arguments: JSON.stringify({ pattern: 'needle' }),
+    };
+    const outputA = { type: 'function_call_output', call_id: 'call_a', output: 'a contents' };
+    const outputB = { type: 'function_call_output', call_id: 'call_b', output: 'grep matches' };
+    const next = {
+      ...previous,
+      input: [
+        ...previous.input,
+        { ...callA, arguments: JSON.stringify({ path: './a.ts' }) },
+        { ...callB, arguments: JSON.stringify({ pattern: 'needle', flags: '' }) },
+        outputA,
+        outputB,
+      ],
+    };
+    const continuation: ContinuationState = {
+      lastRequestBody: previous,
+      lastResponseId: 'resp_parallel',
+      lastResponseItems: [callA, callB],
+    };
+
+    expect(buildContinuationRequestBody(continuation, next)).toEqual({
+      decision: 'delta',
+      body: {
+        ...next,
+        previous_response_id: 'resp_parallel',
+        input: [outputA, outputB],
+      },
+    });
+  });
+
+  it('does not use tool output delta when a pending parallel tool result is missing', () => {
+    const previous = buildResponsesBody(makeModel(), {
+      messages: [{ role: 'user', content: 'inspect two files', timestamp: 1 }],
+    });
+    const callA = {
+      type: 'function_call',
+      id: 'fc_a',
+      call_id: 'call_a',
+      name: 'read',
+      arguments: JSON.stringify({ path: 'a.ts' }),
+    };
+    const callB = {
+      type: 'function_call',
+      id: 'fc_b',
+      call_id: 'call_b',
+      name: 'grep',
+      arguments: JSON.stringify({ pattern: 'needle' }),
+    };
+    const next = {
+      ...previous,
+      input: [
+        ...previous.input,
+        { ...callA, arguments: JSON.stringify({ path: './a.ts' }) },
+        callB,
+        { type: 'function_call_output', call_id: 'call_a', output: 'a contents' },
+      ],
+    };
+    const continuation: ContinuationState = {
+      lastRequestBody: previous,
+      lastResponseId: 'resp_parallel',
+      lastResponseItems: [callA, callB],
+    };
+
+    expect(buildContinuationRequestBody(continuation, next)).toEqual({
+      decision: 'input_prefix_mismatch',
+      body: next,
+    });
+  });
+
   it('does not replay tool calls from length-truncated assistant messages', () => {
     const model = makeModel();
     const truncated = makeAssistantMessage(model);
@@ -805,6 +890,40 @@ describe('Responses adapter and retrieve recovery', () => {
       reasoningItem,
       expect.objectContaining({ type: 'message', id: 'msg_1' }),
     ]);
+  });
+
+  it('preserves completed native web search calls across replay', async () => {
+    const model = makeModel();
+    const output = makeAssistantMessage(model);
+    const stream = createAssistantMessageEventStream();
+    const webSearchItem = {
+      type: 'web_search_call',
+      id: 'ws_1',
+      status: 'completed',
+      action: { query: 'Responses API prompt caching' },
+      results: [{ title: 'Docs', url: 'https://example.com/docs' }],
+    };
+
+    await processResponsesEvents(
+      events(
+        { type: 'response.created', response: { id: 'resp_web' } },
+        {
+          type: 'response.output_item.done',
+          output_index: 0,
+          item: webSearchItem,
+        },
+        { type: 'response.completed', response: { id: 'resp_web', status: 'completed' } },
+      ),
+      output,
+      stream,
+      model,
+    );
+
+    expect((output.content as any[]).filter((block) => block.type === 'response_item')).toEqual([
+      { type: 'response_item', item: webSearchItem },
+    ]);
+    expect(assistantMessageToResponseItems(output)).toEqual([webSearchItem]);
+    expect(buildResponsesBody(model, { messages: [output] }).input).toEqual([webSearchItem]);
   });
 
   it('keeps interleaved output items separate by output_index', async () => {

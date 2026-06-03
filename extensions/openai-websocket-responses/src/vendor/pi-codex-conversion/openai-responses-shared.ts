@@ -39,6 +39,8 @@ type ThinkingBlock = Record<string, any> & {
   thinkingSignature?: string;
 };
 type ToolCallBlock = ToolCall & { partialJson?: string };
+type HiddenResponseItemBlock = { type: 'response_item'; item: ResponsesInputItem };
+type InternalAssistantContent = AssistantMessage['content'][number] | HiddenResponseItemBlock;
 
 type ReasoningState = {
   kind: 'reasoning';
@@ -126,6 +128,18 @@ function textSignaturePhase(signature: string | undefined): string | undefined {
   return parseTextSignature(signature)?.phase;
 }
 
+function isHiddenResponseItemBlock(
+  block: InternalAssistantContent,
+): block is HiddenResponseItemBlock {
+  return block.type === 'response_item' && !!block.item;
+}
+
+function sanitizeHiddenResponseItem(item: Record<string, any>): ResponsesInputItem | undefined {
+  if (item.type !== 'web_search_call') return undefined;
+  if (typeof item.id !== 'string' || !item.id) return undefined;
+  return JSON.parse(JSON.stringify(item)) as ResponsesInputItem;
+}
+
 export function responseMessageTextSignature(response: Record<string, any>): string | undefined {
   const item = (Array.isArray(response.output) ? response.output : []).find(
     (candidate) => candidate?.type === 'message' && typeof candidate.id === 'string',
@@ -191,7 +205,11 @@ function assistantMessageItems(
 ): ResponsesInputItem[] {
   const output: ResponsesInputItem[] = [];
   let textBlockIndex = 0;
-  for (const block of message.content) {
+  for (const block of message.content as InternalAssistantContent[]) {
+    if (isHiddenResponseItemBlock(block)) {
+      output.push(block.item);
+      continue;
+    }
     if (block.type === 'thinking' && block.thinkingSignature) {
       try {
         output.push(JSON.parse(block.thinkingSignature) as ResponsesInputItem);
@@ -677,6 +695,15 @@ export function createResponsesEventProcessor<TApi extends Api>(
           partial: output,
         });
         states.delete(index);
+      } else {
+        const hiddenItem = sanitizeHiddenResponseItem(item);
+        if (hiddenItem) {
+          (output.content as InternalAssistantContent[]).push({
+            type: 'response_item',
+            item: hiddenItem,
+          });
+        }
+        states.delete(index);
       }
       return;
     }
@@ -841,7 +868,11 @@ export function appendRecoveredFunctionCalls(
 export function assistantMessageToResponseItems(output: AssistantMessage): unknown[] {
   const items: unknown[] = [];
   let textIndex = 0;
-  for (const block of output.content) {
+  for (const block of output.content as InternalAssistantContent[]) {
+    if (isHiddenResponseItemBlock(block)) {
+      items.push(block.item);
+      continue;
+    }
     if (block.type === 'thinking' && block.thinkingSignature) {
       try {
         items.push(JSON.parse(block.thinkingSignature) as unknown);

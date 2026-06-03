@@ -52,6 +52,72 @@ function responseInputsEqual(a: unknown[] | undefined, b: unknown[] | undefined)
   );
 }
 
+function itemRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function responseItemType(value: unknown): string | undefined {
+  const record = itemRecord(value);
+  return typeof record?.type === 'string' ? record.type : undefined;
+}
+
+function responseItemRole(value: unknown): string | undefined {
+  const record = itemRecord(value);
+  return typeof record?.role === 'string' ? record.role : undefined;
+}
+
+function responseItemCallId(value: unknown): string | undefined {
+  const record = itemRecord(value);
+  return typeof record?.call_id === 'string' && record.call_id.trim() ? record.call_id : undefined;
+}
+
+function pendingFunctionCallIds(items: unknown[]): string[] {
+  const seen = new Set<string>();
+  const ids: string[] = [];
+  for (const item of items) {
+    if (responseItemType(item) !== 'function_call') continue;
+    const callId = responseItemCallId(item);
+    if (!callId || seen.has(callId)) continue;
+    seen.add(callId);
+    ids.push(callId);
+  }
+  return ids;
+}
+
+function buildCompleteToolOutputDelta(
+  continuation: ContinuationState,
+  body: ResponsesBody,
+): unknown[] | undefined {
+  const pendingCallIds = pendingFunctionCallIds(continuation.lastResponseItems);
+  if (pendingCallIds.length === 0) return undefined;
+
+  const previousInput = continuation.lastRequestBody.input ?? [];
+  const currentInput = body.input ?? [];
+  if (!responseInputsEqual(currentInput.slice(0, previousInput.length), previousInput)) {
+    return undefined;
+  }
+
+  const pending = new Set(pendingCallIds);
+  const outputsByCallId = new Map<string, unknown>();
+  for (const item of currentInput.slice(previousInput.length)) {
+    const itemType = responseItemType(item);
+    const callId = responseItemCallId(item);
+
+    if (itemType === 'function_call_output') {
+      if (!callId || !pending.has(callId) || outputsByCallId.has(callId)) return undefined;
+      outputsByCallId.set(callId, item);
+      continue;
+    }
+
+    if (responseItemRole(item) === 'user') return undefined;
+  }
+
+  if (outputsByCallId.size !== pendingCallIds.length) return undefined;
+  return pendingCallIds.map((callId) => outputsByCallId.get(callId));
+}
+
 export function buildContinuationRequestBody(
   continuation: ContinuationState | undefined,
   body: ResponsesBody,
@@ -69,8 +135,12 @@ export function buildContinuationRequestBody(
   ];
   if ((body.input ?? []).length < baseline.length)
     return { body, decision: 'input_shorter_than_baseline' };
-  if (!responseInputsEqual((body.input ?? []).slice(0, baseline.length), baseline)) {
-    return { body, decision: 'input_prefix_mismatch' };
+  let delta: unknown[] | undefined;
+  if (responseInputsEqual((body.input ?? []).slice(0, baseline.length), baseline)) {
+    delta = (body.input ?? []).slice(baseline.length);
+  } else {
+    delta = buildCompleteToolOutputDelta(continuation, body);
+    if (!delta) return { body, decision: 'input_prefix_mismatch' };
   }
   if (!continuation.lastResponseId) return { body, decision: 'missing_previous_response_id' };
   return {
@@ -78,7 +148,7 @@ export function buildContinuationRequestBody(
     body: {
       ...body,
       previous_response_id: continuation.lastResponseId,
-      input: (body.input ?? []).slice(baseline.length),
+      input: delta,
     },
   };
 }
