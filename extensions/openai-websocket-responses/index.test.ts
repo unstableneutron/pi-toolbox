@@ -220,7 +220,7 @@ describe('settings and patch matching', () => {
   it('defaults to explicit API enabled and transparent patch disabled', () => {
     expect(normalizeSettings(undefined)).toMatchObject({
       patch: { enabled: false, apis: ['openai-responses', 'openai-codex-responses'] },
-      request: { queryParams: {} },
+      request: { queryParams: {}, storeByProviderModel: {} },
       websocket: {
         retries: 2,
         connectTimeoutMs: 15000,
@@ -235,6 +235,23 @@ describe('settings and patch matching', () => {
         emitSyntheticDeltas: true,
       },
       trace: { enabled: true },
+    });
+  });
+
+  it('normalizes store overrides by provider/model glob', () => {
+    expect(
+      normalizeSettings({
+        request: {
+          storeByProviderModel: {
+            'facade/productivity/gpt-5*': false,
+            'devai/gpt-5*': true,
+            invalid: 'nope',
+          },
+        },
+      }).request.storeByProviderModel,
+    ).toEqual({
+      'facade/productivity/gpt-5*': false,
+      'devai/gpt-5*': true,
     });
   });
 
@@ -274,6 +291,7 @@ describe('settings and patch matching', () => {
           queryParams: { 'api-version': 'preview' },
           queryParamsByProvider: {},
           queryParamsByProviderModel: {},
+          storeByProviderModel: {},
         },
       });
       expect(settings).not.toHaveProperty('registerSmokeProvider');
@@ -561,7 +579,7 @@ describe('body and continuation helpers', () => {
       model: 'gpt-5.5-nomoderation',
       max_output_tokens: 123,
       instructions: 'You are helpful.',
-      store: false,
+      store: true,
       text: { verbosity: 'high' },
       include: ['reasoning.encrypted_content'],
       prompt_cache_key: 'session-abcdefghijklmnopqrstuvwxyz-ABCDEFGHIJKLMNOPQRSTUVWXYZ-01',
@@ -581,6 +599,18 @@ describe('body and continuation helpers', () => {
     );
 
     expect(body.max_output_tokens).toBeUndefined();
+  });
+
+  it('allows provider/model store overrides for non-Codex profiles', () => {
+    const body = buildResponsesBody(
+      makeModel({ id: 'productivity/gpt-5.5-nomoderation' }),
+      { messages: [{ role: 'user', content: 'Hi', timestamp: 1 }] },
+      undefined,
+      'generic',
+      { storeByProviderModel: { 'facade/productivity/gpt-5*': false } },
+    );
+
+    expect(body.store).toBe(false);
   });
 
   it('builds Codex-profile request bodies with Codex-compatible defaults', () => {

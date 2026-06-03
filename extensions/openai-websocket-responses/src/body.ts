@@ -25,6 +25,10 @@ type OpenAIWebSocketResponsesStreamOptions = SimpleStreamOptions & {
   serviceTier?: string;
 };
 
+export interface RequestStoreSettings {
+  storeByProviderModel?: Record<string, boolean>;
+}
+
 export interface ResponsesBody {
   model: string;
   input: unknown[];
@@ -83,11 +87,41 @@ function shouldSendServiceTier(profile: ResolvedRequestProfile): boolean {
   return profile === 'codex';
 }
 
+function globToRegExp(glob: string): RegExp {
+  const escaped = glob.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+  return new RegExp(`^${escaped}$`);
+}
+
+function matchesGlob(value: string, pattern: string): boolean {
+  return globToRegExp(pattern).test(value);
+}
+
+function storeOverrideForProviderModel(
+  providerModel: string,
+  storeSettings: RequestStoreSettings | undefined,
+): boolean | undefined {
+  for (const [pattern, store] of Object.entries(storeSettings?.storeByProviderModel ?? {})) {
+    if (matchesGlob(providerModel, pattern)) return store;
+  }
+  return undefined;
+}
+
+function resolveStore(
+  model: Model<Api>,
+  profile: ResolvedRequestProfile,
+  storeSettings?: RequestStoreSettings,
+): boolean {
+  if (profile === 'codex') return false;
+  const providerModel = `${model.provider}/${model.id}`;
+  return storeOverrideForProviderModel(providerModel, storeSettings) ?? true;
+}
+
 export function buildResponsesBody(
   model: Model<Api>,
   context: Context,
   options?: OpenAIWebSocketResponsesStreamOptions,
   profile: ResolvedRequestProfile = resolveRequestProfile(model),
+  storeSettings?: RequestStoreSettings,
 ): ResponsesBody {
   const clampedReasoning = options?.reasoning
     ? clampThinkingLevel(model, options.reasoning)
@@ -105,7 +139,7 @@ export function buildResponsesBody(
     model: model.headers?.['x-azure-deployment'] ?? model.id,
     input: buildResponsesInput(model, context, { includeSystemPrompt: false }),
     instructions: buildResponsesInstructions(context) ?? 'You are a helpful assistant.',
-    store: false,
+    store: resolveStore(model, profile, storeSettings),
     text: { verbosity: resolveTextVerbosity(options) },
     include: ['reasoning.encrypted_content'],
     tool_choice: 'auto',

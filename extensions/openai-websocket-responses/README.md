@@ -34,7 +34,11 @@ Configure the extension in `~/.pi/agent/settings.json`:
           "azure-resource-bucket": "${headers.x-azure-resource-bucket}"
         }
       },
-      "queryParamsByProviderModel": {}
+      "queryParamsByProviderModel": {},
+      "storeByProviderModel": {
+        "facade/productivity/gpt-5*": true,
+        "facade/prototype/gpt-5*": true
+      }
     },
     "websocket": {
       "retries": 2,
@@ -61,8 +65,8 @@ Defaults: `patch.enabled` is `false`; `patch.apis` is
 `["openai-responses", "openai-codex-responses"]`; `patch.providers`,
 `patch.providerModels`, and `patch.excludeProviderModels` are empty arrays;
 `request.profile` is `"auto"`; `request.queryParams`,
-`request.queryParamsByProvider`, and `request.queryParamsByProviderModel` are
-empty; WebSocket defaults are `retries: 2`, `connectTimeoutMs: 15000`,
+`request.queryParamsByProvider`, `request.queryParamsByProviderModel`, and
+`request.storeByProviderModel` are empty; WebSocket defaults are `retries: 2`, `connectTimeoutMs: 15000`,
 `firstEventTimeoutMs: 60000`, and `idleTimeoutMs: 0`; debug logging is disabled;
 recovery defaults are shown above. Keep `providerModels` narrow when request query params contain
 deployment-specific values.
@@ -88,6 +92,11 @@ routing values do not leak into Codex URLs. Provider/model keys support `*`
 globs such as `facade/gpt-5*`. Azure routing values such as `x-azure-region`,
 `x-azure-resource-bucket`, and `x-azure-deployment` remain headers.
 
+`request.storeByProviderModel` overrides the non-Codex `store` default by
+provider/model glob. For example, `"facade/productivity/gpt-5*": false` forces
+matching facade productivity models to use stateless Responses requests. Codex
+profile requests ignore store overrides and always use `store: false`.
+
 `request.profile` controls endpoint-specific request shaping:
 
 - `auto` detects Codex from `openai-codex-responses`, `openai-codex`,
@@ -105,7 +114,10 @@ match Pi's Codex Responses path where Azure supports them:
 
 - Pi system prompts are sent as top-level `instructions` instead of an input
   `system`/`developer` item.
-- `store` defaults to `false`.
+- `store` defaults to `true` for Azure/generic profiles and is forced to `false`
+  for the Codex profile because ChatGPT/Codex backends reject stored responses.
+  Use `request.storeByProviderModel` with provider/model globs to explicitly
+  override non-Codex model families.
 - If no system prompt exists, `instructions` falls back to
   `"You are a helpful assistant."`.
 - `text.verbosity` defaults to `low`; callers may pass `textVerbosity` as

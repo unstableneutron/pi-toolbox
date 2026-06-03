@@ -179,7 +179,7 @@ export function createOpenAIWebSocketResponsesStream(
           });
         }
 
-        const fullBody = buildResponsesBody(model, context, options, profile);
+        const fullBody = buildResponsesBody(model, context, options, profile, settings.request);
         const continuationRequest = buildContinuationRequestBody(
           getContinuation(cacheKey),
           fullBody,

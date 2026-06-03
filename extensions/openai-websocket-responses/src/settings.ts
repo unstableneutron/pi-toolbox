@@ -17,6 +17,7 @@ export interface OpenAIWebSocketResponsesSettings {
     queryParams: Record<string, string>;
     queryParamsByProvider: Record<string, Record<string, string>>;
     queryParamsByProviderModel: Record<string, Record<string, string>>;
+    storeByProviderModel: Record<string, boolean>;
   };
   websocket: {
     retries: number;
@@ -53,6 +54,7 @@ const DEFAULT_SETTINGS: OpenAIWebSocketResponsesSettings = {
     queryParams: {},
     queryParamsByProvider: {},
     queryParamsByProviderModel: {},
+    storeByProviderModel: {},
   },
   websocket: { retries: 2, connectTimeoutMs: 15000, firstEventTimeoutMs: 60000, idleTimeoutMs: 0 },
   debug: { enabled: false, logFile: undefined },
@@ -171,6 +173,15 @@ function queryParamsMap(value: unknown): Record<string, Record<string, string>> 
   );
 }
 
+function booleanMap(value: unknown): Record<string, boolean> {
+  if (!isRecord(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value).filter(
+      (entry): entry is [string, boolean] => typeof entry[1] === 'boolean',
+    ),
+  );
+}
+
 export function normalizeSettings(raw: unknown): OpenAIWebSocketResponsesSettings {
   const root = isRecord(raw) ? raw : {};
   const patch = isRecord(root.patch) ? root.patch : {};
@@ -196,6 +207,7 @@ export function normalizeSettings(raw: unknown): OpenAIWebSocketResponsesSetting
       queryParams: queryParams(request.queryParams),
       queryParamsByProvider: queryParamsMap(request.queryParamsByProvider),
       queryParamsByProviderModel: queryParamsMap(request.queryParamsByProviderModel),
+      storeByProviderModel: booleanMap(request.storeByProviderModel),
     },
     websocket: {
       retries: nonNegativeNumber(websocket.retries, DEFAULT_SETTINGS.websocket.retries),
