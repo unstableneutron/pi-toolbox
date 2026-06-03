@@ -1,8 +1,14 @@
-import { createAssistantMessageEventStream } from '@earendil-works/pi-ai';
+import {
+  createAssistantMessageEventStream,
+  getApiProvider,
+  registerApiProvider,
+  resetApiProviders,
+} from '@earendil-works/pi-ai';
 import type { AssistantMessage, Model } from '@earendil-works/pi-ai';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 
 import {
+  installOpenAICodexTransportMetadataPatch,
   shouldPatchOpenAICodexTransportMetadata,
   wrapCodexStreamWithTransportMetadata,
 } from './codex-transport-metadata';
@@ -45,6 +51,7 @@ function makeAssistantMessage(): AssistantMessage {
 describe('openai-codex transport metadata patch', () => {
   afterEach(() => {
     vi.unstubAllEnvs();
+    resetApiProviders();
   });
 
   test('is disabled by default', () => {
@@ -116,6 +123,29 @@ describe('openai-codex transport metadata patch', () => {
 
     await expect(stream.result()).resolves.toMatchObject({ api: 'openai-codex-responses' });
     expect(observed).toEqual([{ status: 200, headers: { 'content-type': 'text/event-stream' } }]);
+  });
+
+  test('does not wrap the Codex API provider more than once', () => {
+    vi.stubEnv('OPENAI_WEBSOCKET_RESPONSES_PATCH_CODEX_TRANSPORT_METADATA', 'true');
+    const originalStream = vi.fn(() => createAssistantMessageEventStream());
+    registerApiProvider(
+      {
+        api: 'openai-codex-responses',
+        stream: originalStream as any,
+        streamSimple: originalStream as any,
+      },
+      'test:codex-provider',
+    );
+
+    expect(installOpenAICodexTransportMetadataPatch()).toBe(true);
+    const firstProvider = getApiProvider('openai-codex-responses');
+    expect(firstProvider?.stream).not.toBe(originalStream);
+    expect(firstProvider?.streamSimple).not.toBe(originalStream);
+
+    expect(installOpenAICodexTransportMetadataPatch()).toBe(true);
+    const secondProvider = getApiProvider('openai-codex-responses');
+    expect(secondProvider?.stream).toBe(firstProvider?.stream);
+    expect(secondProvider?.streamSimple).toBe(firstProvider?.streamSimple);
   });
 
   test('does not emit WebSocket metadata when SSE transport is forced', async () => {

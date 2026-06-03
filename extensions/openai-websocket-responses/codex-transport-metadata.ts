@@ -12,12 +12,20 @@ import {
 
 const CODEX_API = 'openai-codex-responses';
 const SOURCE_ID = 'extension:openai-websocket-responses/codex-transport-metadata';
+const WRAPPED = Symbol.for('openai-websocket-responses.codex-transport-metadata.wrapped');
+
+let installedRegistryStream: unknown;
+let installedRegistryStreamSimple: unknown;
 
 type StreamLike<TOptions extends StreamOptions> = (
   model: Model<Api>,
   context: Context,
   options?: TOptions,
 ) => AssistantMessageEventStream;
+
+type MarkableStreamLike<TOptions extends StreamOptions> = StreamLike<TOptions> & {
+  [WRAPPED]?: true;
+};
 
 const WEBSOCKET_UPGRADE_RESPONSE: ProviderResponse = {
   status: 101,
@@ -44,7 +52,10 @@ function shouldSynthesizeWebSocketResponse(options: StreamOptions | undefined): 
 export function wrapCodexStreamWithTransportMetadata<TOptions extends StreamOptions>(
   streamFn: StreamLike<TOptions>,
 ): StreamLike<TOptions> {
-  return (model, context, options) => {
+  const markableStream = streamFn as MarkableStreamLike<TOptions>;
+  if (markableStream[WRAPPED]) return markableStream;
+
+  const wrappedStream = ((model, context, options) => {
     let sawResponse = false;
     let emittedSyntheticResponse = false;
     const originalOnResponse = options?.onResponse;
@@ -82,7 +93,9 @@ export function wrapCodexStreamWithTransportMetadata<TOptions extends StreamOpti
     })();
 
     return proxy;
-  };
+  }) as MarkableStreamLike<TOptions>;
+  Object.defineProperty(wrappedStream, WRAPPED, { value: true });
+  return wrappedStream;
 }
 
 export function installOpenAICodexTransportMetadataPatch(): boolean {
@@ -94,6 +107,12 @@ export function installOpenAICodexTransportMetadataPatch(): boolean {
   if (!provider) {
     return false;
   }
+  if (
+    provider.stream === installedRegistryStream &&
+    provider.streamSimple === installedRegistryStreamSimple
+  ) {
+    return true;
+  }
 
   registerApiProvider(
     {
@@ -103,5 +122,8 @@ export function installOpenAICodexTransportMetadataPatch(): boolean {
     },
     SOURCE_ID,
   );
+  const installedProvider = getApiProvider(CODEX_API);
+  installedRegistryStream = installedProvider?.stream;
+  installedRegistryStreamSimple = installedProvider?.streamSimple;
   return true;
 }

@@ -1,4 +1,10 @@
-import { registerApiProvider } from '@earendil-works/pi-ai';
+import type {
+  Api,
+  AssistantMessageEventStream,
+  Context,
+  Model,
+  SimpleStreamOptions,
+} from '@earendil-works/pi-ai';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 
 import { installOpenAICodexTransportMetadataPatch } from './codex-transport-metadata';
@@ -24,6 +30,30 @@ interface InputEventLike {
 
 interface UIContextLike {
   hasUI?: boolean;
+}
+
+type WebSocketStreamSimple = (
+  model: Model<Api>,
+  context: Context,
+  options?: SimpleStreamOptions,
+) => AssistantMessageEventStream;
+
+export function registerOpenAIWebSocketResponsesApiProvider(
+  pi: Pick<ExtensionAPI, 'registerProvider'>,
+  streamWebSocket: WebSocketStreamSimple,
+): void {
+  pi.registerProvider(API, {
+    api: API,
+    streamSimple: streamWebSocket,
+  });
+}
+
+export function installOpenAIWebSocketResponsesApiPatches(
+  installCodexTransportMetadataPatch: () => void,
+  installTransparentPatch: () => void,
+): void {
+  installCodexTransportMetadataPatch();
+  installTransparentPatch();
 }
 
 export function registerOpenAIWebSocketResponsesPatchRefreshHooks(
@@ -100,8 +130,6 @@ export function createIdleKeepaliveActivityTracker(now = () => Date.now()) {
 }
 
 export default function (pi: ExtensionAPI) {
-  installOpenAICodexTransportMetadataPatch();
-
   let currentCtx: ExtensionContext | undefined;
   let statusTimer: ReturnType<typeof setTimeout> | undefined;
   const idleKeepaliveActivity = createIdleKeepaliveActivityTracker();
@@ -130,17 +158,16 @@ export default function (pi: ExtensionAPI) {
   const installTransparentPatch = () => {
     installOpenAIWebSocketResponsesPatch(settingsProvider, streamWebSocket);
   };
+  const installApiPatches = () => {
+    installOpenAIWebSocketResponsesApiPatches(
+      installOpenAICodexTransportMetadataPatch,
+      installTransparentPatch,
+    );
+  };
 
-  registerApiProvider(
-    {
-      api: API,
-      stream: streamWebSocket,
-      streamSimple: streamWebSocket,
-    },
-    'extension:openai-websocket-responses',
-  );
-  installTransparentPatch();
-  registerOpenAIWebSocketResponsesPatchRefreshHooks(pi, installTransparentPatch);
+  registerOpenAIWebSocketResponsesApiProvider(pi, streamWebSocket);
+  installApiPatches();
+  registerOpenAIWebSocketResponsesPatchRefreshHooks(pi, installApiPatches);
 
   pi.on('session_start', (_event, ctx) => {
     currentCtx = ctx;

@@ -26,6 +26,8 @@ import {
   createIdleKeepaliveActivityTracker,
   formatWebSocketStatus,
   IDLE_KEEPALIVE_ACTIVITY_WINDOW_MS,
+  installOpenAIWebSocketResponsesApiPatches,
+  registerOpenAIWebSocketResponsesApiProvider,
   registerOpenAIWebSocketResponsesPatchRefreshHooks,
 } from './index.ts';
 import { buildResponsesBody } from './src/body.ts';
@@ -3619,6 +3621,36 @@ describe('provider transport diagnostics', () => {
 });
 
 describe('transparent provider patching', () => {
+  it('registers the explicit websocket API through pi.registerProvider', () => {
+    const streamSimple = vi.fn();
+    const pi = {
+      registerProvider: vi.fn(),
+    } as any;
+
+    registerOpenAIWebSocketResponsesApiProvider(pi, streamSimple as any);
+
+    expect(pi.registerProvider).toHaveBeenCalledWith('openai-websocket-responses', {
+      api: 'openai-websocket-responses',
+      streamSimple,
+    });
+  });
+
+  it('installs the transparent websocket patch and Codex transport metadata patch together', () => {
+    const installCodexTransportMetadataPatch = vi.fn();
+    const installTransparentPatch = vi.fn();
+
+    installOpenAIWebSocketResponsesApiPatches(
+      installCodexTransportMetadataPatch,
+      installTransparentPatch,
+    );
+
+    expect(installCodexTransportMetadataPatch).toHaveBeenCalledOnce();
+    expect(installTransparentPatch).toHaveBeenCalledOnce();
+    expect(installCodexTransportMetadataPatch.mock.invocationCallOrder[0]).toBeLessThan(
+      installTransparentPatch.mock.invocationCallOrder[0],
+    );
+  });
+
   it('reapplies API provider wrappers after model-registry refresh events', async () => {
     const handlers = new Map<string, (event?: unknown, ctx?: unknown) => unknown>();
     const pi = {
