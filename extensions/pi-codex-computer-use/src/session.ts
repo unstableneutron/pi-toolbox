@@ -61,9 +61,19 @@ function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function isUnknownMcpServerError(error: unknown): boolean {
+  return /unknown MCP server/i.test(getErrorMessage(error));
+}
+
 function shouldResetBridgeAfterError(error: unknown): boolean {
   const message = getErrorMessage(error);
   return message.includes('Operation aborted') || message.includes('timed out after');
+}
+
+function makeUnknownMcpServerError(error: unknown): Error {
+  return new Error(
+    `${getErrorMessage(error)}. Run /codex-computer-use-doctor to install, enable, or reset Codex Computer Use.`,
+  );
 }
 
 function formatPathStatus(label: string, filePath: string | undefined): string {
@@ -276,43 +286,52 @@ export class ComputerUseSession {
     input: CodexMcpToolCall,
     signal?: AbortSignal,
   ): Promise<{ threadId: string; rawResult: any }> {
-    const client = await this.getClient();
-    const threadId = await this.getThreadId(ctx, client, signal);
-    const restore = client.setElicitationHandler((params) =>
-      answerComputerUseElicitation(params, ctx),
-    );
-    try {
-      for (let attempt = 0; attempt < 2; attempt++) {
-        const rawResult = await client.callMcpTool({
-          server: input.server,
-          threadId,
-          tool: input.tool,
-          arguments: input.arguments,
-          timeoutMs: input.timeoutMs ?? 120_000,
-          signal,
-          ...(input.server === NODE_REPL_SERVER
-            ? { _meta: buildNodeReplRequestMeta(threadId, this.nextNodeReplTurnNumber++) }
-            : {}),
-        });
-        const errorMessage = getMcpErrorMessage(rawResult);
-        if (!errorMessage) {
-          return { threadId, rawResult };
+    let lastError: unknown;
+    for (let bridgeAttempt = 0; bridgeAttempt < 2; bridgeAttempt++) {
+      const client = await this.getClient();
+      const threadId = await this.getThreadId(ctx, client, signal);
+      const restore = client.setElicitationHandler((params) =>
+        answerComputerUseElicitation(params, ctx),
+      );
+      try {
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const rawResult = await client.callMcpTool({
+            server: input.server,
+            threadId,
+            tool: input.tool,
+            arguments: input.arguments,
+            timeoutMs: input.timeoutMs ?? 120_000,
+            signal,
+            ...(input.server === NODE_REPL_SERVER
+              ? { _meta: buildNodeReplRequestMeta(threadId, this.nextNodeReplTurnNumber++) }
+              : {}),
+          });
+          const errorMessage = getMcpErrorMessage(rawResult);
+          if (!errorMessage) {
+            return { threadId, rawResult };
+          }
+          if (attempt === 0 && isRetryableMcpError(input.server, input.tool, errorMessage)) {
+            await sleep(250, signal);
+            continue;
+          }
+          throw new Error(`Codex MCP ${input.server}.${input.tool} failed: ${errorMessage}`);
         }
-        if (attempt === 0 && isRetryableMcpError(input.server, input.tool, errorMessage)) {
-          await sleep(250, signal);
+        throw new Error(`Codex MCP ${input.server}.${input.tool} failed unexpectedly`);
+      } catch (error) {
+        lastError = error;
+        if (isUnknownMcpServerError(error) && bridgeAttempt === 0) {
+          this.resetDefaultBridge();
           continue;
         }
-        throw new Error(`Codex MCP ${input.server}.${input.tool} failed: ${errorMessage}`);
+        if (shouldResetBridgeAfterError(error) || isUnknownMcpServerError(error)) {
+          this.resetDefaultBridge();
+        }
+        throw isUnknownMcpServerError(error) ? makeUnknownMcpServerError(error) : error;
+      } finally {
+        restore();
       }
-      throw new Error(`Codex MCP ${input.server}.${input.tool} failed unexpectedly`);
-    } catch (error) {
-      if (shouldResetBridgeAfterError(error)) {
-        this.resetDefaultBridge();
-      }
-      throw error;
-    } finally {
-      restore();
     }
+    throw isUnknownMcpServerError(lastError) ? makeUnknownMcpServerError(lastError) : lastError;
   }
 
   async callBrowserMcpTool(
@@ -348,13 +367,30 @@ export class ComputerUseSession {
       }
       return { threadId, rawResult };
     } catch (error) {
-      if (shouldResetBridgeAfterError(error)) {
+      if (shouldResetBridgeAfterError(error) || isUnknownMcpServerError(error)) {
         this.resetChromeBridge();
       }
-      throw error;
+      throw isUnknownMcpServerError(error) ? makeUnknownMcpServerError(error) : error;
     } finally {
       restore();
     }
+  }
+
+  async getMcpServerAvailability(ctx: ExtensionContext): Promise<{
+    computerUseAvailable: boolean;
+    nodeReplAvailable: boolean;
+  }> {
+    const client = await this.getClient();
+    const threadId = await this.getThreadId(ctx, client);
+    const servers = normalizeMcpServers(await client.listMcpServers(threadId));
+    return {
+      computerUseAvailable: servers.some((server) => server?.name === COMPUTER_USE_SERVER),
+      nodeReplAvailable: servers.some((server) => server?.name === NODE_REPL_SERVER),
+    };
+  }
+
+  resetBridge(): void {
+    this.resetDefaultBridge();
   }
 
   close(): void {

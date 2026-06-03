@@ -21,6 +21,13 @@ const okTccRows = [
   { service: 'kTCCServiceScreenCapture', client: 'com.openai.sky.CUAService', authValue: 2 },
 ];
 
+const installedPluginStatus = {
+  appBundledMarketplaceHasPlugin: true,
+  cacheHasPlugin: true,
+  enabled: true,
+  installed: true,
+};
+
 describe('buildCodexComputerUseDoctorReport', () => {
   test('reports healthy paths and required TCC grants', async () => {
     const report = await buildCodexComputerUseDoctorReport({
@@ -36,6 +43,7 @@ describe('buildCodexComputerUseDoctorReport', () => {
           build: '799',
         }),
         readTccRows: async () => okTccRows,
+        readComputerUsePluginStatus: async () => installedPluginStatus,
         readDisplayState: async () => ({ displayAsleep: false }),
         findProcesses: async () => [
           { pid: 100, command: 'SkyComputerUseService' },
@@ -68,6 +76,7 @@ describe('buildCodexComputerUseDoctorReport', () => {
             authValue: 2,
           },
         ],
+        readComputerUsePluginStatus: async () => installedPluginStatus,
         readDisplayState: async () => ({ displayAsleep: false }),
         findProcesses: async () => [],
       },
@@ -96,6 +105,7 @@ describe('buildCodexComputerUseDoctorReport', () => {
           build: '799',
         }),
         readTccRows: async () => okTccRows,
+        readComputerUsePluginStatus: async () => installedPluginStatus,
         readDisplayState: async () => ({ displayAsleep: true }),
         findProcesses: async () => [],
       },
@@ -112,6 +122,70 @@ describe('buildCodexComputerUseDoctorReport', () => {
         caffeinateSeconds: 600,
         id: 'display-asleep',
       }),
+    ]);
+  });
+
+  test('classifies a missing Computer Use plugin as a guided install fix', async () => {
+    const report = await buildCodexComputerUseDoctorReport({
+      paths,
+      deps: {
+        exists: () => true,
+        readBundleInfo: async () => ({
+          bundleId: 'com.openai.sky.CUAService',
+          teamIdentifier: '2DC432GLL2',
+          version: '1.0',
+          build: '799',
+        }),
+        readTccRows: async () => okTccRows,
+        readDisplayState: async () => ({ displayAsleep: false }),
+        findProcesses: async () => [],
+        readComputerUsePluginStatus: async () => ({
+          appBundledMarketplaceHasPlugin: true,
+          cacheHasPlugin: false,
+          enabled: false,
+          installed: false,
+        }),
+      },
+    });
+
+    expect(report.hasFixableIssues).toBe(true);
+    expect(report.text).toContain('✗ computer-use@openai-bundled is not installed and enabled');
+    expect(report.text).toContain(
+      '✗ computer-use@openai-bundled is not installed and enabled → Install Computer Use plugin from Codex.app',
+    );
+    expect(report.fixableIssues).toEqual([
+      expect.objectContaining({ id: 'computer-use-plugin-missing' }),
+    ]);
+  });
+
+  test('classifies a missing live bridge server as a guided reset fix', async () => {
+    const report = await buildCodexComputerUseDoctorReport({
+      paths,
+      deps: {
+        exists: () => true,
+        readBundleInfo: async () => ({
+          bundleId: 'com.openai.sky.CUAService',
+          teamIdentifier: '2DC432GLL2',
+          version: '1.0',
+          build: '799',
+        }),
+        readTccRows: async () => okTccRows,
+        readDisplayState: async () => ({ displayAsleep: false }),
+        findProcesses: async () => [],
+        readBridgeMcpStatus: async () => ({ computerUseAvailable: false }),
+        readComputerUsePluginStatus: async () => ({
+          appBundledMarketplaceHasPlugin: true,
+          cacheHasPlugin: true,
+          enabled: true,
+          installed: true,
+        }),
+      },
+    });
+
+    expect(report.hasFixableIssues).toBe(true);
+    expect(report.text).toContain('✗ computer-use MCP server missing from live bridge');
+    expect(report.fixableIssues).toEqual([
+      expect.objectContaining({ id: 'computer-use-bridge-missing' }),
     ]);
   });
 });
@@ -132,10 +206,13 @@ describe('parseTccRowsFromOutputs', () => {
 });
 
 describe('runCodexComputerUseDoctor', () => {
-  test('opens System Settings after a permission fix is selected in the TUI', async () => {
+  test('opens System Settings and reveals the app after a permission fix is selected in the TUI', async () => {
     const notify = vi.fn();
-    const custom = vi.fn(async () => 'screen-recording-missing');
+    const custom = vi.fn(async () =>
+      custom.mock.calls.length === 1 ? 'screen-recording-missing' : 'close',
+    );
     const openSettingsUrl = vi.fn(async () => {});
+    const revealInFinder = vi.fn(async () => {});
 
     await runCodexComputerUseDoctor({ hasUI: true, ui: { custom, notify } } as any, {
       paths,
@@ -151,12 +228,15 @@ describe('runCodexComputerUseDoctor', () => {
         readDisplayState: async () => ({ displayAsleep: false }),
         findProcesses: async () => [],
         openSettingsUrl,
+        revealInFinder,
       },
     });
 
     expect(openSettingsUrl).toHaveBeenCalledWith(
       'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture',
     );
+    expect(revealInFinder).toHaveBeenCalledWith(paths.stableComputerUseApp);
+    expect(custom).toHaveBeenCalledTimes(2);
     expect(custom).toHaveBeenCalledWith(expect.any(Function));
     expect(notify).toHaveBeenCalledWith(
       expect.stringContaining('After granting permission'),
@@ -166,7 +246,7 @@ describe('runCodexComputerUseDoctor', () => {
 
   test('starts a short caffeinate guard after the display fix is selected in the TUI', async () => {
     const notify = vi.fn();
-    const custom = vi.fn(async () => 'display-asleep');
+    const custom = vi.fn(async () => (custom.mock.calls.length === 1 ? 'display-asleep' : 'close'));
     const startWakeGuard = vi.fn(async () => {});
 
     await runCodexComputerUseDoctor({ hasUI: true, ui: { custom, notify } } as any, {
@@ -187,10 +267,93 @@ describe('runCodexComputerUseDoctor', () => {
     });
 
     expect(startWakeGuard).toHaveBeenCalledWith(600);
+    expect(custom).toHaveBeenCalledTimes(2);
     expect(notify).toHaveBeenCalledWith(
       expect.stringContaining('Started a 10-minute caffeinate guard'),
       'info',
     );
+  });
+
+  test('installs the Computer Use plugin from a selected doctor action and rechecks', async () => {
+    const custom = vi.fn(async () =>
+      custom.mock.calls.length === 1 ? 'computer-use-plugin-missing' : 'close',
+    );
+    const installComputerUsePlugin = vi.fn(async () => {});
+    const readComputerUsePluginStatus = vi
+      .fn()
+      .mockResolvedValueOnce({
+        appBundledMarketplaceHasPlugin: true,
+        cacheHasPlugin: false,
+        enabled: false,
+        installed: false,
+      })
+      .mockResolvedValueOnce({
+        appBundledMarketplaceHasPlugin: true,
+        cacheHasPlugin: true,
+        enabled: true,
+        installed: true,
+      });
+
+    await runCodexComputerUseDoctor({ hasUI: true, ui: { custom, notify: vi.fn() } } as any, {
+      paths,
+      deps: {
+        exists: () => true,
+        readBundleInfo: async () => ({
+          bundleId: 'com.openai.sky.CUAService',
+          teamIdentifier: '2DC432GLL2',
+          version: '1.0',
+          build: '799',
+        }),
+        readTccRows: async () => okTccRows,
+        readDisplayState: async () => ({ displayAsleep: false }),
+        findProcesses: async () => [],
+        installComputerUsePlugin,
+        readComputerUsePluginStatus,
+      },
+    });
+
+    expect(installComputerUsePlugin).toHaveBeenCalledTimes(1);
+    expect(readComputerUsePluginStatus).toHaveBeenCalledTimes(2);
+    expect(custom).toHaveBeenCalledTimes(2);
+  });
+
+  test('resets the live bridge from a selected doctor action and rechecks', async () => {
+    const custom = vi.fn(async () =>
+      custom.mock.calls.length === 1 ? 'computer-use-bridge-missing' : 'close',
+    );
+    const resetBridge = vi.fn(async () => {});
+    const readBridgeMcpStatus = vi
+      .fn()
+      .mockResolvedValueOnce({ computerUseAvailable: false })
+      .mockResolvedValueOnce({ computerUseAvailable: true });
+
+    await runCodexComputerUseDoctor({ hasUI: true, ui: { custom, notify: vi.fn() } } as any, {
+      paths,
+      deps: {
+        exists: () => true,
+        readBundleInfo: async () => ({
+          bundleId: 'com.openai.sky.CUAService',
+          teamIdentifier: '2DC432GLL2',
+          version: '1.0',
+          build: '799',
+        }),
+        readTccRows: async () => okTccRows,
+        readDisplayState: async () => ({ displayAsleep: false }),
+        findProcesses: async () => [],
+        readBridgeMcpStatus,
+        readComputerUsePluginStatus: async () => ({
+          appBundledMarketplaceHasPlugin: true,
+          cacheHasPlugin: true,
+          enabled: true,
+          installed: true,
+        }),
+        resetBridge,
+      },
+    });
+
+    expect(resetBridge).toHaveBeenCalledTimes(1);
+    expect(readBridgeMcpStatus).toHaveBeenCalledTimes(2);
+    expect(custom).toHaveBeenCalledTimes(2);
   });
 
   test('rebuilds the report when Re-check is selected', async () => {

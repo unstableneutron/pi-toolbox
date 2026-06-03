@@ -20,6 +20,8 @@ function labelForIssue(issue: DoctorFixableIssue): string {
   if (issue.caffeinateSeconds !== undefined) {
     return `Start ${formatDuration(issue.caffeinateSeconds)} caffeinate guard`;
   }
+  if (issue.installComputerUsePlugin) return 'Install Computer Use plugin from Codex.app';
+  if (issue.resetBridge) return 'Reset Computer Use bridge';
   if (issue.id === 'screen-recording-missing') return 'Open Screen Recording settings';
   if (issue.id === 'accessibility-missing') return 'Open Accessibility settings';
   return issue.title;

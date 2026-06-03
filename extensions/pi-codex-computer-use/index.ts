@@ -15,7 +15,15 @@ export default function piComputerUseExtension(pi: ExtensionAPI): void {
     description:
       'Diagnose Codex native Computer Use setup, permissions, and helper process health; prompts before opening guided fixes.',
     handler: async (_args, ctx) => {
-      await runCodexComputerUseDoctor(ctx);
+      await runCodexComputerUseDoctor(ctx, {
+        deps: {
+          readBridgeMcpStatus: async () => {
+            const status = await session.getMcpServerAvailability(ctx);
+            return { computerUseAvailable: status.computerUseAvailable };
+          },
+          resetBridge: () => session.resetBridge(),
+        },
+      });
     },
   });
 

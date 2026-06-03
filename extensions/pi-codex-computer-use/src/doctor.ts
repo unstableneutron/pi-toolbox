@@ -27,7 +27,7 @@ interface CodexComputerUsePathsForDoctor {
   codexHome: string;
   stableComputerUseApp: string;
   stableComputerUseClient: string;
-  browserClientScripts: Record<string, string | undefined>;
+  browserClientScripts: { chrome?: string; iab?: string };
 }
 
 export interface BundleInfo {
@@ -52,10 +52,24 @@ export interface DisplayState {
   displayAsleep: boolean;
 }
 
+export interface ComputerUsePluginStatus {
+  appBundledMarketplaceHasPlugin: boolean;
+  cacheHasPlugin: boolean;
+  enabled: boolean;
+  installed: boolean;
+}
+
+export interface BridgeMcpStatus {
+  computerUseAvailable: boolean;
+}
+
 export interface DoctorFixableIssue {
   caffeinateSeconds?: number;
   id: string;
+  installComputerUsePlugin?: boolean;
   instructions: string;
+  resetBridge?: boolean;
+  revealPath?: string;
   settingsUrl?: string;
   title: string;
 }
@@ -69,10 +83,15 @@ export interface CodexComputerUseDoctorReport {
 export interface CodexComputerUseDoctorDeps {
   exists?: (filePath: string) => boolean;
   findProcesses?: () => Promise<ProcessInfo[]>;
+  installComputerUsePlugin?: () => Promise<void>;
   openSettingsUrl?: (url: string) => Promise<void>;
+  readBridgeMcpStatus?: () => Promise<BridgeMcpStatus>;
   readBundleInfo?: (appPath: string) => Promise<BundleInfo>;
+  readComputerUsePluginStatus?: () => Promise<ComputerUsePluginStatus>;
   readDisplayState?: () => Promise<DisplayState>;
   readTccRows?: () => Promise<TccRow[]>;
+  resetBridge?: () => Promise<void> | void;
+  revealInFinder?: (filePath: string) => Promise<void>;
   startWakeGuard?: (seconds: number) => Promise<void>;
 }
 
@@ -87,6 +106,114 @@ function boolMark(ok: boolean): string {
 
 function helperAppPath(paths: { stableComputerUseClient: string }): string {
   return path.dirname(path.dirname(path.dirname(paths.stableComputerUseClient)));
+}
+
+function appBundledMarketplaceRoot(paths: { codexApp: string }): string {
+  return path.join(paths.codexApp, 'Contents/Resources/plugins/openai-bundled');
+}
+
+function marketplaceJsonPath(marketplaceRoot: string): string {
+  return path.join(marketplaceRoot, '.agents/plugins/marketplace.json');
+}
+
+function marketplaceHasPlugin(marketplaceRoot: string, pluginName: string): boolean {
+  try {
+    const marketplace = JSON.parse(fs.readFileSync(marketplaceJsonPath(marketplaceRoot), 'utf8'));
+    return Array.isArray(marketplace.plugins)
+      ? marketplace.plugins.some((plugin: any) => plugin?.name === pluginName)
+      : false;
+  } catch {
+    return false;
+  }
+}
+
+function readTextIfExists(filePath: string): string {
+  try {
+    return fs.readFileSync(filePath, 'utf8');
+  } catch {
+    return '';
+  }
+}
+
+function getTomlTableBlock(toml: string, tableName: string): string | undefined {
+  const lines = toml.split('\n');
+  const header = `[${tableName}]`;
+  const start = lines.findIndex((line) => line.trim() === header);
+  if (start < 0) return undefined;
+  const end = lines.findIndex((line, index) => index > start && /^\s*\[/.test(line));
+  return lines.slice(start + 1, end < 0 ? undefined : end).join('\n');
+}
+
+function isTomlPluginEnabled(toml: string, pluginId: string): boolean {
+  const block = getTomlTableBlock(toml, `plugins."${pluginId}"`);
+  return block ? /^\s*enabled\s*=\s*true\s*$/m.test(block) : false;
+}
+
+function getConfiguredMarketplaceSource(toml: string, marketplaceName: string): string | undefined {
+  const block = getTomlTableBlock(toml, `marketplaces.${marketplaceName}`);
+  return block?.match(/^\s*source\s*=\s*"([^"]+)"\s*$/m)?.[1];
+}
+
+function hasCachedComputerUsePlugin(codexHome: string): boolean {
+  const pluginRoot = path.join(codexHome, 'plugins/cache/openai-bundled/computer-use');
+  try {
+    return fs
+      .readdirSync(pluginRoot, { withFileTypes: true })
+      .some(
+        (entry) =>
+          entry.isDirectory() && fs.existsSync(path.join(pluginRoot, entry.name, '.mcp.json')),
+      );
+  } catch {
+    return false;
+  }
+}
+
+async function defaultReadComputerUsePluginStatus(
+  paths: CodexComputerUsePathsForDoctor,
+): Promise<ComputerUsePluginStatus> {
+  const configText = readTextIfExists(path.join(paths.codexHome, 'config.toml'));
+  const enabled = isTomlPluginEnabled(configText, 'computer-use@openai-bundled');
+  const cacheHasPlugin = hasCachedComputerUsePlugin(paths.codexHome);
+  return {
+    appBundledMarketplaceHasPlugin: marketplaceHasPlugin(
+      appBundledMarketplaceRoot(paths),
+      'computer-use',
+    ),
+    cacheHasPlugin,
+    enabled,
+    installed: enabled && cacheHasPlugin,
+  };
+}
+
+async function defaultInstallComputerUsePlugin(
+  paths: CodexComputerUsePathsForDoctor,
+): Promise<void> {
+  const appMarketplaceRoot = appBundledMarketplaceRoot(paths);
+  const configText = readTextIfExists(path.join(paths.codexHome, 'config.toml'));
+  const currentSource = getConfiguredMarketplaceSource(configText, 'openai-bundled');
+  const currentSourceHasPlugin = currentSource
+    ? marketplaceHasPlugin(currentSource, 'computer-use')
+    : false;
+  const env = { ...process.env, CODEX_HOME: paths.codexHome };
+
+  if (!currentSource || (currentSource !== appMarketplaceRoot && !currentSourceHasPlugin)) {
+    await execFileAsync(
+      paths.codexExecutable,
+      ['plugin', 'marketplace', 'remove', 'openai-bundled'],
+      { env },
+    ).catch(() => {});
+    await execFileAsync(
+      paths.codexExecutable,
+      ['plugin', 'marketplace', 'add', appMarketplaceRoot],
+      {
+        env,
+      },
+    );
+  }
+
+  await execFileAsync(paths.codexExecutable, ['plugin', 'add', 'computer-use@openai-bundled'], {
+    env,
+  });
 }
 
 async function defaultReadBundleInfo(appPath: string): Promise<BundleInfo> {
@@ -171,6 +298,10 @@ async function defaultOpenSettingsUrl(url: string): Promise<void> {
   await execFileAsync('/usr/bin/open', [url]);
 }
 
+async function defaultRevealInFinder(filePath: string): Promise<void> {
+  await execFileAsync('/usr/bin/open', ['-R', filePath]);
+}
+
 async function defaultReadDisplayState(): Promise<DisplayState> {
   const { stdout } = await execFileAsync('/usr/sbin/system_profiler', ['SPDisplaysDataType']);
   return { displayAsleep: /Display Asleep:\s*Yes/i.test(stdout) };
@@ -199,22 +330,47 @@ function formatBundleInfo(label: string, info: BundleInfo): string[] {
   ];
 }
 
-function makePermissionIssue(kind: 'screen' | 'accessibility'): DoctorFixableIssue {
+function makePermissionIssue(
+  kind: 'screen' | 'accessibility',
+  paths: CodexComputerUsePathsForDoctor,
+): DoctorFixableIssue {
   if (kind === 'screen') {
     return {
       id: 'screen-recording-missing',
       title: 'Screen Recording missing for Codex Computer Use.app',
+      revealPath: paths.stableComputerUseApp,
       settingsUrl: SCREEN_CAPTURE_SETTINGS_URL,
       instructions:
-        'Enable Codex Computer Use.app in Privacy & Security → Screen & System Audio Recording, then rerun /codex-computer-use-doctor.',
+        'Enable Codex Computer Use.app in Privacy & Security → Screen & System Audio Recording. The doctor will also reveal the app in Finder so you can drag it into Settings if needed.',
     };
   }
   return {
     id: 'accessibility-missing',
     title: 'Accessibility missing for Codex Computer Use.app',
+    revealPath: paths.stableComputerUseApp,
     settingsUrl: ACCESSIBILITY_SETTINGS_URL,
     instructions:
-      'Enable Codex Computer Use.app in Privacy & Security → Accessibility, then rerun /codex-computer-use-doctor.',
+      'Enable Codex Computer Use.app in Privacy & Security → Accessibility. The doctor will also reveal the app in Finder so you can drag it into Settings if needed.',
+  };
+}
+
+function makeComputerUsePluginIssue(): DoctorFixableIssue {
+  return {
+    id: 'computer-use-plugin-missing',
+    installComputerUsePlugin: true,
+    instructions:
+      'Install and enable computer-use@openai-bundled from the Codex.app bundled plugin marketplace.',
+    title: 'computer-use@openai-bundled is not installed and enabled',
+  };
+}
+
+function makeBridgeMissingIssue(): DoctorFixableIssue {
+  return {
+    id: 'computer-use-bridge-missing',
+    instructions:
+      "Reset this Pi session's Codex app-server bridge, then re-check the Computer Use MCP server list.",
+    resetBridge: true,
+    title: 'computer-use MCP server missing from live bridge',
   };
 }
 
@@ -237,6 +393,8 @@ function actionLabelForIssue(issue: DoctorFixableIssue): string {
   if (issue.caffeinateSeconds !== undefined) {
     return `Start a ${formatDuration(issue.caffeinateSeconds)} caffeinate guard`;
   }
+  if (issue.installComputerUsePlugin) return 'Install Computer Use plugin from Codex.app';
+  if (issue.resetBridge) return 'Reset Computer Use bridge';
   if (issue.id === 'screen-recording-missing') return 'Open Screen Recording settings';
   if (issue.id === 'accessibility-missing') return 'Open Accessibility settings';
   return issue.instructions;
@@ -326,8 +484,46 @@ export async function buildCodexComputerUseDoctorReport(
   lines.push(
     `${boolMark(accessibilityGranted)} Accessibility ${accessibilityGranted ? 'granted' : 'missing'} for Codex Computer Use.app`,
   );
-  if (!screenGranted) fixableIssues.push(makePermissionIssue('screen'));
-  if (!accessibilityGranted) fixableIssues.push(makePermissionIssue('accessibility'));
+  if (!screenGranted) fixableIssues.push(makePermissionIssue('screen', paths));
+  if (!accessibilityGranted) fixableIssues.push(makePermissionIssue('accessibility', paths));
+
+  lines.push('', 'Plugin:');
+  try {
+    const pluginStatus = await (
+      deps.readComputerUsePluginStatus ?? (() => defaultReadComputerUsePluginStatus(paths))
+    )();
+    const pluginReady = pluginStatus.installed && pluginStatus.enabled;
+    lines.push(
+      `${boolMark(pluginStatus.appBundledMarketplaceHasPlugin)} Codex.app bundled marketplace contains computer-use`,
+    );
+    lines.push(
+      `${boolMark(pluginReady)} computer-use@openai-bundled ${pluginReady ? 'installed and enabled' : 'is not installed and enabled'}`,
+    );
+    if (!pluginReady && pluginStatus.appBundledMarketplaceHasPlugin) {
+      fixableIssues.push(makeComputerUsePluginIssue());
+    }
+  } catch (error) {
+    lines.push(
+      `⚠ Could not inspect Codex Computer Use plugin state: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  if (deps.readBridgeMcpStatus) {
+    lines.push('', 'Bridge MCP:');
+    try {
+      const bridgeStatus = await deps.readBridgeMcpStatus();
+      lines.push(
+        `${boolMark(bridgeStatus.computerUseAvailable)} computer-use MCP server ${bridgeStatus.computerUseAvailable ? 'available in live bridge' : 'missing from live bridge'}`,
+      );
+      if (!bridgeStatus.computerUseAvailable) {
+        fixableIssues.push(makeBridgeMissingIssue());
+      }
+    } catch (error) {
+      lines.push(
+        `⚠ Could not inspect live bridge MCP servers: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
 
   lines.push('', 'Runtime:');
   try {
@@ -392,26 +588,40 @@ async function runFixableIssue(
   ctx: ExtensionContext,
   issue: DoctorFixableIssue,
   deps: CodexComputerUseDoctorDeps,
+  paths: CodexComputerUsePathsForDoctor,
 ): Promise<void> {
+  const installComputerUsePlugin =
+    deps.installComputerUsePlugin ?? (() => defaultInstallComputerUsePlugin(paths));
   const openSettingsUrl = deps.openSettingsUrl ?? defaultOpenSettingsUrl;
+  const revealInFinder = deps.revealInFinder ?? defaultRevealInFinder;
   const startWakeGuard = deps.startWakeGuard ?? defaultStartWakeGuard;
 
   if (issue.caffeinateSeconds !== undefined) {
     const duration = formatDuration(issue.caffeinateSeconds);
     await startWakeGuard(issue.caffeinateSeconds);
-    notify(
-      ctx,
-      `Started a ${duration} caffeinate guard. Retry the Codex Computer Use action, or rerun /codex-computer-use-doctor.`,
-    );
+    notify(ctx, `Started a ${duration} caffeinate guard. Re-checking Codex Computer Use status.`);
+    return;
+  }
+
+  if (issue.installComputerUsePlugin) {
+    await installComputerUsePlugin();
+    await deps.resetBridge?.();
+    notify(ctx, 'Installed Computer Use plugin from Codex.app. Re-checking status.');
+    return;
+  }
+
+  if (issue.resetBridge) {
+    await deps.resetBridge?.();
+    notify(ctx, 'Reset Codex Computer Use bridge. Re-checking status.');
     return;
   }
 
   if (issue.settingsUrl) {
     await openSettingsUrl(issue.settingsUrl);
-    notify(
-      ctx,
-      `${issue.instructions}\n\nAfter granting permission, rerun /codex-computer-use-doctor.`,
-    );
+    if (issue.revealPath) {
+      await revealInFinder(issue.revealPath);
+    }
+    notify(ctx, `${issue.instructions}\n\nAfter granting permission, re-checking status.`);
   }
 }
 
@@ -419,6 +629,7 @@ async function runDoctorFallback(
   ctx: ExtensionContext,
   report: CodexComputerUseDoctorReport,
   deps: CodexComputerUseDoctorDeps,
+  paths: CodexComputerUsePathsForDoctor,
 ): Promise<void> {
   notify(ctx, report.text);
 
@@ -431,7 +642,13 @@ async function runDoctorFallback(
         'Wake display for Computer Use?',
         `${issue.title}\n\n${issue.instructions}\n\nStart a ${duration} caffeinate guard now?`,
       );
-      if (shouldStart) await runFixableIssue(ctx, issue, deps);
+      if (shouldStart) await runFixableIssue(ctx, issue, deps, paths);
+      continue;
+    }
+
+    if (issue.installComputerUsePlugin || issue.resetBridge) {
+      const shouldRun = await ctx.ui.confirm('Fix Codex Computer Use?', issue.instructions);
+      if (shouldRun) await runFixableIssue(ctx, issue, deps, paths);
       continue;
     }
 
@@ -444,7 +661,7 @@ async function runDoctorFallback(
           : 'Accessibility'
       } settings now?`,
     );
-    if (shouldOpen) await runFixableIssue(ctx, issue, deps);
+    if (shouldOpen) await runFixableIssue(ctx, issue, deps, paths);
   }
 }
 
@@ -453,13 +670,20 @@ export async function runCodexComputerUseDoctor(
   options: CodexComputerUseDoctorOptions = {},
 ): Promise<void> {
   const deps = options.deps ?? {};
+  const paths = options.paths ?? getCodexComputerUsePaths();
+  const reportOptions = { ...options, paths };
   if (!ctx.hasUI || !ctx.ui || !ctx.ui.custom) {
-    await runDoctorFallback(ctx, await buildCodexComputerUseDoctorReport(options), deps);
+    await runDoctorFallback(
+      ctx,
+      await buildCodexComputerUseDoctorReport(reportOptions),
+      deps,
+      paths,
+    );
     return;
   }
 
   for (;;) {
-    const report = await buildCodexComputerUseDoctorReport(options);
+    const report = await buildCodexComputerUseDoctorReport(reportOptions);
     const action = await ctx.ui.custom<DoctorViewAction>((tui, theme, _keybindings, done) => {
       const view = new DoctorReportView(report, theme, done);
       return {
@@ -477,7 +701,6 @@ export async function runCodexComputerUseDoctor(
 
     const issue = report.fixableIssues.find((candidate) => candidate.id === action);
     if (!issue) continue;
-    await runFixableIssue(ctx, issue, deps);
-    return;
+    await runFixableIssue(ctx, issue, deps, paths);
   }
 }

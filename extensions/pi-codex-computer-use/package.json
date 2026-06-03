@@ -1,6 +1,6 @@
 {
   "name": "pi-codex-computer-use",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Pi extension that exposes Codex.app's native Computer Use and browser MCP surfaces",
   "keywords": [
     "codex",

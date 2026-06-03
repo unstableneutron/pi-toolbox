@@ -116,6 +116,46 @@ describe('ComputerUseSession.callMcpTool', () => {
     expect(calls[0]).toHaveProperty('signal', controller.signal);
   });
 
+  test('resets the bridge and retries once when Codex reports an unknown MCP server', async () => {
+    const session = new ComputerUseSession();
+    const firstClient = {
+      close: vi.fn(),
+      setElicitationHandler() {
+        return () => {};
+      },
+      callMcpTool: vi.fn(async () => {
+        throw new Error("unknown MCP server 'computer-use'");
+      }),
+    };
+    const secondClient = {
+      close: vi.fn(),
+      setElicitationHandler() {
+        return () => {};
+      },
+      callMcpTool: vi.fn(async () => successfulListApps),
+    };
+    const clients = [firstClient, secondClient];
+    (session as any).getClient = vi.fn(async () => {
+      const client = clients.shift() ?? secondClient;
+      (session as any).client = client;
+      return client;
+    });
+    (session as any).getThreadId = vi.fn(async (_ctx: unknown, client: unknown) =>
+      client === firstClient ? 'thread-1' : 'thread-2',
+    );
+
+    const result = await session.callTool({ cwd: '/tmp', hasUI: false } as any, 'list_apps', {});
+
+    expect(result.rawResult).toBe(successfulListApps);
+    expect(firstClient.callMcpTool).toHaveBeenCalledWith(
+      expect.objectContaining({ server: 'computer-use', threadId: 'thread-1', tool: 'list_apps' }),
+    );
+    expect(firstClient.close).toHaveBeenCalledTimes(1);
+    expect(secondClient.callMcpTool).toHaveBeenCalledWith(
+      expect.objectContaining({ server: 'computer-use', threadId: 'thread-2', tool: 'list_apps' }),
+    );
+  });
+
   test('resets the shared app-server bridge when a direct MCP tool call aborts', async () => {
     const session = new ComputerUseSession();
     const close = vi.fn();
