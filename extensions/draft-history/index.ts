@@ -110,7 +110,8 @@ export default function draftHistory(pi: ExtensionAPI) {
   registerExtensionEditorBehavior(
     pi,
     createDraftHistoryBehavior({
-      onDraftSaved: () => setTemporaryStatus('Saved cleared draft. Press ↑ to restore it.', SAVED_STATUS_MS),
+      onDraftSaved: () =>
+        setTemporaryStatus('Saved cleared draft. Press ↑ to restore it.', SAVED_STATUS_MS),
     }),
   );
 
