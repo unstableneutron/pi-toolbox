@@ -648,17 +648,43 @@ function validatePatchTextForProfile(patch: string, profile: ApplyPatchProfile):
 
   for (const line of patch.split(/\r?\n/)) {
     const trimmed = line.trim();
-    if (trimmed === '*** FindReplaceOnce:') {
+    if (/^\*\*\*\s+FindReplaceOnce\b/.test(trimmed)) {
       throw new Error(
         'FindReplaceOnce chunks are not allowed by the codex-compatible apply_patch profile. Use @@ hunk chunks instead.',
       );
     }
-    if (trimmed === '*** FindReplaceAll:') {
+    if (/^\*\*\*\s+FindReplaceAll\b/.test(trimmed)) {
       throw new Error(
         'FindReplaceAll chunks are not allowed by the codex-compatible apply_patch profile. Use @@ hunk chunks instead.',
       );
     }
   }
+}
+
+function sanitizePatchParseErrorForProfile(error: unknown, profile: ApplyPatchProfile): never {
+  if (profile !== 'codex-compatible' || !(error instanceof Error)) {
+    throw error;
+  }
+
+  const findReplaceExample = [
+    'For a content edit, use a valid hunk such as:',
+    '*** FindReplaceOnce:',
+    '<<<<<<< SEARCH',
+    '<old text>',
+    '======= REPLACE',
+    '<new text>',
+    '>>>>>>> REPLACE',
+  ].join('\n');
+  const codexExample = [
+    'For a content edit in the codex-compatible profile, use a valid @@ hunk such as:',
+    '@@',
+    '-<old text>',
+    '+<new text>',
+  ].join('\n');
+  const message = error.message.replace(findReplaceExample, codexExample);
+  const sanitized = new Error(message);
+  sanitized.stack = error.stack;
+  throw sanitized;
 }
 
 async function executePatch(
@@ -675,7 +701,13 @@ async function executePatch(
   validatePatchTextForProfile(patch, profile);
   const patchAutofixes = applyPatchTextAutofixes(patch);
   const effectivePatch = patchAutofixes.patchText;
-  const { ops, mergedEnvelopes } = parsePatchWithDiagnostics(effectivePatch);
+  let diagnostics: ReturnType<typeof parsePatchWithDiagnostics>;
+  try {
+    diagnostics = parsePatchWithDiagnostics(effectivePatch);
+  } catch (error) {
+    sanitizePatchParseErrorForProfile(error, profile);
+  }
+  const { ops, mergedEnvelopes } = diagnostics;
   validateApplyPatchProfile(ops, profile);
   const files = ops.flatMap((op) => {
     if (op.kind === 'update' && op.moveTo) {

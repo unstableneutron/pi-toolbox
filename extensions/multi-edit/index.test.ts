@@ -289,6 +289,67 @@ describe('multi-edit extension', () => {
     }
   });
 
+  test('rejects FindReplace-like malformed markers before parser repair guidance for codex-compatible profiles', async () => {
+    const tool = getApplyPatchTool();
+    const cwd = await mkdtemp(join(tmpdir(), 'multi-edit-profile-'));
+    try {
+      await writeFile(join(cwd, 'demo.txt'), 'old\n', 'utf8');
+      await expect(
+        tool.execute(
+          'call-find-replace-missing-colon',
+          {
+            patch: [
+              '*** Begin Patch',
+              '*** Update File: demo.txt',
+              '*** FindReplaceOnce',
+              'old',
+              '---',
+              'new',
+              '*** End Patch',
+            ].join('\n'),
+          },
+          undefined,
+          undefined,
+          { cwd, model: { id: 'gpt-5.5', provider: 'openai-codex' } },
+        ),
+      ).rejects.toThrow(/FindReplaceOnce.*codex-compatible/);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test('codex-compatible parse errors do not suggest FindReplace examples', async () => {
+    const tool = getApplyPatchTool();
+    const cwd = await mkdtemp(join(tmpdir(), 'multi-edit-profile-'));
+    try {
+      await writeFile(join(cwd, 'demo.txt'), 'old\n', 'utf8');
+      await expect(
+        tool.execute(
+          'call-empty-update-codex-compatible',
+          {
+            patch: ['*** Begin Patch', '*** Update File: demo.txt', '*** End Patch'].join('\n'),
+          },
+          undefined,
+          undefined,
+          { cwd, model: { id: 'gpt-5.5', provider: 'openai-codex' } },
+        ),
+      ).rejects.toThrow(/@@/);
+      await expect(
+        tool.execute(
+          'call-empty-update-codex-compatible-again',
+          {
+            patch: ['*** Begin Patch', '*** Update File: demo.txt', '*** End Patch'].join('\n'),
+          },
+          undefined,
+          undefined,
+          { cwd, model: { id: 'gpt-5.5', provider: 'openai-codex' } },
+        ),
+      ).rejects.not.toThrow(/FindReplaceOnce/);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   test('codex-compatible hunk failures do not suggest FindReplace rewrites', async () => {
     const tool = getApplyPatchTool();
     const cwd = await mkdtemp(join(tmpdir(), 'multi-edit-profile-'));
