@@ -1133,6 +1133,7 @@ describe('Responses adapter and retrieve recovery', () => {
   it('uses a synthetic message id when prior reasoning is unavailable for replay', () => {
     const model = makeModel();
     const output = makeAssistantMessage(model);
+    output.stopReason = 'toolUse';
     output.content.push(
       { type: 'thinking', thinking: 'Reasoning summary without a replayable signature' } as any,
       {
@@ -1144,22 +1145,70 @@ describe('Responses adapter and retrieve recovery', () => {
           phase: 'commentary',
         }),
       },
+      {
+        type: 'toolCall',
+        id: 'call_missing_reasoning|fc_requires_missing_reasoning',
+        name: 'read',
+        arguments: { path: 'README.md' },
+      },
     );
 
-    expect(buildResponsesBody(model, { messages: [output] }).input).toEqual([
+    const inputItems = buildResponsesBody(model, { messages: [output] }).input as any[];
+    const responseItems = assistantMessageToResponseItems(output) as any[];
+    const inputFunctionCall = inputItems.find((item) => item.type === 'function_call');
+    const responseFunctionCall = responseItems.find((item) => item.type === 'function_call');
+
+    expect(inputItems).toContainEqual(
       expect.objectContaining({
         type: 'message',
         id: 'msg_pi_0_0',
         phase: 'commentary',
       }),
-    ]);
-    expect(assistantMessageToResponseItems(output)).toEqual([
+    );
+    expect(responseItems).toContainEqual(
       expect.objectContaining({
         type: 'message',
         id: 'msg_pi_0_0',
         phase: 'commentary',
       }),
-    ]);
+    );
+    expect(inputFunctionCall).toMatchObject({
+      type: 'function_call',
+      call_id: 'call_missing_reasoning',
+      name: 'read',
+    });
+    expect(responseFunctionCall).toMatchObject({
+      type: 'function_call',
+      call_id: 'call_missing_reasoning',
+      name: 'read',
+    });
+    expect(inputFunctionCall).not.toHaveProperty('id');
+    expect(responseFunctionCall).not.toHaveProperty('id');
+  });
+
+  it('drops hidden provider response items after unreplayable reasoning', () => {
+    const model = makeModel();
+    const output = makeAssistantMessage(model);
+    output.content.push(
+      { type: 'thinking', thinking: 'Reasoning summary without a replayable signature' } as any,
+      {
+        type: 'response_item',
+        item: {
+          type: 'web_search_call',
+          id: 'ws_requires_missing_reasoning',
+          status: 'completed',
+          action: { query: 'Responses replay' },
+        },
+      } as any,
+      { type: 'text', text: 'Found the relevant docs.' },
+    );
+
+    expect(buildResponsesBody(model, { messages: [output] }).input).not.toContainEqual(
+      expect.objectContaining({ type: 'web_search_call' }),
+    );
+    expect(assistantMessageToResponseItems(output)).not.toContainEqual(
+      expect.objectContaining({ type: 'web_search_call' }),
+    );
   });
 
   it('keeps interleaved output items separate by output_index', async () => {

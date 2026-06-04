@@ -168,11 +168,14 @@ function splitToolCallId(id: string): { callId: string; itemId?: string } {
   return { callId: callId || id, itemId };
 }
 
-function functionCallInput(block: ToolCall): ResponsesInputItem {
+function functionCallInput(
+  block: ToolCall,
+  options: { includeItemId?: boolean } = {},
+): ResponsesInputItem {
   const { callId, itemId } = splitToolCallId(block.id);
   return {
     type: 'function_call',
-    id: itemId,
+    ...(options.includeItemId === false ? {} : { id: itemId }),
     call_id: callId,
     name: block.name,
     arguments: JSON.stringify(block.arguments),
@@ -217,23 +220,23 @@ function assistantMessageItems(
 ): ResponsesInputItem[] {
   const output: ResponsesInputItem[] = [];
   let textBlockIndex = 0;
-  let hasUnreplayableReasoningBeforeText = false;
+  let hasUnreplayableReasoningBeforeItem = false;
   for (const block of message.content as InternalAssistantContent[]) {
     if (isHiddenResponseItemBlock(block)) {
-      output.push(block.item);
+      if (!hasUnreplayableReasoningBeforeItem) output.push(block.item);
       continue;
     }
     if (block.type === 'thinking') {
       const item = parseReplayableReasoningItem(block.thinkingSignature);
       if (item) output.push(item);
-      else hasUnreplayableReasoningBeforeText = true;
+      else hasUnreplayableReasoningBeforeItem = true;
       continue;
     }
     if (block.type === 'text') {
       const fallbackId = `msg_pi_${index}_${textBlockIndex}`;
       const signature = parseTextSignature(block.textSignature);
       textBlockIndex++;
-      const id = hasUnreplayableReasoningBeforeText ? fallbackId : (signature?.id ?? fallbackId);
+      const id = hasUnreplayableReasoningBeforeItem ? fallbackId : (signature?.id ?? fallbackId);
       output.push({
         type: 'message',
         role: 'assistant',
@@ -245,7 +248,7 @@ function assistantMessageItems(
       continue;
     }
     if (message.stopReason === 'toolUse' && block.type === 'toolCall') {
-      output.push(functionCallInput(block));
+      output.push(functionCallInput(block, { includeItemId: !hasUnreplayableReasoningBeforeItem }));
     }
   }
   return output;
@@ -952,19 +955,19 @@ export function appendRecoveredFunctionCalls(
 export function assistantMessageToResponseItems(output: AssistantMessage): unknown[] {
   const items: unknown[] = [];
   let textIndex = 0;
-  let hasUnreplayableReasoningBeforeText = false;
+  let hasUnreplayableReasoningBeforeItem = false;
   for (const block of output.content as InternalAssistantContent[]) {
     if (isHiddenResponseItemBlock(block)) {
-      items.push(block.item);
+      if (!hasUnreplayableReasoningBeforeItem) items.push(block.item);
       continue;
     }
     if (block.type === 'thinking') {
       const item = parseReplayableReasoningItem(block.thinkingSignature);
       if (item) items.push(item);
-      else hasUnreplayableReasoningBeforeText = true;
+      else hasUnreplayableReasoningBeforeItem = true;
     } else if (block.type === 'text') {
       const fallbackId = `msg_pi_0_${textIndex}`;
-      const id = hasUnreplayableReasoningBeforeText
+      const id = hasUnreplayableReasoningBeforeItem
         ? fallbackId
         : (textSignatureItemId(block.textSignature) ?? fallbackId);
       const phase = textSignaturePhase(block.textSignature);
@@ -978,7 +981,7 @@ export function assistantMessageToResponseItems(output: AssistantMessage): unkno
         ...(phase ? { phase } : {}),
       });
     } else if (output.stopReason === 'toolUse' && block.type === 'toolCall') {
-      items.push(functionCallInput(block));
+      items.push(functionCallInput(block, { includeItemId: !hasUnreplayableReasoningBeforeItem }));
     }
   }
   return items;
