@@ -5,7 +5,12 @@ EMPTY_VALUE="__PI_NATIVE_SPLIT_EMPTY__"
 cwd=$1
 session_file=$2
 prompt_file=$3
-shift 3
+marker_file=${4:-$EMPTY_VALUE}
+if [ "$#" -ge 4 ]; then
+  shift 4
+else
+  shift 3
+fi
 
 cd "$cwd" || {
   printf '\npi-native-split: failed to cd to %s\n' "$cwd" >&2
@@ -24,6 +29,10 @@ if [ "$prompt_file" != "$EMPTY_VALUE" ]; then
   rm -f "$prompt_file"
   rm -rf "$prompt_dir"
   set -- "$@" "$prompt"
+fi
+
+if [ "$marker_file" != "$EMPTY_VALUE" ]; then
+  export PI_NATIVE_SPLIT_MARKER_FILE="$marker_file"
 fi
 
 pi "$@"

@@ -8,8 +8,10 @@ import {
   serializeConversation,
   type ExtensionAPI,
   type ExtensionCommandContext,
+  type ExtensionContext,
   type SessionEntry,
 } from '@earendil-works/pi-coding-agent';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import * as path from 'node:path';
@@ -62,12 +64,289 @@ Files involved:
 export type SupportedTerminal = 'ghostty' | 'kitty' | 'herdr';
 
 const EMPTY_LAUNCH_VALUE = '__PI_NATIVE_SPLIT_EMPTY__';
+const SPLIT_MARKER_ENV = 'PI_NATIVE_SPLIT_MARKER_FILE';
+const SPLIT_MARKER_PREFIX = 'pi-native-split';
+const CHILD_MARKER_NOTIFY_DELAY_MS = 100;
 // Match Herdr's MOBILE_WIDTH_THRESHOLD from src/ui/mobile.rs.
 const HERDR_MOBILE_WIDTH_THRESHOLD = 64;
+
+type SplitMarkerKind = 'split-fork' | 'split-handoff';
+type SplitPromptKind = 'raw' | 'handoff' | 'none';
+type SplitMarkerSide = 'parent' | 'child';
+
+type NativeSplitDetails = {
+  terminal: SupportedTerminal;
+  parent?: { pane?: string; workspace?: string; window?: string };
+  child?: {
+    pane?: string;
+    window?: string;
+    target?: 'pane' | 'tab';
+    pid?: string;
+    listenOn?: string;
+    socket?: string;
+  };
+};
+
+type SplitMarkerData = {
+  v: 1;
+  id: string;
+  side: SplitMarkerSide;
+  kind: SplitMarkerKind;
+  at: string;
+  parent: { id: string; file?: string; leaf: string | null };
+  child: { id: string; file: string };
+  prompt: SplitPromptKind;
+  native?: NativeSplitDetails;
+};
+
+type CreatedSplitSession = {
+  manager: SessionManager;
+  file: string;
+  id: string;
+  parentSessionFile?: string;
+  parentSessionId: string;
+  sourceLeafId: string | null;
+};
+
+type PendingParentMarker = { customType: string; data: SplitMarkerData };
+type SplitMarkerSeed = PendingParentMarker;
 
 function shellQuote(value: string): string {
   if (value.length === 0) return "''";
   return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function formatSplitMarkerCustomType(kind: SplitMarkerKind, childSessionId: string): string {
+  return `${SPLIT_MARKER_PREFIX}.${kind}.${childSessionId}`;
+}
+
+function hasObjectKeys(value: object): boolean {
+  return Object.keys(value).length > 0;
+}
+
+function materializeSessionFile(manager: SessionManager, sessionFile: string): void {
+  const header = manager.getHeader();
+  if (!header) {
+    throw new Error('Cannot materialize session without a header');
+  }
+
+  fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
+  const records = [header, ...manager.getEntries()];
+  fs.writeFileSync(sessionFile, `${records.map((entry) => JSON.stringify(entry)).join('\n')}\n`, {
+    flag: 'w',
+  });
+}
+
+function buildNativeDetails(
+  terminal: SupportedTerminal,
+  env: NodeJS.ProcessEnv,
+): NativeSplitDetails {
+  if (terminal === 'kitty') {
+    const parent: NativeSplitDetails['parent'] = {};
+    if (env.KITTY_WINDOW_ID) parent.window = env.KITTY_WINDOW_ID;
+    return { terminal, parent: hasObjectKeys(parent) ? parent : undefined };
+  }
+
+  if (terminal === 'herdr') {
+    const parent: NativeSplitDetails['parent'] = {};
+    if (env.HERDR_PANE_ID) parent.pane = env.HERDR_PANE_ID;
+    if (env.HERDR_WORKSPACE_ID) parent.workspace = env.HERDR_WORKSPACE_ID;
+    return { terminal, parent: hasObjectKeys(parent) ? parent : undefined };
+  }
+
+  return { terminal };
+}
+
+function getKittyChildWindowId(stdout: string | undefined): string | undefined {
+  const trimmed = stdout?.trim();
+  return trimmed && /^\d+$/.test(trimmed) ? trimmed : undefined;
+}
+
+function augmentNativeWithChildEnv(
+  native: NativeSplitDetails | undefined,
+  env: NodeJS.ProcessEnv,
+): NativeSplitDetails | undefined {
+  const terminal = native?.terminal ?? detectTerminal(env);
+  if (!terminal) return native;
+
+  if (terminal === 'kitty') {
+    return {
+      ...native,
+      terminal,
+      child: {
+        ...native?.child,
+        ...(env.KITTY_WINDOW_ID ? { window: env.KITTY_WINDOW_ID } : {}),
+        ...(env.KITTY_PID ? { pid: env.KITTY_PID } : {}),
+        ...(env.KITTY_LISTEN_ON ? { listenOn: env.KITTY_LISTEN_ON } : {}),
+      },
+    };
+  }
+
+  if (terminal === 'herdr') {
+    return {
+      ...native,
+      terminal,
+      child: {
+        ...native?.child,
+        ...(env.HERDR_PANE_ID ? { pane: env.HERDR_PANE_ID } : {}),
+        ...(env.HERDR_SOCKET_PATH ? { socket: env.HERDR_SOCKET_PATH } : {}),
+      },
+    };
+  }
+
+  return { ...native, terminal };
+}
+
+function augmentParentMarkerFromLaunchResult(
+  terminal: SupportedTerminal,
+  marker: PendingParentMarker | undefined,
+  result: LaunchResult,
+): void {
+  if (!marker || result.code !== 0 || terminal !== 'kitty') return;
+
+  const window = getKittyChildWindowId(result.stdout);
+  if (!window) return;
+
+  marker.data.native = {
+    ...marker.data.native,
+    terminal,
+    child: { ...marker.data.native?.child, window },
+  };
+}
+
+function createSplitMarkerPair(
+  session: CreatedSplitSession,
+  kind: SplitMarkerKind,
+  prompt: SplitPromptKind,
+  native: NativeSplitDetails | undefined,
+): { customType: string; parent: SplitMarkerData; child: SplitMarkerData } {
+  const id = randomUUID();
+  const at = new Date().toISOString();
+  const customType = formatSplitMarkerCustomType(kind, session.id);
+  const base = {
+    v: 1 as const,
+    id,
+    kind,
+    at,
+    parent: {
+      id: session.parentSessionId,
+      file: session.parentSessionFile,
+      leaf: session.sourceLeafId,
+    },
+    child: {
+      id: session.id,
+      file: session.file,
+    },
+    prompt,
+    native,
+  };
+
+  return {
+    customType,
+    parent: { ...base, side: 'parent' },
+    child: { ...base, side: 'child' },
+  };
+}
+
+function writeMarkerSeed(seed: SplitMarkerSeed): string {
+  const seedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-native-split-marker-'));
+  const seedFile = path.join(seedDir, 'marker.json');
+  fs.writeFileSync(seedFile, JSON.stringify(seed), 'utf8');
+  return seedFile;
+}
+
+function formatSplitMarkerLink(data: SplitMarkerData): string {
+  if (data.side === 'parent') {
+    return `child → ${data.child.id}`;
+  }
+
+  return `parent ← ${data.parent.id}`;
+}
+
+function formatSplitMarkerNotification(data: SplitMarkerData): string {
+  const terminal = data.native?.terminal ?? 'native';
+  return `⇄ ${data.kind} via ${terminal}\n${formatSplitMarkerLink(data)}`;
+}
+
+function formatSplitMarkerLabel(data: SplitMarkerData): string {
+  return `${data.kind} ${formatSplitMarkerLink(data)}`;
+}
+
+function getSplitMarkerLabelTarget(
+  ctx: Pick<ExtensionContext, 'sessionManager'>,
+  data: SplitMarkerData,
+): string | undefined {
+  const sourceLeafId = getNearestSplitSourceEntryId(ctx, data.parent.leaf);
+  if (sourceLeafId) return sourceLeafId;
+
+  return ctx.sessionManager.getLeafId?.() ?? undefined;
+}
+
+function labelSplitMarker(
+  pi: ExtensionAPI,
+  ctx: Pick<ExtensionContext, 'sessionManager'>,
+  data: SplitMarkerData,
+): void {
+  const targetId = getSplitMarkerLabelTarget(ctx, data);
+  if (!targetId || ctx.sessionManager.getLabel?.(targetId)) return;
+
+  pi.setLabel(targetId, formatSplitMarkerLabel(data));
+}
+
+function notifySplitMarker(
+  ctx: Pick<ExtensionContext, 'hasUI' | 'ui'>,
+  data: SplitMarkerData,
+): void {
+  if (!ctx.hasUI) return;
+  ctx.ui.notify(formatSplitMarkerNotification(data), 'info');
+}
+
+function readMarkerSeed(seedFile: string): SplitMarkerSeed | undefined {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(seedFile, 'utf8')) as SplitMarkerSeed;
+    if (!parsed?.customType || !parsed?.data) return undefined;
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
+
+function cleanupTempPath(tempFile: string | undefined): void {
+  if (!tempFile || tempFile === EMPTY_LAUNCH_VALUE) return;
+
+  try {
+    fs.rmSync(path.dirname(tempFile), { recursive: true, force: true });
+  } catch {
+    // best-effort cleanup only
+  }
+}
+
+function installChildMarkerHandler(pi: ExtensionAPI, env: NodeJS.ProcessEnv): void {
+  const markerFile = env[SPLIT_MARKER_ENV];
+  if (!markerFile) return;
+
+  pi.on?.('session_start', (_event, ctx) => {
+    const seed = readMarkerSeed(markerFile);
+    cleanupTempPath(markerFile);
+    if (!seed) return;
+
+    const data = {
+      ...seed.data,
+      native: augmentNativeWithChildEnv(seed.data.native, env),
+    };
+    pi.appendEntry(seed.customType, data);
+    labelSplitMarker(pi, ctx, data);
+    setTimeout(() => notifySplitMarker(ctx, data), CHILD_MARKER_NOTIFY_DELAY_MS);
+  });
+}
+
+function prepareChildMarkerSeed(
+  session: CreatedSplitSession,
+  customType: string,
+  data: SplitMarkerData,
+): string {
+  materializeSessionFile(session.manager, session.file);
+  return writeMarkerSeed({ customType, data });
 }
 
 export function detectTerminal(
@@ -106,7 +385,8 @@ export function buildLaunchWrapperArgs(
   cwd: string,
   sessionFile: string | undefined,
   prompt: string,
-): { argv: string[]; promptFile?: string } {
+  markerFile?: string,
+): { argv: string[]; promptFile?: string; markerFile?: string } {
   const promptFile = prompt.length > 0 ? writePromptFile(prompt) : undefined;
 
   return {
@@ -116,8 +396,10 @@ export function buildLaunchWrapperArgs(
       cwd,
       sessionFile ?? EMPTY_LAUNCH_VALUE,
       promptFile ?? EMPTY_LAUNCH_VALUE,
+      markerFile ?? EMPTY_LAUNCH_VALUE,
     ],
     promptFile,
+    markerFile,
   };
 }
 
@@ -169,52 +451,148 @@ export function getUserMessagesForForking(
   return result;
 }
 
-function createChildSession(ctx: ExtensionCommandContext): string | undefined {
-  const manager = SessionManager.create(ctx.cwd, ctx.sessionManager.getSessionDir());
-  return manager.newSession({
-    parentSession: ctx.sessionManager.getSessionFile() ?? undefined,
-  });
+function isNonEmptyTextPart(part: unknown): part is { type: 'text'; text: string } {
+  if (typeof part !== 'object' || part === null) return false;
+
+  const candidate = part as { type?: unknown; text?: unknown };
+  return (
+    candidate.type === 'text' &&
+    typeof candidate.text === 'string' &&
+    candidate.text.trim().length > 0
+  );
 }
 
-function createForkedSessionFromCurrentLeaf(ctx: ExtensionCommandContext): string | undefined {
-  const manager = ctx.sessionManager as typeof ctx.sessionManager & {
-    createBranchedSession?: (leafId: string) => string | undefined;
-  };
+function hasAssistantTextContent(content: unknown): boolean {
+  if (typeof content === 'string') return content.trim().length > 0;
+  if (!Array.isArray(content)) return false;
 
-  const currentLeafId = ctx.sessionManager.getBranch().at(-1)?.id;
-  if (!currentLeafId) {
-    return createChildSession(ctx);
+  return content.some(isNonEmptyTextPart);
+}
+
+function isMeaningfulSplitSourceEntry(entry: SessionEntry): boolean {
+  if (entry.type !== 'message') return false;
+
+  if (entry.message.role === 'user') return true;
+  if (entry.message.role !== 'assistant') return false;
+
+  return hasAssistantTextContent(entry.message.content);
+}
+
+export function getNearestSplitSourceEntryId(
+  ctx: Pick<ExtensionContext, 'sessionManager'>,
+  startEntryId?: string | null,
+): string | null {
+  let entryId = startEntryId ?? ctx.sessionManager.getLeafId?.() ?? null;
+  const visited = new Set<string>();
+
+  while (entryId && !visited.has(entryId)) {
+    visited.add(entryId);
+    const entry = ctx.sessionManager.getEntry(entryId);
+    if (!entry) return null;
+    if (isMeaningfulSplitSourceEntry(entry)) return entry.id;
+    entryId = entry.parentId ?? null;
   }
 
-  if (!manager.createBranchedSession) {
+  return null;
+}
+
+function getParentSessionId(ctx: ExtensionCommandContext): string {
+  return ctx.sessionManager.getSessionId?.() ?? ctx.sessionManager.getHeader?.()?.id ?? 'unknown';
+}
+
+function createChildSessionDetails(
+  ctx: ExtensionCommandContext,
+  sourceLeafId: string | null,
+): CreatedSplitSession | undefined {
+  const parentSessionFile = ctx.sessionManager.getSessionFile() ?? undefined;
+  const parentSessionId = getParentSessionId(ctx);
+  const manager = SessionManager.create(ctx.cwd, ctx.sessionManager.getSessionDir());
+  const file = manager.newSession({ parentSession: parentSessionFile });
+  if (!file) return undefined;
+
+  return {
+    manager,
+    file,
+    id: manager.getSessionId(),
+    parentSessionFile,
+    parentSessionId,
+    sourceLeafId,
+  };
+}
+
+function openCurrentSessionSnapshot(ctx: ExtensionCommandContext): SessionManager | undefined {
+  const sessionFile = ctx.sessionManager.getSessionFile?.();
+  if (!sessionFile) return undefined;
+
+  return SessionManager.open(sessionFile, ctx.sessionManager.getSessionDir());
+}
+
+function createForkedSessionFromCurrentLeafDetails(
+  ctx: ExtensionCommandContext,
+): CreatedSplitSession | undefined {
+  const snapshot = openCurrentSessionSnapshot(ctx);
+  if (!snapshot) return createChildSessionDetails(ctx, null);
+
+  const sourceLeafId = getNearestSplitSourceEntryId({ sessionManager: snapshot });
+  if (!sourceLeafId) {
+    return createChildSessionDetails(ctx, null);
+  }
+
+  const parentSessionFile = ctx.sessionManager.getSessionFile() ?? undefined;
+  const parentSessionId = getParentSessionId(ctx);
+  const file = snapshot.createBranchedSession(sourceLeafId);
+  if (!file) return undefined;
+
+  return {
+    manager: snapshot,
+    file,
+    id: snapshot.getSessionId(),
+    parentSessionFile,
+    parentSessionId,
+    sourceLeafId,
+  };
+}
+
+function createForkedSessionDetails(
+  ctx: ExtensionCommandContext,
+  entryId: string,
+): CreatedSplitSession | undefined {
+  const selectedEntry = ctx.sessionManager.getEntry(entryId);
+  if (!selectedEntry || selectedEntry.type !== 'message' || selectedEntry.message.role !== 'user') {
     return undefined;
   }
 
-  return manager.createBranchedSession(currentLeafId);
+  if (!selectedEntry.parentId) {
+    return createChildSessionDetails(ctx, null);
+  }
+
+  const snapshot = openCurrentSessionSnapshot(ctx);
+  if (!snapshot) return undefined;
+
+  const parentSessionFile = ctx.sessionManager.getSessionFile() ?? undefined;
+  const parentSessionId = getParentSessionId(ctx);
+  try {
+    const file = snapshot.createBranchedSession(selectedEntry.parentId);
+    if (!file) return undefined;
+
+    return {
+      manager: snapshot,
+      file,
+      id: snapshot.getSessionId(),
+      parentSessionFile,
+      parentSessionId,
+      sourceLeafId: selectedEntry.parentId,
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 export function createForkedSession(
   ctx: ExtensionCommandContext,
   entryId: string,
 ): string | undefined {
-  const selectedEntry = ctx.sessionManager.getEntry(entryId);
-  if (!selectedEntry || selectedEntry.type !== 'message' || selectedEntry.message.role !== 'user') {
-    return undefined;
-  }
-
-  const manager = ctx.sessionManager as typeof ctx.sessionManager & {
-    createBranchedSession?: (leafId: string) => string | undefined;
-  };
-
-  if (!selectedEntry.parentId) {
-    return createChildSession(ctx);
-  }
-
-  if (!manager.createBranchedSession) {
-    return undefined;
-  }
-
-  return manager.createBranchedSession(selectedEntry.parentId);
+  return createForkedSessionDetails(ctx, entryId)?.file;
 }
 
 export async function selectForkEntry(ctx: ExtensionCommandContext): Promise<string | null> {
@@ -336,8 +714,11 @@ async function launchGhostty(
   ctx: ExtensionCommandContext,
   sessionFile: string | undefined,
   prompt: string,
+  env: NodeJS.ProcessEnv,
+  beforeRun?: (native: NativeSplitDetails) => string | undefined,
 ) {
-  const launch = buildLaunchWrapperArgs(ctx.cwd, sessionFile, prompt);
+  const markerFile = beforeRun?.(buildNativeDetails('ghostty', env));
+  const launch = buildLaunchWrapperArgs(ctx.cwd, sessionFile, prompt, markerFile);
   const startupInput = `${launch.argv.map(shellQuote).join(' ')}\n`;
 
   try {
@@ -351,11 +732,13 @@ async function launchGhostty(
 
     if (result.code !== 0) {
       cleanupPromptTempPath(launch.promptFile);
+      cleanupTempPath(launch.markerFile);
     }
 
     return result;
   } catch (error) {
     cleanupPromptTempPath(launch.promptFile);
+    cleanupTempPath(launch.markerFile);
     throw error;
   }
 }
@@ -366,8 +749,10 @@ async function launchKitty(
   sessionFile: string | undefined,
   prompt: string,
   env: NodeJS.ProcessEnv,
+  beforeRun?: (native: NativeSplitDetails) => string | undefined,
 ) {
-  const launch = buildLaunchWrapperArgs(ctx.cwd, sessionFile, prompt);
+  const markerFile = beforeRun?.(buildNativeDetails('kitty', env));
+  const launch = buildLaunchWrapperArgs(ctx.cwd, sessionFile, prompt, markerFile);
   const shellPath = env.SHELL || process.env.SHELL || '/bin/sh';
   const wrapperCommand = launch.argv.map(shellQuote).join(' ');
 
@@ -386,11 +771,13 @@ async function launchKitty(
 
     if (result.code !== 0) {
       cleanupPromptTempPath(launch.promptFile);
+      cleanupTempPath(launch.markerFile);
     }
 
     return result;
   } catch (error) {
     cleanupPromptTempPath(launch.promptFile);
+    cleanupTempPath(launch.markerFile);
     throw error;
   }
 }
@@ -499,19 +886,19 @@ async function launchHerdr(
   sessionFile: string | undefined,
   prompt: string,
   env: NodeJS.ProcessEnv,
+  beforeRun?: (native: NativeSplitDetails) => string | undefined,
 ) {
-  const launch = buildLaunchWrapperArgs(ctx.cwd, sessionFile, prompt);
-  const wrapperCommand = launch.argv.map(shellQuote).join(' ');
+  let launch: ReturnType<typeof buildLaunchWrapperArgs> | undefined;
 
   try {
     const listResult = await pi.exec('herdr', ['pane', 'list']);
     if (listResult.code !== 0) {
-      cleanupPromptTempPath(launch.promptFile);
       return listResult;
     }
 
     const focusedPane = parseFocusedHerdrPane(listResult.stdout);
     let newPaneId: string;
+    let target: 'pane' | 'tab';
 
     if (shouldCreateHerdrTab(env)) {
       const createArgs = ['tab', 'create'];
@@ -522,11 +909,11 @@ async function launchHerdr(
 
       const tabResult = await pi.exec('herdr', createArgs);
       if (tabResult.code !== 0) {
-        cleanupPromptTempPath(launch.promptFile);
         return tabResult;
       }
 
       newPaneId = parseCreatedHerdrTabRootPaneId(tabResult.stdout);
+      target = 'tab';
     } else {
       const splitResult = await pi.exec('herdr', [
         'pane',
@@ -539,20 +926,34 @@ async function launchHerdr(
         '--no-focus',
       ]);
       if (splitResult.code !== 0) {
-        cleanupPromptTempPath(launch.promptFile);
         return splitResult;
       }
 
       newPaneId = parseCreatedHerdrPaneId(splitResult.stdout);
+      target = 'pane';
     }
+
+    const markerFile = beforeRun?.({
+      terminal: 'herdr',
+      parent: {
+        pane: focusedPane.paneId,
+        workspace: focusedPane.workspaceId,
+      },
+      child: { pane: newPaneId, target },
+    });
+    launch = buildLaunchWrapperArgs(ctx.cwd, sessionFile, prompt, markerFile);
+    const wrapperCommand = launch.argv.map(shellQuote).join(' ');
+
     const runResult = await pi.exec('herdr', ['pane', 'run', newPaneId, wrapperCommand]);
     if (runResult.code !== 0) {
       cleanupPromptTempPath(launch.promptFile);
+      cleanupTempPath(launch.markerFile);
     }
 
     return runResult;
   } catch (error) {
-    cleanupPromptTempPath(launch.promptFile);
+    cleanupPromptTempPath(launch?.promptFile);
+    cleanupTempPath(launch?.markerFile);
     throw error;
   }
 }
@@ -572,17 +973,18 @@ async function launchSessionInTerminal(
   sessionFile: string | undefined,
   prompt: string,
   env: NodeJS.ProcessEnv,
+  beforeRun?: (native: NativeSplitDetails) => string | undefined,
 ): Promise<LaunchResult> {
   try {
     if (terminal === 'ghostty') {
-      return await launchGhostty(pi, ctx, sessionFile, prompt);
+      return await launchGhostty(pi, ctx, sessionFile, prompt, env, beforeRun);
     }
 
     if (terminal === 'herdr') {
-      return await launchHerdr(pi, ctx, sessionFile, prompt, env);
+      return await launchHerdr(pi, ctx, sessionFile, prompt, env, beforeRun);
     }
 
-    return await launchKitty(pi, ctx, sessionFile, prompt, env);
+    return await launchKitty(pi, ctx, sessionFile, prompt, env, beforeRun);
   } catch (error) {
     return {
       code: 1,
@@ -637,12 +1039,65 @@ function notifyLaunchSuccess(
   }
 }
 
+function notifySplitLaunchSuccess(
+  ctx: ExtensionCommandContext,
+  marker: PendingParentMarker | undefined,
+  fallbackMessage: string,
+  wasBusy: boolean,
+): void {
+  if (marker) {
+    notifySplitMarker(ctx, marker.data);
+  } else {
+    ctx.ui.notify(fallbackMessage, 'info');
+  }
+
+  if (wasBusy) {
+    ctx.ui.notify(
+      'Forked from current committed state (in-flight turn continues in original session).',
+      'info',
+    );
+  }
+}
+
+function recordParentMarker(
+  pi: ExtensionAPI,
+  ctx: ExtensionCommandContext,
+  pendingParentMarkers: PendingParentMarker[],
+  marker: PendingParentMarker | undefined,
+  wasBusy: boolean,
+): void {
+  if (!marker) return;
+
+  if (wasBusy) {
+    pendingParentMarkers.push(marker);
+    return;
+  }
+
+  pi.appendEntry(marker.customType, marker.data);
+  labelSplitMarker(pi, ctx, marker.data);
+}
+
+function flushPendingParentMarkers(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  pendingParentMarkers: PendingParentMarker[],
+): void {
+  while (pendingParentMarkers.length > 0) {
+    const marker = pendingParentMarkers.shift();
+    if (marker) {
+      pi.appendEntry(marker.customType, marker.data);
+      labelSplitMarker(pi, ctx, marker.data);
+    }
+  }
+}
+
 async function runSplitForkForTerminal(
   terminal: SupportedTerminal,
   pi: ExtensionAPI,
   args: string,
   ctx: ExtensionCommandContext,
   env: NodeJS.ProcessEnv,
+  pendingParentMarkers: PendingParentMarker[],
 ): Promise<void> {
   if (!ctx.hasUI) {
     ctx.ui.notify('split-fork requires interactive mode', 'error');
@@ -652,29 +1107,53 @@ async function runSplitForkForTerminal(
   const wasBusy = !ctx.isIdle();
   const prompt = args.trim();
 
-  let sessionFile: string | undefined;
+  let splitSession: CreatedSplitSession | undefined;
   if (prompt) {
-    sessionFile = createForkedSessionFromCurrentLeaf(ctx);
+    splitSession = createForkedSessionFromCurrentLeafDetails(ctx);
   } else {
     const selectedEntryId = await selectForkEntry(ctx);
     if (!selectedEntryId) return;
-    sessionFile = createForkedSession(ctx, selectedEntryId);
+    splitSession = createForkedSessionDetails(ctx, selectedEntryId);
   }
 
-  if (!sessionFile) {
+  if (!splitSession) {
     ctx.ui.notify('Failed to create forked session', 'error');
     return;
   }
 
-  const result = await launchSessionInTerminal(terminal, pi, ctx, sessionFile, prompt, env);
-  const successMessage = `Forked new session: ${formatSessionLaunchHint(sessionFile)}${prompt ? ' and sent prompt' : ''}`;
+  let parentMarker: PendingParentMarker | undefined;
+  const result = await launchSessionInTerminal(
+    terminal,
+    pi,
+    ctx,
+    splitSession.file,
+    prompt,
+    env,
+    (native) => {
+      const marker = createSplitMarkerPair(
+        splitSession,
+        'split-fork',
+        prompt ? 'raw' : 'none',
+        native,
+      );
+      parentMarker = { customType: marker.customType, data: marker.parent };
+      return prepareChildMarkerSeed(splitSession, marker.customType, marker.child);
+    },
+  );
+  augmentParentMarkerFromLaunchResult(terminal, parentMarker, result);
+  const successMessage = `Forked new session: ${formatSessionLaunchHint(splitSession.file)}${prompt ? ' and sent prompt' : ''}`;
   if (
-    notifyLaunchFailure(result, terminal, ctx, { sessionFile, hadStartupInput: prompt.length > 0 })
+    notifyLaunchFailure(result, terminal, ctx, {
+      sessionFile: splitSession.file,
+      hadStartupInput: prompt.length > 0,
+    })
   ) {
     return;
   }
 
-  notifyLaunchSuccess(ctx, successMessage, wasBusy);
+  recordParentMarker(pi, ctx, pendingParentMarkers, parentMarker, wasBusy);
+
+  notifySplitLaunchSuccess(ctx, parentMarker, successMessage, wasBusy);
 }
 
 async function runSplitResumeForTerminal(
@@ -706,6 +1185,7 @@ async function runSplitHandoffForTerminal(
   args: string,
   ctx: ExtensionCommandContext,
   env: NodeJS.ProcessEnv,
+  pendingParentMarkers: PendingParentMarker[],
 ): Promise<void> {
   if (!ctx.hasUI) {
     ctx.ui.notify('split-handoff requires interactive mode', 'error');
@@ -718,6 +1198,8 @@ async function runSplitHandoffForTerminal(
     return;
   }
 
+  const wasBusy = !ctx.isIdle();
+  const sourceLeafId = getNearestSplitSourceEntryId(ctx);
   const generatedPrompt = await generateHandoffPrompt(goal, ctx);
   if (generatedPrompt === null) {
     ctx.ui.notify('Cancelled', 'info');
@@ -730,24 +1212,39 @@ async function runSplitHandoffForTerminal(
     return;
   }
 
-  const sessionFile = createChildSession(ctx);
-  if (!sessionFile) {
+  const splitSession = createChildSessionDetails(ctx, sourceLeafId);
+  if (!splitSession) {
     ctx.ui.notify('Failed to create handoff session', 'error');
     return;
   }
 
-  const result = await launchSessionInTerminal(terminal, pi, ctx, sessionFile, editedPrompt, env);
-  const successMessage = `Handoff session ready: ${formatSessionLaunchHint(sessionFile)}`;
+  let parentMarker: PendingParentMarker | undefined;
+  const result = await launchSessionInTerminal(
+    terminal,
+    pi,
+    ctx,
+    splitSession.file,
+    editedPrompt,
+    env,
+    (native) => {
+      const marker = createSplitMarkerPair(splitSession, 'split-handoff', 'handoff', native);
+      parentMarker = { customType: marker.customType, data: marker.parent };
+      return prepareChildMarkerSeed(splitSession, marker.customType, marker.child);
+    },
+  );
+  augmentParentMarkerFromLaunchResult(terminal, parentMarker, result);
+  const successMessage = `Handoff session ready: ${formatSessionLaunchHint(splitSession.file)}`;
   if (
     notifyLaunchFailure(result, terminal, ctx, {
-      sessionFile,
+      sessionFile: splitSession.file,
       hadStartupInput: editedPrompt.length > 0,
     })
   ) {
     return;
   }
 
-  notifyLaunchSuccess(ctx, successMessage, false);
+  recordParentMarker(pi, ctx, pendingParentMarkers, parentMarker, wasBusy);
+  notifySplitLaunchSuccess(ctx, parentMarker, successMessage, false);
 }
 
 async function runSplitTreeForTerminal(
@@ -781,13 +1278,19 @@ export async function piNativeSplitExtension(
   pi: ExtensionAPI,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<void> {
+  installChildMarkerHandler(pi, env);
+
   const terminal = detectTerminal(env);
   if (!terminal) return;
+
+  const pendingParentMarkers: PendingParentMarker[] = [];
+  pi.on?.('agent_end', (_event, ctx) => flushPendingParentMarkers(pi, ctx, pendingParentMarkers));
 
   pi.registerCommand('split-fork', {
     description:
       'Fork this session into a new terminal-native split or window. Usage: /split-fork [optional prompt]',
-    handler: async (args, ctx) => runSplitForkForTerminal(terminal, pi, args, ctx, env),
+    handler: async (args, ctx) =>
+      runSplitForkForTerminal(terminal, pi, args, ctx, env, pendingParentMarkers),
   });
 
   pi.registerCommand('split-resume', {
@@ -797,7 +1300,8 @@ export async function piNativeSplitExtension(
 
   pi.registerCommand('split-handoff', {
     description: 'Generate a handoff and continue it in a new terminal-native split or window',
-    handler: async (args, ctx) => runSplitHandoffForTerminal(terminal, pi, args, ctx, env),
+    handler: async (args, ctx) =>
+      runSplitHandoffForTerminal(terminal, pi, args, ctx, env, pendingParentMarkers),
   });
 
   pi.registerCommand('split-tree', {

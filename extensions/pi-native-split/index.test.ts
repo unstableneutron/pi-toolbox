@@ -35,11 +35,13 @@ import {
   detectTerminal,
   generateHandoffPrompt,
   getLauncherScriptPath,
+  getNearestSplitSourceEntryId,
   getUserMessagesForForking,
   piNativeSplitExtension as registerPiNativeSplit,
 } from './index';
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -56,11 +58,29 @@ function extractPromptFilePath(command: string): string | undefined {
   return command.match(/\/[^'\n]*pi-native-split-[^'\n]*\/prompt\.txt/)?.[0];
 }
 
+function extractSessionFilePath(command: string): string | undefined {
+  return command.match(/\/[^'\n]*\.jsonl/)?.[0];
+}
+
+function extractMarkerFilePath(command: string): string | undefined {
+  return command.match(/\/[^'\n]*pi-native-split-marker-[^'\n]*\/marker\.json/)?.[0];
+}
+
 function createCommandHarness(execResult: { code: number; stdout?: string; stderr?: string }) {
   const registerCommand = vi.fn();
+  const eventHandlers = new Map<string, Function[]>();
+  const appendEntry = vi.fn();
+  const setLabel = vi.fn();
   const exec = vi.fn().mockResolvedValue(execResult);
   const pi = {
+    appendEntry,
     exec,
+    on: vi.fn((eventName: string, handler: Function) => {
+      const handlers = eventHandlers.get(eventName) ?? [];
+      handlers.push(handler);
+      eventHandlers.set(eventName, handlers);
+    }),
+    setLabel,
     registerCommand: vi.fn(
       (name: string, options: { handler: (args: string, ctx: any) => Promise<void> }) => {
         registerCommand(name, options);
@@ -69,30 +89,30 @@ function createCommandHarness(execResult: { code: number; stdout?: string; stder
   } as any;
 
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-native-split-'));
-  const sessionFile = path.join(tempDir, 'sessions', 'current.jsonl');
-  const branchedSessionFile = path.join(
-    tempDir,
-    'sessions',
-    '2026-04-14T00-00-00-000Z_12345678-1234-1234-1234-123456789abc.jsonl',
-  );
-  fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
-  fs.writeFileSync(sessionFile, '');
+  const realSessionManager = SessionManager.create(tempDir, path.join(tempDir, 'sessions'));
+  const firstUserId = realSessionManager.appendMessage({
+    role: 'user',
+    content: 'Initial request',
+    timestamp: Date.now(),
+  } as any);
+  const assistantId = realSessionManager.appendMessage({
+    role: 'assistant',
+    content: 'Previous response',
+    timestamp: Date.now(),
+  } as any);
+  const userId = realSessionManager.appendMessage({
+    role: 'user',
+    content: 'Investigate split fork',
+    timestamp: Date.now(),
+  } as any);
+  const sessionFile = realSessionManager.getSessionFile()!;
+  const entries = realSessionManager.getEntries();
+  const assistantEntry = entries.find((entry) => entry.id === assistantId)!;
+  const userEntry = entries.find((entry) => entry.id === userId)!;
 
   const notify = vi.fn();
-  const custom = vi.fn().mockResolvedValue('user-1');
+  const custom = vi.fn().mockResolvedValue(userId);
   const editor = vi.fn().mockResolvedValue('Edited handoff prompt');
-  const createBranchedSession = vi.fn(() => branchedSessionFile);
-  const userEntry = {
-    type: 'message',
-    id: 'user-1',
-    parentId: 'assistant-0',
-    message: { role: 'user', content: 'Investigate split fork' },
-  };
-  const assistantEntry = {
-    type: 'message',
-    id: 'assistant-0',
-    message: { role: 'assistant', content: 'Previous response' },
-  };
 
   const ctx = {
     cwd: tempDir,
@@ -104,28 +124,45 @@ function createCommandHarness(execResult: { code: number; stdout?: string; stder
     },
     sessionManager: {
       getSessionFile: () => sessionFile,
-      getEntries: () => [assistantEntry, userEntry],
-      getEntry: (id: string) => (id === 'user-1' ? userEntry : undefined),
+      getEntries: () => realSessionManager.getEntries(),
+      getEntry: (id: string) => realSessionManager.getEntry(id),
+      getHeader: () => realSessionManager.getHeader(),
+      getLabel: (id: string) => realSessionManager.getLabel(id),
+      getLeafId: () => realSessionManager.getLeafId(),
       getSessionDir: () => path.dirname(sessionFile),
-      getBranch: () => [assistantEntry, userEntry],
-      createBranchedSession,
+      getSessionId: () => realSessionManager.getSessionId(),
+      getBranch: () => realSessionManager.getBranch(),
     },
     ui: { custom, editor, notify },
   } as any;
 
   return {
-    branchedSessionFile,
-    createBranchedSession,
+    appendEntry,
+    assistantEntry,
     ctx,
     custom,
     editor,
+    eventHandlers,
     exec,
+    firstUserId,
     notify,
     pi,
+    realSessionManager,
     registerCommand,
     sessionFile,
+    setLabel,
     tempDir,
+    userEntry,
   };
+}
+
+function readJsonl(file: string): any[] {
+  return fs
+    .readFileSync(file, 'utf8')
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
 }
 
 describe('detectTerminal', () => {
@@ -321,7 +358,13 @@ exit 0
     const launch = buildLaunchWrapperArgs(cwd, '/tmp/fork.jsonl', 'investigate this');
     const result = spawnSync(
       '/bin/sh',
-      [getLauncherScriptPath(), cwd, '/tmp/fork.jsonl', launch.promptFile!],
+      [
+        getLauncherScriptPath(),
+        cwd,
+        '/tmp/fork.jsonl',
+        launch.promptFile!,
+        '__PI_NATIVE_SPLIT_EMPTY__',
+      ],
       {
         env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH || ''}` },
       },
@@ -351,11 +394,204 @@ exit 0
       '/tmp/project',
       '/tmp/session.jsonl',
       launch.promptFile!,
+      '__PI_NATIVE_SPLIT_EMPTY__',
     ]);
     expect(launch.promptFile).toBeDefined();
     expect(fs.readFileSync(launch.promptFile!, 'utf8')).toBe('line one\nline two');
 
     fs.rmSync(path.dirname(launch.promptFile!), { recursive: true, force: true });
+  });
+
+  test('launcher script exports marker seed path for the child pi process', () => {
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-native-split-marker-env-'));
+    const cwd = path.join(rootDir, 'cwd');
+    const fakeBin = path.join(rootDir, 'bin');
+    const fakePi = path.join(fakeBin, 'pi');
+    const envFile = path.join(rootDir, 'marker-env.txt');
+    const markerFile = path.join(rootDir, 'marker.json');
+
+    fs.mkdirSync(cwd, { recursive: true });
+    fs.mkdirSync(fakeBin, { recursive: true });
+    fs.writeFileSync(markerFile, '{}', 'utf8');
+    fs.writeFileSync(
+      fakePi,
+      `#!/bin/sh\nprintf '%s\n' "$PI_NATIVE_SPLIT_MARKER_FILE" > "${envFile}"\nexit 0\n`,
+      'utf8',
+    );
+    fs.chmodSync(fakePi, 0o755);
+
+    const result = spawnSync(
+      '/bin/sh',
+      [getLauncherScriptPath(), cwd, '/tmp/fork.jsonl', '__PI_NATIVE_SPLIT_EMPTY__', markerFile],
+      {
+        env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH || ''}` },
+      },
+    );
+
+    expect(result.status).toBe(0);
+    expect(fs.readFileSync(envFile, 'utf8').trim()).toBe(markerFile);
+
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  });
+
+  test('child session_start marker records Kitty child environment details', async () => {
+    vi.useFakeTimers();
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-native-split-child-kitty-'));
+    const markerFile = path.join(rootDir, 'marker.json');
+    const appendEntry = vi.fn();
+    const notify = vi.fn();
+    const setLabel = vi.fn();
+    const eventHandlers = new Map<string, Function[]>();
+    const pi = {
+      appendEntry,
+      on: vi.fn((eventName: string, handler: Function) => {
+        const handlers = eventHandlers.get(eventName) ?? [];
+        handlers.push(handler);
+        eventHandlers.set(eventName, handlers);
+      }),
+      registerCommand: vi.fn(),
+      setLabel,
+    } as any;
+    const seed = {
+      customType: 'pi-native-split.split-fork.child-session',
+      data: {
+        v: 1,
+        id: 'boundary',
+        side: 'child',
+        kind: 'split-fork',
+        at: '2026-06-04T00:00:00.000Z',
+        parent: { id: 'parent', file: '/tmp/parent.jsonl', leaf: 'leaf' },
+        child: { id: 'child-session', file: '/tmp/child.jsonl' },
+        prompt: 'raw',
+        native: { terminal: 'kitty', parent: { window: '18' } },
+      },
+    };
+    fs.mkdirSync(rootDir, { recursive: true });
+    fs.writeFileSync(markerFile, JSON.stringify(seed), 'utf8');
+
+    await registerPiNativeSplit(pi, {
+      TERM_PROGRAM: 'kitty',
+      KITTY_WINDOW_ID: '19',
+      KITTY_PID: '1817',
+      KITTY_LISTEN_ON: 'unix:/tmp/kitty-1817.sock',
+      PI_NATIVE_SPLIT_MARKER_FILE: markerFile,
+    } as NodeJS.ProcessEnv);
+
+    await eventHandlers.get('session_start')![0]!(
+      { type: 'session_start' },
+      {
+        hasUI: true,
+        sessionManager: {
+          getEntry: (id: string) =>
+            id === 'leaf'
+              ? { id, type: 'message', message: { role: 'user', content: 'source' } }
+              : undefined,
+          getLabel: () => undefined,
+          getLeafId: () => 'marker-entry',
+        },
+        ui: { notify },
+      },
+    );
+
+    expect(appendEntry).toHaveBeenCalledWith(
+      seed.customType,
+      expect.objectContaining({
+        native: expect.objectContaining({
+          terminal: 'kitty',
+          child: expect.objectContaining({
+            window: '19',
+            pid: '1817',
+            listenOn: 'unix:/tmp/kitty-1817.sock',
+          }),
+        }),
+      }),
+    );
+    expect(setLabel).toHaveBeenCalledWith('leaf', 'split-fork parent ← parent');
+    expect(notify).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(100);
+    expect(notify).toHaveBeenCalledWith('⇄ split-fork via kitty\nparent ← parent', 'info');
+    expect(fs.existsSync(markerFile)).toBe(false);
+
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  });
+
+  test('child session_start marker records Herdr child environment details', async () => {
+    vi.useFakeTimers();
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-native-split-child-herdr-'));
+    const markerFile = path.join(rootDir, 'marker.json');
+    const appendEntry = vi.fn();
+    const notify = vi.fn();
+    const setLabel = vi.fn();
+    const eventHandlers = new Map<string, Function[]>();
+    const pi = {
+      appendEntry,
+      on: vi.fn((eventName: string, handler: Function) => {
+        const handlers = eventHandlers.get(eventName) ?? [];
+        handlers.push(handler);
+        eventHandlers.set(eventName, handlers);
+      }),
+      registerCommand: vi.fn(),
+      setLabel,
+    } as any;
+    const seed = {
+      customType: 'pi-native-split.split-fork.child-session',
+      data: {
+        v: 1,
+        id: 'boundary',
+        side: 'child',
+        kind: 'split-fork',
+        at: '2026-06-04T00:00:00.000Z',
+        parent: { id: 'parent', file: '/tmp/parent.jsonl', leaf: 'leaf' },
+        child: { id: 'child-session', file: '/tmp/child.jsonl' },
+        prompt: 'raw',
+        native: { terminal: 'herdr', parent: { pane: 'p_43' } },
+      },
+    };
+    fs.mkdirSync(rootDir, { recursive: true });
+    fs.writeFileSync(markerFile, JSON.stringify(seed), 'utf8');
+
+    await registerPiNativeSplit(pi, {
+      HERDR_ENV: '1',
+      HERDR_PANE_ID: 'p_44',
+      HERDR_SOCKET_PATH: '/Users/thinh/.config/herdr/herdr.sock',
+      PI_NATIVE_SPLIT_MARKER_FILE: markerFile,
+    } as NodeJS.ProcessEnv);
+
+    await eventHandlers.get('session_start')![0]!(
+      { type: 'session_start' },
+      {
+        hasUI: true,
+        sessionManager: {
+          getEntry: (id: string) =>
+            id === 'leaf'
+              ? { id, type: 'message', message: { role: 'user', content: 'source' } }
+              : undefined,
+          getLabel: () => undefined,
+          getLeafId: () => 'marker-entry',
+        },
+        ui: { notify },
+      },
+    );
+
+    expect(appendEntry).toHaveBeenCalledWith(
+      seed.customType,
+      expect.objectContaining({
+        native: expect.objectContaining({
+          terminal: 'herdr',
+          child: expect.objectContaining({
+            pane: 'p_44',
+            socket: '/Users/thinh/.config/herdr/herdr.sock',
+          }),
+        }),
+      }),
+    );
+    expect(setLabel).toHaveBeenCalledWith('leaf', 'split-fork parent ← parent');
+    expect(notify).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(100);
+    expect(notify).toHaveBeenCalledWith('⇄ split-fork via herdr\nparent ← parent', 'info');
+    expect(fs.existsSync(markerFile)).toBe(false);
+
+    fs.rmSync(rootDir, { recursive: true, force: true });
   });
 
   test('getUserMessagesForForking matches Pi fork selector semantics', () => {
@@ -379,50 +615,130 @@ exit 0
     ]);
   });
 
-  test('createForkedSession delegates to createBranchedSession for the selected entry parent', async () => {
-    const createBranchedSession = vi.fn(() => '/tmp/forked.jsonl');
+  test('createForkedSession branches with an isolated manager and leaves the parent unchanged', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-native-split-helper-'));
+    const parent = SessionManager.create(tempDir, path.join(tempDir, 'sessions'));
+    parent.appendMessage({ role: 'user', content: 'root', timestamp: Date.now() } as any);
+    const assistantId = parent.appendMessage({
+      role: 'assistant',
+      content: 'answer',
+      timestamp: Date.now(),
+    } as any);
+    const userId = parent.appendMessage({
+      role: 'user',
+      content: 'next',
+      timestamp: Date.now(),
+    } as any);
+    const parentFile = parent.getSessionFile()!;
+    const parentId = parent.getSessionId();
+    const entries = parent.getEntries();
     const ctx = {
-      cwd: '/tmp',
+      cwd: tempDir,
       sessionManager: {
-        getEntry: () => ({
-          type: 'message',
-          id: 'user-1',
-          parentId: 'assistant-0',
-          message: { role: 'user', content: 'hello' },
-        }),
-        createBranchedSession,
-        getSessionDir: () => '/tmp/sessions',
-        getSessionFile: () => '/tmp/sessions/current.jsonl',
+        getEntry: (id: string) => entries.find((entry) => entry.id === id),
+        getSessionDir: () => path.dirname(parentFile),
+        getSessionFile: () => parentFile,
+        getSessionId: () => parentId,
       },
     } as any;
 
-    expect(createForkedSession(ctx, 'user-1')).toBe('/tmp/forked.jsonl');
-    expect(createBranchedSession).toHaveBeenCalledWith('assistant-0');
+    const forked = createForkedSession(ctx, userId);
+
+    expect(forked).toBeDefined();
+    expect(forked).not.toBe(parentFile);
+    expect(parent.getSessionFile()).toBe(parentFile);
+    expect(parent.getSessionId()).toBe(parentId);
+    expect(readJsonl(forked!).map((entry) => entry.id)).toContain(assistantId);
+
+    fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
   test('createForkedSession creates a fresh child session when selecting the root user message', async () => {
-    const newSession = vi.fn(() => '/tmp/new-session.jsonl');
-    const createSpy = vi.spyOn(SessionManager, 'create').mockReturnValue({ newSession } as any);
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-native-split-root-'));
+    const parent = SessionManager.create(tempDir, path.join(tempDir, 'sessions'));
+    const rootId = parent.appendMessage({
+      role: 'user',
+      content: 'root',
+      timestamp: Date.now(),
+    } as any);
+    const parentFile = parent.getSessionFile()!;
+    const entries = parent.getEntries();
     const ctx = {
-      cwd: '/tmp/project',
+      cwd: tempDir,
       sessionManager: {
-        getEntry: () => ({
-          type: 'message',
-          id: 'user-root',
-          parentId: null,
-          message: { role: 'user', content: 'root' },
-        }),
-        getSessionDir: () => '/tmp/sessions',
-        getSessionFile: () => '/tmp/sessions/current.jsonl',
+        getEntry: (id: string) => entries.find((entry) => entry.id === id),
+        getLeafId: () => parent.getLeafId(),
+        getSessionDir: () => path.dirname(parentFile),
+        getSessionFile: () => parentFile,
+        getSessionId: () => parent.getSessionId(),
       },
     } as any;
 
-    expect(createForkedSession(ctx, 'user-root')).toBe('/tmp/new-session.jsonl');
-    expect(createSpy).toHaveBeenCalledWith('/tmp/project', '/tmp/sessions');
-    expect(newSession).toHaveBeenCalledWith({ parentSession: '/tmp/sessions/current.jsonl' });
+    const child = createForkedSession(ctx, rootId);
+
+    expect(child).toBeDefined();
+    expect(child).not.toBe(parentFile);
+
+    fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  test('createForkedSession returns undefined when private branching api is unavailable', () => {
+  test('getNearestSplitSourceEntryId skips custom and label entries', () => {
+    const entries = [
+      { id: 'user-root', type: 'message', message: { role: 'user', content: 'root' } },
+      {
+        id: 'assistant-answer',
+        parentId: 'user-root',
+        type: 'message',
+        message: { role: 'assistant', content: 'answer' },
+      },
+      {
+        id: 'custom-marker',
+        parentId: 'assistant-answer',
+        type: 'custom',
+        customType: 'pi-native-split.split-fork.child',
+      },
+      { id: 'label-entry', parentId: 'custom-marker', type: 'label', targetId: 'assistant-answer' },
+    ];
+    const ctx = {
+      sessionManager: {
+        getEntry: (id: string) => entries.find((entry) => entry.id === id),
+        getLeafId: () => 'label-entry',
+      },
+    } as any;
+
+    expect(getNearestSplitSourceEntryId(ctx)).toBe('assistant-answer');
+  });
+
+  test('getNearestSplitSourceEntryId skips tool-only assistant messages', () => {
+    const entries = [
+      { id: 'user-root', type: 'message', message: { role: 'user', content: 'root' } },
+      {
+        id: 'tool-only-assistant',
+        parentId: 'user-root',
+        type: 'message',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'toolCall', name: 'bash', id: 'call-1', arguments: {} }],
+        },
+      },
+      {
+        id: 'tool-result',
+        parentId: 'tool-only-assistant',
+        type: 'message',
+        message: { role: 'toolResult' },
+      },
+    ];
+    const ctx = {
+      sessionManager: {
+        getEntry: (id: string) => entries.find((entry) => entry.id === id),
+        getLeafId: () => 'tool-result',
+      },
+    } as any;
+
+    expect(getNearestSplitSourceEntryId(ctx)).toBe('user-root');
+  });
+
+  test('createForkedSession returns undefined when the target parent is not in the persisted session', () => {
     const ctx = {
       cwd: '/tmp',
       sessionManager: {
@@ -473,7 +789,6 @@ describe('split commands', () => {
     await handler('', harness.ctx);
 
     expect(harness.custom).toHaveBeenCalledTimes(1);
-    expect(harness.createBranchedSession).toHaveBeenCalledWith('assistant-0');
 
     expect(harness.exec).toHaveBeenCalledWith(
       'kitten',
@@ -491,6 +806,40 @@ describe('split commands', () => {
 
     const wrapperCommand = String(harness.exec.mock.calls[0][1].at(-1));
     expect(wrapperCommand).toContain(getLauncherScriptPath());
+
+    const childSessionFile = extractSessionFilePath(wrapperCommand);
+    expect(childSessionFile).toBeDefined();
+    expect(childSessionFile).not.toBe(harness.sessionFile);
+    const markerFile = extractMarkerFilePath(wrapperCommand);
+    expect(markerFile).toBeDefined();
+    const childMarker = JSON.parse(fs.readFileSync(markerFile!, 'utf8'));
+    expect(childMarker.customType).toContain('pi-native-split.split-fork.');
+    expect(childMarker.data).toEqual(
+      expect.objectContaining({
+        v: 1,
+        side: 'child',
+        kind: 'split-fork',
+        parent: expect.objectContaining({
+          id: harness.realSessionManager.getSessionId(),
+          file: harness.sessionFile,
+          leaf: harness.assistantEntry.id,
+        }),
+        child: expect.objectContaining({ file: childSessionFile }),
+        prompt: 'none',
+        native: expect.objectContaining({
+          terminal: 'kitty',
+          parent: expect.objectContaining({ window: '1' }),
+        }),
+      }),
+    );
+    expect(harness.appendEntry).toHaveBeenCalledWith(
+      childMarker.customType,
+      expect.objectContaining({
+        id: childMarker.data.id,
+        side: 'parent',
+        child: expect.objectContaining({ file: childSessionFile }),
+      }),
+    );
   });
 
   test('split-fork with a prompt skips the selector, branches from the current leaf, and forwards the prompt', async () => {
@@ -506,7 +855,10 @@ describe('split commands', () => {
     await handler("don't stop", harness.ctx);
 
     expect(harness.custom).not.toHaveBeenCalled();
-    expect(harness.createBranchedSession).toHaveBeenCalledWith('user-1');
+    expect(harness.realSessionManager.getSessionFile()).toBe(harness.sessionFile);
+    expect(harness.realSessionManager.getSessionId()).toBe(
+      JSON.parse(fs.readFileSync(harness.sessionFile, 'utf8').split('\n')[0]!).id,
+    );
 
     const wrapperCommand = String(harness.exec.mock.calls[0][1].at(-1));
     const promptFile = extractPromptFilePath(wrapperCommand);
@@ -515,9 +867,85 @@ describe('split commands', () => {
     expect(wrapperCommand).not.toContain("don't stop");
     fs.rmSync(path.dirname(promptFile!), { recursive: true, force: true });
 
+    const childSessionFile = extractSessionFilePath(wrapperCommand);
+    expect(childSessionFile).toBeDefined();
+    const markerFile = extractMarkerFilePath(wrapperCommand);
+    expect(markerFile).toBeDefined();
+    const childMarker = JSON.parse(fs.readFileSync(markerFile!, 'utf8'));
+    expect(childMarker.data).toEqual(
+      expect.objectContaining({
+        side: 'child',
+        kind: 'split-fork',
+        parent: expect.objectContaining({ leaf: harness.userEntry.id }),
+        prompt: 'raw',
+      }),
+    );
+
     expect(harness.notify).toHaveBeenCalledWith(
-      expect.stringContaining('Forked new session: pi --session '),
+      `⇄ split-fork via kitty\nchild → ${childMarker.data.child.id}`,
       'info',
+    );
+    expect(harness.setLabel).toHaveBeenCalledWith(
+      harness.userEntry.id,
+      `split-fork child → ${childMarker.data.child.id}`,
+    );
+  });
+
+  test('split-fork with a prompt skips trailing custom entries when choosing the source', async () => {
+    const harness = createCommandHarness({ code: 0, stdout: '', stderr: '' });
+    harness.realSessionManager.appendCustomEntry('pi-native-split.previous-marker', {});
+
+    await registerPiNativeSplit(harness.pi, {
+      TERM_PROGRAM: 'kitty',
+      KITTY_WINDOW_ID: '1',
+      SHELL: '/bin/zsh',
+    } as NodeJS.ProcessEnv);
+
+    const handler = getRegisteredHandler(harness.registerCommand, 'split-fork');
+    await handler('continue from meaningful entry', harness.ctx);
+
+    const wrapperCommand = String(harness.exec.mock.calls[0][1].at(-1));
+    const markerFile = extractMarkerFilePath(wrapperCommand);
+    expect(markerFile).toBeDefined();
+    const childMarker = JSON.parse(fs.readFileSync(markerFile!, 'utf8'));
+
+    expect(childMarker.data.parent.leaf).toBe(harness.userEntry.id);
+    expect(harness.setLabel).toHaveBeenCalledWith(
+      harness.userEntry.id,
+      `split-fork child → ${childMarker.data.child.id}`,
+    );
+  });
+
+  test('split-fork queues the parent marker until agent_end when the parent is busy', async () => {
+    const harness = createCommandHarness({ code: 0, stdout: '', stderr: '' });
+    harness.ctx.isIdle = () => false;
+
+    await registerPiNativeSplit(harness.pi, {
+      TERM_PROGRAM: 'kitty',
+      KITTY_WINDOW_ID: '1',
+      SHELL: '/bin/zsh',
+    } as NodeJS.ProcessEnv);
+
+    const handler = getRegisteredHandler(harness.registerCommand, 'split-fork');
+    await handler('continue separately', harness.ctx);
+
+    expect(harness.appendEntry).not.toHaveBeenCalled();
+    const agentEndHandlers = harness.eventHandlers.get('agent_end') ?? [];
+    expect(agentEndHandlers).toHaveLength(1);
+
+    await agentEndHandlers[0]!({ type: 'agent_end', messages: [] }, harness.ctx);
+
+    expect(harness.appendEntry).toHaveBeenCalledWith(
+      expect.stringContaining('pi-native-split.split-fork.'),
+      expect.objectContaining({
+        side: 'parent',
+        kind: 'split-fork',
+        prompt: 'raw',
+      }),
+    );
+    expect(harness.setLabel).toHaveBeenCalledWith(
+      harness.userEntry.id,
+      expect.stringMatching(/^split-fork child → /),
     );
   });
 
@@ -660,8 +1088,22 @@ describe('split commands', () => {
       '1-3',
       expect.stringContaining(getLauncherScriptPath()),
     ]);
+
+    const runCommand = String(harness.exec.mock.calls[2][1][3]);
+    const childSessionFile = extractSessionFilePath(runCommand);
+    expect(childSessionFile).toBeDefined();
+    const markerFile = extractMarkerFilePath(runCommand);
+    expect(markerFile).toBeDefined();
+    const childMarker = JSON.parse(fs.readFileSync(markerFile!, 'utf8'));
+    expect(childMarker.data.native).toEqual(
+      expect.objectContaining({
+        terminal: 'herdr',
+        parent: expect.objectContaining({ pane: '1-2' }),
+        child: expect.objectContaining({ pane: '1-3', target: 'pane' }),
+      }),
+    );
     expect(harness.notify).toHaveBeenCalledWith(
-      expect.stringContaining('Forked new session: pi --session '),
+      `⇄ split-fork via herdr\nchild → ${childMarker.data.child.id}`,
       'info',
     );
   });
@@ -722,12 +1164,12 @@ describe('split commands', () => {
       expect.arrayContaining(['pane', 'split']),
     );
     expect(harness.notify).toHaveBeenCalledWith(
-      expect.stringContaining('Forked new session: pi --session '),
+      expect.stringMatching(/^⇄ split-fork via herdr\nchild → /),
       'info',
     );
   });
 
-  test('split-fork cleans up prompt temp files when Herdr tab creation fails', async () => {
+  test('split-fork does not create prompt temp files before Herdr tab creation succeeds', async () => {
     const harness = createCommandHarness({ code: 0, stdout: '', stderr: '' });
     harness.exec.mockReset();
     harness.exec
@@ -762,8 +1204,7 @@ describe('split commands', () => {
     const handler = getRegisteredHandler(harness.registerCommand, 'split-fork');
     await handler('cleanup me', harness.ctx);
 
-    expect(promptDirs).toHaveLength(1);
-    expect(fs.existsSync(promptDirs[0]!)).toBe(false);
+    expect(promptDirs).toHaveLength(0);
     expect(harness.exec).toHaveBeenCalledTimes(2);
     expect(harness.notify).toHaveBeenCalledWith(
       expect.stringContaining('Failed to launch herdr:'),
@@ -840,8 +1281,7 @@ describe('split commands', () => {
 
   test('split-handoff edits the generated prompt and launches a child session', async () => {
     const harness = createCommandHarness({ code: 0, stdout: '', stderr: '' });
-    const newSession = vi.fn(() => '/tmp/sessions/handoff-target.jsonl');
-    vi.spyOn(SessionManager, 'create').mockReturnValue({ newSession } as any);
+    harness.realSessionManager.appendCustomEntry('pi-native-split.previous-marker', {});
     vi.mocked(complete).mockResolvedValue({
       stopReason: 'stop',
       content: [{ type: 'text', text: 'Generated handoff prompt' }],
@@ -863,27 +1303,46 @@ describe('split commands', () => {
     await handler('continue implementation', harness.ctx);
 
     expect(harness.editor).toHaveBeenCalledWith('Edit handoff prompt', 'Generated handoff prompt');
-    expect(newSession).toHaveBeenCalledWith({ parentSession: harness.sessionFile });
 
     const wrapperCommand = String(harness.exec.mock.calls[0][1].at(-1));
     expect(wrapperCommand).toContain(getLauncherScriptPath());
-    expect(wrapperCommand).toContain('/tmp/sessions/handoff-target.jsonl');
+    const childSessionFile = extractSessionFilePath(wrapperCommand);
+    expect(childSessionFile).toBeDefined();
     const promptFile = extractPromptFilePath(wrapperCommand);
     expect(promptFile).toBeDefined();
     expect(fs.readFileSync(promptFile!, 'utf8')).toBe('Edited handoff prompt');
     expect(wrapperCommand).not.toContain('Edited handoff prompt');
     fs.rmSync(path.dirname(promptFile!), { recursive: true, force: true });
 
+    const markerFile = extractMarkerFilePath(wrapperCommand);
+    expect(markerFile).toBeDefined();
+    const childMarker = JSON.parse(fs.readFileSync(markerFile!, 'utf8'));
+    expect(childMarker.data).toEqual(
+      expect.objectContaining({
+        side: 'child',
+        kind: 'split-handoff',
+        parent: expect.objectContaining({
+          id: harness.realSessionManager.getSessionId(),
+          file: harness.sessionFile,
+          leaf: harness.userEntry.id,
+        }),
+        child: expect.objectContaining({ file: childSessionFile }),
+        prompt: 'handoff',
+      }),
+    );
+
     expect(harness.notify).toHaveBeenCalledWith(
-      expect.stringContaining('Handoff session ready: pi --session '),
+      `⇄ split-handoff via kitty\nchild → ${childMarker.data.child.id}`,
       'info',
+    );
+    expect(harness.setLabel).toHaveBeenCalledWith(
+      harness.userEntry.id,
+      `split-handoff child → ${childMarker.data.child.id}`,
     );
   });
 
   test('split-handoff Ghostty launch uses the wrapper startup command and does not inline prompt text', async () => {
     const harness = createCommandHarness({ code: 0, stdout: '', stderr: '' });
-    const newSession = vi.fn(() => '/tmp/sessions/handoff-target.jsonl');
-    vi.spyOn(SessionManager, 'create').mockReturnValue({ newSession } as any);
     vi.mocked(complete).mockResolvedValue({
       stopReason: 'stop',
       content: [{ type: 'text', text: 'Generated handoff prompt' }],
