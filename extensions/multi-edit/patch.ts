@@ -286,18 +286,28 @@ function summarizeContextMatchFailure(failure: ContextMatchFailure): string {
 // expected and `+` for actual at the same file line. Line numbers
 // repeat on drift pairs so the agent can see both refer to the
 // same file position.
-export function renderContextMatchFailure(failure: ContextMatchFailure): string {
+interface RenderContextMatchFailureOptions {
+  allowFindReplaceSuggestions?: boolean;
+}
+
+export function renderContextMatchFailure(
+  failure: ContextMatchFailure,
+  options: RenderContextMatchFailureOptions = {},
+): string {
   if (failure.kind === 'anchor-not-found') {
     return renderAnchorFailure(failure);
   }
-  return renderContextNotFound(failure);
+  return renderContextNotFound(failure, options);
 }
 
 function padLineNumber(n: number, width: number): string {
   return String(n).padStart(width, ' ');
 }
 
-function renderContextNotFound(failure: ContextMatchFailure): string {
+function renderContextNotFound(
+  failure: ContextMatchFailure,
+  options: RenderContextMatchFailureOptions,
+): string {
   const parts: string[] = [];
   const near = failure.nearestMatch;
 
@@ -325,7 +335,7 @@ function renderContextNotFound(failure: ContextMatchFailure): string {
     parts.push('');
     parts.push('Tip: pattern may have moved or been removed — consider grep or re-read.');
 
-    const suggestion = maybeRenderHunkRewriteSuggestion(failure);
+    const suggestion = maybeRenderHunkRewriteSuggestion(failure, options);
     if (suggestion) {
       parts.push('');
       parts.push(suggestion);
@@ -384,7 +394,7 @@ function renderContextNotFound(failure: ContextMatchFailure): string {
     parts.push(correctedSearch);
   }
 
-  const suggestion = maybeRenderHunkRewriteSuggestion(failure);
+  const suggestion = maybeRenderHunkRewriteSuggestion(failure, options);
   if (suggestion) {
     parts.push('');
     parts.push(suggestion);
@@ -416,7 +426,11 @@ function maybeRenderCorrectedSearchBlock(failure: ContextMatchFailure): string |
   ].join('\n');
 }
 
-function maybeRenderHunkRewriteSuggestion(failure: ContextMatchFailure): string | undefined {
+function maybeRenderHunkRewriteSuggestion(
+  failure: ContextMatchFailure,
+  options: RenderContextMatchFailureOptions = {},
+): string | undefined {
+  if (options.allowFindReplaceSuggestions === false) return undefined;
   if (failure.chunkSource !== 'hunk') return undefined;
   const near = failure.nearestMatch;
   const nearSearch =
@@ -477,6 +491,7 @@ const MAX_RENDERED_FAILURES = 10;
 export function renderPlanFailure(
   statuses: PlanOpStatus[],
   filePath: (path: string) => string = (p) => p,
+  options: RenderContextMatchFailureOptions = {},
 ): string {
   const parts: string[] = [];
   const failed = statuses.filter((s) => !s.wouldApply);
@@ -492,7 +507,9 @@ export function renderPlanFailure(
     parts.push('');
     parts.push(`— ${status.opId} (${status.kind} ${filePath(status.path)}):`);
     parts.push(
-      status.failure ? renderContextMatchFailure(status.failure) : (status.error ?? 'failed'),
+      status.failure
+        ? renderContextMatchFailure(status.failure, options)
+        : (status.error ?? 'failed'),
     );
   }
   if (hidden > 0) {

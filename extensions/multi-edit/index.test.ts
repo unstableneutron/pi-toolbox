@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { visibleWidth } from '@earendil-works/pi-tui';
 
 import multiEditExtension from './index';
 import * as mutationPlanModule from './mutation-plan';
@@ -129,66 +130,22 @@ describe('multi-edit extension', () => {
     );
 
     expect(tools[1].description).toBe(
-      'Apply a Codex-style patch payload. Default to *** FindReplaceOnce: blocks for almost every edit (unique SEARCH/REPLACE). Use *** FindReplaceAll: for deliberate whole-line mass substitutions. Use @@ hunks only for complex coordinated edits that FindReplace would fracture. One payload can mix shapes.',
+      'Apply a patch payload using the syntax advertised by the active multi-edit profile.',
     );
-    expect(tools[1].description).toContain('FindReplaceOnce');
-    expect(tools[1].description).toContain('FindReplaceAll');
-    expect(tools[1].description).toContain('Default to');
+    expect(tools[1].description).not.toContain('FindReplaceOnce');
+    expect(tools[1].description).not.toContain('FindReplaceAll');
+    expect(tools[1].description).not.toContain('Default to');
     expect(tools[1].parameters.properties.patch.description).toContain(
-      'The patch value must be raw patch text only, with no Markdown fences, surrounding prose, or commentary.',
+      'Patch payload. Use the syntax advertised by the active multi-edit profile.',
     );
-    expect(tools[1].parameters.properties.patch.description).toContain(
-      'Use this exact structure: *** Begin Patch / *** End Patch.',
-    );
-    expect(tools[1].parameters.properties.patch.description).toContain(
-      'A pure rename may use *** Update File: followed immediately by *** Move to: with no @@ hunks.',
-    );
-    expect(tools[1].parameters.properties.patch.description).toContain(
-      'For Add File, every content line must start with +.',
-    );
-    expect(tools[1].parameters.properties.patch.description).toContain(
-      'Do not use git/unified diff syntax such as diff --git, ---, +++, or line-number hunks.',
-    );
-    expect(tools[1].parameters.properties.patch.description).toContain(
-      'Use *** End of File when needed for EOF-sensitive changes.',
-    );
-    expect(tools[1].parameters.properties.patch.description).toContain(
-      'stack multiple @@ context headers when needed',
-    );
+    expect(tools[1].parameters.properties.patch.description).not.toContain('FindReplaceOnce');
+    expect(tools[1].parameters.properties.patch.description).not.toContain('FindReplaceAll');
     expect(tools[1].promptGuidelines).toContain(
-      'Use apply_patch with the exact patch envelope: *** Begin Patch ... *** End Patch.',
+      'Follow the active multi-edit profile syntax from the session prompt.',
     );
-    expect(tools[1].promptGuidelines).toContain(
-      'For apply_patch, the patch value must be raw patch text only: no Markdown fences, no prose, no commentary.',
-    );
-    expect(tools[1].promptGuidelines).toContain(
-      'For apply_patch, a rename-only patch may use *** Update File: plus *** Move to: with no @@ hunks.',
-    );
-    expect(tools[1].promptGuidelines).toContain(
-      'For apply_patch, do not use git/unified diff syntax such as diff --git, ---, +++, or line-number hunks.',
-    );
-    expect(tools[1].promptGuidelines).toContain(
-      'In apply_patch *** Update File: blocks, prefer *** FindReplaceOnce: for nearly every edit. Paste the exact text to change into SEARCH and what it should become into REPLACE. Delimiters: <<<<<<< SEARCH / ======= REPLACE / >>>>>>> REPLACE, each on its own line.',
-    );
-    expect(tools[1].promptGuidelines).toContain(
-      'Use apply_patch *** FindReplaceAll: only when you deliberately want every whole-line occurrence replaced. Verify the reported match count.',
-    );
-    expect(tools[1].promptGuidelines).toContain(
-      'Use apply_patch @@ hunks only when you need several coordinated -/+ changes in close proximity that would be awkward to split into separate FindReplaceOnce blocks. Do not reach for @@ for simple single-block rewrites.',
-    );
-    expect(tools[1].promptGuidelines).toContain(
-      'In apply_patch, @@ is a bare marker on its own line. Line numbers are ignored (no @@ -10,7 +10,7 @@). There is no hunk separator — do not insert bare *** lines between chunks.',
-    );
-    // @@ context label is WHOLE-LINE and preserved as context.
-    expect(tools[1].promptGuidelines.some((g: string) => g.includes('WHOLE-LINE match'))).toBe(
-      true,
-    );
-    expect(tools[1].promptGuidelines).toContain(
-      'In apply_patch, all chunks in one *** Update File: block match against the original file state, not against prior chunks within the same block. Split dependent edits into separate blocks or separate apply_patch calls.',
-    );
-    expect(tools[1].promptGuidelines).toContain(
-      'apply_patch may partially apply independent operations. If a partial result reports failed or skipped files, read those files before retrying and avoid rereading applied files unless a specific dependency requires it.',
-    );
+    expect(tools[1].promptGuidelines.join('\n')).not.toContain('FindReplaceOnce');
+    expect(tools[1].promptGuidelines.join('\n')).not.toContain('FindReplaceAll');
+    expect(tools[1].promptGuidelines.join('\n')).not.toContain('@@ markers');
     expect(tools[1].promptGuidelines).not.toContain(
       'Prefer apply_patch for manual code edits, file creation/deletion, and renames when a patch would suffice.',
     );
@@ -229,11 +186,12 @@ describe('multi-edit extension', () => {
       { model: { id: 'gpt-5.4', provider: 'openai' } },
     );
 
-    expect(activeTools).toEqual(['read', 'apply_patch']);
+    expect(activeTools).toEqual(['apply_patch']);
     expect(result.systemPrompt).toContain('Always use apply_patch for manual code edits.');
     expect(result.systemPrompt).toContain('when apply_patch would suffice');
-    expect(result.systemPrompt).toContain('*** FindReplaceOnce:');
-    expect(result.systemPrompt).toContain('*** FindReplaceAll:');
+    expect(result.systemPrompt).not.toContain('*** FindReplaceOnce:');
+    expect(result.systemPrompt).not.toContain('*** FindReplaceAll:');
+    expect(result.systemPrompt).toContain('Update file chunks use @@ context markers');
     expect(result.systemPrompt).not.toContain(
       'Use edit for exact text replacements with { path, edits[] }.',
     );
@@ -241,7 +199,128 @@ describe('multi-edit extension', () => {
     expect(result.systemPrompt).not.toContain('copy/write commands');
   });
 
-  test('disables edit and write for Claude Opus 4 family models', async () => {
+  test('extended profile accepts FindReplace payloads', async () => {
+    const tool = getApplyPatchTool();
+    const cwd = await mkdtemp(join(tmpdir(), 'multi-edit-profile-'));
+    try {
+      await writeFile(join(cwd, 'demo.txt'), 'old\n', 'utf8');
+      const result = await tool.execute(
+        'call-find-replace-extended',
+        {
+          patch: [
+            '*** Begin Patch',
+            '*** Update File: demo.txt',
+            '*** FindReplaceOnce:',
+            '<<<<<<< SEARCH',
+            'old',
+            '======= REPLACE',
+            'new',
+            '>>>>>>> REPLACE',
+            '*** End Patch',
+          ].join('\n'),
+        },
+        undefined,
+        undefined,
+        { cwd, model: { id: 'claude-sonnet-4-6', provider: 'anthropic' } },
+      );
+
+      expect(result.isError).not.toBe(true);
+      await expect(readFile(join(cwd, 'demo.txt'), 'utf8')).resolves.toBe('new\n');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test('rejects FindReplace payloads for codex-compatible apply_patch profiles', async () => {
+    const tool = getApplyPatchTool();
+    const cwd = await mkdtemp(join(tmpdir(), 'multi-edit-profile-'));
+    try {
+      await writeFile(join(cwd, 'demo.txt'), 'old\n', 'utf8');
+      await expect(
+        tool.execute(
+          'call-find-replace',
+          {
+            patch: [
+              '*** Begin Patch',
+              '*** Update File: demo.txt',
+              '*** FindReplaceOnce:',
+              '<<<<<<< SEARCH',
+              'old',
+              '======= REPLACE',
+              'new',
+              '>>>>>>> REPLACE',
+              '*** End Patch',
+            ].join('\n'),
+          },
+          undefined,
+          undefined,
+          { cwd, model: { id: 'gpt-5.4', provider: 'openai' } },
+        ),
+      ).rejects.toThrow(/FindReplaceOnce.*codex-compatible/);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test('rejects malformed FindReplace payloads before parsing for codex-compatible profiles', async () => {
+    const tool = getApplyPatchTool();
+    const cwd = await mkdtemp(join(tmpdir(), 'multi-edit-profile-'));
+    try {
+      await writeFile(join(cwd, 'demo.txt'), 'old\n', 'utf8');
+      await expect(
+        tool.execute(
+          'call-malformed-find-replace',
+          {
+            patch: [
+              '*** Begin Patch',
+              '*** Update File: demo.txt',
+              '*** FindReplaceOnce:',
+              '<<<<<<< SEARCH',
+              'old',
+            ].join('\n'),
+          },
+          undefined,
+          undefined,
+          { cwd, model: { id: 'gpt-5.5', provider: 'openai-codex' } },
+        ),
+      ).rejects.toThrow(/FindReplaceOnce.*codex-compatible/);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test('codex-compatible hunk failures do not suggest FindReplace rewrites', async () => {
+    const tool = getApplyPatchTool();
+    const cwd = await mkdtemp(join(tmpdir(), 'multi-edit-profile-'));
+    try {
+      await writeFile(join(cwd, 'demo.txt'), 'actual\n', 'utf8');
+      const result = await tool.execute(
+        'call-codex-hunk-failure',
+        {
+          patch: [
+            '*** Begin Patch',
+            '*** Update File: demo.txt',
+            '@@',
+            '-expected',
+            '+new',
+            '*** End Patch',
+          ].join('\n'),
+        },
+        undefined,
+        undefined,
+        { cwd, model: { id: 'gpt-5.4', provider: 'openai' } },
+      );
+
+      expect(result.isError).toBe(true);
+      const text = result.content.map((part: { text: string }) => part.text).join('\n');
+      expect(text).not.toContain('FindReplaceOnce');
+      expect(text).not.toContain('Consider rewriting as');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test('keeps all tools enabled for Claude Opus 4 family models', async () => {
     const handlers = new Map<string, Function[]>();
     let activeTools: string[] = ['read', 'edit', 'write', 'apply_patch'];
     const allTools = activeTools.map((name) => ({ name }));
@@ -270,7 +349,7 @@ describe('multi-edit extension', () => {
       { model: { id: 'global.anthropic.claude-opus-4-8', provider: 'devai' } },
     );
 
-    expect(activeTools).toEqual(['read', 'apply_patch']);
+    expect(activeTools).toEqual(['read', 'edit', 'write', 'apply_patch']);
   });
 
   test('keeps edit and write enabled for non-target models', async () => {
@@ -332,7 +411,18 @@ describe('multi-edit extension', () => {
 
     expect(blocked).toEqual({
       block: true,
-      reason: "Tool 'write' is disabled for model 'openai/gpt-5.3-codex'; use apply_patch instead.",
+      reason:
+        "Tool 'write' is disabled for profile 'codex-compatible' on model 'openai/gpt-5.3-codex'; use apply_patch instead.",
+    });
+
+    const readBlocked = await toolCall(
+      { toolName: 'read' },
+      { model: { id: 'gpt-5.3-codex', provider: 'openai' } },
+    );
+    expect(readBlocked).toEqual({
+      block: true,
+      reason:
+        "Tool 'read' is disabled for profile 'codex-compatible' on model 'openai/gpt-5.3-codex'; use apply_patch instead.",
     });
   });
 
@@ -362,6 +452,42 @@ describe('multi-edit extension', () => {
     const rendered = component.render(160).join('\n');
     expect(rendered).toContain('apply_patch  1 operation');
     expect(rendered).toContain('◌ edit   src/foo.ts');
+  });
+
+  test('apply_patch rows never exceed narrow terminal width', () => {
+    const tool = getApplyPatchTool();
+    const component = tool.renderResult(
+      {
+        details: {
+          operations: [
+            {
+              kind: 'edit',
+              path: 'extensions/openai-websocket-responses/index.test.ts',
+              addedLines: 5,
+              removedLines: 0,
+              modifiedBytes: 117,
+              state: 'staging',
+            },
+            {
+              kind: 'edit',
+              path: '',
+              addedLines: 0,
+              removedLines: 0,
+              modifiedBytes: 0,
+              state: 'streaming',
+            },
+          ],
+        },
+      },
+      { isPartial: true, expanded: false },
+      createTheme(),
+      { args: {}, cwd: '/Users/thinh/Projects/pi-toolbox' },
+    );
+
+    const rendered = component.render(28);
+    for (const line of rendered) {
+      expect(visibleWidth(line)).toBeLessThanOrEqual(28);
+    }
   });
 
   test('renderCall keeps previous preview rows during append-only parse regressions', () => {

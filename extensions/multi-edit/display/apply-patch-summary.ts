@@ -210,27 +210,16 @@ function renderRows(
     const statusSuffix = formatStateSuffix(row, theme);
     const metric = statusSuffix ? `${metricBase} · ${statusSuffix}` : metricBase;
     const prefix = `${icon} ${theme.fg('text', action)} `;
-    const minPathWidth = 8;
-    const maxPathWidth = Math.max(
-      minPathWidth,
-      width - visibleWidth(prefix) - visibleWidth(metric) - 2,
+    const availablePathWidth = Math.max(1, width - visibleWidth(prefix) - visibleWidth(metric) - 2);
+    const path = theme.fg(
+      'accent',
+      truncateMiddleToWidth(formatPath(row, cwd), availablePathWidth),
     );
+    const line = `${prefix}${path}  ${metric}`;
 
-    let availablePathWidth = maxPathWidth;
-    let line = '';
-    while (availablePathWidth >= minPathWidth) {
-      const path = theme.fg(
-        'accent',
-        truncateMiddleToWidth(formatPath(row, cwd), availablePathWidth),
-      );
-      line = `${prefix}${path}  ${metric}`;
-      if (width <= 0 || visibleWidth(line) <= width) {
-        break;
-      }
-      availablePathWidth--;
-    }
-
-    lines.push(line);
+    lines.push(
+      width <= 0 || visibleWidth(line) <= width ? line : truncateToWidth(line, width, '…'),
+    );
   }
 
   return lines;

@@ -1,20 +1,24 @@
 {
-  "registerToolOverrides": {
-    "edit": true
+  "profiles": {
+    "default": "extended",
+    "modelProfiles": [
+      {
+        "match": {
+          "includes": ["gpt-5.3", "gpt-5.4", "gpt-5.5"]
+        },
+        "profile": "codex-compatible"
+      }
+    ]
   },
-  "modelToolPolicies": [
-    {
-      "match": ["gpt-5", "claude-opus-4-"],
-      "disable": ["edit", "write"]
-    }
-  ],
-  "enableNativeUserMessageBox": false,
-  "previewLines": 8,
-  "expandedPreviewMaxLines": 4000,
-  "diffViewMode": "auto",
-  "diffSplitMinWidth": 120,
-  "diffCollapsedLines": 24,
-  "diffWordWrap": true,
-  "showTruncationHints": false,
-  "showRtkCompactionHints": false
+  "display": {
+    "enableNativeUserMessageBox": false,
+    "previewLines": 8,
+    "expandedPreviewMaxLines": 4000,
+    "diffViewMode": "auto",
+    "diffSplitMinWidth": 120,
+    "diffCollapsedLines": 24,
+    "diffWordWrap": true,
+    "showTruncationHints": false,
+    "showRtkCompactionHints": false
+  }
 }

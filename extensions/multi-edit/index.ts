@@ -35,6 +35,7 @@ import {
   PatchPlanFailedError,
   renderContextMatchFailure,
   renderPlanFailure,
+  type PatchOperation,
   type PatchPreviewRow,
 } from './patch';
 import { createPatchSession } from './patch-session';
@@ -46,13 +47,24 @@ import {
 import { renderApplyPatchRows } from './display/apply-patch-summary';
 import type { Workspace } from './workspace';
 
-interface ModelToolPolicy {
-  match: string[];
-  disable: string[];
+type ToolProfile = 'extended' | 'codex-compatible';
+type ApplyPatchProfile = ToolProfile;
+
+interface MatchConfig {
+  includes?: string[];
+}
+
+interface ToolProfileModelMatch {
+  match?: MatchConfig;
+  profile?: ToolProfile;
 }
 
 interface ExtensionConfig {
-  modelToolPolicies?: ModelToolPolicy[];
+  profiles?: {
+    default?: ToolProfile;
+    modelProfiles?: ToolProfileModelMatch[];
+  };
+  display?: Record<string, unknown>;
 }
 
 type LazyDiffDetails = EditToolDetails & {
@@ -106,7 +118,59 @@ function materializeLazyDiffDetails(
 
 const EXTENSION_CONFIG = loadExtensionConfig();
 
-function buildApplyPatchPromptAppend(disabledTools: string[] = []): string {
+function buildApplyPatchPromptAppend(
+  disabledTools: string[] = [],
+  profile: ApplyPatchProfile = 'extended',
+): string {
+  if (profile === 'codex-compatible') {
+    return buildCodexCompatibleApplyPatchPromptAppend(disabledTools);
+  }
+  return buildExtendedApplyPatchPromptAppend(disabledTools);
+}
+
+function buildCodexCompatibleApplyPatchPromptAppend(disabledTools: string[] = []): string {
+  const disabled = new Set(disabledTools);
+  const editEnabled = !disabled.has('edit');
+  const editGuidance = editEnabled
+    ? '- Use edit for exact text replacements with { path, edits[] } when a classic edit is more appropriate.\n'
+    : '';
+  const mutationAlternatives = editEnabled ? 'apply_patch or edit' : 'apply_patch';
+
+  return `Always use apply_patch for manual code edits.
+- Prefer apply_patch for file creation, deletion, renames, and other patch-shaped edits when a patch would suffice.
+${editGuidance}- Do not use bash or shell file-mutation commands like cat, tee, cp, or here-docs when ${mutationAlternatives} would suffice.
+
+Codex-compatible apply_patch grammar:
+- Use the exact patch envelope: *** Begin Patch ... *** End Patch.
+- Each operation must start with exactly one header: *** Add File:, *** Delete File:, or *** Update File:.
+- For renames, put *** Move to: immediately after *** Update File:.
+- Update file chunks use @@ context markers followed by lines prefixed with one space for context, - for removals, and + for additions.
+- A bare @@ marker starts an unanchored chunk. @@ <label> is a WHOLE-LINE anchor, not a substring; the anchor line is preserved and the first changed line applies after it.
+- Line-numbered unified-diff headers are not the target syntax. Use a bare @@ marker instead of headers like @@ -10,7 +10,7 @@.
+- For *** Add File: blocks, every file-content line must start with a literal + with NO space after it. +hello is correct; + hello inserts a leading space.
+- Use *** End of File only when a chunk must match the end of the file.
+- Do not use alternate search/replace block syntaxes in this profile.
+
+Other invariants:
+- All chunks within one *** Update File: block match against the ORIGINAL file state — not against earlier chunks' results. If two chunks must depend on each other, split into separate *** Update File: sections or separate apply_patch calls.
+- apply_patch applies valid independent operations and reports failed or skipped operations. After a partial failure, read failed/skipped files before retrying. Do not reread applied files unless a specific dependency requires it.
+- Formatting commands, tests, and read/search commands do not need apply_patch.
+
+Canonical example:
+${'```'}
+*** Begin Patch
+*** Update File: src/service.ts
+@@
+ const DEBUG = true;
+-const VERBOSE = true;
++const VERBOSE = false;
+*** Add File: src/new-service.ts
++export const enabled = true;
+*** End Patch
+${'```'}`;
+}
+
+function buildExtendedApplyPatchPromptAppend(disabledTools: string[] = []): string {
   const disabled = new Set(disabledTools);
   const editEnabled = !disabled.has('edit');
   const editGuidance = editEnabled
@@ -239,7 +303,7 @@ const applyPatchSchema = Type.Object(
   {
     patch: Type.String({
       description:
-        'Codex-style patch payload. The patch value must be raw patch text only, with no Markdown fences, surrounding prose, or commentary. Use this exact structure: *** Begin Patch / *** End Patch. Inside, include one or more file operations starting with *** Add File:, *** Delete File:, or *** Update File:. Update sections may include *** Move to: for renames and one or more @@ hunks. A pure rename may use *** Update File: followed immediately by *** Move to: with no @@ hunks. In hunks, unchanged lines start with space, removed lines start with -, and added lines start with +. For Add File, every content line must start with +. Do not use git/unified diff syntax such as diff --git, ---, +++, or line-number hunks. Prefer relative paths when practical; absolute paths are allowed when necessary. Use small, unique context, but include enough unchanged lines or @@ anchors to identify the target block unambiguously. If a change is ambiguous, add @@ context headers such as @@ class Foo or @@ def bar, and stack multiple @@ context headers when needed. Use *** End of File when needed for EOF-sensitive changes.',
+        'Patch payload. Use the syntax advertised by the active multi-edit profile. The patch value must be raw patch text only, with no Markdown fences, surrounding prose, or commentary.',
     }),
   },
   { additionalProperties: false },
@@ -266,26 +330,40 @@ function getModelIdentity(model: { provider?: string; id?: string } | undefined)
   return [provider, id].filter(Boolean).join('/').toLowerCase();
 }
 
-function getDisabledToolsForModel(model: { provider?: string; id?: string } | undefined): string[] {
-  const identity = getModelIdentity(model);
-  if (!identity) return [];
+function matchesModel(identity: string, match: MatchConfig | undefined): boolean {
+  const includes = Array.isArray(match?.includes) ? match.includes : [];
+  return includes.some((pattern) => {
+    const normalized = pattern.trim().toLowerCase();
+    return normalized.length > 0 && identity.includes(normalized);
+  });
+}
 
-  const disabled = new Set<string>();
-  for (const policy of EXTENSION_CONFIG.modelToolPolicies ?? []) {
-    const matches = Array.isArray(policy.match) ? policy.match : [];
-    const shouldApply = matches.some((pattern) => {
-      const normalized = pattern.trim().toLowerCase();
-      return normalized.length > 0 && identity.includes(normalized);
-    });
-    if (!shouldApply) continue;
-    for (const toolName of Array.isArray(policy.disable) ? policy.disable : []) {
-      if (typeof toolName === 'string' && toolName.trim()) {
-        disabled.add(toolName);
-      }
-    }
+function normalizeToolProfile(value: unknown): ToolProfile | undefined {
+  return value === 'extended' || value === 'codex-compatible' ? value : undefined;
+}
+
+function getToolProfileForModel(
+  model: { provider?: string; id?: string } | undefined,
+): ToolProfile {
+  const configuredDefault = normalizeToolProfile(EXTENSION_CONFIG.profiles?.default);
+  const defaultProfile = configuredDefault ?? 'extended';
+  const identity = getModelIdentity(model);
+  if (!identity) return defaultProfile;
+
+  for (const policy of EXTENSION_CONFIG.profiles?.modelProfiles ?? []) {
+    if (!matchesModel(identity, policy.match)) continue;
+    return normalizeToolProfile(policy.profile) ?? defaultProfile;
   }
 
-  return [...disabled];
+  return defaultProfile;
+}
+
+function isToolAllowedForProfile(toolName: string, profile: ToolProfile): boolean {
+  return profile === 'extended' || toolName === 'apply_patch';
+}
+
+function getDisabledToolsForProfile(profile: ToolProfile, allTools: string[]): string[] {
+  return profile === 'extended' ? [] : allTools.filter((name) => name !== 'apply_patch');
 }
 
 function applyModelToolPolicy(
@@ -297,12 +375,13 @@ function applyModelToolPolicy(
       }
     | undefined,
 ): string[] {
+  const profile = getToolProfileForModel(model);
   if (typeof pi.getAllTools !== 'function' || typeof pi.setActiveTools !== 'function') {
-    return getDisabledToolsForModel(model);
+    return profile === 'extended' ? [] : ['edit', 'write'];
   }
 
   const allTools = pi.getAllTools().map((tool) => tool.name);
-  const disabled = new Set(getDisabledToolsForModel(model));
+  const disabled = new Set(getDisabledToolsForProfile(profile, allTools));
   const nextActive = allTools.filter((name) => !disabled.has(name));
   pi.setActiveTools(nextActive);
   return [...disabled];
@@ -544,6 +623,44 @@ function buildPatchCommitRows(
   });
 }
 
+function validateApplyPatchProfile(ops: PatchOperation[], profile: ApplyPatchProfile): void {
+  if (profile !== 'codex-compatible') return;
+
+  for (const op of ops) {
+    if (op.kind !== 'update') continue;
+    for (const chunk of op.chunks) {
+      if (chunk.source === 'find-replace-once') {
+        throw new Error(
+          'FindReplaceOnce chunks are not allowed by the codex-compatible apply_patch profile. Use @@ hunk chunks instead.',
+        );
+      }
+      if (chunk.source === 'find-replace-all') {
+        throw new Error(
+          'FindReplaceAll chunks are not allowed by the codex-compatible apply_patch profile. Use @@ hunk chunks instead.',
+        );
+      }
+    }
+  }
+}
+
+function validatePatchTextForProfile(patch: string, profile: ApplyPatchProfile): void {
+  if (profile !== 'codex-compatible') return;
+
+  for (const line of patch.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed === '*** FindReplaceOnce:') {
+      throw new Error(
+        'FindReplaceOnce chunks are not allowed by the codex-compatible apply_patch profile. Use @@ hunk chunks instead.',
+      );
+    }
+    if (trimmed === '*** FindReplaceAll:') {
+      throw new Error(
+        'FindReplaceAll chunks are not allowed by the codex-compatible apply_patch profile. Use @@ hunk chunks instead.',
+      );
+    }
+  }
+}
+
 async function executePatch(
   patch: string,
   cwd: string,
@@ -553,10 +670,13 @@ async function executePatch(
     details?: unknown;
   }) => void,
   context?: { state?: unknown },
+  profile: ApplyPatchProfile = 'extended',
 ) {
+  validatePatchTextForProfile(patch, profile);
   const patchAutofixes = applyPatchTextAutofixes(patch);
   const effectivePatch = patchAutofixes.patchText;
   const { ops, mergedEnvelopes } = parsePatchWithDiagnostics(effectivePatch);
+  validateApplyPatchProfile(ops, profile);
   const files = ops.flatMap((op) => {
     if (op.kind === 'update' && op.moveTo) {
       return [resolveToCwd(op.path, cwd), resolveToCwd(op.moveTo, cwd)];
@@ -571,8 +691,9 @@ async function executePatch(
         mode: 'partial',
       });
     const renderPlanningError = (error: unknown) => {
+      const failureRenderOptions = { allowFindReplaceSuggestions: profile !== 'codex-compatible' };
       if (error instanceof PatchContextMatchError) {
-        const text = renderContextMatchFailure(error.failure);
+        const text = renderContextMatchFailure(error.failure, failureRenderOptions);
         return {
           isError: true,
           content: [{ type: 'text' as const, text }],
@@ -587,7 +708,11 @@ async function executePatch(
         };
       }
       if (error instanceof PatchPlanFailedError) {
-        const text = renderPlanFailure(error.statuses, (p) => shortenDisplayPath(p, cwd));
+        const text = renderPlanFailure(
+          error.statuses,
+          (p) => shortenDisplayPath(p, cwd),
+          failureRenderOptions,
+        );
         return {
           isError: true,
           content: [{ type: 'text' as const, text }],
@@ -1297,21 +1422,22 @@ export default function multiEditExtension(pi: ExtensionAPI) {
 
   pi.on?.('before_agent_start', async (event, ctx) => {
     const disabledTools = applyModelToolPolicy(pi, ctx.model);
+    const profile = getToolProfileForModel(ctx.model);
     return {
-      systemPrompt: `${event.systemPrompt}\n\n${buildApplyPatchPromptAppend(disabledTools)}`,
+      systemPrompt: `${event.systemPrompt}\n\n${buildApplyPatchPromptAppend(disabledTools, profile)}`,
     };
   });
 
   pi.on?.('tool_call', async (event, ctx) => {
-    const disabled = getDisabledToolsForModel(ctx.model);
-    if (!disabled.includes(event.toolName)) {
+    const profile = getToolProfileForModel(ctx.model);
+    if (isToolAllowedForProfile(event.toolName, profile)) {
       return undefined;
     }
 
     const identity = getModelIdentity(ctx.model) || 'unknown-model';
     return {
       block: true,
-      reason: `Tool '${event.toolName}' is disabled for model '${identity}'; use apply_patch instead.`,
+      reason: `Tool '${event.toolName}' is disabled for profile '${profile}' on model '${identity}'; use apply_patch instead.`,
     };
   });
 
@@ -1331,7 +1457,14 @@ export default function multiEditExtension(pi: ExtensionAPI) {
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const normalized = normalizeClassicParams(params);
       if (normalized.mode === 'patch') {
-        return executePatch(normalized.patch, ctx.cwd, signal, _onUpdate as any, ctx as any);
+        return executePatch(
+          normalized.patch,
+          ctx.cwd,
+          signal,
+          _onUpdate as any,
+          ctx as any,
+          getToolProfileForModel(ctx.model),
+        );
       }
 
       return executeClassic(normalized.edits, ctx.cwd, signal);
@@ -1375,30 +1508,23 @@ export default function multiEditExtension(pi: ExtensionAPI) {
     name: 'apply_patch',
     label: 'apply_patch',
     description:
-      'Apply a Codex-style patch payload. Default to *** FindReplaceOnce: blocks for almost every edit (unique SEARCH/REPLACE). Use *** FindReplaceAll: for deliberate whole-line mass substitutions. Use @@ hunks only for complex coordinated edits that FindReplace would fracture. One payload can mix shapes.',
-    promptSnippet: 'Apply Codex-style patch payloads with { patch }.',
+      'Apply a patch payload using the syntax advertised by the active multi-edit profile.',
+    promptSnippet: 'Apply patch payloads with { patch }.',
     promptGuidelines: [
-      'Use apply_patch with the exact patch envelope: *** Begin Patch ... *** End Patch.',
-      'For apply_patch, the patch value must be raw patch text only: no Markdown fences, no prose, no commentary.',
-      'For apply_patch, each operation must start with exactly one header: *** Add File:, *** Delete File:, or *** Update File:.',
-      'For apply_patch renames, use *** Move to: immediately after *** Update File:.',
-      'For apply_patch, a rename-only patch may use *** Update File: plus *** Move to: with no @@ hunks.',
-      'For apply_patch Add File blocks, prefix every file-content line with a literal "+" with NO space after it. "+hello" is correct; "+ hello" leaves a leading space on every line.',
-      'For apply_patch, do not use git/unified diff syntax such as diff --git, ---, +++, or line-number hunks.',
-      'In apply_patch *** Update File: blocks, prefer *** FindReplaceOnce: for nearly every edit. Paste the exact text to change into SEARCH and what it should become into REPLACE. Delimiters: <<<<<<< SEARCH / ======= REPLACE / >>>>>>> REPLACE, each on its own line.',
-      'Use apply_patch *** FindReplaceAll: only when you deliberately want every whole-line occurrence replaced. Verify the reported match count.',
-      'Use apply_patch @@ hunks only when you need several coordinated -/+ changes in close proximity that would be awkward to split into separate FindReplaceOnce blocks. Do not reach for @@ for simple single-block rewrites.',
-      'In apply_patch, @@ is a bare marker on its own line. Line numbers are ignored (no @@ -10,7 +10,7 @@). There is no hunk separator — do not insert bare *** lines between chunks.',
-      'In apply_patch, the @@ <label> anchor is a WHOLE-LINE match (e.g. "@@ class Foo" matches only a line whose content is exactly "class Foo", not "class Foo {"). The anchor is preserved; the first -/+ line applies to the line AFTER the anchor. Prefer bare @@ with no label unless you genuinely need to disambiguate.',
-      'For apply_patch, prefer relative paths when practical; absolute paths are allowed when necessary.',
-      'Use apply_patch *** End of File when needed for EOF-sensitive changes.',
-      'In apply_patch, all chunks in one *** Update File: block match against the original file state, not against prior chunks within the same block. Split dependent edits into separate blocks or separate apply_patch calls.',
-      'apply_patch may partially apply independent operations. If a partial result reports failed or skipped files, read those files before retrying and avoid rereading applied files unless a specific dependency requires it.',
+      'Follow the active multi-edit profile syntax from the session prompt.',
+      'The patch value must be raw patch text only: no Markdown fences, no prose, no commentary.',
     ],
     parameters: applyPatchSchema,
     prepareArguments: prepareApplyPatchArguments,
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      return executePatch(params.patch, ctx.cwd, signal, onUpdate as any, ctx as any);
+      return executePatch(
+        params.patch,
+        ctx.cwd,
+        signal,
+        onUpdate as any,
+        ctx as any,
+        getToolProfileForModel(ctx.model),
+      );
     },
     renderCall(args, theme, context) {
       return renderApplyPatchCall(args, theme, context as any);
