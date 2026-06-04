@@ -140,6 +140,18 @@ function sanitizeHiddenResponseItem(item: Record<string, any>): ResponsesInputIt
   return JSON.parse(JSON.stringify(item)) as ResponsesInputItem;
 }
 
+function parseReplayableReasoningItem(
+  signature: string | undefined,
+): ResponsesInputItem | undefined {
+  if (!signature) return undefined;
+  try {
+    const item = JSON.parse(signature) as ResponsesInputItem;
+    return item?.type === 'reasoning' ? item : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function responseMessageTextSignature(response: Record<string, any>): string | undefined {
   const item = (Array.isArray(response.output) ? response.output : []).find(
     (candidate) => candidate?.type === 'message' && typeof candidate.id === 'string',
@@ -205,29 +217,29 @@ function assistantMessageItems(
 ): ResponsesInputItem[] {
   const output: ResponsesInputItem[] = [];
   let textBlockIndex = 0;
+  let hasUnreplayableReasoningBeforeText = false;
   for (const block of message.content as InternalAssistantContent[]) {
     if (isHiddenResponseItemBlock(block)) {
       output.push(block.item);
       continue;
     }
-    if (block.type === 'thinking' && block.thinkingSignature) {
-      try {
-        output.push(JSON.parse(block.thinkingSignature) as ResponsesInputItem);
-      } catch {
-        // Ignore malformed opaque signatures.
-      }
+    if (block.type === 'thinking') {
+      const item = parseReplayableReasoningItem(block.thinkingSignature);
+      if (item) output.push(item);
+      else hasUnreplayableReasoningBeforeText = true;
       continue;
     }
     if (block.type === 'text') {
       const fallbackId = `msg_pi_${index}_${textBlockIndex}`;
       const signature = parseTextSignature(block.textSignature);
       textBlockIndex++;
+      const id = hasUnreplayableReasoningBeforeText ? fallbackId : (signature?.id ?? fallbackId);
       output.push({
         type: 'message',
         role: 'assistant',
         content: [{ type: 'output_text', text: sanitizeSurrogates(block.text), annotations: [] }],
         status: 'completed',
-        id: signature?.id ?? fallbackId,
+        id,
         ...(signature?.phase ? { phase: signature.phase } : {}),
       });
       continue;
@@ -339,6 +351,12 @@ function terminalResponseOutputItems(response: Record<string, any>): number | un
   return Array.isArray(response.output) ? response.output.length : undefined;
 }
 
+function hasActionableTerminalOutput(response: Record<string, any>): boolean {
+  return responseOutputItems(response).some(
+    (item) => item.type === 'message' || item.type === 'function_call',
+  );
+}
+
 function formatTerminalResponseError(type: string, response: Record<string, any>): string {
   const message = terminalResponseMessage(response);
   if (message) return message;
@@ -363,6 +381,7 @@ export class TerminalResponseError extends Error {
   readonly previousResponseId?: string;
   readonly hasDetails: boolean;
   readonly outputItems?: number;
+  readonly hasActionableOutput: boolean;
 
   constructor(type: string, response: Record<string, any>) {
     super(formatTerminalResponseError(type, response));
@@ -375,6 +394,7 @@ export class TerminalResponseError extends Error {
       typeof response.previous_response_id === 'string' ? response.previous_response_id : undefined;
     this.hasDetails = hasTerminalResponseDetails(response);
     this.outputItems = terminalResponseOutputItems(response);
+    this.hasActionableOutput = hasActionableTerminalOutput(response);
   }
 }
 
@@ -384,7 +404,7 @@ export function isRetryableEmptyResponseFailure(error: unknown): error is Termin
     error.eventType === 'response.failed' &&
     error.status === 'failed' &&
     !error.hasDetails &&
-    (error.outputItems === undefined || error.outputItems === 0)
+    !error.hasActionableOutput
   );
 }
 
@@ -932,20 +952,21 @@ export function appendRecoveredFunctionCalls(
 export function assistantMessageToResponseItems(output: AssistantMessage): unknown[] {
   const items: unknown[] = [];
   let textIndex = 0;
+  let hasUnreplayableReasoningBeforeText = false;
   for (const block of output.content as InternalAssistantContent[]) {
     if (isHiddenResponseItemBlock(block)) {
       items.push(block.item);
       continue;
     }
-    if (block.type === 'thinking' && block.thinkingSignature) {
-      try {
-        items.push(JSON.parse(block.thinkingSignature) as unknown);
-      } catch {
-        // Ignore malformed opaque signatures.
-      }
+    if (block.type === 'thinking') {
+      const item = parseReplayableReasoningItem(block.thinkingSignature);
+      if (item) items.push(item);
+      else hasUnreplayableReasoningBeforeText = true;
     } else if (block.type === 'text') {
       const fallbackId = `msg_pi_0_${textIndex}`;
-      const id = textSignatureItemId(block.textSignature) ?? fallbackId;
+      const id = hasUnreplayableReasoningBeforeText
+        ? fallbackId
+        : (textSignatureItemId(block.textSignature) ?? fallbackId);
       const phase = textSignaturePhase(block.textSignature);
       textIndex++;
       items.push({

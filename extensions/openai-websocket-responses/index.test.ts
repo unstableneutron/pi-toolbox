@@ -1130,6 +1130,38 @@ describe('Responses adapter and retrieve recovery', () => {
     expect(buildResponsesBody(model, { messages: [output] }).input).toEqual([webSearchItem]);
   });
 
+  it('uses a synthetic message id when prior reasoning is unavailable for replay', () => {
+    const model = makeModel();
+    const output = makeAssistantMessage(model);
+    output.content.push(
+      { type: 'thinking', thinking: 'Reasoning summary without a replayable signature' } as any,
+      {
+        type: 'text',
+        text: 'I need to inspect the session.',
+        textSignature: JSON.stringify({
+          v: 1,
+          id: 'msg_requires_missing_reasoning',
+          phase: 'commentary',
+        }),
+      },
+    );
+
+    expect(buildResponsesBody(model, { messages: [output] }).input).toEqual([
+      expect.objectContaining({
+        type: 'message',
+        id: 'msg_pi_0_0',
+        phase: 'commentary',
+      }),
+    ]);
+    expect(assistantMessageToResponseItems(output)).toEqual([
+      expect.objectContaining({
+        type: 'message',
+        id: 'msg_pi_0_0',
+        phase: 'commentary',
+      }),
+    ]);
+  });
+
   it('keeps interleaved output items separate by output_index', async () => {
     const model = makeModel();
     const output = makeAssistantMessage(model);
@@ -2057,7 +2089,7 @@ describe('WebSocket transport', () => {
     }
   });
 
-  it('retries empty response.failed once on a fresh websocket with the known previous_response_id', async () => {
+  it('retries detail-less response.failed with only reasoning output on a fresh websocket', async () => {
     const instances: FakeWebSocket[] = [];
     const sentBodies: Array<{ instance: number; body: any }> = [];
 
@@ -2091,7 +2123,7 @@ describe('WebSocket transport', () => {
                   previous_response_id: 'resp_previous',
                   error: null,
                   incomplete_details: null,
-                  output: [],
+                  output: [{ type: 'reasoning', id: 'rs_failed', summary: [] }],
                 },
               }),
             });
