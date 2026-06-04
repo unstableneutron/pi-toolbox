@@ -11,6 +11,14 @@ Optional Pi extension that owns the single active `bash` override for shell-to-t
 
 If this extension is not loaded, those provider extensions still work as normal direct tools; they just do not override `bash`.
 
+The parser tolerates narrow safety/navigation prefixes before a rewriteable command:
+
+- optional shebang line, e.g. `#!/usr/bin/env bash`
+- standalone `set -e`, `set -u`, `set -euo pipefail`, and `set -o pipefail` preambles
+- one or more simple `cd <literal-dir> &&`, `cd <literal-dir>;`, or `cd <literal-dir>` newline prefixes
+
+When a `cd` prefix is accepted, providers execute with that effective cwd. More complex setup, variables, command substitutions, loops, redirects, and non-rewriteable commands still pass through to builtin bash unchanged.
+
 ## Provider contract
 
 Providers register synchronously when `pi-bash-rewrite` emits:
@@ -32,7 +40,7 @@ Rules:
 - Set `fallbackOnExecuteError: false` for mutating rewrites such as `apply_patch` so failures do not silently run raw shell.
 - Unsubscribe provider listeners on `session_shutdown` when the extension runtime supports it.
 
-The orchestrator adds routing metadata to rewritten results: `routedVia`, `rewriteProviderId`, `rewriteRecognizer`, `rewriteFromCommand`, `rewriteToParams`, and `rewriteCall`.
+The orchestrator adds routing metadata to rewritten results: `routedVia`, `rewriteProviderId`, `rewriteRecognizer`, `rewriteFromCommand`, `rewriteToParams`, `rewriteCall`, and `rewriteCwd` when a `cd` prefix changed the provider cwd.
 
 ## Development
 

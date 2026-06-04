@@ -188,6 +188,44 @@ describe('multi-edit extension', () => {
         fallbackOnExecuteError: false,
       });
 
+      const preview = providers[0].renderPreview?.(
+        {
+          tool: 'apply_patch',
+          params: {
+            patch: `*** Begin Patch
+*** Update File: demo.txt
+@@
+-old
++new
+*** End Patch`,
+          },
+        },
+        createTheme(),
+        { cwd, isPartial: true, argsComplete: false, state: {} },
+      );
+      expect(preview?.render(120).join('\n')).toContain('bash›apply_patch 1 operation');
+      expect(preview?.render(120).join('\n')).toContain('edit   demo.txt');
+      expect(preview?.render(120).join('\n')).not.toContain('*** Begin Patch');
+
+      const executionStartedPreview = providers[0].renderPreview?.(
+        {
+          tool: 'apply_patch',
+          params: {
+            patch: `*** Begin Patch
+*** Update File: demo.txt
+@@
+-old
++new
+*** End Patch`,
+          },
+        },
+        createTheme(),
+        { cwd, isPartial: false, executionStarted: true, argsComplete: true, state: {} },
+      );
+      const executionStartedText = executionStartedPreview?.render(120).join('\n');
+      expect(executionStartedText).toContain('bash›apply_patch 1 operation');
+      expect(executionStartedText).not.toContain('edit   demo.txt');
+
       const result = await providers[0].execute(
         {
           params: {
@@ -204,6 +242,28 @@ describe('multi-edit extension', () => {
 
       expect(result.isError).not.toBe(true);
       expect(result.content[0]?.text).toContain('Applied patch with 1 operation');
+      const renderedResult = providers[0].renderResult?.(
+        {
+          ...result,
+          details: {
+            ...result.details,
+            rewriteToParams: {
+              patch: `*** Begin Patch
+*** Update File: demo.txt
+@@
+-old
++new
+*** End Patch`,
+            },
+          },
+        },
+        { expanded: false, isPartial: false },
+        createTheme(),
+        { cwd },
+      );
+      const renderedBashPatch = renderedResult?.render(120).join('\n');
+      expect(renderedBashPatch).not.toContain('bash›apply_patch');
+      expect(renderedBashPatch).toContain('✓ edit   demo.txt');
       await expect(readFile(join(cwd, 'demo.txt'), 'utf8')).resolves.toBe('new\n');
     } finally {
       await rm(cwd, { recursive: true, force: true });

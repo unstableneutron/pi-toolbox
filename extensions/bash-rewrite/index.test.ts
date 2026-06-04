@@ -84,6 +84,52 @@ describe('bash-rewrite orchestrator', () => {
     });
   });
 
+  test('passes renderCall context through to rewrite provider previews', () => {
+    const { tools, pi } = createHarness();
+    const state = { marker: true };
+    const renderPreview = vi.fn((_decision, _theme, runtime) => ({
+      render: () => [`started=${String(runtime.executionStarted)}`],
+    }));
+
+    pi.events.on('bash-rewrite:collect-providers', (payload: any) => {
+      payload.register({
+        id: 'test-fff',
+        priority: 100,
+        tools: ['fff_grep'],
+        execute: vi.fn(),
+        renderPreview,
+      });
+    });
+
+    const rendered = tools[0]
+      .renderCall(
+        { command: 'grep -rn "foo" src/ | head -20' },
+        {},
+        {
+          cwd: '/repo',
+          isPartial: false,
+          executionStarted: true,
+          argsComplete: true,
+          state,
+        },
+      )
+      .render(120)
+      .join('\n');
+
+    expect(rendered).toContain('started=true');
+    expect(renderPreview).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({
+        cwd: '/repo',
+        isPartial: false,
+        executionStarted: true,
+        argsComplete: true,
+        state,
+      }),
+    );
+  });
+
   test('passes through rewriteable commands when no provider for the target tool is loaded', async () => {
     const { tools } = createHarness(['bash', 'read', 'ls']);
 

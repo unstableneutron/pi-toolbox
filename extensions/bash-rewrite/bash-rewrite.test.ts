@@ -20,6 +20,17 @@ describe('tryRewriteBash — single-command rewrites', () => {
       params: { path: 'node_modules/impers/dist/public.d.ts' },
       recognizer: 'cat-file',
     });
+    expect(r?.cwd).toBe('/tmp');
+  });
+
+  test('leading cd .. updates the effective rewrite cwd', () => {
+    const r = rewrite('cd .. && cat package.json');
+    expect(r?.decision).toMatchObject({
+      tool: 'read',
+      params: { path: 'package.json' },
+      recognizer: 'cat-file',
+    });
+    expect(r?.cwd).toBe('/');
   });
 
   test('cat MULTIPLE FILES → pass through', () => {
@@ -201,6 +212,39 @@ describe('tryRewriteBash — grep rewrites', () => {
         patterns: ['rustls'],
         within: ['crates/portl-cli/Cargo.toml', 'Cargo.toml'],
       },
+    });
+    expect(r?.cwd).toBe('/repo');
+  });
+
+  test('shebang and set preamble before cd X && grep PAT FILE → fff_grep', () => {
+    const r = rewrite(`#!/usr/bin/env bash
+set -euo pipefail
+cd /tmp/repo && grep -rn "SEARCH_TOOL_PROMPT" extensions/pi-fff-search/index.ts | head -5`);
+    expect(r?.decision).toMatchObject({
+      tool: 'fff_grep',
+      params: {
+        patterns: ['SEARCH_TOOL_PROMPT'],
+        within: 'extensions/pi-fff-search/index.ts',
+        literal: true,
+        limit: 5,
+      },
+      recognizer: 'grep-search+head',
+    });
+    expect(r?.cwd).toBe('/tmp/repo');
+  });
+
+  test('set -e preamble before rg PAT PATH → fff_grep', () => {
+    const r = rewrite(`set -e
+rg -n "struct MdnsAddressLookup" src | head -20`);
+    expect(r?.decision).toMatchObject({
+      tool: 'fff_grep',
+      params: {
+        patterns: ['struct MdnsAddressLookup'],
+        within: 'src',
+        literal: true,
+        limit: 20,
+      },
+      recognizer: 'rg-search+head',
     });
   });
 
@@ -573,6 +617,7 @@ describe('tryRewriteBash — pipelines', () => {
       params: { patterns: ['Doctor {'], within: 'crates/portl-cli/src', glob: 'lib.rs', limit: 10 },
       recognizer: 'grep-search+head',
     });
+    expect(r?.cwd).toBe('/repo');
   });
 
   test('grep | head --bytes=N → pass through', () => {

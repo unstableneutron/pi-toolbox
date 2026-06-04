@@ -1,3 +1,5 @@
+import os from 'node:os';
+import path from 'node:path';
 import { parse as shellParse, type ControlOperator, type ParseEntry } from 'shell-quote';
 import { tryRewriteApplyPatchCliBash } from './apply-patch';
 
@@ -10,6 +12,9 @@ import { tryRewriteApplyPatchCliBash } from './apply-patch';
  *     of the recognized tools; the `head -N` folds into `limit: N`.
  *   - A defensive-read idiom `find <path> [-type f] | head -1 | xargs cat [| head -N]`
  *     collapses to `read <path> [limit=N]`.
+ *   - Narrow safety/navigation prefixes: optional shebang, standalone `set -e` /
+ *     `set -euo pipefail`-style preambles, and simple leading `cd <path>`
+ *     commands before the recognized work command.
  *
  * Every other shape — chained `&&`/`||`/`;` (beyond a leading `cd <path> &&` prefix),
  * non-trivial redirects, command substitution, subshells, background jobs — passes
@@ -35,10 +40,196 @@ export interface RewriteResult {
    */
   decision?: RewriteDecision;
   notice: string;
+  /** Effective cwd after a safe leading `cd <path> &&`/`;`/newline prefix. */
+  cwd?: string;
 }
 
 interface RewriteOptions {
   enabledTools?: Iterable<string> | ((toolName: RewriteTool) => boolean);
+}
+
+interface NormalizedRewriteCommand {
+  command: string;
+  cwd: string;
+  explicitCwd: boolean;
+}
+
+function normalizeRewriteCommand(cmd: string, cwd: string): NormalizedRewriteCommand {
+  let rest = cmd.trimStart();
+  let effectiveCwd = cwd;
+  let explicitCwd = false;
+
+  if (rest.startsWith('#!')) {
+    const newlineIndex = rest.indexOf('\n');
+    if (newlineIndex === -1) return { command: cmd, cwd, explicitCwd: false };
+    rest = rest.slice(newlineIndex + 1).trimStart();
+  }
+
+  for (;;) {
+    const stripped = stripSupportedSetPreamble(rest);
+    if (stripped === null) break;
+    rest = stripped.trimStart();
+  }
+
+  for (;;) {
+    const cd = parseLeadingCdNavigation(rest);
+    if (!cd) break;
+    effectiveCwd = resolveCdTarget(effectiveCwd, cd.target);
+    explicitCwd = true;
+    rest = rest.slice(cd.endIndex).trimStart();
+  }
+
+  return { command: rest, cwd: effectiveCwd, explicitCwd };
+}
+
+function stripSupportedSetPreamble(input: string): string | null {
+  const newlineIndex = input.search(/\r?\n/);
+  const semicolonIndex = input.indexOf(';');
+  const endIndex = [newlineIndex, semicolonIndex]
+    .filter((index) => index >= 0)
+    .sort((a, b) => a - b)[0];
+  if (endIndex === undefined) return null;
+
+  const line = input.slice(0, endIndex).trim();
+  if (!isSupportedSetPreamble(line)) return null;
+
+  const separatorLength = input[endIndex] === '\r' && input[endIndex + 1] === '\n' ? 2 : 1;
+  return input.slice(endIndex + separatorLength);
+}
+
+function isSupportedSetPreamble(line: string): boolean {
+  let tokens: ParseEntry[];
+  try {
+    tokens = shellParse(line);
+  } catch {
+    return false;
+  }
+
+  if (tokens.length < 2 || tokens[0] !== 'set') return false;
+  if (!tokens.every((token) => typeof token === 'string')) return false;
+
+  const args = (tokens as string[]).slice(1);
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i]!;
+    if (/^-[eu]+$/.test(arg)) continue;
+    if (/^-[euo]+$/.test(arg) && arg.includes('o')) {
+      if (args[i + 1] !== 'pipefail') return false;
+      i += 1;
+      continue;
+    }
+    if (arg === '-o') {
+      if (args[i + 1] !== 'pipefail') return false;
+      i += 1;
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
+function parseLeadingCdNavigation(input: string): { target: string; endIndex: number } | null {
+  let i = 0;
+  while (input[i] === ' ' || input[i] === '\t') i += 1;
+  if (input.slice(i, i + 2) !== 'cd') return null;
+  i += 2;
+  if (input[i] !== ' ' && input[i] !== '\t') return null;
+  while (input[i] === ' ' || input[i] === '\t') i += 1;
+
+  const word = readShellWord(input, i);
+  if (!word) return null;
+  let j = word.endIndex;
+  while (input[j] === ' ' || input[j] === '\t') j += 1;
+
+  let endIndex: number | null = null;
+  if (input.startsWith('&&', j)) {
+    endIndex = j + 2;
+  } else if (input[j] === ';') {
+    endIndex = j + 1;
+  } else if (input[j] === '\n') {
+    endIndex = j + 1;
+  } else if (input[j] === '\r' && input[j + 1] === '\n') {
+    endIndex = j + 2;
+  }
+  if (endIndex === null) return null;
+
+  let tokens: ParseEntry[];
+  try {
+    tokens = shellParse(`cd ${word.raw}`);
+  } catch {
+    return null;
+  }
+  if (tokens.length !== 2 || tokens[0] !== 'cd' || typeof tokens[1] !== 'string') return null;
+
+  const target = tokens[1];
+  if (!target || target === '-' || target.startsWith('-')) return null;
+  return { target, endIndex };
+}
+
+function readShellWord(
+  input: string,
+  startIndex: number,
+): { raw: string; endIndex: number } | null {
+  let i = startIndex;
+  let quote: 'single' | 'double' | null = null;
+  let escaped = false;
+
+  while (i < input.length) {
+    const ch = input[i]!;
+    if (quote === 'single') {
+      if (ch === "'") quote = null;
+      i += 1;
+      continue;
+    }
+    if (quote === 'double') {
+      if (escaped) {
+        escaped = false;
+        i += 1;
+        continue;
+      }
+      if (ch === '\\') {
+        escaped = true;
+        i += 1;
+        continue;
+      }
+      if (ch === '"') quote = null;
+      i += 1;
+      continue;
+    }
+
+    if (ch === '\\') {
+      i += 2;
+      continue;
+    }
+    if (ch === "'") {
+      quote = 'single';
+      i += 1;
+      continue;
+    }
+    if (ch === '"') {
+      quote = 'double';
+      i += 1;
+      continue;
+    }
+    if (/\s/.test(ch) || ch === ';' || ch === '&' || ch === '|') break;
+    i += 1;
+  }
+
+  if (quote !== null || i === startIndex) return null;
+  return { raw: input.slice(startIndex, i), endIndex: i };
+}
+
+function resolveCdTarget(cwd: string, target: string): string {
+  if (target === '~') return os.homedir();
+  if (target.startsWith('~/')) return path.resolve(os.homedir(), target.slice(2));
+  if (path.isAbsolute(target)) return path.resolve(target);
+  return path.resolve(cwd, target);
+}
+
+function withEffectiveCwd(
+  result: RewriteResult,
+  normalized: NormalizedRewriteCommand,
+): RewriteResult {
+  return normalized.explicitCwd ? { ...result, cwd: normalized.cwd } : result;
 }
 
 const GLOB_META_PATTERN = /[*?[\]{}!]/;
@@ -187,7 +378,8 @@ const FIRST_TOKEN_PATTERN =
  * Cheap gate that runs before the shell-quote parser. Rejects:
  *   - empty / whitespace-only commands
  *   - commands longer than MAX_REWRITE_CANDIDATE_LENGTH
- *   - multi-line commands (heredocs, inline scripts, for/while bodies)
+ *   - multi-line commands after safe-prefix normalization (heredocs, inline scripts,
+ *     for/while bodies)
  *   - first token outside FIRST_TOKEN_ALLOWLIST
  *   - commands that start with an unsupported absolute path, `sudo`,
  *     `env`, variable assignment, quoted command, etc. — the regex
@@ -1312,16 +1504,19 @@ export function tryRewriteBashWithOptions(
   _cwd: string,
   options: RewriteOptions = {},
 ): RewriteResult | null {
-  const applyPatchRewrite = tryRewriteApplyPatchCliBash(cmd, {
+  const normalized = normalizeRewriteCommand(cmd, _cwd);
+  const rewriteCommand = normalized.command;
+
+  const applyPatchRewrite = tryRewriteApplyPatchCliBash(rewriteCommand, {
     availableTools: (toolName) =>
       toolName === 'apply_patch' && isRewriteToolEnabled(toolName, options),
   });
-  if (applyPatchRewrite) return applyPatchRewrite;
+  if (applyPatchRewrite) return withEffectiveCwd(applyPatchRewrite, normalized);
 
-  if (!looksLikeRewriteCandidate(cmd)) return null;
+  if (!looksLikeRewriteCandidate(rewriteCommand)) return null;
   let tokens: Token[];
   try {
-    tokens = shellParse(cmd);
+    tokens = shellParse(rewriteCommand);
   } catch {
     return null;
   }
@@ -1359,19 +1554,26 @@ export function tryRewriteBashWithOptions(
 
   // Special multi-stage idiom first.
   const idiom = tryFindXargsCatIdiom(strippedStages);
-  if (idiom)
-    return filterRewriteResult(
-      { decision: idiom, notice: formatNotice(cmd.trim(), idiom) },
+  if (idiom) {
+    const filtered = filterRewriteResult(
+      { decision: idiom, notice: formatNotice(rewriteCommand.trim(), idiom) },
       options,
     );
+    return filtered ? withEffectiveCwd(filtered, normalized) : null;
+  }
 
   if (strippedStages.length === 1) {
     const d = classifySingleStage(strippedStages[0]!);
-    if (d)
-      return filterRewriteResult({ decision: d, notice: formatNotice(cmd.trim(), d) }, options);
+    if (d) {
+      const filtered = filterRewriteResult(
+        { decision: d, notice: formatNotice(rewriteCommand.trim(), d) },
+        options,
+      );
+      return filtered ? withEffectiveCwd(filtered, normalized) : null;
+    }
     // No rewrite available — fall through to notice-only classifiers.
     const notice = classifyNoticeOnly(strippedStages[0]!);
-    return notice ? { notice: notice.notice } : null;
+    return notice ? withEffectiveCwd({ notice: notice.notice }, normalized) : null;
   }
 
   // Two-stage: `<search> | head -N`, `cat FILE | sed -n 'N,Mp'`, or
@@ -1405,7 +1607,11 @@ export function tryRewriteBashWithOptions(
           params,
           recognizer: 'cat-grep',
         };
-        return filterRewriteResult({ decision: d, notice: formatNotice(cmd.trim(), d) }, options);
+        const filtered = filterRewriteResult(
+          { decision: d, notice: formatNotice(rewriteCommand.trim(), d) },
+          options,
+        );
+        return filtered ? withEffectiveCwd(filtered, normalized) : null;
       }
     }
     // `cat FILE | sed -n 'N,Mp'` → read(path=FILE, offset=N, limit=M-N+1).
@@ -1427,7 +1633,11 @@ export function tryRewriteBashWithOptions(
           },
           recognizer: 'cat-sed-range',
         };
-        return filterRewriteResult({ decision: d, notice: formatNotice(cmd.trim(), d) }, options);
+        const filtered = filterRewriteResult(
+          { decision: d, notice: formatNotice(rewriteCommand.trim(), d) },
+          options,
+        );
+        return filtered ? withEffectiveCwd(filtered, normalized) : null;
       }
     }
     const limit = extractHeadLimit(strippedStages[1]!);
@@ -1435,23 +1645,24 @@ export function tryRewriteBashWithOptions(
       // Even without a rewriteable pipeline shape, a notice on the
       // first stage is still useful — e.g. `cat -A FILE | od -c`.
       const notice = classifyNoticeOnly(strippedStages[0]!);
-      return notice ? { notice: notice.notice } : null;
+      return notice ? withEffectiveCwd({ notice: notice.notice }, normalized) : null;
     }
     const d = classifySingleStage(strippedStages[0]!);
     if (!d) {
       // `cat -A FILE | head -N` — no rewrite, but still surface the notice.
       const notice = classifyNoticeOnly(strippedStages[0]!);
-      return notice ? { notice: notice.notice } : null;
+      return notice ? withEffectiveCwd({ notice: notice.notice }, normalized) : null;
     }
     const withLimit: RewriteDecision = {
       tool: d.tool,
       params: { ...d.params, limit },
       recognizer: `${d.recognizer}+head`,
     };
-    return filterRewriteResult(
-      { decision: withLimit, notice: formatNotice(cmd.trim(), withLimit) },
+    const filtered = filterRewriteResult(
+      { decision: withLimit, notice: formatNotice(rewriteCommand.trim(), withLimit) },
       options,
     );
+    return filtered ? withEffectiveCwd(filtered, normalized) : null;
   }
 
   return null;

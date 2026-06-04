@@ -509,6 +509,13 @@ describe('pi-fff-search extension', () => {
     expect(tools.map((tool) => tool.name)).toEqual(['fff_find_files', 'fff_grep']);
     expect(providers.map((provider) => provider.id)).toEqual(['pi-fff-search']);
     expect(providers[0].tools).toEqual(['fff_grep', 'fff_find_files']);
+
+    const preview = providers[0].renderPreview(
+      { tool: 'fff_grep', params: { patterns: ['SEARCH_TOOL_PROMPT'], within: 'extensions' } },
+      createTheme(),
+      { cwd: '/Users/thinh/Projects/pi-toolbox' },
+    );
+    expect(renderTextTrimmed(preview, 120)).toContain('bash›fff_grep SEARCH_TOOL_PROMPT');
   });
 
   test('injects repository search preference guidance into the system prompt', async () => {
@@ -561,9 +568,9 @@ describe('pi-fff-search extension', () => {
       ),
     );
     expect(grepText.trimEnd()).toBe(
-      'fff_grep  plan(Request)? | build(Request)?  within=/repo/src · case-sensitive',
+      'fff_grep plan(Request)? | build(Request)? within=/repo/src · case-sensitive',
     );
-    expect(findText.trimEnd()).toBe('fff_find_files  router  within=/repo/src');
+    expect(findText.trimEnd()).toBe('fff_find_files router within=/repo/src');
   });
 
   test('direct FFF renderCall styles compact call parts', () => {
@@ -582,7 +589,7 @@ describe('pi-fff-search extension', () => {
     );
 
     expect(renderTextTrimmed(rendered, 160)).toBe(
-      '<toolTitle><b>fff_grep</b></toolTitle>  <accent>alpha | beta</accent>  <dim>within=src · glob=*.ts · limit=50</dim>',
+      '<toolTitle><b>fff_grep</b></toolTitle> <accent>alpha | beta</accent> <dim>within=src · glob=*.ts · limit=50</dim>',
     );
   });
 
@@ -606,7 +613,7 @@ describe('pi-fff-search extension', () => {
     );
 
     expect(renderTextTrimmed(rendered, 220)).toBe(
-      'grep → fff_grep  createReadTool\\( | createGrepTool\\( | createFindTool\\(  within=node_modules · glob=**/*.{ts,js,mjs,cjs} · limit=50',
+      'grep›fff_grep createReadTool\\( | createGrepTool\\( | createFindTool\\( within=node_modules · glob=**/*.{ts,js,mjs,cjs} · limit=50',
     );
   });
 
@@ -629,7 +636,7 @@ describe('pi-fff-search extension', () => {
     );
 
     expect(renderTextTrimmed(rendered, 160)).toBe(
-      '<dim>grep → </dim><toolTitle><b>fff_grep</b></toolTitle>  <accent>warning</accent>  <dim>within=src · ignoreCase</dim>',
+      '<dim>grep›</dim><toolTitle><b>fff_grep</b></toolTitle> <accent>warning</accent> <dim>within=src · ignoreCase</dim>',
     );
   });
 
@@ -651,9 +658,7 @@ describe('pi-fff-search extension', () => {
       { cwd: '/repo' } as any,
     );
 
-    expect(renderTextTrimmed(rendered, 120)).toBe(
-      'grep → fff_grep  warning  within=src · ignoreCase',
-    );
+    expect(renderTextTrimmed(rendered, 120)).toBe('grep›fff_grep warning within=src · ignoreCase');
   });
 
   test('builtin grep override renderCall collapses long compact rewrite paths by width', () => {
@@ -678,7 +683,7 @@ describe('pi-fff-search extension', () => {
 
     const lines = renderTextTrimmed(rendered, 96).split('\n');
     expect(lines).toEqual([
-      'grep → fff_grep  getToolDefinition | toolCallId | definition.execute | execute\\(',
+      'grep›fff_grep getToolDefinition | toolCallId | definition.execute | execute\\(',
       '  within=~/.../pi-coding-agent/dist/core · glob=*.js · ctx=4 · limit=200',
     ]);
     expect(lines.every((line) => line.length <= 96)).toBe(true);
@@ -750,7 +755,7 @@ describe('pi-fff-search extension', () => {
 
     const lines = renderTextTrimmed(rendered, 58).split('\n');
     expect(lines).toEqual([
-      'find → fff_find_files  rewrite',
+      'find›fff_find_files rewrite',
       '  within=extensions/... · glob=**/*rewrite*.ts · limit=20',
     ]);
     expect(lines.every((line) => line.length <= 58)).toBe(true);
@@ -775,7 +780,7 @@ describe('pi-fff-search extension', () => {
     );
 
     expect(renderTextTrimmed(rendered, 220)).toBe(
-      'find → fff_find_files  index  within=extensions · glob=**/index.test.ts · limit=20',
+      'find›fff_find_files index within=extensions · glob=**/index.test.ts · limit=20',
     );
   });
 
@@ -1041,7 +1046,6 @@ describe('pi-fff-search extension', () => {
       overrideBuiltinRead: true,
       overrideBuiltinGrep: false,
       overrideBuiltinFind: false,
-      rewriteBuiltinBash: false,
     });
     const theme = createTaggedTheme();
     const read = tools.find((tool) => tool.name === 'read')!;
@@ -1066,7 +1070,6 @@ describe('pi-fff-search extension', () => {
       overrideBuiltinRead: true,
       overrideBuiltinGrep: false,
       overrideBuiltinFind: false,
-      rewriteBuiltinBash: false,
     });
     const theme = createTheme();
     const read = tools.find((tool) => tool.name === 'read')!;
@@ -1091,7 +1094,6 @@ describe('pi-fff-search extension', () => {
       overrideBuiltinRead: true,
       overrideBuiltinGrep: false,
       overrideBuiltinFind: false,
-      rewriteBuiltinBash: false,
     });
     const theme = createTheme();
     const read = tools.find((tool) => tool.name === 'read')!;
@@ -1276,7 +1278,7 @@ describe('pi-fff-search extension', () => {
 
     expect(renderTextTrimmed(rendered, 45)).toBe(
       [
-        'fff_find_files  vim mode',
+        'fff_find_files vim mode',
         '  glob=**/* · ext=ts,md,json ·',
         'exclude=dist,coverage,node_modules ·',
         'limit=100',

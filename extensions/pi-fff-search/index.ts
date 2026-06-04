@@ -31,6 +31,7 @@ import {
 } from 'fff-router';
 import { clampMatchText } from './match-heuristics';
 import { DEFAULT_EXPAND_HINT_SUFFIXES, chooseOptionalSuffix } from '../shared/tui-width';
+import { TOOL_REWRITE_ARROW } from '../shared/rewrite-label';
 import {
   type FallbackSpillInfo,
   type LocalFallbackEngine,
@@ -1429,9 +1430,9 @@ function renderCompactSearchCall(
   theme: CompactCallTheme,
 ): string {
   const metadataText = summary.metadata.map(renderCompactMetadataEntry).join(' · ');
-  const sourcePrefix = summary.sourceTool ? `${summary.sourceTool} → ` : '';
-  const firstLinePrefix = `${sourcePrefix}${summary.targetTool}  `;
-  const inline = `${firstLinePrefix}${summary.primary}${metadataText ? `  ${metadataText}` : ''}`;
+  const sourcePrefix = summary.sourceTool ? `${summary.sourceTool}${TOOL_REWRITE_ARROW}` : '';
+  const firstLinePrefix = `${sourcePrefix}${summary.targetTool} `;
+  const inline = `${firstLinePrefix}${summary.primary}${metadataText ? ` ${metadataText}` : ''}`;
   const fitsInline = !width || width <= 0 || inline.length <= width;
   const primaryBudget = width
     ? Math.max(8, width - firstLinePrefix.length)
@@ -1443,11 +1444,11 @@ function renderCompactSearchCall(
   const inlineMetadata = fitsInline && metadataText ? metadataText : '';
 
   const firstLine = [
-    summary.sourceTool ? theme.fg('dim', `${summary.sourceTool} → `) : '',
+    sourcePrefix ? theme.fg('dim', sourcePrefix) : '',
     theme.fg('toolTitle', theme.bold(summary.targetTool)),
-    '  ',
+    ' ',
     theme.fg('accent', primary),
-    inlineMetadata ? `  ${theme.fg('dim', inlineMetadata)}` : '',
+    inlineMetadata ? ` ${theme.fg('dim', inlineMetadata)}` : '',
   ].join('');
 
   return metadataLine ? `${firstLine}\n${theme.fg('dim', metadataLine)}` : firstLine;

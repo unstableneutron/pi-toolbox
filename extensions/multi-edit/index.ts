@@ -45,6 +45,7 @@ import {
   type MutationPlan,
 } from './mutation-plan';
 import { renderApplyPatchRows } from './display/apply-patch-summary';
+import { TOOL_REWRITE_ARROW } from '../shared/rewrite-label';
 import type { Workspace } from './workspace';
 
 type ToolProfile = 'extended' | 'codex-compatible';
@@ -1328,6 +1329,186 @@ function renderApplyPatchCall(
   return renderApplyPatchPreview(args, theme, context);
 }
 
+function getBashRewriteToParams(result: unknown): unknown {
+  const details = (result as { details?: unknown } | undefined)?.details;
+  return details && typeof details === 'object'
+    ? (details as { rewriteToParams?: unknown }).rewriteToParams
+    : undefined;
+}
+
+function withApplyPatchRenderArgs(result: unknown, context: unknown) {
+  const rewriteArgs = getBashRewriteToParams(result);
+  if (!rewriteArgs || typeof rewriteArgs !== 'object' || Array.isArray(rewriteArgs)) {
+    return context;
+  }
+  return { ...(context as Record<string, unknown> | undefined), args: rewriteArgs };
+}
+
+function renderApplyPatchResult(
+  result: unknown,
+  options: ToolRenderResultOptions,
+  theme: {
+    fg(color: string, text: string): string;
+    bold(text: string): string;
+  },
+  context: any,
+) {
+  const renderContext = withApplyPatchRenderArgs(result, context) as any;
+
+  if (options.isPartial) {
+    const displayRows = cacheApplyPatchRows(
+      renderContext,
+      getApplyPatchPartialRows(
+        result,
+        renderContext?.args,
+        renderContext?.executionStarted === true,
+        renderContext,
+      ),
+    );
+    if (displayRows && displayRows.length > 0) {
+      return renderApplyPatchRows(displayRows, theme, renderContext?.cwd);
+    }
+    return new Text(theme.fg('warning', 'patching...'), 0, 0);
+  }
+
+  const fallbackText = extractTextOutput(result as { content?: unknown });
+  const rows = getResultOperationRows(result);
+  if (isToolError(result, renderContext)) {
+    const failedRows = getApplyPatchFailedRows(result, renderContext);
+    if (failedRows && failedRows.length > 0) {
+      return renderApplyPatchRows(failedRows, theme, renderContext?.cwd);
+    }
+    const error = fallbackText || 'Patch failed.';
+    return new Text(theme.fg('error', error), 0, 0);
+  }
+
+  cacheApplyPatchRows(renderContext, rows);
+
+  if (!options.expanded && rows && rows.length > 0) {
+    return renderApplyPatchRows(rows, theme, renderContext?.cwd);
+  }
+
+  if (options.expanded && rows && rows.length > 0 && rows.every((row) => row.kind === 'delete')) {
+    return renderApplyPatchRows(rows, theme, renderContext?.cwd);
+  }
+
+  if (options.expanded && rows && rows.some((row) => row.kind === 'delete')) {
+    const deleteRows = rows.filter((row) => row.kind === 'delete');
+    if (deleteRows.length === rows.length) {
+      return renderApplyPatchRows(deleteRows, theme, renderContext?.cwd);
+    }
+
+    const details = materializeLazyDiffDetails(
+      (result as { details?: unknown }).details as LazyDiffDetails | undefined,
+      options.expanded,
+    );
+    const container = new Container();
+    container.addChild(
+      renderEditDiffResult(
+        details,
+        { expanded: options.expanded, filePath: undefined },
+        DEFAULT_TOOL_DISPLAY_CONFIG,
+        theme,
+        fallbackText,
+      ),
+    );
+    container.addChild(new Spacer(1));
+    container.addChild(renderApplyPatchRows(deleteRows, theme, renderContext?.cwd));
+    return container;
+  }
+
+  const details = materializeLazyDiffDetails(
+    (result as { details?: unknown }).details as LazyDiffDetails | undefined,
+    options.expanded,
+  );
+  return renderEditDiffResult(
+    details,
+    { expanded: options.expanded, filePath: undefined },
+    DEFAULT_TOOL_DISPLAY_CONFIG,
+    theme,
+    fallbackText,
+  );
+}
+
+function renderBashApplyPatchHeader(
+  count: number | undefined,
+  theme: {
+    fg(color: string, text: string): string;
+    bold(text: string): string;
+  },
+  spinnerFrame?: string,
+): Text {
+  const prefix = spinnerFrame ? `${theme.fg('muted', spinnerFrame)} ` : '';
+  const label = `${prefix}${theme.fg('dim', `bash${TOOL_REWRITE_ARROW}`)}${theme.fg('toolTitle', theme.bold('apply_patch'))}`;
+  if (!count) return new Text(label, 0, 0);
+  return new Text(
+    `${label} ${theme.fg('muted', `${count} operation${count === 1 ? '' : 's'}`)}`,
+    0,
+    0,
+  );
+}
+
+function renderBashApplyPatchSummary(
+  rows: PatchPreviewRow[] | undefined,
+  count: number | undefined,
+  theme: {
+    fg(color: string, text: string): string;
+    bold(text: string): string;
+  },
+  cwd?: string,
+) {
+  const container = new Container();
+  container.addChild(renderBashApplyPatchHeader(rows?.length ?? count, theme));
+  if (rows && rows.length > 0) {
+    container.addChild(renderApplyPatchRows(rows, theme, cwd));
+  }
+  return container;
+}
+
+function renderBashApplyPatchPreview(
+  args: unknown,
+  theme: {
+    fg(color: string, text: string): string;
+    bold(text: string): string;
+  },
+  context?: {
+    argsComplete?: boolean;
+    isPartial?: boolean;
+    state?: unknown;
+    cwd?: string;
+    invalidate?: () => void;
+  },
+) {
+  const isStreaming = context?.isPartial === true && context?.argsComplete !== true;
+  const rows = isStreaming ? getApplyPatchSessionRows(args, context) : undefined;
+  const count = rows?.length ?? getApplyPatchOperationCount(args);
+
+  if (!rows || rows.length === 0) {
+    if (!isStreaming) {
+      clearPlaceholderPulse(context);
+      return renderBashApplyPatchHeader(count, theme);
+    }
+    const spinner = tickPlaceholderSpinnerFrame(context);
+    return renderBashApplyPatchHeader(count, theme, spinner);
+  }
+
+  clearPlaceholderPulse(context);
+  return renderBashApplyPatchSummary(rows, rows.length, theme, context?.cwd);
+}
+
+function renderBashApplyPatchResult(
+  result: unknown,
+  options: ToolRenderResultOptions,
+  theme: {
+    fg(color: string, text: string): string;
+    bold(text: string): string;
+  },
+  context: any,
+) {
+  const renderContext = withApplyPatchRenderArgs(result, context) as any;
+  return renderApplyPatchResult(result, options, theme, renderContext);
+}
+
 async function executeClassic(edits: ClassicEditItem[], cwd: string, signal?: AbortSignal) {
   const orderedFiles = [...new Set(edits.map((edit) => resolveToCwd(edit.path, cwd)))];
 
@@ -1483,6 +1664,12 @@ export default function multiEditExtension(pi: ExtensionAPI) {
             getToolProfileForModel(runtime.ctx.model),
           );
         },
+        renderPreview(decision: { params: { patch?: unknown } }, theme: any, runtime: any) {
+          return renderBashApplyPatchPreview(decision.params, theme, runtime);
+        },
+        renderResult(result: unknown, options: ToolRenderResultOptions, theme: any, context: any) {
+          return renderBashApplyPatchResult(result, options, theme, context);
+        },
       });
     }) ?? (() => {});
 
@@ -1604,84 +1791,7 @@ export default function multiEditExtension(pi: ExtensionAPI) {
       return renderApplyPatchCall(args, theme, context as any);
     },
     renderResult(result, options: ToolRenderResultOptions, theme, context) {
-      if (options.isPartial) {
-        const displayRows = cacheApplyPatchRows(
-          context,
-          getApplyPatchPartialRows(
-            result,
-            context?.args,
-            (context as any)?.executionStarted === true,
-            context as any,
-          ),
-        );
-        if (displayRows && displayRows.length > 0) {
-          return renderApplyPatchRows(displayRows, theme, context?.cwd);
-        }
-        return new Text(theme.fg('warning', 'patching...'), 0, 0);
-      }
-
-      const fallbackText = extractTextOutput(result as { content?: unknown });
-      const rows = getResultOperationRows(result);
-      if (isToolError(result, context)) {
-        const failedRows = getApplyPatchFailedRows(result, context as any);
-        if (failedRows && failedRows.length > 0) {
-          return renderApplyPatchRows(failedRows, theme, context?.cwd);
-        }
-        const error = fallbackText || 'Patch failed.';
-        return new Text(theme.fg('error', error), 0, 0);
-      }
-
-      cacheApplyPatchRows(context as any, rows);
-
-      if (!options.expanded && rows && rows.length > 0) {
-        return renderApplyPatchRows(rows, theme, context?.cwd);
-      }
-
-      if (
-        options.expanded &&
-        rows &&
-        rows.length > 0 &&
-        rows.every((row) => row.kind === 'delete')
-      ) {
-        return renderApplyPatchRows(rows, theme, context?.cwd);
-      }
-
-      if (options.expanded && rows && rows.some((row) => row.kind === 'delete')) {
-        const deleteRows = rows.filter((row) => row.kind === 'delete');
-        if (deleteRows.length === rows.length) {
-          return renderApplyPatchRows(deleteRows, theme, context?.cwd);
-        }
-
-        const details = materializeLazyDiffDetails(
-          result.details as LazyDiffDetails | undefined,
-          options.expanded,
-        );
-        const container = new Container();
-        container.addChild(
-          renderEditDiffResult(
-            details,
-            { expanded: options.expanded, filePath: undefined },
-            DEFAULT_TOOL_DISPLAY_CONFIG,
-            theme,
-            fallbackText,
-          ),
-        );
-        container.addChild(new Spacer(1));
-        container.addChild(renderApplyPatchRows(deleteRows, theme, context?.cwd));
-        return container;
-      }
-
-      const details = materializeLazyDiffDetails(
-        result.details as LazyDiffDetails | undefined,
-        options.expanded,
-      );
-      return renderEditDiffResult(
-        details,
-        { expanded: options.expanded, filePath: undefined },
-        DEFAULT_TOOL_DISPLAY_CONFIG,
-        theme,
-        fallbackText,
-      );
+      return renderApplyPatchResult(result, options, theme, context);
     },
   });
 }

@@ -13,6 +13,7 @@ import {
   type RewriteResult,
   type RewriteTool,
 } from './bash-rewrite';
+import { TOOL_REWRITE_ARROW } from '../shared/rewrite-label';
 
 export const BASH_REWRITE_COLLECT_PROVIDERS_EVENT = 'bash-rewrite:collect-providers';
 export const BASH_REWRITE_API_VERSION = 1;
@@ -50,6 +51,11 @@ export interface BashRewriteExecuteRuntime {
 
 export interface BashRewriteRenderRuntime {
   cwd?: string;
+  isPartial?: boolean;
+  executionStarted?: boolean;
+  argsComplete?: boolean;
+  state?: unknown;
+  invalidate?: () => void;
 }
 
 export interface BashRewriteProvider {
@@ -289,9 +295,9 @@ function renderGenericPreview(
   decision: RewriteDecision,
   theme: { fg: (...args: any[]) => string; bold?: (text: string) => string },
 ): Component {
-  const title = theme.fg('dim', 'bash →');
+  const title = theme.fg('dim', `bash${TOOL_REWRITE_ARROW}`);
   const tool = theme.fg('toolTitle', theme.bold ? theme.bold(decision.tool) : decision.tool);
-  return new Text(`${title} ${tool}(${renderParamsForSignature(decision.params)})`, 0, 0);
+  return new Text(`${title}${tool}(${renderParamsForSignature(decision.params)})`, 0, 0);
 }
 
 function routeDetails(args: {
@@ -299,6 +305,7 @@ function routeDetails(args: {
   provider: BashRewriteProvider;
   originalCommand: string;
   notice: string;
+  cwd?: string;
 }): Record<string, unknown> {
   return {
     routedVia: `bash-to-${args.decision.tool}`,
@@ -307,6 +314,7 @@ function routeDetails(args: {
     rewriteFromCommand: args.originalCommand,
     rewriteToParams: args.decision.params,
     rewriteCall: args.notice,
+    ...(args.cwd ? { rewriteCwd: args.cwd } : {}),
   };
 }
 
@@ -314,10 +322,13 @@ function renderBashRewritePreview(
   pi: ExtensionAPI,
   args: unknown,
   theme: { fg: (...args: any[]) => string; bold?: (text: string) => string },
-  cwd: string | undefined,
+  context: unknown,
 ): Component | null {
   const command = extractBashCommand(args);
   if (!command) return null;
+  const renderContext =
+    context && typeof context === 'object' ? (context as Record<string, unknown>) : {};
+  const cwd = typeof renderContext.cwd === 'string' ? renderContext.cwd : undefined;
   const providers = getProviders(pi);
   const rewrite = tryRewriteBashWithOptions(command, cwd ?? process.cwd(), {
     enabledTools: enabledRewriteTools(providers),
@@ -325,9 +336,12 @@ function renderBashRewritePreview(
   if (!rewrite?.decision) return null;
   const provider = findProviderForDecision(providers, rewrite.decision);
   if (!provider) return null;
+  const effectiveCwd = rewrite.cwd ?? cwd;
   return (
-    provider.renderPreview?.(rewrite.decision, theme, { cwd }) ??
-    renderGenericPreview(rewrite.decision, theme)
+    provider.renderPreview?.(rewrite.decision, theme, {
+      ...renderContext,
+      cwd: effectiveCwd,
+    }) ?? renderGenericPreview(rewrite.decision, theme)
   );
 }
 
@@ -349,7 +363,16 @@ function renderBashRewriteResult(
     typeof providerId === 'string'
       ? providers.find((candidate) => candidate.id === providerId)
       : providers.find((candidate) => routedVia === `bash-to-${candidate.tools[0]}`);
-  return provider?.renderResult?.(result, options, theme, context) ?? null;
+  const rewriteCwd = (details as { rewriteCwd?: unknown }).rewriteCwd;
+  const rewriteToParams = (details as { rewriteToParams?: unknown }).rewriteToParams;
+  const renderContext = {
+    ...(context as Record<string, unknown> | undefined),
+    ...(typeof rewriteCwd === 'string' ? { cwd: rewriteCwd } : {}),
+    ...(rewriteToParams && typeof rewriteToParams === 'object' && !Array.isArray(rewriteToParams)
+      ? { args: rewriteToParams }
+      : {}),
+  };
+  return provider?.renderResult?.(result, options, theme, renderContext) ?? null;
 }
 
 export default function bashRewriteExtension(pi: ExtensionAPI) {
@@ -359,7 +382,7 @@ export default function bashRewriteExtension(pi: ExtensionAPI) {
     ...bashTemplate,
     renderCall(args, theme, context) {
       return (
-        renderBashRewritePreview(pi, args, theme, context?.cwd) ??
+        renderBashRewritePreview(pi, args, theme, context) ??
         bashTemplate.renderCall!(args, theme, context)
       );
     },
@@ -403,6 +426,7 @@ export default function bashRewriteExtension(pi: ExtensionAPI) {
 
       const provider = findProviderForDecision(providers, rewrite.decision);
       if (!provider) return builtInBash.execute(toolCallId, params, signal, onUpdate, ctx);
+      const providerCtx = rewrite.cwd ? ({ ...ctx, cwd: rewrite.cwd } as typeof ctx) : ctx;
 
       try {
         const result = await provider.execute(rewrite.decision, {
@@ -410,7 +434,7 @@ export default function bashRewriteExtension(pi: ExtensionAPI) {
           originalCommand: command,
           signal,
           onUpdate,
-          ctx,
+          ctx: providerCtx,
         });
         return mergeRewriteDetails(
           result,
@@ -419,6 +443,7 @@ export default function bashRewriteExtension(pi: ExtensionAPI) {
             provider,
             originalCommand: command,
             notice: rewrite.notice,
+            cwd: rewrite.cwd,
           }),
         );
       } catch (error) {
