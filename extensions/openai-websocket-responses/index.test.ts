@@ -25,6 +25,7 @@ vi.mock('ws', () => ({
 import {
   createIdleKeepaliveActivityTracker,
   formatWebSocketFallbackNotification,
+  formatWebSocketRecoveryNotification,
   formatWebSocketRetryNotification,
   formatWebSocketStatus,
   IDLE_KEEPALIVE_ACTIVITY_WINDOW_MS,
@@ -3517,6 +3518,21 @@ describe('WebSocket transport', () => {
     );
   });
 
+  it('formats retrieve recovery notifications as concise recovery timeline messages', () => {
+    expect(
+      formatWebSocketRecoveryNotification({
+        type: 'recovering',
+        reason: 'midstream_error',
+        action: 'retrieve_response_snapshot',
+        urlHash: 'abc123',
+        responseId: 'resp_0091b44445adddfa006a21cb8aac448194b4aee1903076f4c2',
+        message: 'websocket: close 1006 (abnormal closure): unexpected EOF',
+      }),
+    ).toBe(
+      'Responses WS: stream error after response_id=resp_0091b…3076f4c2; retrieving response snapshot. Reason: websocket: close 1006 (abnormal closure): unexpected EOF',
+    );
+  });
+
   it('removes an idle cached socket when the server closes it', async () => {
     const instances: any[] = [];
     class FakeWebSocket {
@@ -4363,6 +4379,133 @@ describe('provider transport diagnostics', () => {
       )!;
       expect(retrieveTrace.traceId).toBe(websocketTrace.traceId);
       expect(retrieveTrace.spanId).not.toBe(websocketTrace.spanId);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.doUnmock('ws');
+      closeAllCachedWebSockets();
+    }
+  });
+
+  it('recovers transient server error frames by retrieving the response snapshot', async () => {
+    class FakeWebSocket {
+      readyState = 1;
+      listeners = new Map<string, Set<(event: any) => void>>();
+
+      constructor() {
+        queueMicrotask(() => this.emit('open', {}));
+      }
+
+      send() {
+        queueMicrotask(() => {
+          this.emit('message', {
+            data: JSON.stringify({ type: 'response.created', response: { id: 'resp_eof' } }),
+          });
+          this.emit('message', {
+            data: JSON.stringify({
+              type: 'response.output_item.added',
+              output_index: 0,
+              item: { type: 'message', id: 'msg_eof' },
+            }),
+          });
+          this.emit('message', {
+            data: JSON.stringify({
+              type: 'response.content_part.added',
+              output_index: 0,
+              content_index: 0,
+              part: { type: 'output_text', text: '' },
+            }),
+          });
+          this.emit('message', {
+            data: JSON.stringify({
+              type: 'response.output_text.delta',
+              output_index: 0,
+              content_index: 0,
+              delta: 'Hello',
+            }),
+          });
+          this.emit('message', {
+            data: JSON.stringify({
+              type: 'error',
+              status: 500,
+              error: {
+                message: 'websocket: close 1006 (abnormal closure): unexpected EOF',
+                type: 'server_error',
+                code: 'internal_server_error',
+              },
+            }),
+          });
+        });
+      }
+
+      close() {
+        this.readyState = 3;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void) {
+        const listeners = this.listeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      removeEventListener(type: string, listener: (event: any) => void) {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      emit(type: string, event: any) {
+        for (const listener of this.listeners.get(type) ?? []) listener(event);
+      }
+    }
+
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            id: 'resp_eof',
+            status: 'completed',
+            output: [
+              {
+                type: 'message',
+                id: 'msg_eof',
+                content: [{ type: 'output_text', text: 'Hello world' }],
+              },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+    );
+    const lifecycle: WebSocketLifecycleEvent[] = [];
+
+    vi.doMock('ws', () => ({ WebSocket: FakeWebSocket, default: FakeWebSocket }));
+    vi.stubGlobal('fetch', fetchImpl);
+    try {
+      const streamFactory = createOpenAIWebSocketResponsesStream(
+        () => normalizeSettings({ websocket: { retries: 0, idleTimeoutMs: 0 } }),
+        (event) => lifecycle.push(event),
+      );
+      const events = await collectStreamEvents(
+        streamFactory(makeModel(), { messages: [] }, {
+          apiKey: 'test-token',
+          sessionId: 'provider-transient-error-recovery-session',
+          transport: 'websocket-cached',
+        } as any),
+      );
+
+      expect(events.at(-1)).toMatchObject({ type: 'done', reason: 'stop' });
+      expect((events.at(-1) as any).message.content).toContainEqual(
+        expect.objectContaining({ type: 'text', text: 'Hello world' }),
+      );
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      expect(lifecycle).toContainEqual(
+        expect.objectContaining({
+          type: 'recovering',
+          reason: 'midstream_error',
+          action: 'retrieve_response_snapshot',
+          responseId: 'resp_eof',
+        }),
+      );
+      expect(lifecycle).toContainEqual(
+        expect.objectContaining({ type: 'recovered', mode: 'resumed', responseId: 'resp_eof' }),
+      );
     } finally {
       vi.unstubAllGlobals();
       vi.doUnmock('ws');

@@ -340,6 +340,14 @@ export function createOpenAIWebSocketResponsesStream(
             emittedTextBytes: new TextEncoder().encode(getOutputText(output)).byteLength,
             ...traceFields(retrieveTrace),
           });
+          onLifecycleEvent?.({
+            type: 'recovering',
+            reason: 'midstream_error',
+            action: 'retrieve_response_snapshot',
+            urlHash: shortHash(url) ?? '',
+            responseId: error.responseId,
+            message: error.message,
+          });
           try {
             const recoveryResult = await recoverResponseByRetrieve({
               model,
@@ -357,6 +365,12 @@ export function createOpenAIWebSocketResponsesStream(
               polls: recoveryResult.polls,
               responseId: error.responseId,
               syntheticDeltas: recoveryResult.emittedSyntheticDeltas,
+            });
+            onLifecycleEvent?.({
+              type: 'recovered',
+              mode: 'resumed',
+              urlHash: shortHash(url) ?? '',
+              responseId: error.responseId,
             });
           } catch (recoveryError) {
             transportDiagnostics?.record('retrieve_recovery_error', {

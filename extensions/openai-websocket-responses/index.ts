@@ -139,6 +139,18 @@ export function formatWebSocketFallbackNotification(
   ].join(' ');
 }
 
+export function formatWebSocketRecoveryNotification(
+  event: WebSocketLifecycleEvent,
+): string | undefined {
+  if (event.type !== 'recovering') return undefined;
+  return [
+    `Responses WS: stream error after response_id=${shortResponseId(event.responseId)}; retrieving response snapshot.`,
+    event.message ? `Reason: ${event.message}` : undefined,
+  ]
+    .filter((part): part is string => typeof part === 'string')
+    .join(' ');
+}
+
 export function createMissingCodexAccountIdNotifier(
   getContext: () => NotifyContextLike | undefined,
 ): (event: MissingCodexAccountIdWarningEvent) => void {
@@ -222,6 +234,9 @@ export default function (pi: ExtensionAPI) {
     const fallbackNotification = formatWebSocketFallbackNotification(event);
     if (fallbackNotification && currentCtx?.hasUI)
       currentCtx.ui.notify(fallbackNotification, 'warning');
+    const recoveryNotification = formatWebSocketRecoveryNotification(event);
+    if (recoveryNotification && currentCtx?.hasUI)
+      currentCtx.ui.notify(recoveryNotification, 'warning');
     const status = formatWebSocketStatus(event);
     if (!status || !currentCtx?.hasUI) return;
     currentCtx.ui.setStatus(WEBSOCKET_STATUS_KEY, status);
