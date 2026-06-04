@@ -113,7 +113,7 @@ function resolveStore(
 ): boolean {
   if (profile === 'codex') return false;
   const providerModel = `${model.provider}/${model.id}`;
-  return storeOverrideForProviderModel(providerModel, storeSettings) ?? true;
+  return storeOverrideForProviderModel(providerModel, storeSettings) ?? model.provider !== 'openai';
 }
 
 export function buildResponsesBody(

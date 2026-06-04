@@ -623,6 +623,17 @@ describe('body and continuation helpers', () => {
     expect(body.max_output_tokens).toBeUndefined();
   });
 
+  it('defaults OpenAI provider requests to stateless storage', () => {
+    const body = buildResponsesBody(
+      makeModel({ provider: 'openai', id: 'gpt-5.4-mini' }),
+      { messages: [{ role: 'user', content: 'Hi', timestamp: 1 }] },
+      undefined,
+      'generic',
+    );
+
+    expect(body.store).toBe(false);
+  });
+
   it('allows provider/model store overrides for non-Codex profiles', () => {
     const body = buildResponsesBody(
       makeModel({ id: 'productivity/gpt-5.5-nomoderation' }),
