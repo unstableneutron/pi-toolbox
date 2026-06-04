@@ -358,12 +358,16 @@ function getToolProfileForModel(
   return defaultProfile;
 }
 
+const CODEX_COMPATIBLE_DISABLED_TOOLS = new Set(['edit', 'write']);
+
 function isToolAllowedForProfile(toolName: string, profile: ToolProfile): boolean {
-  return profile === 'extended' || toolName === 'apply_patch';
+  return profile === 'extended' || !CODEX_COMPATIBLE_DISABLED_TOOLS.has(toolName);
 }
 
 function getDisabledToolsForProfile(profile: ToolProfile, allTools: string[]): string[] {
-  return profile === 'extended' ? [] : allTools.filter((name) => name !== 'apply_patch');
+  return profile === 'extended'
+    ? []
+    : allTools.filter((name) => CODEX_COMPATIBLE_DISABLED_TOOLS.has(name));
 }
 
 function applyModelToolPolicy(
@@ -1448,6 +1452,44 @@ async function buildClassicEditPlan(
 }
 
 export default function multiEditExtension(pi: ExtensionAPI) {
+  const unregisterBashRewriteProvider =
+    pi.events?.on?.('bash-rewrite:collect-providers', (payload: unknown) => {
+      if (!payload || typeof payload !== 'object') return;
+      const register = (payload as { register?: unknown }).register;
+      if (typeof register !== 'function') return;
+
+      register({
+        id: 'multi-edit.apply-patch',
+        priority: 200,
+        tools: ['apply_patch'],
+        fallbackOnExecuteError: false,
+        async execute(
+          decision: { params: { patch?: unknown } },
+          runtime: {
+            signal?: AbortSignal;
+            onUpdate?: unknown;
+            ctx: { cwd: string; model?: { provider?: string; id?: string } };
+          },
+        ) {
+          if (typeof decision.params.patch !== 'string') {
+            throw new Error('apply_patch bash rewrite requires a string patch payload.');
+          }
+          return executePatch(
+            decision.params.patch,
+            runtime.ctx.cwd,
+            runtime.signal,
+            runtime.onUpdate as any,
+            runtime.ctx as any,
+            getToolProfileForModel(runtime.ctx.model),
+          );
+        },
+      });
+    }) ?? (() => {});
+
+  pi.on?.('session_shutdown', async () => {
+    unregisterBashRewriteProvider();
+  });
+
   pi.on?.('session_start', async (_event, ctx) => {
     applyModelToolPolicy(pi, ctx.model);
   });

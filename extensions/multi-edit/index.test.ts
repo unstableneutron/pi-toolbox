@@ -154,10 +154,66 @@ describe('multi-edit extension', () => {
     );
   });
 
-  test('disables edit and write for gpt-5.4-based models', async () => {
+  test('registers apply_patch as a bash-rewrite provider', async () => {
+    const tools: any[] = [];
+    const eventHandlers = new Map<string, Function[]>();
+    const pi = {
+      registerTool(tool: any) {
+        tools.push(tool);
+      },
+      on() {},
+      events: {
+        on(event: string, handler: Function) {
+          eventHandlers.set(event, [...(eventHandlers.get(event) ?? []), handler]);
+          return () => {};
+        },
+      },
+    } as any;
+    const cwd = await mkdtemp(join(tmpdir(), 'multi-edit-bash-provider-'));
+
+    try {
+      await writeFile(join(cwd, 'demo.txt'), 'old\n', 'utf8');
+      multiEditExtension(pi);
+
+      const providers: any[] = [];
+      for (const handler of eventHandlers.get('bash-rewrite:collect-providers') ?? []) {
+        handler({ apiVersion: 1, register: (provider: any) => providers.push(provider) });
+      }
+
+      expect(providers).toHaveLength(1);
+      expect(providers[0]).toMatchObject({
+        id: 'multi-edit.apply-patch',
+        priority: 200,
+        tools: ['apply_patch'],
+        fallbackOnExecuteError: false,
+      });
+
+      const result = await providers[0].execute(
+        {
+          params: {
+            patch: `*** Begin Patch
+*** Update File: demo.txt
+@@
+-old
++new
+*** End Patch`,
+          },
+        },
+        { ctx: { cwd }, signal: undefined, onUpdate: undefined },
+      );
+
+      expect(result.isError).not.toBe(true);
+      expect(result.content[0]?.text).toContain('Applied patch with 1 operation');
+      await expect(readFile(join(cwd, 'demo.txt'), 'utf8')).resolves.toBe('new\n');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test('keeps read-only tools while disabling edit and write for gpt-5.4-based models', async () => {
     const tools: any[] = [];
     const handlers = new Map<string, Function[]>();
-    let activeTools: string[] = ['read', 'edit', 'write', 'apply_patch'];
+    let activeTools: string[] = ['read', 'grep', 'ls', 'bash', 'edit', 'write', 'apply_patch'];
     const allTools = activeTools.map((name) => ({ name }));
     const pi = {
       registerTool(tool: any) {
@@ -186,7 +242,7 @@ describe('multi-edit extension', () => {
       { model: { id: 'gpt-5.4', provider: 'openai' } },
     );
 
-    expect(activeTools).toEqual(['apply_patch']);
+    expect(activeTools).toEqual(['read', 'grep', 'ls', 'bash', 'apply_patch']);
     expect(result.systemPrompt).toContain('Always use apply_patch for manual code edits.');
     expect(result.systemPrompt).toContain('when apply_patch would suffice');
     expect(result.systemPrompt).not.toContain('*** FindReplaceOnce:');
@@ -445,7 +501,7 @@ describe('multi-edit extension', () => {
     expect(activeTools).toEqual(['read', 'edit', 'write', 'apply_patch']);
   });
 
-  test('blocks disabled tools at tool_call time for matching models', async () => {
+  test('blocks mutation alternatives but allows read-only tools at tool_call time for matching models', async () => {
     const handlers = new Map<string, Function[]>();
     const pi = {
       registerTool() {},
@@ -476,15 +532,11 @@ describe('multi-edit extension', () => {
         "Tool 'write' is disabled for profile 'codex-compatible' on model 'openai/gpt-5.3-codex'; use apply_patch instead.",
     });
 
-    const readBlocked = await toolCall(
+    const readAllowed = await toolCall(
       { toolName: 'read' },
       { model: { id: 'gpt-5.3-codex', provider: 'openai' } },
     );
-    expect(readBlocked).toEqual({
-      block: true,
-      reason:
-        "Tool 'read' is disabled for profile 'codex-compatible' on model 'openai/gpt-5.3-codex'; use apply_patch instead.",
-    });
+    expect(readAllowed).toBeUndefined();
   });
 
   test('renderCall shows a header plus speculative preview rows before execution starts', () => {
