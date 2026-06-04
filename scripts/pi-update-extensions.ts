@@ -665,6 +665,8 @@ export async function applyPiContinuousLearningPatch(
 // ---------------------------------------------------------------------------
 
 const PI_SUBAGENTS_PACKAGE_NAME = 'pi-subagents';
+const PI_SUBAGENTS_AGENTS_RELATIVE_PATH = 'agents';
+const PI_SUBAGENTS_APPLY_PATCH_TOOL_NAME = 'apply_patch';
 const PI_SUBAGENTS_EXECUTION_RELATIVE_PATH = 'src/runs/foreground/execution.ts';
 const PI_SUBAGENTS_INTERCOM_DETACH_PATCH_MARKER =
   '__pi_update_extensions:pi-subagents-blocking-intercom-detach__';
@@ -805,6 +807,119 @@ export async function applyPiSubagentsIntercomDetachPatch(
     );
   writeFileSync(filePath, patched);
   return { status: 'applied', packageRoot, version, patchPath: filePath };
+}
+
+// ---------------------------------------------------------------------------
+// pi-subagents built-in agent apply_patch tool patch
+//
+// Built-in pi-subagents agent definitions predate this toolbox's apply_patch
+// tool. Agents with `edit` or `write` can already mutate files, so add the
+// narrower patch-shaped editor tool to any built-in agent that has either of
+// those tools. Scan the package's agent markdown dynamically instead of naming
+// specific agents so new writable built-ins get patched automatically.
+// ---------------------------------------------------------------------------
+
+type AgentToolLinePatch = {
+  changed: boolean;
+  content: string;
+  hasWritableTool: boolean;
+  hasApplyPatchTool: boolean;
+};
+
+function getPiSubagentsAgentsDir(packageRoot: string): string {
+  return join(packageRoot, PI_SUBAGENTS_AGENTS_RELATIVE_PATH);
+}
+
+function getPiSubagentsAgentMarkdownFiles(packageRoot: string): string[] {
+  const agentsDir = getPiSubagentsAgentsDir(packageRoot);
+  if (!existsSync(agentsDir)) return [];
+  return readdirSync(agentsDir)
+    .filter((entry) => entry.endsWith('.md'))
+    .map((entry) => join(agentsDir, entry))
+    .filter((entryPath) => statSync(entryPath).isFile())
+    .sort();
+}
+
+function splitFrontmatterTools(rawTools: string): string[] {
+  return rawTools
+    .split(',')
+    .map((tool) => tool.trim())
+    .filter(Boolean);
+}
+
+function patchAgentToolLine(content: string): AgentToolLinePatch {
+  const frontmatterMatch = content.match(/^---\r?\n(?<frontmatter>[\s\S]*?)\r?\n---/);
+  if (!frontmatterMatch?.groups?.frontmatter) {
+    return { changed: false, content, hasWritableTool: false, hasApplyPatchTool: false };
+  }
+
+  const frontmatter = frontmatterMatch.groups.frontmatter;
+  const toolsLineMatch = frontmatter.match(/^(?<prefix>tools:\s*)(?<tools>.*)$/m);
+  if (!toolsLineMatch?.groups) {
+    return { changed: false, content, hasWritableTool: false, hasApplyPatchTool: false };
+  }
+
+  const tools = splitFrontmatterTools(toolsLineMatch.groups.tools);
+  const hasWritableTool = tools.includes('edit') || tools.includes('write');
+  const hasApplyPatchTool = tools.includes(PI_SUBAGENTS_APPLY_PATCH_TOOL_NAME);
+  if (!hasWritableTool || hasApplyPatchTool) {
+    return { changed: false, content, hasWritableTool, hasApplyPatchTool };
+  }
+
+  const patchedToolsLine = `${toolsLineMatch.groups.prefix}${toolsLineMatch.groups.tools}, ${PI_SUBAGENTS_APPLY_PATCH_TOOL_NAME}`;
+  return {
+    changed: true,
+    content: content.replace(toolsLineMatch[0], patchedToolsLine),
+    hasWritableTool,
+    hasApplyPatchTool,
+  };
+}
+
+export function isPiSubagentsApplyPatchToolPatchApplied(packageRoot: string): boolean {
+  const agentFiles = getPiSubagentsAgentMarkdownFiles(packageRoot);
+  if (agentFiles.length === 0) return false;
+
+  return agentFiles.every(
+    (filePath) => !patchAgentToolLine(readFileSync(filePath, 'utf8')).changed,
+  );
+}
+
+export async function applyPiSubagentsApplyPatchToolPatch(
+  options: { dryRun?: boolean; packageRoot?: string; cwd?: string } = {},
+): Promise<ApplyPatchResult> {
+  const packageRoot =
+    options.packageRoot ?? findGlobalPackagePath(PI_SUBAGENTS_PACKAGE_NAME, { cwd: options.cwd });
+  if (!packageRoot) {
+    throw new Error(
+      `Could not locate installed ${PI_SUBAGENTS_PACKAGE_NAME} via configured package manager, aube, or pnpm`,
+    );
+  }
+
+  const version = getPackageVersion(packageRoot) ?? 'unknown';
+  const agentsDir = getPiSubagentsAgentsDir(packageRoot);
+  if (!existsSync(agentsDir)) {
+    throw new Error(`pi-subagents@${version}: agents directory not found at ${agentsDir}`);
+  }
+
+  const filesToPatch = getPiSubagentsAgentMarkdownFiles(packageRoot)
+    .map((filePath) => ({
+      filePath,
+      patch: patchAgentToolLine(readFileSync(filePath, 'utf8')),
+    }))
+    .filter(({ patch }) => patch.changed);
+
+  if (filesToPatch.length === 0) {
+    return { status: 'already-applied', packageRoot, version, patchPath: agentsDir };
+  }
+
+  if (options.dryRun) {
+    return { status: 'would-apply', packageRoot, version, patchPath: agentsDir };
+  }
+
+  for (const { filePath, patch } of filesToPatch) {
+    writeFileSync(filePath, patch.content);
+  }
+  return { status: 'applied', packageRoot, version, patchPath: agentsDir };
 }
 
 // ---------------------------------------------------------------------------
@@ -1594,8 +1709,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       const subagentsResult = await applyPiSubagentsIntercomDetachPatch({
         dryRun,
         cwd: REPO_ROOT,
-        packageRoot: installedPackages.find((entry) => entry.source === 'npm:pi-subagents')
-          ?.installedPath,
+        packageRoot: findInstalledNpmPackagePath(installedPackages, 'pi-subagents'),
       });
       const label =
         subagentsResult.status === 'already-applied'
@@ -1607,6 +1721,25 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     } catch (error) {
       console.error(
         `Skipped pi-subagents intercom detach patch: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    try {
+      const subagentsApplyPatchToolResult = await applyPiSubagentsApplyPatchToolPatch({
+        dryRun,
+        cwd: REPO_ROOT,
+        packageRoot: findInstalledNpmPackagePath(installedPackages, 'pi-subagents'),
+      });
+      const label =
+        subagentsApplyPatchToolResult.status === 'already-applied'
+          ? `Already applied: pi-subagents apply_patch agent tool patch (${subagentsApplyPatchToolResult.version})`
+          : subagentsApplyPatchToolResult.status === 'would-apply'
+            ? `Would apply: pi-subagents apply_patch agent tool patch (${subagentsApplyPatchToolResult.version})`
+            : `${subagentsApplyPatchToolResult.status}: pi-subagents apply_patch agent tool patch (${subagentsApplyPatchToolResult.version}) via ${subagentsApplyPatchToolResult.patchPath}`;
+      console.log(label);
+    } catch (error) {
+      console.error(
+        `Skipped pi-subagents apply_patch agent tool patch: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }

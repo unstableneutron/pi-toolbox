@@ -8,6 +8,7 @@ import {
   applyPiCodingAgentResolverPatch,
   applyPiContinuousLearningPatch,
   applyPiMermaidPatch,
+  applyPiSubagentsApplyPatchToolPatch,
   applyPiSubagentsIntercomDetachPatch,
   buildPiCodingAgentResolverReplacement,
   compareVersions,
@@ -18,6 +19,7 @@ import {
   isPiCodingAgentResolverPatchApplied,
   isPiContinuousLearningPatchApplied,
   isPiMermaidPatchApplied,
+  isPiSubagentsApplyPatchToolPatchApplied,
   isPiSubagentsIntercomDetachPatchApplied,
   parsePiListOutput,
   readConfiguredNpmCommand,
@@ -516,6 +518,117 @@ describe('pi-subagents intercom detach patching', () => {
     const packageRoot = setupFakePackage('1.0.0', 'export function changedUpstream() {}\n');
     await expect(applyPiSubagentsIntercomDetachPatch({ packageRoot })).rejects.toThrow(
       /target text for pi-subagents intercom detach patch not found/i,
+    );
+  });
+});
+
+describe('pi-subagents apply_patch agent tool patching', () => {
+  function setupFakePackage(
+    version: string,
+    agents: Record<string, string> = {
+      'worker.md': [
+        '---',
+        'name: worker',
+        'tools: read, grep, find, ls, bash, edit, write, contact_supervisor',
+        '---',
+        '',
+      ].join('\n'),
+      'planner.md': ['---', 'name: planner', 'tools: read, write, intercom', '---', ''].join('\n'),
+      'oracle.md': [
+        '---',
+        'name: oracle',
+        'tools: read, grep, find, ls, bash, intercom',
+        '---',
+        '',
+      ].join('\n'),
+      'already-patched.md': [
+        '---',
+        'name: already-patched',
+        'tools: read, write, apply_patch, intercom',
+        '---',
+        '',
+      ].join('\n'),
+    },
+  ): string {
+    const packageRoot = makeTempDir('pi-subagents-');
+    writeFileSync(
+      join(packageRoot, 'package.json'),
+      JSON.stringify({ name: 'pi-subagents', version }, null, 2),
+    );
+    mkdirSync(join(packageRoot, 'agents'), { recursive: true });
+    for (const [fileName, content] of Object.entries(agents)) {
+      writeFileSync(join(packageRoot, 'agents', fileName), content);
+    }
+    return packageRoot;
+  }
+
+  it('reports unpatched editable agent definitions as not yet patched', () => {
+    const packageRoot = setupFakePackage('0.27.0');
+    expect(isPiSubagentsApplyPatchToolPatchApplied(packageRoot)).toBe(false);
+  });
+
+  it('adds apply_patch dynamically to agents with edit or write tools only', async () => {
+    const packageRoot = setupFakePackage('0.27.0');
+    const result = await applyPiSubagentsApplyPatchToolPatch({ packageRoot });
+
+    expect(result).toMatchObject({
+      status: 'applied',
+      packageRoot,
+      version: '0.27.0',
+    });
+    expect(result.patchPath).toBe(join(packageRoot, 'agents'));
+
+    expect(readFileSync(join(packageRoot, 'agents', 'worker.md'), 'utf8')).toContain(
+      'tools: read, grep, find, ls, bash, edit, write, contact_supervisor, apply_patch',
+    );
+    expect(readFileSync(join(packageRoot, 'agents', 'planner.md'), 'utf8')).toContain(
+      'tools: read, write, intercom, apply_patch',
+    );
+    expect(readFileSync(join(packageRoot, 'agents', 'oracle.md'), 'utf8')).toContain(
+      'tools: read, grep, find, ls, bash, intercom',
+    );
+    expect(readFileSync(join(packageRoot, 'agents', 'already-patched.md'), 'utf8')).toContain(
+      'tools: read, write, apply_patch, intercom',
+    );
+    expect(isPiSubagentsApplyPatchToolPatchApplied(packageRoot)).toBe(true);
+  });
+
+  it('is idempotent after patching all editable agent definitions', async () => {
+    const packageRoot = setupFakePackage('0.27.0');
+    await applyPiSubagentsApplyPatchToolPatch({ packageRoot });
+    const second = await applyPiSubagentsApplyPatchToolPatch({ packageRoot });
+
+    expect(second).toMatchObject({
+      status: 'already-applied',
+      packageRoot,
+      version: '0.27.0',
+    });
+  });
+
+  it('supports dry-run without mutating agent definitions', async () => {
+    const packageRoot = setupFakePackage('0.27.0');
+    const workerPath = join(packageRoot, 'agents', 'worker.md');
+    const original = readFileSync(workerPath, 'utf8');
+
+    const result = await applyPiSubagentsApplyPatchToolPatch({ packageRoot, dryRun: true });
+    expect(result).toMatchObject({
+      status: 'would-apply',
+      packageRoot,
+      version: '0.27.0',
+    });
+    expect(readFileSync(workerPath, 'utf8')).toBe(original);
+    expect(isPiSubagentsApplyPatchToolPatchApplied(packageRoot)).toBe(false);
+  });
+
+  it('throws a descriptive error when the agents directory is missing', async () => {
+    const packageRoot = makeTempDir('pi-subagents-');
+    writeFileSync(
+      join(packageRoot, 'package.json'),
+      JSON.stringify({ name: 'pi-subagents', version: '1.0.0' }, null, 2),
+    );
+
+    await expect(applyPiSubagentsApplyPatchToolPatch({ packageRoot })).rejects.toThrow(
+      /agents directory not found/i,
     );
   });
 });
