@@ -46,6 +46,11 @@ Configure the extension in `~/.pi/agent/settings.json`:
       "firstEventTimeoutMs": 60000,
       "idleTimeoutMs": 0
     },
+    "diagnostics": {
+      "successTimingFields": true,
+      "successTimelineSampleRate": 0.05,
+      "successTimelineSlowStartThresholdMs": 30000
+    },
     "debug": {
       "enabled": false,
       "logFile": "~/.pi/agent/openai-websocket-responses.debug.jsonl"
@@ -68,9 +73,11 @@ Defaults: `patch.enabled` is `true`; `patch.apis` is
 `request.queryParams`, `request.queryParamsByProvider`,
 `request.queryParamsByProviderModel`, and `request.storeByProviderModel` are
 empty; WebSocket defaults are `retries: 2`, `connectTimeoutMs: 15000`,
-`firstEventTimeoutMs: 60000`, and `idleTimeoutMs: 0`; debug logging is disabled;
-recovery defaults are shown above. Keep `providerModels` narrow when request query params contain
-deployment-specific values.
+`firstEventTimeoutMs: 60000`, and `idleTimeoutMs: 0`; diagnostic defaults are
+`successTimingFields: true`, `successTimelineSampleRate: 0.05`, and
+`successTimelineSlowStartThresholdMs: 30000`; debug logging is disabled;
+recovery defaults are shown above. Keep `providerModels` narrow when request
+query params contain deployment-specific values.
 
 For the current Azure/LFM WSS route, `api-version` alone is not enough. The
 handshake also needs Azure routing values in URL query params. Use `${model.id}`
@@ -205,6 +212,29 @@ connection/cache metadata, upstream response ids when available, and a bounded
 timeline. Timeline events record the path that matters for later debugging:
 WebSocket acquisition, stale cached sockets, close/error codes, retry decisions,
 SSE fallback, response id discovery, and retrieve recovery start/done/failure.
+
+Successful WebSocket turns include compact startup timing fields by default:
+`firstEventMs`, `responseCreatedMs`, `lastEventMs`, and `completedMs` when those
+milestones are observed. Full timelines are always included for failures and
+significant transport events. For otherwise normal successful requests,
+`diagnostics.successTimelineSampleRate` controls random full-timeline sampling;
+the default `0.05` samples roughly 5%. Successful requests also keep a full
+timeline when startup is slow: `successTimelineSlowStartThresholdMs` compares
+the time to `response.created` (or the first WebSocket event if no response id
+was recorded) against the threshold. This slow-start threshold is intentionally
+about startup latency, not total generation duration, because long model turns
+can legitimately keep a WebSocket open for much longer.
+
+Diagnostics also include a compact continuation summary so session analysis can
+distinguish full-context sends from previous-response-id deltas without reading
+debug logs. `continuation` records the continuation decision such as `delta` or
+`no_continuation`; `sentInputItems` records the number of Responses API input
+items sent on the actual request. For `delta` sends, `fullInputItems` and
+`fullBytes` estimate the full-context request that was avoided; the existing
+`requestBytes` field remains the actual payload size sent over the WebSocket.
+When a `previous_response_not_found` recovery retries with full context, the
+diagnostic sets `fallback: "previous_response_not_found"` and updates
+`sentInputItems` to the full-context item count.
 
 When transparent `transport: "auto"` falls back to SSE before the stream starts,
 the WebSocket failure diagnostic is copied onto the final SSE assistant message

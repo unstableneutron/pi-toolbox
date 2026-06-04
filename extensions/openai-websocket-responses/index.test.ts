@@ -56,6 +56,7 @@ import {
   createTransportDiagnostics,
   extractTransportDiagnostics,
   mergeTransportDiagnostics,
+  shouldIncludeSuccessTimeline,
 } from './src/transport-diagnostics.ts';
 import { recoverResponseByRetrieve } from './src/retrieve-recovery.ts';
 import {
@@ -214,6 +215,122 @@ describe('transport diagnostics', () => {
       expect.objectContaining({ type: 'sse_fallback' }),
     );
   });
+
+  it('emits compact success timing fields and only includes timelines when requested', async () => {
+    let now = 1000;
+    const diagnostics = createTransportDiagnostics(
+      {
+        configuredTransport: 'websocket',
+        url: 'wss://example.test/responses',
+        logicalTraceId: 'trace-success-timing',
+      },
+      () => now,
+    );
+
+    class FakeWebSocket {
+      readyState = 1;
+      listeners = new Map<string, Set<(event: any) => void>>();
+
+      constructor() {
+        queueMicrotask(() => this.emit('open', {}));
+      }
+
+      send() {
+        queueMicrotask(() => {
+          now = 1042;
+          this.emit('message', {
+            data: JSON.stringify({ type: 'response.created', response: { id: 'resp_timing' } }),
+          });
+          now = 1100;
+          this.emit('message', {
+            data: JSON.stringify({
+              type: 'response.completed',
+              response: { id: 'resp_timing', status: 'completed' },
+            }),
+          });
+        });
+      }
+
+      close() {
+        this.readyState = 3;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void) {
+        const listeners = this.listeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      removeEventListener(type: string, listener: (event: any) => void) {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      emit(type: string, event: any) {
+        for (const listener of this.listeners.get(type) ?? []) listener(event);
+      }
+    }
+
+    await runWebSocketResponse(
+      {
+        url: 'wss://example.test/responses',
+        headers: new Headers(),
+        body: { model: 'gpt', input: [] },
+        settings: normalizeSettings({ websocket: { retries: 0 } }),
+        WebSocketCtor: FakeWebSocket as any,
+        diagnostics,
+      },
+      () => undefined,
+    );
+
+    const compactMessage = makeAssistantMessage();
+    attachTransportDiagnostic(compactMessage, diagnostics, {
+      finalTransport: 'websocket',
+      outcome: 'completed',
+    });
+    const [compact] = extractTransportDiagnostics(compactMessage);
+    expect(compact?.details).toMatchObject({
+      firstEventMs: 42,
+      responseCreatedMs: 42,
+      lastEventMs: 100,
+      completedMs: 100,
+    });
+    expect(compact?.details).not.toHaveProperty('timeline');
+
+    const sampledMessage = makeAssistantMessage();
+    attachTransportDiagnostic(sampledMessage, diagnostics, {
+      finalTransport: 'websocket',
+      outcome: 'completed',
+      includeTimeline: true,
+    });
+    const [sampled] = extractTransportDiagnostics(sampledMessage);
+    expect(sampled?.details?.timeline).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'first_event', tMs: 42, eventType: 'response.created' }),
+        expect.objectContaining({ type: 'response_created', tMs: 42 }),
+        expect.objectContaining({ type: 'response_completed', tMs: 100 }),
+      ]),
+    );
+  });
+
+  it('samples successful websocket timelines at the configured rate and for slow starts', () => {
+    const settings = normalizeSettings({
+      diagnostics: {
+        successTimelineSampleRate: 0.05,
+        successTimelineSlowStartThresholdMs: 30000,
+      },
+    });
+
+    expect(shouldIncludeSuccessTimeline(settings, { responseCreatedMs: 1200 }, () => 0.049)).toBe(
+      true,
+    );
+    expect(shouldIncludeSuccessTimeline(settings, { responseCreatedMs: 1200 }, () => 0.05)).toBe(
+      false,
+    );
+    expect(shouldIncludeSuccessTimeline(settings, { responseCreatedMs: 30000 }, () => 0.99)).toBe(
+      true,
+    );
+    expect(shouldIncludeSuccessTimeline(settings, { firstEventMs: 31000 }, () => 0.99)).toBe(true);
+  });
 });
 
 describe('settings and patch matching', () => {
@@ -232,6 +349,11 @@ describe('settings and patch matching', () => {
         connectTimeoutMs: 15000,
         firstEventTimeoutMs: 60000,
         idleTimeoutMs: 0,
+      },
+      diagnostics: {
+        successTimingFields: true,
+        successTimelineSampleRate: 0.05,
+        successTimelineSlowStartThresholdMs: 30000,
       },
       recovery: {
         enabled: true,
@@ -265,6 +387,22 @@ describe('settings and patch matching', () => {
     expect(normalizeSettings(undefined).trace.enabled).toBe(true);
     expect(normalizeSettings({ trace: { enabled: false } }).trace.enabled).toBe(false);
     expect(normalizeSettings({ trace: { enabled: 'nope' } }).trace.enabled).toBe(true);
+  });
+
+  it('normalizes diagnostics sampling settings with safe defaults', () => {
+    expect(
+      normalizeSettings({
+        diagnostics: {
+          successTimingFields: false,
+          successTimelineSampleRate: 2,
+          successTimelineSlowStartThresholdMs: -1,
+        },
+      }).diagnostics,
+    ).toEqual({
+      successTimingFields: false,
+      successTimelineSampleRate: 1,
+      successTimelineSlowStartThresholdMs: 30000,
+    });
   });
 
   it('reads the openaiWebsocketResponses key from commented settings JSON', () => {
@@ -3348,7 +3486,178 @@ function streamFromEvents(...events: any[]) {
   return stream;
 }
 
+function responseCreateBytes(body: Record<string, any>): number {
+  return new TextEncoder().encode(JSON.stringify({ type: 'response.create', ...body })).byteLength;
+}
+
 describe('provider transport diagnostics', () => {
+  it('adds compact continuation diagnostics for full-context websocket requests', async () => {
+    class FakeWebSocket {
+      readyState = 1;
+      listeners = new Map<string, Set<(event: any) => void>>();
+
+      constructor() {
+        queueMicrotask(() => this.emit('open', {}));
+      }
+
+      send() {
+        queueMicrotask(() => {
+          this.emit('message', {
+            data: JSON.stringify({ type: 'response.created', response: { id: 'resp_full' } }),
+          });
+          this.emit('message', {
+            data: JSON.stringify({
+              type: 'response.completed',
+              response: { id: 'resp_full', status: 'completed' },
+            }),
+          });
+        });
+      }
+
+      close() {
+        this.readyState = 3;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void) {
+        const listeners = this.listeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      removeEventListener(type: string, listener: (event: any) => void) {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      emit(type: string, event: any) {
+        for (const listener of this.listeners.get(type) ?? []) listener(event);
+      }
+    }
+
+    vi.doMock('ws', () => ({ WebSocket: FakeWebSocket, default: FakeWebSocket }));
+    try {
+      const settings = normalizeSettings({ websocket: { retries: 0 } });
+      const streamFactory = createOpenAIWebSocketResponsesStream(() => settings);
+      const model = makeModel();
+      const context = { messages: [{ role: 'user', content: 'hello', timestamp: 1 }] } as any;
+
+      const events = await collectStreamEvents(
+        streamFactory(model, context, { apiKey: 'test-token', sessionId: 'session-full' } as any),
+      );
+      const done = events.find((event) => event.type === 'done');
+      const [diagnostic] = extractTransportDiagnostics(done?.message ?? {});
+
+      expect(diagnostic?.details).toMatchObject({
+        continuation: 'no_continuation',
+        sentInputItems: 1,
+      });
+      expect(diagnostic?.details).not.toHaveProperty('fullInputItems');
+      expect(diagnostic?.details).not.toHaveProperty('fullBytes');
+    } finally {
+      vi.doUnmock('ws');
+      closeAllCachedWebSockets();
+      clearAllContinuations();
+    }
+  });
+
+  it('adds compact continuation diagnostics and full-byte estimate for delta requests', async () => {
+    const sentPayloads: any[] = [];
+    class FakeWebSocket {
+      readyState = 1;
+      listeners = new Map<string, Set<(event: any) => void>>();
+
+      constructor() {
+        queueMicrotask(() => this.emit('open', {}));
+      }
+
+      send(payload: string) {
+        sentPayloads.push(JSON.parse(payload));
+        queueMicrotask(() => {
+          this.emit('message', {
+            data: JSON.stringify({ type: 'response.created', response: { id: 'resp_delta' } }),
+          });
+          this.emit('message', {
+            data: JSON.stringify({
+              type: 'response.completed',
+              response: { id: 'resp_delta', status: 'completed' },
+            }),
+          });
+        });
+      }
+
+      close() {
+        this.readyState = 3;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void) {
+        const listeners = this.listeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      removeEventListener(type: string, listener: (event: any) => void) {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      emit(type: string, event: any) {
+        for (const listener of this.listeners.get(type) ?? []) listener(event);
+      }
+    }
+
+    vi.doMock('ws', () => ({ WebSocket: FakeWebSocket, default: FakeWebSocket }));
+    try {
+      clearAllContinuations();
+      const settings = normalizeSettings({ websocket: { retries: 0 } });
+      const streamFactory = createOpenAIWebSocketResponsesStream(() => settings);
+      const model = makeModel();
+      const options = { apiKey: 'test-token', sessionId: 'session-delta' } as any;
+      const profile = resolveRequestProfile(model, settings);
+      const websocketHeaders = buildWebSocketHeaders(model, options, profile);
+      const cacheKey = buildSocketCacheKey({
+        sessionId: options.sessionId,
+        url: resolveWebSocketResponsesUrl(model, settings, websocketHeaders, profile),
+        provider: model.provider,
+        modelId: model.id,
+        headersFingerprint: headersFingerprint(websocketHeaders),
+      });
+      const firstContext = { messages: [{ role: 'user', content: 'first', timestamp: 1 }] } as any;
+      const fullContext = {
+        messages: [
+          { role: 'user', content: 'first', timestamp: 1 },
+          { role: 'user', content: 'next', timestamp: 2 },
+        ],
+      } as any;
+      const previousBody = buildResponsesBody(model, firstContext, options, profile);
+      const fullBody = buildResponsesBody(model, fullContext, options, profile);
+      setContinuation(cacheKey, {
+        lastRequestBody: previousBody,
+        lastResponseId: 'resp_previous',
+        lastResponseItems: [],
+      });
+
+      const events = await collectStreamEvents(streamFactory(model, fullContext, options));
+      const done = events.find((event) => event.type === 'done');
+      const [diagnostic] = extractTransportDiagnostics(done?.message ?? {});
+
+      expect(sentPayloads[0]).toMatchObject({
+        previous_response_id: 'resp_previous',
+        input: [expect.objectContaining({ role: 'user' })],
+      });
+      expect(diagnostic?.details).toMatchObject({
+        continuation: 'delta',
+        fullInputItems: 2,
+        sentInputItems: 1,
+        fullBytes: responseCreateBytes(fullBody),
+      });
+      expect(Number(diagnostic?.details?.requestBytes)).toBeLessThan(
+        Number(diagnostic?.details?.fullBytes),
+      );
+    } finally {
+      vi.doUnmock('ws');
+      closeAllCachedWebSockets();
+      clearAllContinuations();
+    }
+  });
+
   it('clears cached continuation after an upstream invalid_encrypted_content error frame', async () => {
     const sentPayloads: any[] = [];
     class FakeWebSocket {

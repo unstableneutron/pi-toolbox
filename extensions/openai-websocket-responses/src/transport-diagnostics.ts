@@ -6,6 +6,8 @@ import {
 } from '@earendil-works/pi-ai';
 
 import { shortHash } from './debug.ts';
+import type { ContinuationDecision } from './continuation-cache.ts';
+import type { OpenAIWebSocketResponsesSettings } from './settings.ts';
 
 const TRANSPORT_DIAGNOSTIC_TYPE = 'openai_websocket_transport';
 
@@ -56,6 +58,15 @@ export interface TransportDiagnosticFields {
   previousResponseId?: string;
   requestBytes?: number;
   responseIdSeen?: boolean;
+  continuation?: ContinuationDecision;
+  fallback?: 'previous_response_not_found';
+  fullInputItems?: number;
+  sentInputItems?: number;
+  fullBytes?: number;
+  firstEventMs?: number;
+  responseCreatedMs?: number;
+  lastEventMs?: number;
+  completedMs?: number;
   url?: string;
   websocketResponseId?: string;
   logicalTraceId?: string;
@@ -77,11 +88,14 @@ export interface TransportDiagnosticsCollector {
     options?: { significant?: boolean },
   ): void;
   set(fields: TransportDiagnosticFields): void;
+  getFields(): TransportDiagnosticFields;
   toDiagnostic(options?: AttachTransportDiagnosticOptions): AssistantMessageDiagnostic | undefined;
 }
 
 export interface AttachTransportDiagnosticOptions extends TransportDiagnosticFields {
   error?: unknown;
+  includeTimeline?: boolean;
+  includeTimingFields?: boolean;
 }
 
 interface MergeTransportDiagnosticOptions extends TransportDiagnosticFields {
@@ -99,8 +113,35 @@ function withoutUndefined<T extends Record<string, unknown>>(value: T): Record<s
 }
 
 function diagnosticFields(value: Record<string, unknown>): Record<string, unknown> {
-  const { error: _error, timelineEvent: _timelineEvent, ...fields } = value;
+  const {
+    error: _error,
+    timelineEvent: _timelineEvent,
+    includeTimeline: _includeTimeline,
+    includeTimingFields: _includeTimingFields,
+    ...fields
+  } = value;
   return withoutUndefined(fields);
+}
+
+function isTimingEvent(type: string): boolean {
+  return (
+    type === 'first_event' ||
+    type === 'response_created' ||
+    type === 'response_id' ||
+    type === 'response_completed' ||
+    type === 'response_terminal'
+  );
+}
+
+function removeTimingFields(fields: TransportDiagnosticFields): TransportDiagnosticFields {
+  const {
+    firstEventMs: _firstEventMs,
+    responseCreatedMs: _responseCreatedMs,
+    lastEventMs: _lastEventMs,
+    completedMs: _completedMs,
+    ...rest
+  } = fields;
+  return rest;
 }
 
 function sanitizeUrl(rawUrl: string | undefined): string | undefined {
@@ -168,12 +209,18 @@ export function createTransportDiagnostics(
 
     record(type, details = {}, options = {}) {
       eventTypes.add(type);
+      const tMs = Math.max(0, now() - startedAt);
       timeline = appendTimelineEvent(timeline, {
         type,
-        tMs: Math.max(0, now() - startedAt),
+        tMs,
         ...withoutUndefined(details),
       });
       if (options.significant ?? SIGNIFICANT_EVENT_TYPES.has(type)) significant = true;
+      if (type === 'first_event' && fields.firstEventMs === undefined) fields.firstEventMs = tMs;
+      if (type === 'response_created' && fields.responseCreatedMs === undefined)
+        fields.responseCreatedMs = tMs;
+      if (type === 'response_completed' || type === 'response_terminal') fields.completedMs = tMs;
+      if (isTimingEvent(type)) fields.lastEventMs = tMs;
       if (typeof details.responseId === 'string') fields.websocketResponseId = details.responseId;
       if (typeof details.eventCount === 'number') fields.eventCount = details.eventCount;
       if (typeof details.attempt === 'number')
@@ -197,20 +244,26 @@ export function createTransportDiagnostics(
       Object.assign(fields, withoutUndefined(nextFields as Record<string, unknown>));
     },
 
+    getFields() {
+      return { ...fields };
+    },
+
     toDiagnostic(options = {}) {
-      const merged = { ...fields, ...diagnosticFields(options as Record<string, unknown>) };
+      const mergedFields = { ...fields, ...diagnosticFields(options as Record<string, unknown>) };
+      const merged =
+        options.includeTimingFields === false ? removeTimingFields(mergedFields) : mergedFields;
       const hasTraceContext =
         typeof merged.logicalTraceId === 'string' ||
         typeof merged.traceparent === 'string' ||
         typeof merged.connectionTraceparent === 'string';
-      if (!significant && !hasTraceContext) return undefined;
+      if (!significant && !hasTraceContext && !options.includeTimeline) return undefined;
       const details = withoutUndefined({
         ...merged,
         requestId,
         responseIdSeen: merged.responseIdSeen ?? typeof merged.websocketResponseId === 'string',
         url: sanitizedUrl,
         urlHash: shortHash(sanitizedUrl),
-        timeline: significant ? timeline : undefined,
+        timeline: significant || options.includeTimeline ? timeline : undefined,
       });
       const diagnostic: AssistantMessageDiagnostic = {
         type: TRANSPORT_DIAGNOSTIC_TYPE,
@@ -222,6 +275,18 @@ export function createTransportDiagnostics(
       return diagnostic;
     },
   };
+}
+
+export function shouldIncludeSuccessTimeline(
+  settings: OpenAIWebSocketResponsesSettings,
+  fields: Pick<TransportDiagnosticFields, 'firstEventMs' | 'responseCreatedMs'>,
+  random = Math.random,
+): boolean {
+  const slowStartMs = fields.responseCreatedMs ?? fields.firstEventMs;
+  const thresholdMs = settings.diagnostics.successTimelineSlowStartThresholdMs;
+  if (thresholdMs > 0 && typeof slowStartMs === 'number' && slowStartMs >= thresholdMs) return true;
+  const sampleRate = settings.diagnostics.successTimelineSampleRate;
+  return sampleRate > 0 && random() < sampleRate;
 }
 
 export function attachTransportDiagnostic(

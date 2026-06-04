@@ -25,6 +25,11 @@ export interface OpenAIWebSocketResponsesSettings {
     firstEventTimeoutMs: number;
     idleTimeoutMs: number;
   };
+  diagnostics: {
+    successTimingFields: boolean;
+    successTimelineSampleRate: number;
+    successTimelineSlowStartThresholdMs: number;
+  };
   debug: {
     enabled: boolean;
     logFile: string | undefined;
@@ -57,6 +62,11 @@ const DEFAULT_SETTINGS: OpenAIWebSocketResponsesSettings = {
     storeByProviderModel: {},
   },
   websocket: { retries: 2, connectTimeoutMs: 15000, firstEventTimeoutMs: 60000, idleTimeoutMs: 0 },
+  diagnostics: {
+    successTimingFields: true,
+    successTimelineSampleRate: 0.05,
+    successTimelineSlowStartThresholdMs: 30000,
+  },
   debug: { enabled: false, logFile: undefined },
   recovery: {
     enabled: true,
@@ -84,6 +94,11 @@ function booleanValue(value: unknown, fallback: boolean): boolean {
 
 function nonNegativeNumber(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+function sampleRate(value: unknown, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return fallback;
+  return Math.min(1, value);
 }
 
 function stripJsonComments(source: string): string {
@@ -187,6 +202,7 @@ export function normalizeSettings(raw: unknown): OpenAIWebSocketResponsesSetting
   const patch = isRecord(root.patch) ? root.patch : {};
   const request = isRecord(root.request) ? root.request : {};
   const websocket = isRecord(root.websocket) ? root.websocket : {};
+  const diagnostics = isRecord(root.diagnostics) ? root.diagnostics : {};
   const debug = isRecord(root.debug) ? root.debug : {};
   const recovery = isRecord(root.recovery) ? root.recovery : {};
   const trace = isRecord(root.trace) ? root.trace : {};
@@ -222,6 +238,20 @@ export function normalizeSettings(raw: unknown): OpenAIWebSocketResponsesSetting
       idleTimeoutMs: nonNegativeNumber(
         websocket.idleTimeoutMs,
         DEFAULT_SETTINGS.websocket.idleTimeoutMs,
+      ),
+    },
+    diagnostics: {
+      successTimingFields: booleanValue(
+        diagnostics.successTimingFields,
+        DEFAULT_SETTINGS.diagnostics.successTimingFields,
+      ),
+      successTimelineSampleRate: sampleRate(
+        diagnostics.successTimelineSampleRate,
+        DEFAULT_SETTINGS.diagnostics.successTimelineSampleRate,
+      ),
+      successTimelineSlowStartThresholdMs: nonNegativeNumber(
+        diagnostics.successTimelineSlowStartThresholdMs,
+        DEFAULT_SETTINGS.diagnostics.successTimelineSlowStartThresholdMs,
       ),
     },
     debug: {

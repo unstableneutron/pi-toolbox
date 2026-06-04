@@ -39,10 +39,12 @@ import {
   attachTransportDiagnostic,
   createTransportDiagnostics,
   extractTransportDiagnostics,
+  shouldIncludeSuccessTimeline,
   type TransportDiagnosticsCollector,
 } from './transport-diagnostics.ts';
 import { resolveWebSocketResponsesUrl } from './urls.ts';
 import {
+  responseCreatePayloadBytes,
   runWebSocketResponse,
   type WebSocketConnectionMetadata,
   type WebSocketLifecycleObserver,
@@ -218,12 +220,24 @@ export function createOpenAIWebSocketResponsesStream(
           fullBody,
         );
         const body = continuationRequest.body;
+        const fullInputItems = fullBody.input?.length ?? 0;
+        const sentInputItems = body.input?.length ?? 0;
         transportDiagnostics = createTransportDiagnostics({
           configuredTransport: options?.transport ?? 'auto',
           previousResponseId:
             typeof body.previous_response_id === 'string' ? body.previous_response_id : undefined,
           url,
           logicalTraceId: logicalTrace?.traceId,
+        });
+        transportDiagnostics.set({
+          continuation: continuationRequest.decision,
+          sentInputItems,
+          ...(continuationRequest.decision === 'delta'
+            ? {
+                fullInputItems,
+                fullBytes: responseCreatePayloadBytes(fullBody),
+              }
+            : {}),
         });
         writeDebugLog(settings, 'continuation.decision', {
           cacheKeyHash: shortHash(cacheKey),
@@ -286,6 +300,10 @@ export function createOpenAIWebSocketResponsesStream(
           );
           if (websocketResult.fallbackUsed) {
             transportOutcome = 'previous_response_not_found_fallback_succeeded';
+            transportDiagnostics?.set({
+              fallback: 'previous_response_not_found',
+              sentInputItems: fullInputItems,
+            });
             transportDiagnostics?.record('previous_response_not_found_fallback', {
               responseId: websocketResult.responseId,
             });
@@ -349,10 +367,19 @@ export function createOpenAIWebSocketResponsesStream(
           clearContinuation(cacheKey);
         }
         if (options?.signal?.aborted) throw new Error('Request was aborted');
+        const isSuccessfulWebsocketTurn =
+          output.stopReason === 'stop' || output.stopReason === 'toolUse';
         attachTransportDiagnostic(output, transportDiagnostics, {
           finalResponseId: output.responseId,
           finalTransport: 'websocket',
           outcome: transportOutcome ?? 'completed',
+          includeTimeline:
+            isSuccessfulWebsocketTurn && transportDiagnostics
+              ? shouldIncludeSuccessTimeline(settings, transportDiagnostics.getFields())
+              : undefined,
+          includeTimingFields: isSuccessfulWebsocketTurn
+            ? settings.diagnostics.successTimingFields
+            : undefined,
         });
         if (output.stopReason === 'error') {
           pushFinalEvent(

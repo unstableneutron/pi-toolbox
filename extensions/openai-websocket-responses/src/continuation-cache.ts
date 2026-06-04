@@ -6,7 +6,7 @@ export interface ContinuationState {
   lastResponseItems: unknown[];
 }
 
-type ContinuationDecision =
+export type ContinuationDecision =
   | 'no_continuation'
   | 'body_mismatch'
   | 'input_shorter_than_baseline'

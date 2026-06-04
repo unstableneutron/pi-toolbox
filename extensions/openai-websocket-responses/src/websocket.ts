@@ -106,6 +106,18 @@ class PreviousResponseNotFoundError extends Error {
   }
 }
 
+export function responseCreatePayloadBytes(body: ResponsesBody): number {
+  return payloadBytes(responseCreatePayload(body));
+}
+
+export function responseCreatePayload(body: ResponsesBody): string {
+  return JSON.stringify({ type: 'response.create', ...body });
+}
+
+function payloadBytes(payload: string): number {
+  return new TextEncoder().encode(payload).byteLength;
+}
+
 function isReusable(socket: WebSocketLike): boolean {
   return socket.readyState === undefined || socket.readyState === 1;
 }
@@ -816,7 +828,14 @@ export async function runWebSocketResponse(
         const handleParsedMessage = (parsed: Record<string, any>) => {
           const previousResponseError = previousResponseNotFoundMessage(parsed);
           if (previousResponseError) throw new PreviousResponseNotFoundError(previousResponseError);
-          if (eventCount === 0) clearFirstEventTimer();
+          if (eventCount === 0) {
+            clearFirstEventTimer();
+            request.diagnostics?.record(
+              'first_event',
+              { attempt, eventType: parsed.type },
+              { significant: false },
+            );
+          }
           eventCount++;
           const nextResponseId = extractResponseId(parsed);
           if (nextResponseId && nextResponseId !== responseId) {
@@ -959,8 +978,8 @@ export async function runWebSocketResponse(
         armFirstEventTimer();
         armIdleTimer();
         try {
-          const payload = JSON.stringify({ type: 'response.create', ...request.body });
-          request.diagnostics?.set({ requestBytes: new TextEncoder().encode(payload).byteLength });
+          const payload = responseCreatePayload(request.body);
+          request.diagnostics?.set({ requestBytes: payloadBytes(payload) });
           socket.send(payload);
         } catch (error) {
           request.diagnostics?.record('ws_send_error', {
