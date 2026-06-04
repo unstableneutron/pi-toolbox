@@ -1130,7 +1130,7 @@ describe('Responses adapter and retrieve recovery', () => {
     expect(buildResponsesBody(model, { messages: [output] }).input).toEqual([webSearchItem]);
   });
 
-  it('uses a synthetic message id when prior reasoning is unavailable for replay', () => {
+  it('omits provider item ids when prior reasoning is unavailable for replay', () => {
     const model = makeModel();
     const output = makeAssistantMessage(model);
     output.stopReason = 'toolUse';
@@ -1155,23 +1155,15 @@ describe('Responses adapter and retrieve recovery', () => {
 
     const inputItems = buildResponsesBody(model, { messages: [output] }).input as any[];
     const responseItems = assistantMessageToResponseItems(output) as any[];
+    const inputMessage = inputItems.find((item) => item.type === 'message');
+    const responseMessage = responseItems.find((item) => item.type === 'message');
     const inputFunctionCall = inputItems.find((item) => item.type === 'function_call');
     const responseFunctionCall = responseItems.find((item) => item.type === 'function_call');
 
-    expect(inputItems).toContainEqual(
-      expect.objectContaining({
-        type: 'message',
-        id: 'msg_pi_0_0',
-        phase: 'commentary',
-      }),
-    );
-    expect(responseItems).toContainEqual(
-      expect.objectContaining({
-        type: 'message',
-        id: 'msg_pi_0_0',
-        phase: 'commentary',
-      }),
-    );
+    expect(inputMessage).toMatchObject({ type: 'message', phase: 'commentary' });
+    expect(responseMessage).toMatchObject({ type: 'message', phase: 'commentary' });
+    expect(inputMessage).not.toHaveProperty('id');
+    expect(responseMessage).not.toHaveProperty('id');
     expect(inputFunctionCall).toMatchObject({
       type: 'function_call',
       call_id: 'call_missing_reasoning',

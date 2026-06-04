@@ -236,13 +236,13 @@ function assistantMessageItems(
       const fallbackId = `msg_pi_${index}_${textBlockIndex}`;
       const signature = parseTextSignature(block.textSignature);
       textBlockIndex++;
-      const id = hasUnreplayableReasoningBeforeItem ? fallbackId : (signature?.id ?? fallbackId);
+      const id = hasUnreplayableReasoningBeforeItem ? undefined : (signature?.id ?? fallbackId);
       output.push({
         type: 'message',
         role: 'assistant',
         content: [{ type: 'output_text', text: sanitizeSurrogates(block.text), annotations: [] }],
         status: 'completed',
-        id,
+        ...(id ? { id } : {}),
         ...(signature?.phase ? { phase: signature.phase } : {}),
       });
       continue;
@@ -968,7 +968,7 @@ export function assistantMessageToResponseItems(output: AssistantMessage): unkno
     } else if (block.type === 'text') {
       const fallbackId = `msg_pi_0_${textIndex}`;
       const id = hasUnreplayableReasoningBeforeItem
-        ? fallbackId
+        ? undefined
         : (textSignatureItemId(block.textSignature) ?? fallbackId);
       const phase = textSignaturePhase(block.textSignature);
       textIndex++;
@@ -977,7 +977,7 @@ export function assistantMessageToResponseItems(output: AssistantMessage): unkno
         role: 'assistant',
         content: [{ type: 'output_text', text: sanitizeSurrogates(block.text), annotations: [] }],
         status: 'completed',
-        id,
+        ...(id ? { id } : {}),
         ...(phase ? { phase } : {}),
       });
     } else if (output.stopReason === 'toolUse' && block.type === 'toolCall') {
