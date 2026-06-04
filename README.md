@@ -84,6 +84,7 @@ Custom extensions built in this repo:
 - `loop` — `/loop` command with a breakout tool.
 - `multi-edit` — multi-file edit tool with diff preview.
 - `notify` — OSC 777 desktop notifications.
+- `pi-bash-rewrite` — optional bash override that routes recognized shell idioms to structured tools.
 - `pi-fff-search` — fff-router backed find/grep/read tools.
 - `pi-md-hooks` — markdown rendering hooks.
 - `pi-native-split` — session splitting helpers.
