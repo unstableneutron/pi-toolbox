@@ -3,6 +3,7 @@ import type { OpenAIWebSocketResponsesSettings } from './settings.ts';
 import type { TransportDiagnosticsCollector } from './transport-diagnostics.ts';
 import { cloneHeadersWithTraceparent, type TraceContext } from './trace-context.ts';
 import type { ResponsesBody } from './body.ts';
+import { isRetryableEmptyResponseFailure } from './responses-adapter.ts';
 
 interface WebSocketLike {
   readyState?: number;
@@ -58,7 +59,9 @@ export class WebSocketMidstreamError extends Error {
 interface WebSocketRunResult {
   responseId?: string;
   eventCount: number;
+  connection?: WebSocketConnectionMetadata;
   fallbackUsed?: boolean;
+  fallbackReason?: 'previous_response_not_found' | 'empty_response_failed_without_details';
 }
 
 export type WebSocketCacheStatus = 'disabled' | 'miss' | 'hit' | 'busy' | 'stale';
@@ -95,6 +98,40 @@ export type WebSocketLifecycleEvent =
       localPort?: number;
       code?: number;
       closeReason?: string;
+    }
+  | {
+      type: 'retry';
+      reason: 'empty_response_failed_without_details';
+      action: 'retry_fresh_websocket_same_previous_response_id';
+      attempt: number;
+      nextAttempt: number;
+      maxAttempts: number;
+      urlHash: string;
+      connectionId?: string;
+      cacheKeyHash?: string;
+      responseId?: string;
+      previousResponseId: string;
+    }
+  | {
+      type: 'fallback';
+      reason: 'previous_response_not_found' | 'empty_response_failed_without_details';
+      action: 'replay_full_conversation_without_previous_response_id';
+      attempt: number;
+      nextAttempt: number;
+      maxAttempts: number;
+      urlHash: string;
+      connectionId?: string;
+      cacheKeyHash?: string;
+      responseId?: string;
+      previousResponseId?: string;
+    }
+  | {
+      type: 'recovered';
+      mode: 'resumed' | 'full_replay';
+      connectionId?: string;
+      cacheKeyHash?: string;
+      urlHash: string;
+      responseId?: string;
     };
 
 export type WebSocketLifecycleObserver = (event: WebSocketLifecycleEvent) => void;
@@ -719,6 +756,7 @@ export async function runWebSocketResponse(
   ) => Promise<void> | void,
 ): Promise<WebSocketRunResult> {
   let lastError: unknown;
+  let retriedEmptyResponseFailure = false;
   if (request.trace?.logicalTraceId)
     request.diagnostics?.set({ logicalTraceId: request.trace.logicalTraceId });
   for (let attempt = 0; attempt <= request.settings.websocket.retries; attempt++) {
@@ -1002,7 +1040,17 @@ export async function runWebSocketResponse(
         eventCount,
         keepSocket,
       });
-      return { responseId, eventCount };
+      if (retriedEmptyResponseFailure) {
+        emitLifecycle(request.onLifecycleEvent, {
+          type: 'recovered',
+          mode: 'resumed',
+          connectionId: acquired.connection.connectionId,
+          cacheKeyHash: acquired.connection.cacheKeyHash,
+          urlHash: shortHash(request.url) ?? '',
+          responseId,
+        });
+      }
+      return { responseId, eventCount, connection: acquired.connection };
     } catch (error) {
       keepSocket = false;
       acquired?.release(false);
@@ -1011,6 +1059,28 @@ export async function runWebSocketResponse(
         error instanceof PreviousResponseNotFoundError &&
         request.fallbackBodyOnPreviousResponseNotFound
       ) {
+        const previousResponseId =
+          typeof request.body.previous_response_id === 'string'
+            ? request.body.previous_response_id
+            : undefined;
+        request.diagnostics?.record('previous_response_not_found_fallback', {
+          attempt,
+          action: 'replay_full_conversation_without_previous_response_id',
+          previousResponseId,
+          fallbackInputItems: request.fallbackBodyOnPreviousResponseNotFound.input?.length ?? 0,
+        });
+        emitLifecycle(request.onLifecycleEvent, {
+          type: 'fallback',
+          reason: 'previous_response_not_found',
+          action: 'replay_full_conversation_without_previous_response_id',
+          attempt: attempt + 1,
+          nextAttempt: attempt + 2,
+          maxAttempts: attempt + 2,
+          urlHash: shortHash(request.url) ?? '',
+          connectionId: acquired?.connection.connectionId,
+          cacheKeyHash: request.cacheKey ? shortHash(request.cacheKey) : undefined,
+          previousResponseId,
+        });
         writeDebugLog(request.settings, 'websocket.previous_response_not_found.fallback', {
           cacheKeyHash: shortHash(request.cacheKey),
           message: error.message,
@@ -1024,7 +1094,15 @@ export async function runWebSocketResponse(
           },
           onEvent,
         );
-        return { ...result, fallbackUsed: true };
+        emitLifecycle(request.onLifecycleEvent, {
+          type: 'recovered',
+          mode: 'full_replay',
+          connectionId: result.connection?.connectionId,
+          cacheKeyHash: result.connection?.cacheKeyHash,
+          urlHash: shortHash(request.url) ?? '',
+          responseId: result.responseId,
+        });
+        return { ...result, fallbackUsed: true, fallbackReason: 'previous_response_not_found' };
       }
       if (
         !acquired &&
@@ -1041,6 +1119,110 @@ export async function runWebSocketResponse(
         responseIdSeen: !!responseId,
         websocketResponseId: responseId,
       });
+      const previousResponseId = request.body.previous_response_id;
+      if (
+        isRetryableEmptyResponseFailure(error) &&
+        !retriedEmptyResponseFailure &&
+        eventCount <= 2 &&
+        typeof previousResponseId === 'string' &&
+        attempt < request.settings.websocket.retries &&
+        !request.signal?.aborted
+      ) {
+        retriedEmptyResponseFailure = true;
+        const retryResponseId = error.responseId ?? responseId;
+        request.diagnostics?.record('ws_retry', {
+          attempt: attempt + 1,
+          previousAttempt: attempt,
+          reason: 'empty_response_failed_without_details',
+          action: 'retry_fresh_websocket_same_previous_response_id',
+          eventCount,
+          responseId: retryResponseId,
+          previousResponseId,
+        });
+        emitLifecycle(request.onLifecycleEvent, {
+          type: 'retry',
+          reason: 'empty_response_failed_without_details',
+          action: 'retry_fresh_websocket_same_previous_response_id',
+          attempt: attempt + 1,
+          nextAttempt: attempt + 2,
+          maxAttempts: request.fallbackBodyOnPreviousResponseNotFound ? 3 : 2,
+          urlHash: shortHash(request.url) ?? '',
+          connectionId: acquired?.connection.connectionId,
+          cacheKeyHash: request.cacheKey ? shortHash(request.cacheKey) : undefined,
+          responseId: retryResponseId,
+          previousResponseId,
+        });
+        writeDebugLog(request.settings, 'websocket.response_failed.retry', {
+          attempt,
+          nextAttempt: attempt + 1,
+          cacheKeyHash: shortHash(request.cacheKey),
+          responseId: retryResponseId,
+          previousResponseId,
+        });
+        continue;
+      }
+      if (
+        isRetryableEmptyResponseFailure(error) &&
+        retriedEmptyResponseFailure &&
+        eventCount <= 2 &&
+        request.fallbackBodyOnPreviousResponseNotFound &&
+        !request.signal?.aborted
+      ) {
+        const retryResponseId = error.responseId ?? responseId;
+        const previousResponseId =
+          typeof request.body.previous_response_id === 'string'
+            ? request.body.previous_response_id
+            : undefined;
+        request.diagnostics?.record('empty_response_failed_full_fallback', {
+          attempt,
+          action: 'replay_full_conversation_without_previous_response_id',
+          eventCount,
+          responseId: retryResponseId,
+          previousResponseId,
+          fallbackInputItems: request.fallbackBodyOnPreviousResponseNotFound.input?.length ?? 0,
+        });
+        emitLifecycle(request.onLifecycleEvent, {
+          type: 'fallback',
+          reason: 'empty_response_failed_without_details',
+          action: 'replay_full_conversation_without_previous_response_id',
+          attempt: attempt + 1,
+          nextAttempt: attempt + 2,
+          maxAttempts: 3,
+          urlHash: shortHash(request.url) ?? '',
+          connectionId: acquired?.connection.connectionId,
+          cacheKeyHash: request.cacheKey ? shortHash(request.cacheKey) : undefined,
+          responseId: retryResponseId,
+          previousResponseId,
+        });
+        writeDebugLog(request.settings, 'websocket.response_failed.full_fallback', {
+          attempt,
+          cacheKeyHash: shortHash(request.cacheKey),
+          responseId: retryResponseId,
+          previousResponseId,
+          fallbackInputItems: request.fallbackBodyOnPreviousResponseNotFound.input?.length ?? 0,
+        });
+        const result = await runWebSocketResponse(
+          {
+            ...request,
+            body: request.fallbackBodyOnPreviousResponseNotFound,
+            fallbackBodyOnPreviousResponseNotFound: undefined,
+          },
+          onEvent,
+        );
+        emitLifecycle(request.onLifecycleEvent, {
+          type: 'recovered',
+          mode: 'full_replay',
+          connectionId: result.connection?.connectionId,
+          cacheKeyHash: result.connection?.cacheKeyHash,
+          urlHash: shortHash(request.url) ?? '',
+          responseId: result.responseId,
+        });
+        return {
+          ...result,
+          fallbackUsed: true,
+          fallbackReason: 'empty_response_failed_without_details',
+        };
+      }
       if (error instanceof WebSocketMidstreamError) {
         request.diagnostics?.record('transport_error', {
           attempt,

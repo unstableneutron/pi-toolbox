@@ -79,14 +79,64 @@ export function registerOpenAIWebSocketResponsesPatchRefreshHooks(
 }
 
 function cacheStatusLabel(status: WebSocketCacheStatus): string {
-  if (status === 'busy') return 'extra';
-  if (status === 'hit') return 'cached';
-  return 'new';
+  if (status === 'busy') return 'extra socket while previous is busy';
+  if (status === 'hit') return 'reused idle socket';
+  return 'new socket';
+}
+
+function recoveryModeLabel(mode: 'resumed' | 'full_replay'): string {
+  return mode === 'resumed' ? 'resumed from previous_response_id' : 'full conversation replay';
 }
 
 export function formatWebSocketStatus(event: WebSocketLifecycleEvent): string | undefined {
-  if (event.type !== 'open' || !event.cacheKeyHash) return undefined;
-  return `WebSocket ${event.connectionId} connected · ${cacheStatusLabel(event.cacheStatus)}`;
+  if (event.type === 'open') {
+    if (!event.cacheKeyHash) return undefined;
+    return `Responses WS: ${event.connectionId} connected · ${cacheStatusLabel(event.cacheStatus)}`;
+  }
+  if (event.type === 'recovered') {
+    const target = event.connectionId ? ` on ${event.connectionId}` : '';
+    return `Responses WS: recovered${target} · ${recoveryModeLabel(event.mode)}`;
+  }
+  return undefined;
+}
+
+function shortResponseId(value: string | undefined): string | undefined {
+  if (!value || value.length <= 24) return value;
+  return `${value.slice(0, 10)}…${value.slice(-8)}`;
+}
+
+export function formatWebSocketRetryNotification(
+  event: WebSocketLifecycleEvent,
+): string | undefined {
+  if (event.type !== 'retry') return undefined;
+  const source = event.connectionId ? `${event.connectionId} returned` : 'API returned';
+  return [
+    `Responses WS: ${source} response.failed without details; retrying fresh with previous_response_id=${shortResponseId(event.previousResponseId)}.`,
+    event.responseId ? `Failed response_id=${shortResponseId(event.responseId)}.` : undefined,
+    `Attempt ${event.nextAttempt}/${event.maxAttempts}.`,
+  ]
+    .filter((part): part is string => typeof part === 'string')
+    .join(' ');
+}
+
+export function formatWebSocketFallbackNotification(
+  event: WebSocketLifecycleEvent,
+): string | undefined {
+  if (event.type !== 'fallback') return undefined;
+  if (event.reason === 'empty_response_failed_without_details') {
+    const source = event.connectionId ? `retry on ${event.connectionId}` : 'retry';
+    return [
+      `Responses WS: ${source} also returned response.failed; replaying full conversation.`,
+      event.responseId ? `Failed response_id=${shortResponseId(event.responseId)}.` : undefined,
+      `Attempt ${event.nextAttempt}/${event.maxAttempts}.`,
+    ]
+      .filter((part): part is string => typeof part === 'string')
+      .join(' ');
+  }
+  return [
+    `Responses WS: previous_response_id=${shortResponseId(event.previousResponseId)} was not found; replaying full conversation.`,
+    `Attempt ${event.nextAttempt}/${event.maxAttempts}.`,
+  ].join(' ');
 }
 
 export function createMissingCodexAccountIdNotifier(
@@ -167,6 +217,11 @@ export default function (pi: ExtensionAPI) {
   };
   const onLifecycleEvent = (event: WebSocketLifecycleEvent) => {
     pi.events.emit(WEBSOCKET_LIFECYCLE_EVENT, event);
+    const retryNotification = formatWebSocketRetryNotification(event);
+    if (retryNotification && currentCtx?.hasUI) currentCtx.ui.notify(retryNotification, 'warning');
+    const fallbackNotification = formatWebSocketFallbackNotification(event);
+    if (fallbackNotification && currentCtx?.hasUI)
+      currentCtx.ui.notify(fallbackNotification, 'warning');
     const status = formatWebSocketStatus(event);
     if (!status || !currentCtx?.hasUI) return;
     currentCtx.ui.setStatus(WEBSOCKET_STATUS_KEY, status);

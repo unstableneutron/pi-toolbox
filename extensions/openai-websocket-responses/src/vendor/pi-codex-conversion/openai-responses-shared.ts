@@ -320,9 +320,28 @@ function mapStopReason(status: string | undefined): AssistantMessage['stopReason
   return 'stop';
 }
 
-function formatTerminalResponseError(type: string, response: Record<string, any>): string {
+function terminalResponseMessage(response: Record<string, any>): string | undefined {
   const message = response.error?.message || response.incomplete_details?.reason;
   if (typeof message === 'string' && message.length > 0) return message;
+  return undefined;
+}
+
+function hasTerminalResponseDetails(response: Record<string, any>): boolean {
+  return (
+    response.error != null ||
+    response.incomplete_details != null ||
+    response.content_filters != null ||
+    response.moderation != null
+  );
+}
+
+function terminalResponseOutputItems(response: Record<string, any>): number | undefined {
+  return Array.isArray(response.output) ? response.output.length : undefined;
+}
+
+function formatTerminalResponseError(type: string, response: Record<string, any>): string {
+  const message = terminalResponseMessage(response);
+  if (message) return message;
 
   const status = typeof response.status === 'string' ? response.status : 'unknown';
   const details = [
@@ -334,6 +353,39 @@ function formatTerminalResponseError(type: string, response: Record<string, any>
   ].filter((detail): detail is string => typeof detail === 'string');
   const suffix = details.length > 0 ? ` (${details.join(', ')})` : '';
   return `Responses API returned ${type} with status=${status} without error details${suffix}`;
+}
+
+export class TerminalResponseError extends Error {
+  readonly eventType: string;
+  readonly status: string;
+  readonly responseId?: string;
+  readonly model?: string;
+  readonly previousResponseId?: string;
+  readonly hasDetails: boolean;
+  readonly outputItems?: number;
+
+  constructor(type: string, response: Record<string, any>) {
+    super(formatTerminalResponseError(type, response));
+    this.name = 'TerminalResponseError';
+    this.eventType = type;
+    this.status = typeof response.status === 'string' ? response.status : 'unknown';
+    this.responseId = typeof response.id === 'string' ? response.id : undefined;
+    this.model = typeof response.model === 'string' ? response.model : undefined;
+    this.previousResponseId =
+      typeof response.previous_response_id === 'string' ? response.previous_response_id : undefined;
+    this.hasDetails = hasTerminalResponseDetails(response);
+    this.outputItems = terminalResponseOutputItems(response);
+  }
+}
+
+export function isRetryableEmptyResponseFailure(error: unknown): error is TerminalResponseError {
+  return (
+    error instanceof TerminalResponseError &&
+    error.eventType === 'response.failed' &&
+    error.status === 'failed' &&
+    !error.hasDetails &&
+    (error.outputItems === undefined || error.outputItems === 0)
+  );
 }
 
 function stripToolCalls(output: AssistantMessage): void {
@@ -740,7 +792,7 @@ export function createResponsesEventProcessor<TApi extends Api>(
     if (type === 'error') throw new Error(event.message || event.code || JSON.stringify(event));
     if (type === 'response.failed' || type === 'response.cancelled') {
       const response = event.response ?? {};
-      throw new Error(formatTerminalResponseError(type, response));
+      throw new TerminalResponseError(type, response);
     }
   };
 

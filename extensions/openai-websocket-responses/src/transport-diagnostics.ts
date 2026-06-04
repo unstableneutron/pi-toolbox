@@ -15,6 +15,7 @@ const MAX_TIMELINE_EVENTS = 20;
 const SENSITIVE_QUERY_PARAM =
   /(?:api[-_]?key|authorization|auth|bearer|token|secret|signature|sig|password|credential)/i;
 const SIGNIFICANT_EVENT_TYPES = new Set([
+  'empty_response_failed_full_fallback',
   'previous_response_not_found_fallback',
   'retrieve_recovery_done',
   'retrieve_recovery_error',
@@ -59,7 +60,7 @@ export interface TransportDiagnosticFields {
   requestBytes?: number;
   responseIdSeen?: boolean;
   continuation?: ContinuationDecision;
-  fallback?: 'previous_response_not_found';
+  fallback?: 'previous_response_not_found' | 'empty_response_failed_without_details';
   fullInputItems?: number;
   sentInputItems?: number;
   fullBytes?: number;

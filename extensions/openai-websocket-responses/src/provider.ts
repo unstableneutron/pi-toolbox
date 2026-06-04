@@ -299,14 +299,26 @@ export function createOpenAIWebSocketResponsesStream(
             },
           );
           if (websocketResult.fallbackUsed) {
-            transportOutcome = 'previous_response_not_found_fallback_succeeded';
+            transportOutcome =
+              websocketResult.fallbackReason === 'empty_response_failed_without_details'
+                ? 'empty_response_failed_full_fallback_succeeded'
+                : 'previous_response_not_found_fallback_succeeded';
             transportDiagnostics?.set({
-              fallback: 'previous_response_not_found',
+              fallback:
+                websocketResult.fallbackReason === 'empty_response_failed_without_details'
+                  ? 'empty_response_failed_without_details'
+                  : 'previous_response_not_found',
               sentInputItems: fullInputItems,
             });
-            transportDiagnostics?.record('previous_response_not_found_fallback', {
-              responseId: websocketResult.responseId,
-            });
+            if (websocketResult.fallbackReason === 'empty_response_failed_without_details') {
+              transportDiagnostics?.record('empty_response_failed_full_fallback', {
+                responseId: websocketResult.responseId,
+              });
+            } else {
+              transportDiagnostics?.record('previous_response_not_found_fallback', {
+                responseId: websocketResult.responseId,
+              });
+            }
           } else if (transportDiagnostics?.hasEvent('ws_retry')) {
             transportOutcome = 'websocket_retry_succeeded';
           } else if (transportDiagnostics?.isSignificant()) {

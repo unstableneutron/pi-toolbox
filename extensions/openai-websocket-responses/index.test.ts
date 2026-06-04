@@ -24,6 +24,8 @@ vi.mock('ws', () => ({
 
 import {
   createIdleKeepaliveActivityTracker,
+  formatWebSocketFallbackNotification,
+  formatWebSocketRetryNotification,
   formatWebSocketStatus,
   IDLE_KEEPALIVE_ACTIVITY_WINDOW_MS,
   installOpenAIWebSocketResponsesApiPatches,
@@ -67,6 +69,7 @@ import {
 } from './src/trace-context.ts';
 import {
   assistantMessageToResponseItems,
+  createResponsesEventProcessor,
   extractResponseOutputText,
   processResponsesEvents,
 } from './src/responses-adapter.ts';
@@ -2054,6 +2057,157 @@ describe('WebSocket transport', () => {
     }
   });
 
+  it('retries empty response.failed once on a fresh websocket with the known previous_response_id', async () => {
+    const instances: FakeWebSocket[] = [];
+    const sentBodies: Array<{ instance: number; body: any }> = [];
+
+    class FakeWebSocket {
+      readyState = 1;
+      readonly instance: number;
+      listeners = new Map<string, Set<(event: any) => void>>();
+
+      constructor() {
+        this.instance = instances.push(this) - 1;
+        queueMicrotask(() => this.emit('open', {}));
+      }
+
+      send(data: string) {
+        sentBodies.push({ instance: this.instance, body: JSON.parse(data) });
+        queueMicrotask(() => {
+          if (this.instance === 0) {
+            this.emit('message', {
+              data: JSON.stringify({
+                type: 'response.created',
+                response: { id: 'resp_failed' },
+              }),
+            });
+            this.emit('message', {
+              data: JSON.stringify({
+                type: 'response.failed',
+                response: {
+                  id: 'resp_failed',
+                  status: 'failed',
+                  model: 'gpt-5.5-fast',
+                  previous_response_id: 'resp_previous',
+                  error: null,
+                  incomplete_details: null,
+                  output: [],
+                },
+              }),
+            });
+            return;
+          }
+
+          this.emit('message', {
+            data: JSON.stringify({ type: 'response.created', response: { id: 'resp_ok' } }),
+          });
+          this.emit('message', {
+            data: JSON.stringify({
+              type: 'response.completed',
+              response: { id: 'resp_ok', status: 'completed' },
+            }),
+          });
+        });
+      }
+
+      close() {
+        this.readyState = 3;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void) {
+        const listeners = this.listeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      removeEventListener(type: string, listener: (event: any) => void) {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      emit(type: string, event: any) {
+        for (const listener of this.listeners.get(type) ?? []) listener(event);
+      }
+    }
+
+    const model = makeCodexModel();
+    const options = { apiKey: 'sk-test', sessionId: 'session-empty-failed-retry' } as any;
+    const settings = normalizeSettings({ websocket: { retries: 1, firstEventTimeoutMs: 0 } });
+    const websocketHeaders = buildWebSocketHeaders(model, options, 'codex');
+    const url = resolveWebSocketResponsesUrl(model, settings, websocketHeaders, 'codex');
+    const cacheKey = buildSocketCacheKey({
+      sessionId: options.sessionId,
+      url,
+      provider: model.provider,
+      modelId: model.id,
+      headersFingerprint: headersFingerprint(websocketHeaders),
+    });
+    setContinuation(cacheKey, {
+      lastRequestBody: buildResponsesBody(
+        model,
+        { messages: [{ role: 'user', content: 'first', timestamp: 1 }] },
+        options,
+        'codex',
+      ),
+      lastResponseId: 'resp_previous',
+      lastResponseItems: [],
+    });
+    const lifecycle: any[] = [];
+    wsModuleMock.WebSocketCtor = FakeWebSocket as any;
+
+    try {
+      const stream = createOpenAIWebSocketResponsesStream(
+        () => settings,
+        (event) => lifecycle.push(event),
+      )(
+        model,
+        {
+          messages: [
+            { role: 'user', content: 'first', timestamp: 1 },
+            { role: 'user', content: 'next', timestamp: 2 },
+          ],
+        },
+        options,
+      );
+      const seen: any[] = [];
+      for await (const event of stream) seen.push(event);
+
+      expect(seen.at(-1)).toMatchObject({ type: 'done', reason: 'stop' });
+      expect(instances).toHaveLength(2);
+      expect(sentBodies).toHaveLength(2);
+      expect(sentBodies.map(({ body }) => body.previous_response_id)).toEqual([
+        'resp_previous',
+        'resp_previous',
+      ]);
+      expect(sentBodies.map(({ body }) => body.input)).toEqual([
+        [{ role: 'user', content: [{ type: 'input_text', text: 'next' }] }],
+        [{ role: 'user', content: [{ type: 'input_text', text: 'next' }] }],
+      ]);
+      expect(lifecycle).toContainEqual(
+        expect.objectContaining({
+          type: 'retry',
+          reason: 'empty_response_failed_without_details',
+          action: 'retry_fresh_websocket_same_previous_response_id',
+          responseId: 'resp_failed',
+          previousResponseId: 'resp_previous',
+          attempt: 1,
+          nextAttempt: 2,
+        }),
+      );
+      expect(lifecycle).toContainEqual(
+        expect.objectContaining({
+          type: 'recovered',
+          mode: 'resumed',
+          responseId: 'resp_ok',
+        }),
+      );
+      expect(getContinuation(cacheKey)?.lastResponseId).toBe('resp_ok');
+    } finally {
+      wsModuleMock.WebSocketCtor = undefined;
+      clearContinuation(cacheKey);
+      closeAllCachedWebSockets();
+    }
+  });
+
   it('swallows ws abortHandshake errors when aborting during connect', async () => {
     const controller = new AbortController();
     let closeHadErrorListener: boolean | undefined;
@@ -3194,7 +3348,16 @@ describe('WebSocket transport', () => {
         cacheKeyHash: '336920397f78',
         urlHash: 'urlhash',
       }),
-    ).toBe('WebSocket ws#61243 connected · new');
+    ).toBe('Responses WS: ws#61243 connected · new socket');
+    expect(
+      formatWebSocketStatus({
+        type: 'open',
+        connectionId: 'ws#61245',
+        cacheStatus: 'hit',
+        cacheKeyHash: '336920397f78',
+        urlHash: 'urlhash',
+      }),
+    ).toBe('Responses WS: ws#61245 connected · reused idle socket');
     expect(
       formatWebSocketStatus({
         type: 'open',
@@ -3203,7 +3366,7 @@ describe('WebSocket transport', () => {
         cacheKeyHash: '336920397f78',
         urlHash: 'urlhash',
       }),
-    ).toBe('WebSocket ws#61244 connected · extra');
+    ).toBe('Responses WS: ws#61244 connected · extra socket while previous is busy');
     expect(
       formatWebSocketStatus({
         type: 'open',
@@ -3220,6 +3383,65 @@ describe('WebSocket transport', () => {
         cacheKeyHash: '336920397f78',
       }),
     ).toBeUndefined();
+  });
+
+  it('formats recovery success text for the status bar', () => {
+    expect(
+      formatWebSocketStatus({
+        type: 'recovered',
+        mode: 'resumed',
+        connectionId: 'ws#1293',
+        responseId: 'resp_ok',
+        urlHash: 'urlhash',
+      }),
+    ).toBe('Responses WS: recovered on ws#1293 · resumed from previous_response_id');
+    expect(
+      formatWebSocketStatus({
+        type: 'recovered',
+        mode: 'full_replay',
+        connectionId: 'ws#1294',
+        responseId: 'resp_ok',
+        urlHash: 'urlhash',
+      }),
+    ).toBe('Responses WS: recovered on ws#1294 · full conversation replay');
+  });
+
+  it('formats websocket retry notifications as concise recovery timeline messages', () => {
+    expect(
+      formatWebSocketRetryNotification({
+        type: 'retry',
+        reason: 'empty_response_failed_without_details',
+        action: 'retry_fresh_websocket_same_previous_response_id',
+        attempt: 1,
+        nextAttempt: 2,
+        maxAttempts: 3,
+        urlHash: 'abc123',
+        connectionId: 'ws#1292',
+        responseId: 'resp_0091b44445adddfa006a21cb87efc48194a1b3e5756122ca56',
+        previousResponseId: 'resp_0091b44445adddfa006a21cb733a2081948de63f4cd8a9579b',
+      }),
+    ).toBe(
+      'Responses WS: ws#1292 returned response.failed without details; retrying fresh with previous_response_id=resp_0091b…d8a9579b. Failed response_id=resp_0091b…6122ca56. Attempt 2/3.',
+    );
+  });
+
+  it('formats websocket fallback notifications as concise recovery timeline messages', () => {
+    expect(
+      formatWebSocketFallbackNotification({
+        type: 'fallback',
+        reason: 'empty_response_failed_without_details',
+        action: 'replay_full_conversation_without_previous_response_id',
+        attempt: 2,
+        nextAttempt: 3,
+        maxAttempts: 3,
+        urlHash: 'abc123',
+        connectionId: 'ws#1293',
+        responseId: 'resp_0091b44445adddfa006a21cb8aac448194b4aee1903076f4c2',
+        previousResponseId: 'resp_0091b44445adddfa006a21cb733a2081948de63f4cd8a9579b',
+      }),
+    ).toBe(
+      'Responses WS: retry on ws#1293 also returned response.failed; replaying full conversation. Failed response_id=resp_0091b…3076f4c2. Attempt 3/3.',
+    );
   });
 
   it('removes an idle cached socket when the server closes it', async () => {
@@ -3469,6 +3691,120 @@ describe('WebSocket transport', () => {
     expect(JSON.parse(instances[1].sent[0])).toMatchObject(fullBody);
     expect(JSON.parse(instances[1].sent[0])).not.toHaveProperty('previous_response_id');
     expect(seen).toEqual(['response.created', 'response.completed']);
+  });
+
+  it('falls back to a full body when empty response.failed repeats after retry', async () => {
+    const { WebSocketCtor, instances } = makeWebSocketCtor([
+      (socket) => {
+        socket.emit('message', {
+          data: JSON.stringify({ type: 'response.created', response: { id: 'resp_failed_1' } }),
+        });
+        socket.emit('message', {
+          data: JSON.stringify({
+            type: 'response.failed',
+            response: {
+              id: 'resp_failed_1',
+              status: 'failed',
+              previous_response_id: 'resp_old',
+              error: null,
+              incomplete_details: null,
+              output: [],
+            },
+          }),
+        });
+      },
+      (socket) => {
+        socket.emit('message', {
+          data: JSON.stringify({ type: 'response.created', response: { id: 'resp_failed_2' } }),
+        });
+        socket.emit('message', {
+          data: JSON.stringify({
+            type: 'response.failed',
+            response: {
+              id: 'resp_failed_2',
+              status: 'failed',
+              previous_response_id: 'resp_old',
+              error: null,
+              incomplete_details: null,
+              output: [],
+            },
+          }),
+        });
+      },
+      (socket) => {
+        socket.emit('message', {
+          data: JSON.stringify({ type: 'response.created', response: { id: 'resp_full' } }),
+        });
+        socket.emit('message', {
+          data: JSON.stringify({
+            type: 'response.completed',
+            response: { id: 'resp_full', status: 'completed' },
+          }),
+        });
+      },
+    ]);
+    const lifecycle: WebSocketLifecycleEvent[] = [];
+    const model = makeModel();
+    const output = makeAssistantMessage(model);
+    const stream = createAssistantMessageEventStream();
+    const processor = createResponsesEventProcessor(output, stream, model);
+    const fullBody = {
+      model: 'gpt',
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'full' }] }],
+    };
+
+    const result = await runWebSocketResponse(
+      {
+        url: 'wss://example.test/responses',
+        headers: new Headers(),
+        body: {
+          ...fullBody,
+          previous_response_id: 'resp_old',
+          input: [
+            { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'next' }] },
+          ],
+        },
+        fallbackBodyOnPreviousResponseNotFound: fullBody,
+        settings: normalizeSettings({ websocket: { retries: 1, idleTimeoutMs: 25 } }),
+        WebSocketCtor,
+        onLifecycleEvent: (event) => lifecycle.push(event),
+      },
+      (event) => processor.apply(event),
+    );
+
+    expect(result).toMatchObject({
+      responseId: 'resp_full',
+      eventCount: 2,
+      fallbackUsed: true,
+      fallbackReason: 'empty_response_failed_without_details',
+    });
+    expect(instances).toHaveLength(3);
+    expect(JSON.parse(instances[0].sent[0])).toMatchObject({
+      previous_response_id: 'resp_old',
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'next' }] }],
+    });
+    expect(JSON.parse(instances[1].sent[0])).toMatchObject({
+      previous_response_id: 'resp_old',
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'next' }] }],
+    });
+    expect(JSON.parse(instances[2].sent[0])).toMatchObject(fullBody);
+    expect(JSON.parse(instances[2].sent[0])).not.toHaveProperty('previous_response_id');
+    expect(lifecycle).toContainEqual(
+      expect.objectContaining({
+        type: 'fallback',
+        reason: 'empty_response_failed_without_details',
+        action: 'replay_full_conversation_without_previous_response_id',
+        responseId: 'resp_failed_2',
+        previousResponseId: 'resp_old',
+      }),
+    );
+    expect(lifecycle).toContainEqual(
+      expect.objectContaining({
+        type: 'recovered',
+        mode: 'full_replay',
+        responseId: 'resp_full',
+      }),
+    );
   });
 });
 
