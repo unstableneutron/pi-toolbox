@@ -18,9 +18,9 @@ Sessions are stored in `~/.pi/agent/sessions/` organized by project:
 │   ├── 2026-02-20T20-17-15-095Z_1a6f6bc4-....jsonl   ← parent session
 │   ├── 2026-02-20T20-17-15-095Z_1a6f6bc4-.../        ← nested subagent sessions dir
 │   │   └── 5f316403/                                  ← runId (8-char hex)
-│   │       ├── run-0/<timestamp_uuid>.jsonl              ← parallel task 0
-│   │       ├── run-1/<timestamp_uuid>.jsonl              ← parallel task 1
-│   │       └── async-<uuid>/<timestamp_uuid>.jsonl       ← async run
+│   │       ├── run-0/session.jsonl                       ← parallel task 0
+│   │       ├── run-1/session.jsonl                       ← parallel task 1
+│   │       └── async-<uuid>/session.jsonl                ← async run
 │   ├── subagent-artifacts/                              ← metadata & summaries
 │   │   ├── 5f316403_worker_0_input.md
 │   │   ├── 5f316403_worker_0_output.md
@@ -28,7 +28,8 @@ Sessions are stored in `~/.pi/agent/sessions/` organized by project:
 ```
 
 - Directory names encode the project path with `--` delimiters and `-` replacing `/`
-- Filenames: `<ISO-timestamp>_<UUID>.jsonl`
+- Parent session filenames: `<ISO-timestamp>_<UUID>.jsonl`
+- Nested subagent session filenames are usually `session.jsonl`
 - Each line is a standalone JSON object
 - The nested subagent dir has the same stem as the parent JSONL (without `.jsonl`)
 - The `runId` links nested session dirs to `subagent-artifacts/<runId>_*` files
@@ -177,12 +178,35 @@ Each result object contains:
 
 Four ways to access subagent session data (in order of reliability):
 
-1. **Nested session dir** — `<parent-session-stem>/<runId>/run-<N>/<ts_uuid>.jsonl` (persistent, preferred for full sessions)
+1. **Nested session dir** — `<parent-session-stem>/<runId>/run-<N>/session.jsonl` (persistent, preferred for full sessions)
 2. **Inline messages** — `details.results[].messages` (embedded in parent, always available but may lack tool details)
 3. **Temp session file** — `details.results[].sessionFile` at `$TMPDIR/pi-subagent-session-<random>/run-<N>/` (may be cleaned up)
 4. **Persistent artifacts** — `details.artifacts.files[]` in `subagent-artifacts/` (meta/input/output always available; JSONL may be deleted in favor of nested dir)
 
-To read a subagent's full session, first check the nested session dir, then fall back to `sessionFile` or `artifactPaths.jsonlPath`. Use the same `read_session.py` script for all.
+To read a subagent's full session, first check the nested session dir, then fall back to `sessionFile` or `artifactPaths.jsonlPath`. Use `skills/pi-session-explorer/bin/session-explorer read <path> --mode overview` for all session JSONLs.
+
+## Assistant Diagnostics
+
+Assistant messages may include a `diagnostics` array. The consolidated reader exposes these via:
+
+```bash
+skills/pi-session-explorer/bin/session-explorer read <session.jsonl> --mode diagnostics
+skills/pi-session-explorer/bin/session-explorer read <session.jsonl> --mode websocket
+```
+
+For `openai_websocket_transport`, important fields are:
+
+| Field | Triage meaning |
+|-------|----------------|
+| `outcome` | `completed`, `transport_error`, fallback outcomes, etc. |
+| `eventCount` / `responseIdSeen` | Whether the stream made progress and saw a response id |
+| `firstEventMs` / `responseCreatedMs` / `completedMs` | Startup and completion timing |
+| `continuation` | `delta`, `no_continuation`, or cache decision state |
+| `previousResponseId` / `fallback` | Server-state continuation and fallback behavior |
+| `requestBytes` / `fullBytes` | Sent payload size vs full-context payload size |
+| `sentInputItems` / `fullInputItems` | Sent input items vs full-context item count |
+
+An empty assistant turn with zero usage and `outcome: transport_error` is a provider/transport stall artifact, not a model-authored empty answer.
 
 ## Common Pitfalls
 
@@ -192,4 +216,4 @@ To read a subagent's full session, first check the nested session dir, then fall
 4. **Large sessions:** Tool results often contain huge outputs
 5. **String content:** Some older content fields may be plain strings
 6. **Subagent details:** The `details` field on subagent toolResults is NOT in the `content` array — it's a sibling of `content` on the message object
-7. **Subagent session locations:** `sessionFile` paths are in `$TMPDIR` and get cleaned up. `artifactPaths.jsonlPath` may also be deleted. The reliable location is the nested session dir: `<parent-stem>/<runId>/run-<N>/`. Use `read_session.py --mode subagents` which auto-resolves to the correct path.
+7. **Subagent session locations:** `sessionFile` paths are in `$TMPDIR` and get cleaned up. `artifactPaths.jsonlPath` may also be deleted. The reliable location is the nested session dir: `<parent-stem>/<runId>/run-<N>/`. Use `skills/pi-session-explorer/bin/session-explorer read <parent.jsonl> --mode subagents` which auto-resolves to the correct path.

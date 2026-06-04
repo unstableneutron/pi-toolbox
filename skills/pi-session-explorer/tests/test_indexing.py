@@ -14,6 +14,7 @@ from pi_session_explorer.cache import derive_cache_paths
 from pi_session_explorer.roots import (
     encode_pi_session_dir,
     infer_project_root,
+    RootResolutionError,
     resolve_target_root,
 )
 
@@ -81,6 +82,14 @@ def test_resolve_target_root_encodes_project_root_into_sessions_dir(tmp_path: Pa
     assert resolved.project_root == project_root.resolve()
     assert resolved.session_root == expected_session_root.resolve()
     assert resolved.encoded_session_dir == encoded_name
+
+
+def test_resolve_target_root_rejects_empty_encoded_dir_outside_sessions_root(tmp_path: Path) -> None:
+    encoded_like_project = tmp_path / "--not-a-session-root--"
+    encoded_like_project.mkdir()
+
+    with pytest.raises(RootResolutionError):
+        resolve_target_root(explicit_root=encoded_like_project, sessions_root=tmp_path / "sessions")
 
 
 def test_derive_cache_paths_builds_per_root_duckdb_and_sidecar_paths(tmp_path: Path) -> None:

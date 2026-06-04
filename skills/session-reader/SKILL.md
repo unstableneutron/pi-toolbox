@@ -1,111 +1,35 @@
 ---
 name: session-reader
-description: Efficiently read and analyze pi agent session JSONL files. Use when asked to "read a session", "review a session", "analyze a session", "what happened in this session", "load session", "parse session", "session history", or given a .jsonl session file path.
+description: Use when asked to read, review, load, parse, or summarize one Pi session JSONL file, or when given a .jsonl session path.
 ---
 
-# Read Pi Sessions
+# Session Reader
 
-Parse pi session JSONL files into readable, structured output. Sessions live in `~/.pi/agent/sessions/<project>/` as `.jsonl` files.
+Compatibility trigger for single-session requests. The implementation now lives in `pi-session-explorer`.
 
-## Step 1: Identify the Session File
-
-Resolve the session file path. Sessions are stored at:
-```
-~/.pi/agent/sessions/--<path-with-dashes>--/<timestamp>_<uuid>.jsonl
-```
-
-Subagent sessions are nested under the parent session directory (same stem, no `.jsonl`):
-```
-~/.pi/agent/sessions/<project>/<timestamp_uuid>/          ← parent session dir
-  <runId>/run-0/<timestamp_uuid>.jsonl                     ← subagent session (parallel task 0)
-  <runId>/run-1/<timestamp_uuid>.jsonl                     ← subagent session (parallel task 1)
-  <runId>/async-<uuid>/<timestamp_uuid>.jsonl              ← subagent session (async run)
-```
-
-The `<runId>` (8-char hex) links to `subagent-artifacts/<runId>_<agent>_<N>_meta.json` for metadata.
-
-If the user provides a partial path or project name, find the file:
-```bash
-ls -t ~/.pi/agent/sessions/*<project>*/*.jsonl | head -5
-```
-
-## Step 2: Start with an Overview
-
-Always start with the overview to understand the session before diving deeper:
+Use:
 
 ```bash
-uv run ${CLAUDE_SKILL_ROOT}/scripts/read_session.py <path> --mode overview
+skills/pi-session-explorer/bin/session-explorer read <session.jsonl> --mode overview
 ```
 
-This shows: session metadata (model, project, cost), turn count, and a summary of every turn with timestamps and tool calls used.
+Useful modes:
 
-## Step 3: Read Specific Content
+| Need | Mode |
+|------|------|
+| First pass | `overview` |
+| Conversation only | `conversation` |
+| Full tool I/O | `full --max-content 0` |
+| Tool calls/results | `tools` |
+| Cost/cache tokens | `costs` |
+| Subagent paths/status | `subagents` |
+| Empty/error/transport turns | `diagnostics` |
+| OpenAI WebSocket latency/continuation | `websocket` |
 
-Based on what's needed, use the appropriate mode:
-
-| Goal | Command |
-|------|---------|
-| See user/assistant conversation only | `--mode conversation` |
-| See everything including tool I/O | `--mode full` |
-| See what tools were called and results | `--mode tools` |
-| Analyze token usage and costs | `--mode costs` |
-| See subagent delegations with task/status/cost/paths | `--mode subagents` |
-
-### Controlling Output Size
-
-For large sessions, use `--offset` and `--limit` to page through user turns:
+The old wrapper still works:
 
 ```bash
-# Skip first 3 user turns, show next 5
-uv run ${CLAUDE_SKILL_ROOT}/scripts/read_session.py <path> --mode conversation --offset 3 --limit 5
+uv run skills/session-reader/scripts/read_session.py <session.jsonl> --mode overview
 ```
 
-Control content truncation with `--max-content`:
-
-```bash
-# Show full tool outputs (no truncation)
-uv run ${CLAUDE_SKILL_ROOT}/scripts/read_session.py <path> --mode full --max-content 0
-
-# Shorter previews (500 chars per block)
-uv run ${CLAUDE_SKILL_ROOT}/scripts/read_session.py <path> --mode full --max-content 500
-```
-
-## Step 3b: Drill into Subagent Sessions
-
-When a session contains subagent calls, the `--mode subagents` output shows paths to each subagent's own JSONL session. Read those with the same script:
-
-```bash
-# Nested under parent session dir (preferred — always available)
-uv run ${CLAUDE_SKILL_ROOT}/scripts/read_session.py ~/.pi/agent/sessions/<project>/<parent-session-stem>/<runId>/run-0/<timestamp>.jsonl --mode overview
-
-# Temp session file (may be cleaned up)
-uv run ${CLAUDE_SKILL_ROOT}/scripts/read_session.py $TMPDIR/pi-subagent-session-<id>/run-0/<timestamp>.jsonl --mode overview
-```
-
-Subagent sessions use the exact same JSONL format. The `overview` and `full` modes all handle subagent data — they show inline summaries with agent, model, cost, duration, and status for each subagent run.
-
-### Finding nested subagent sessions
-
-If the `--mode subagents` output shows paths as "(deleted)", the JSONL is likely in the nested parent session directory. To discover all subagent sessions for a parent:
-
-```bash
-# List all nested subagent JONLs for a parent session
-find ~/.pi/agent/sessions/<project>/<parent-session-stem>/ -name '*.jsonl' | sort
-```
-
-## Step 4: Report Findings
-
-When summarizing a session for the user, include:
-
-1. **What was the goal** — first user message intent
-2. **What happened** — key steps taken, tools used, decisions made
-3. **Outcome** — did it succeed? What was the final state?
-4. **Notable issues** — errors, retries, workarounds, wasted effort
-5. **Cost** — total spend and token usage
-
-## Session Format Reference
-
-If you need to understand the raw JSONL format (for custom parsing), read:
-`${CLAUDE_SKILL_ROOT}/references/session-format.md`
-
-The critical thing to know: message content is nested at `line.message.content`, NOT `line.content`. Content is always an array of typed objects (`text`, `toolCall`, `thinking`). Tool results are separate message entries with `role: "toolResult"`.
+Prefer the canonical explorer command for new workflows. For aggregate session triage, use `skills/pi-session-explorer/bin/session-explorer ws` or the `pi-session-explorer` skill.

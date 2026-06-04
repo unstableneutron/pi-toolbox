@@ -85,12 +85,9 @@ def derive_pi_session_root(
 
 
 def _looks_like_explicit_session_root(path: Path, sessions_root: Path) -> bool:
-    return (
-        path.is_dir()
-        and path.parent == sessions_root
-        and path.name.startswith("--")
-        and path.name.endswith("--")
-    )
+    if not (path.is_dir() and path.name.startswith("--") and path.name.endswith("--")):
+        return False
+    return path.parent == sessions_root or any(path.rglob("*.jsonl"))
 
 
 def resolve_target_root(
