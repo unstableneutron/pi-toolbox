@@ -1,5 +1,7 @@
 node_modules/
 node_modules/**
+!extensions/pi-codex-computer-use/vendor/codex-chrome-plugin/scripts/node_modules/
+!extensions/pi-codex-computer-use/vendor/codex-chrome-plugin/scripts/node_modules/**
 disabled/
 disabled/**
 

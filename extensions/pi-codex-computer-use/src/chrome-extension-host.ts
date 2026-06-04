@@ -23,13 +23,27 @@ interface EnsureChromeExtensionAppServerOptions {
 
 const DEFAULT_CHROME_DEBUG_BASE_URL = 'http://127.0.0.1:9224';
 const DEFAULT_EXTENSION_ID = 'hehggadaopoacecdllhhajmbjkdcmajg';
+const CHROME_EXTENSION_ID_ENV = 'PI_CODEX_CHROME_EXTENSION_ID';
+const CHROME_APP_SERVER_ORIGIN_ENV = 'PI_CODEX_CHROME_APP_SERVER_ORIGIN';
 
-function getDebugBaseUrl(): string {
+export function getConfiguredChromeDebugBaseUrl(): string {
   return process.env.PI_CODEX_CHROME_DEBUG_URL ?? DEFAULT_CHROME_DEBUG_BASE_URL;
 }
 
 export function getChromeExtensionOrigin(extensionId: string = DEFAULT_EXTENSION_ID): string {
   return `chrome-extension://${extensionId}`;
+}
+
+export function getConfiguredChromeExtensionId(): string {
+  const configured = process.env[CHROME_EXTENSION_ID_ENV]?.trim();
+  return configured && configured.length > 0 ? configured : DEFAULT_EXTENSION_ID;
+}
+
+export function getConfiguredChromeAppServerOrigin(): string {
+  const configured = process.env[CHROME_APP_SERVER_ORIGIN_ENV]?.trim();
+  return configured && configured.length > 0
+    ? configured.replace(/\/+$/u, '')
+    : getChromeExtensionOrigin(DEFAULT_EXTENSION_ID);
 }
 
 export function findChromeExtensionServiceWorkerTarget(
@@ -98,8 +112,8 @@ function validateEnsureResult(value: any): ChromeExtensionAppServerInfo {
 export async function ensureChromeExtensionAppServer(
   options: EnsureChromeExtensionAppServerOptions = {},
 ): Promise<ChromeExtensionAppServerInfo> {
-  const debugBaseUrl = options.debugBaseUrl ?? getDebugBaseUrl();
-  const extensionId = options.extensionId ?? DEFAULT_EXTENSION_ID;
+  const debugBaseUrl = options.debugBaseUrl ?? getConfiguredChromeDebugBaseUrl();
+  const extensionId = options.extensionId ?? getConfiguredChromeExtensionId();
   const fetchImpl = options.fetchImpl ?? fetch;
   const WebSocketImpl = options.WebSocketImpl ?? WebSocket;
   const readTargets = async () => {

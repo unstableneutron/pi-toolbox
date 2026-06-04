@@ -8,6 +8,7 @@
     "agents/**",
     "disabled/**",
     "docs/**",
+    "extensions/pi-codex-computer-use/vendor/**",
     "git/**",
     "prompts/**",
     "scratch/**",

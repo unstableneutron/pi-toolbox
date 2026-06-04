@@ -2,6 +2,7 @@ import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { StringEnum } from '@earendil-works/pi-ai';
 import { Type } from 'typebox';
 
+import { runChromeDebugBrowserEval, runChromeDebugBrowserList } from './chrome-debug-browser';
 import { getCodexComputerUsePaths } from './codex-paths';
 import type { ComputerUseSession } from './session';
 
@@ -21,10 +22,22 @@ const BrowserBackendParam = Type.Optional(StringEnum(['iab', 'chrome'] as const)
 
 const CodexBrowserListParams = Type.Object({
   backend: BrowserBackendParam,
+  debugUrl: Type.Optional(
+    Type.String({ description: 'Chrome/Brave DevTools base URL, e.g. http://127.0.0.1:9224.' }),
+  ),
+  extensionId: Type.Optional(
+    Type.String({ description: 'Codex Chrome extension ID to verify/use for Chrome backend.' }),
+  ),
 });
 
 const CodexBrowserEvalParams = Type.Object({
   backend: BrowserBackendParam,
+  debugUrl: Type.Optional(
+    Type.String({ description: 'Chrome/Brave DevTools base URL, e.g. http://127.0.0.1:9224.' }),
+  ),
+  extensionId: Type.Optional(
+    Type.String({ description: 'Codex Chrome extension ID to verify/use for Chrome backend.' }),
+  ),
   script: Type.String({
     description:
       'JavaScript async function body to run with agent, browser, tab, and nodeRepl bindings.',
@@ -36,6 +49,8 @@ type BrowserToolParamsSchema = typeof CodexBrowserListParams | typeof CodexBrows
 interface BrowserRuntimeScriptInput {
   backend: BrowserBackend;
   browserClientPath: string;
+  debugUrl?: string;
+  extensionId?: string;
 }
 
 interface CodexBrowserEvalScriptInput extends BrowserRuntimeScriptInput {
@@ -48,6 +63,21 @@ interface BrowserToolSpec {
   description: string;
   promptSnippet: string;
   parameters: BrowserToolParamsSchema;
+}
+
+interface ChromeDebugBrowserToolOptions {
+  debugUrl?: string;
+  extensionId?: string;
+}
+
+interface ChromeNativeBridgeOptions {
+  debugBaseUrl?: string;
+  extensionId?: string;
+}
+
+interface BrowserToolRuntimeDeps {
+  runChromeDebugBrowserEval?: typeof runChromeDebugBrowserEval;
+  runChromeDebugBrowserList?: typeof runChromeDebugBrowserList;
 }
 
 export const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
@@ -322,6 +352,7 @@ async function runNodeReplJs(
   backend: BrowserBackend,
   code: string,
   signal?: AbortSignal,
+  chromeOptions: ChromeNativeBridgeOptions = {},
 ) {
   const timeoutMs = 120_000;
   const { threadId, rawResult } = await session.callBrowserMcpTool(
@@ -334,8 +365,19 @@ async function runNodeReplJs(
       timeoutMs: timeoutMs + 5_000,
     },
     signal,
+    chromeOptions,
   );
   return toCodexBrowserToolResult({ threadId, rawResult, piName });
+}
+
+function isChromeBridgeUnavailableError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes('Codex extension-host WebSocket upgrade') ||
+    message.includes('Could not find a debuggable Codex Chrome Extension') ||
+    message.includes('Could not open a debuggable Codex Chrome Extension page') ||
+    message.includes('No handler registered for method: ensureCodexAppServer')
+  );
 }
 
 function getBrowserScriptInput(params: any): BrowserRuntimeScriptInput {
@@ -343,13 +385,22 @@ function getBrowserScriptInput(params: any): BrowserRuntimeScriptInput {
   return {
     backend,
     browserClientPath: getBrowserClientPath(backend),
+    ...(typeof params.debugUrl === 'string' && params.debugUrl.trim().length > 0
+      ? { debugUrl: params.debugUrl.trim() }
+      : {}),
+    ...(typeof params.extensionId === 'string' && params.extensionId.trim().length > 0
+      ? { extensionId: params.extensionId.trim() }
+      : {}),
   };
 }
 
 export function registerCodexBrowserTools(
   pi: { registerTool(tool: any): void },
   session: ComputerUseSession,
+  deps: BrowserToolRuntimeDeps = {},
 ): void {
+  const runDirectChromeList = deps.runChromeDebugBrowserList ?? runChromeDebugBrowserList;
+  const runDirectChromeEval = deps.runChromeDebugBrowserEval ?? runChromeDebugBrowserEval;
   for (const spec of BROWSER_TOOL_SPECS) {
     pi.registerTool({
       name: spec.piName,
@@ -372,26 +423,46 @@ export function registerCodexBrowserTools(
         ctx: ExtensionContext,
       ) {
         const input = getBrowserScriptInput(params);
+        const chromeOptions: ChromeDebugBrowserToolOptions = {
+          ...(input.debugUrl ? { debugUrl: input.debugUrl } : {}),
+          ...(input.extensionId ? { extensionId: input.extensionId } : {}),
+        };
+        const chromeNativeOptions: ChromeNativeBridgeOptions = {
+          ...(input.debugUrl ? { debugBaseUrl: input.debugUrl } : {}),
+          ...(input.extensionId ? { extensionId: input.extensionId } : {}),
+        };
 
         if (spec.piName === 'codex_browser_list') {
+          try {
+            return await runNodeReplJs(
+              session,
+              ctx,
+              spec.piName,
+              input.backend,
+              buildCodexBrowserListScript(input),
+              signal,
+              chromeNativeOptions,
+            );
+          } catch (error) {
+            if (input.backend !== 'chrome' || !isChromeBridgeUnavailableError(error)) throw error;
+            return await runDirectChromeList(chromeOptions);
+          }
+        }
+
+        try {
           return await runNodeReplJs(
             session,
             ctx,
             spec.piName,
             input.backend,
-            buildCodexBrowserListScript(input),
+            buildCodexBrowserEvalScript({ ...input, script: params.script }),
             signal,
+            chromeNativeOptions,
           );
+        } catch (error) {
+          if (input.backend !== 'chrome' || !isChromeBridgeUnavailableError(error)) throw error;
+          return await runDirectChromeEval({ ...chromeOptions, script: params.script });
         }
-
-        return await runNodeReplJs(
-          session,
-          ctx,
-          spec.piName,
-          input.backend,
-          buildCodexBrowserEvalScript({ ...input, script: params.script }),
-          signal,
-        );
       },
     });
   }

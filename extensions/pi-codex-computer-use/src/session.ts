@@ -5,7 +5,10 @@ import path from 'node:path';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 
 import { CodexAppServerClient, CodexAppServerWebSocketClient } from './app-server';
-import { ensureChromeExtensionAppServer, getChromeExtensionOrigin } from './chrome-extension-host';
+import {
+  ensureChromeExtensionAppServer,
+  getConfiguredChromeAppServerOrigin,
+} from './chrome-extension-host';
 import { getCodexComputerUsePaths } from './codex-paths';
 import { answerComputerUseElicitation } from './elicitation';
 
@@ -179,6 +182,11 @@ interface CodexMcpToolCall {
 
 type BrowserBackend = 'iab' | 'chrome';
 
+interface ChromeBrowserBridgeOptions {
+  debugBaseUrl?: string;
+  extensionId?: string;
+}
+
 function buildNodeReplRequestMeta(threadId: string, turnNumber: number): Record<string, unknown> {
   return {
     'x-codex-turn-metadata': {
@@ -197,6 +205,7 @@ export interface CodexDiagnosticStatusOptions {
 export class ComputerUseSession {
   private client?: CodexAppServerClient;
   private chromeClient?: CodexAppServerWebSocketClient;
+  private chromeClientKey?: string;
   private chromeThreadId?: string;
   private threadId?: string;
   private nextNodeReplTurnNumber = 1;
@@ -339,12 +348,13 @@ export class ComputerUseSession {
     backend: BrowserBackend,
     input: CodexMcpToolCall,
     signal?: AbortSignal,
+    options: ChromeBrowserBridgeOptions = {},
   ): Promise<{ threadId: string; rawResult: any }> {
     if (backend !== 'chrome') {
       return await this.callMcpTool(ctx, input, signal);
     }
 
-    const client = await this.getChromeClient();
+    const client = await this.getChromeClient(options);
     const threadId = await this.getChromeThreadId(ctx, client, signal);
     const restore = client.setElicitationHandler((params) =>
       answerComputerUseElicitation(params, ctx),
@@ -407,6 +417,7 @@ export class ComputerUseSession {
   private resetChromeBridge(): void {
     this.chromeClient?.close();
     this.chromeClient = undefined;
+    this.chromeClientKey = undefined;
     this.chromeThreadId = undefined;
   }
 
@@ -437,14 +448,31 @@ export class ComputerUseSession {
     return this.threadId;
   }
 
-  private async getChromeClient(): Promise<CodexAppServerWebSocketClient> {
+  private async getChromeClient(
+    options: ChromeBrowserBridgeOptions = {},
+  ): Promise<CodexAppServerWebSocketClient> {
+    const origin = getConfiguredChromeAppServerOrigin();
+    const key = JSON.stringify({
+      debugBaseUrl: options.debugBaseUrl ?? null,
+      extensionId: options.extensionId ?? null,
+      origin,
+    });
+    if (this.chromeClient && this.chromeClientKey === undefined) {
+      this.chromeClientKey = key;
+    } else if (this.chromeClient && this.chromeClientKey !== key) {
+      this.resetChromeBridge();
+    }
     if (!this.chromeClient) {
-      const appServer = await ensureChromeExtensionAppServer();
+      const appServer = await ensureChromeExtensionAppServer({
+        debugBaseUrl: options.debugBaseUrl,
+        extensionId: options.extensionId,
+      });
       this.chromeClient = new CodexAppServerWebSocketClient({
-        origin: getChromeExtensionOrigin(),
+        origin,
         url: appServer.localAppServerUrl,
       });
       await this.chromeClient.init();
+      this.chromeClientKey = key;
     }
     return this.chromeClient;
   }

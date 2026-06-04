@@ -109,9 +109,16 @@ and browser MCP tools.
 
 ### Browser
 
-Codex browser automation is intentionally routed through Codex app-server's
-`node_repl` MCP server. That preserves Codex thread metadata needed by the
-in-app browser (`iab`) backend while exposing a compact Pi browser surface.
+Codex browser automation is routed through Codex app-server's `node_repl` MCP
+server when possible. That preserves Codex thread metadata needed by the in-app
+browser (`iab`) backend and by the official Codex Chrome browser-client runtime.
+
+For local Brave/unpacked-extension development, the Chrome backend has an
+explicit fallback: if Codex's extension-host app-server WebSocket is unavailable
+or refuses the direct Pi connection, Pi verifies the configured Codex extension
+is loaded in the target browser and then drives Brave through its DevTools debug
+endpoint. This fallback is intentionally small and documented; it does not
+replace or modify Codex.app's trusted `browser-client.mjs` or native host.
 
 | Pi tool              | Purpose                                           |
 | -------------------- | ------------------------------------------------- |
@@ -121,10 +128,68 @@ in-app browser (`iab`) backend while exposing a compact Pi browser surface.
 Browser tools default to `backend: "iab"`. Use `backend: "chrome"` to target the
 Codex Chrome extension backend (`agent.browsers.get("extension")`).
 
+Chrome calls accept optional per-call settings so a session can target Brave or
+another Chromium debug endpoint without restarting Pi:
+
+```json
+{
+  "backend": "chrome",
+  "debugUrl": "http://127.0.0.1:9224",
+  "extensionId": "abggnaecfoknpafciidmojghmkdkkhao"
+}
+```
+
+`debugUrl` is the Chromium DevTools base URL. `extensionId` is optional; when it
+is omitted, the fallback first uses `PI_CODEX_CHROME_EXTENSION_ID` when set and
+otherwise auto-detects a loaded Codex extension target from `/json/list`.
+
+By default the Chrome bridge targets the official Codex Chrome extension ID
+`hehggadaopoacecdllhhajmbjkdcmajg`. For local unpacked-extension experiments,
+set `PI_CODEX_CHROME_EXTENSION_ID` before starting Pi to target a different
+Chromium extension ID, for example:
+
+```bash
+PI_CODEX_CHROME_EXTENSION_ID=abggnaecfoknpafciidmojghmkdkkhao pi
+```
+
+The matching browser native messaging host manifest must also include
+`chrome-extension://<that-id>/` in `allowed_origins`.
+
+This only changes extension discovery/native messaging. Codex.app's bundled
+extension host may still require the official extension origin for its local
+WebSocket app-server. Override that separately only if you have rebuilt the
+native host configuration:
+
+```bash
+PI_CODEX_CHROME_APP_SERVER_ORIGIN=chrome-extension://hehggadaopoacecdllhhajmbjkdcmajg
+```
+
 `codex_browser_eval.script` runs as an async JavaScript function body with
 `agent`, `browser`, `tab`, and `nodeRepl` bindings available. Return a
 JSON-serializable value for structured output, use `nodeRepl.write(...)` for
 exact text, and use `nodeRepl.emitImage(...)` for screenshots.
+
+When the Chrome DevTools fallback is active, these bindings implement the subset
+needed for tab listing, opening tabs, navigation, page title/URL/text reads,
+`tab.evaluate(...)`, `nodeRepl.write(...)`, and `nodeRepl.emitImage(...)`. The
+full Codex browser-client capability surface remains available only when Codex's
+native Chrome backend is discovered successfully.
+
+For the Chrome backend, keep Codex Desktop and bundled plugins current:
+
+```bash
+codex app /path/to/project
+codex plugin add chrome@openai-bundled
+codex plugin add browser@openai-bundled
+codex plugin add computer-use@openai-bundled
+codex app-server daemon restart
+```
+
+Then restart Brave with remote debugging enabled, for example:
+
+```bash
+open -na "Brave Browser" --args --remote-debugging-port=9224
+```
 
 The extension resolves `scripts/browser-client.mjs` in this order:
 
@@ -220,3 +285,18 @@ additional same-process clients.
 aubr -C extensions/pi-codex-computer-use test
 aubr -C extensions/pi-codex-computer-use check
 ```
+
+## Vendored Codex browser-use artifacts
+
+For local learning and browser-extension experiments, this package vendors
+reference snapshots under `vendor/`:
+
+- `vendor/codex-chrome-extension/` is an unpacked build of the public Codex
+  Chrome Web Store extension. Load this directory with **Load unpacked** in
+  `brave://extensions` or `chrome://extensions`.
+- `vendor/codex-chrome-plugin/` is a snapshot of Codex.app's bundled Chrome
+  plugin from the local Codex plugin cache, including `scripts/browser-client.mjs`
+  and the native host binary available on this machine.
+
+These vendored files are not wired into runtime behavior. See
+`vendor/README.md` for provenance, caveats, and native messaging notes.

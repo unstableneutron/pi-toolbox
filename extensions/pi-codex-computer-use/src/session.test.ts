@@ -237,6 +237,37 @@ describe('ComputerUseSession.callMcpTool', () => {
     expect((session as any).chromeClient).toBeUndefined();
     expect((session as any).chromeThreadId).toBeUndefined();
   });
+
+  test('passes Chrome bridge options into getChromeClient for per-call debug configuration', async () => {
+    const session = new ComputerUseSession();
+    const rawNodeResult = { content: [{ type: 'text', text: 'hello from chrome node' }] };
+    const client = {
+      setElicitationHandler() {
+        return () => {};
+      },
+      async callMcpTool() {
+        return rawNodeResult;
+      },
+    };
+    (session as any).getChromeClient = vi.fn(async () => client);
+    (session as any).getChromeThreadId = vi.fn(async () => 'chrome-thread-1');
+
+    await session.callBrowserMcpTool(
+      { cwd: '/tmp', hasUI: false } as any,
+      'chrome',
+      { server: 'node_repl', tool: 'js', timeoutMs: 5000 },
+      undefined,
+      {
+        debugBaseUrl: 'http://127.0.0.1:9333',
+        extensionId: 'custom-extension-id',
+      },
+    );
+
+    expect((session as any).getChromeClient).toHaveBeenCalledWith({
+      debugBaseUrl: 'http://127.0.0.1:9333',
+      extensionId: 'custom-extension-id',
+    });
+  });
 });
 
 describe('ComputerUseSession.getDiagnosticStatus', () => {

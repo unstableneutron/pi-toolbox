@@ -170,8 +170,9 @@ describe('registerCodexBrowserTools', () => {
         backend: string,
         input: unknown,
         signal: AbortSignal,
+        options: unknown,
       ) {
-        calls.push({ backend, input, signal });
+        calls.push({ backend, input, options, signal });
         return {
           threadId: 'chrome-thread',
           rawResult: { content: [{ type: 'text', text: 'chrome result' }] },
@@ -201,6 +202,130 @@ describe('registerCodexBrowserTools', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0].backend).toBe('chrome');
     expect(calls[0].input).toMatchObject({ server: 'node_repl', tool: 'js' });
+    expect(calls[0].options).toEqual({});
     expect(calls[0].signal).toBe(controller.signal);
+  });
+
+  test('passes Chrome debugUrl and extensionId into the Codex-native Chrome bridge attempt', async () => {
+    const registered: any[] = [];
+    const calls: any[] = [];
+    const session = {
+      async callBrowserMcpTool(
+        _ctx: unknown,
+        backend: string,
+        _input: unknown,
+        _signal: AbortSignal | undefined,
+        options: unknown,
+      ) {
+        calls.push({ backend, options });
+        return {
+          threadId: 'chrome-thread',
+          rawResult: { content: [{ type: 'text', text: 'chrome result' }] },
+        };
+      },
+    };
+    registerCodexBrowserTools(
+      { registerTool: (tool: any) => registered.push(tool) },
+      session as any,
+    );
+
+    const listTool = registered.find((tool) => tool.name === 'codex_browser_list');
+    await listTool.execute(
+      'tool-call-1',
+      {
+        backend: 'chrome',
+        debugUrl: 'http://127.0.0.1:9333',
+        extensionId: 'custom-extension-id',
+      },
+      undefined,
+      undefined,
+      { cwd: '/tmp/project' },
+    );
+
+    expect(calls).toEqual([
+      {
+        backend: 'chrome',
+        options: {
+          debugBaseUrl: 'http://127.0.0.1:9333',
+          extensionId: 'custom-extension-id',
+        },
+      },
+    ]);
+  });
+
+  test('falls back to the Chrome DevTools bridge with per-call debug settings when the Codex app-server proxy is unavailable', async () => {
+    const registered: any[] = [];
+    const directCalls: any[] = [];
+    const session = {
+      async callBrowserMcpTool() {
+        throw new Error('Timed out waiting for Codex extension-host WebSocket upgrade');
+      },
+    };
+    registerCodexBrowserTools(
+      { registerTool: (tool: any) => registered.push(tool) },
+      session as any,
+      {
+        async runChromeDebugBrowserList(input: any) {
+          directCalls.push(input);
+          return {
+            content: [{ type: 'text', text: 'direct chrome result' }],
+            details: { server: 'chrome-devtools' },
+          };
+        },
+      },
+    );
+
+    const listTool = registered.find((tool) => tool.name === 'codex_browser_list');
+    const result = await listTool.execute(
+      'tool-call-1',
+      {
+        backend: 'chrome',
+        debugUrl: 'http://127.0.0.1:9224',
+        extensionId: 'abggnaecfoknpafciidmojghmkdkkhao',
+      },
+      undefined,
+      undefined,
+      { cwd: '/tmp/project' },
+    );
+
+    expect(result.content).toEqual([{ type: 'text', text: 'direct chrome result' }]);
+    expect(directCalls).toEqual([
+      {
+        debugUrl: 'http://127.0.0.1:9224',
+        extensionId: 'abggnaecfoknpafciidmojghmkdkkhao',
+      },
+    ]);
+  });
+
+  test('falls back to the Chrome DevTools bridge when the native proxy lacks ensureCodexAppServer', async () => {
+    const registered: any[] = [];
+    const directCalls: any[] = [];
+    const session = {
+      async callBrowserMcpTool() {
+        throw new Error('No handler registered for method: ensureCodexAppServer');
+      },
+    };
+    registerCodexBrowserTools(
+      { registerTool: (tool: any) => registered.push(tool) },
+      session as any,
+      {
+        async runChromeDebugBrowserList(input: any) {
+          directCalls.push(input);
+          return {
+            content: [{ type: 'text', text: 'direct chrome result' }],
+            details: { server: 'chrome-devtools' },
+          };
+        },
+      },
+    );
+
+    const listTool = registered.find((tool) => tool.name === 'codex_browser_list');
+    await expect(
+      listTool.execute('tool-call-1', { backend: 'chrome' }, undefined, undefined, {
+        cwd: '/tmp/project',
+      }),
+    ).resolves.toMatchObject({ content: [{ type: 'text', text: 'direct chrome result' }] });
+
+    expect(directCalls).toEqual([{}]);
   });
 });

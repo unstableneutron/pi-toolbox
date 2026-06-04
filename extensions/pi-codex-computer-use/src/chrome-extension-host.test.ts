@@ -1,9 +1,37 @@
-import { describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 
 import {
   ensureChromeExtensionAppServer,
   findChromeExtensionServiceWorkerTarget,
+  getConfiguredChromeAppServerOrigin,
+  getConfiguredChromeExtensionId,
 } from './chrome-extension-host';
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
+describe('getConfiguredChromeExtensionId', () => {
+  test('uses the official Codex Chrome extension id by default', () => {
+    vi.stubEnv('PI_CODEX_CHROME_EXTENSION_ID', '');
+
+    expect(getConfiguredChromeExtensionId()).toBe('hehggadaopoacecdllhhajmbjkdcmajg');
+  });
+
+  test('uses PI_CODEX_CHROME_EXTENSION_ID when set for an unpacked Brave extension', () => {
+    vi.stubEnv('PI_CODEX_CHROME_EXTENSION_ID', 'abggnaecfoknpafciidmojghmkdkkhao');
+
+    expect(getConfiguredChromeExtensionId()).toBe('abggnaecfoknpafciidmojghmkdkkhao');
+  });
+
+  test('keeps the app-server WebSocket origin on the official extension by default', () => {
+    vi.stubEnv('PI_CODEX_CHROME_EXTENSION_ID', 'abggnaecfoknpafciidmojghmkdkkhao');
+
+    expect(getConfiguredChromeAppServerOrigin()).toBe(
+      'chrome-extension://hehggadaopoacecdllhhajmbjkdcmajg',
+    );
+  });
+});
 
 describe('findChromeExtensionServiceWorkerTarget', () => {
   test('selects the Codex extension service worker target for the configured extension id', () => {
@@ -141,6 +169,7 @@ const debugBaseUrl = 'http://127.0.0.1:9224';
 
 describe('ensureChromeExtensionAppServer', () => {
   test('uses an existing Codex extension page to request the app-server through the background path', async () => {
+    vi.stubEnv('PI_CODEX_CHROME_EXTENSION_ID', '');
     resetFakeWebSocket();
     const fetchImpl = async () => makeResponse([pageTarget()]);
 
@@ -159,6 +188,7 @@ describe('ensureChromeExtensionAppServer', () => {
   });
 
   test('opens a temporary extension page from the service worker when no page target exists', async () => {
+    vi.stubEnv('PI_CODEX_CHROME_EXTENSION_ID', '');
     resetFakeWebSocket();
     let reads = 0;
     const fetchImpl = async () => {
