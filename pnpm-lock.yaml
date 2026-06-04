@@ -73,6 +73,40 @@ importers:
         specifier: ^3.2.4
         version: 3.2.4(@types/node@24.12.2)
 
+  extensions/bash-rewrite:
+    dependencies:
+      shell-quote:
+        specifier: ^1.8.3
+        version: 1.8.4
+    devDependencies:
+      '@earendil-works/pi-coding-agent':
+        specifier: ^0.78.0
+        version: 0.78.0(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
+      '@earendil-works/pi-tui':
+        specifier: ^0.78.0
+        version: 0.78.0
+      '@types/node':
+        specifier: ^24.3.0
+        version: 24.12.2
+      '@types/shell-quote':
+        specifier: ^1.7.5
+        version: 1.7.5
+      oxfmt:
+        specifier: ^0.44.0
+        version: 0.44.0
+      oxlint:
+        specifier: ^1.59.0
+        version: 1.61.0(oxlint-tsgolint@0.20.0)
+      oxlint-tsgolint:
+        specifier: ^0.20.0
+        version: 0.20.0
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.4(@types/node@24.12.2)
+
   extensions/openai-websocket-responses:
     dependencies:
       partial-json:
@@ -148,9 +182,6 @@ importers:
       picomatch:
         specifier: ^4.0.3
         version: 4.0.4
-      shell-quote:
-        specifier: ^1.8.3
-        version: 1.8.4
     devDependencies:
       '@earendil-works/pi-agent-core':
         specifier: ^0.78.0
@@ -167,9 +198,6 @@ importers:
       '@types/picomatch':
         specifier: ^4.0.3
         version: 4.0.3
-      '@types/shell-quote':
-        specifier: ^1.7.5
-        version: 1.7.5
       oxfmt:
         specifier: ^0.44.0
         version: 0.44.0

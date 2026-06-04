@@ -4,7 +4,6 @@ import path from 'node:path';
 import { Text, type Component } from '@earendil-works/pi-tui';
 import { type TSchema } from 'typebox';
 import {
-  createBashToolDefinition,
   createFindToolDefinition,
   createGrepToolDefinition,
   createLsToolDefinition,
@@ -32,7 +31,6 @@ import {
 } from 'fff-router';
 import { clampMatchText } from './match-heuristics';
 import { DEFAULT_EXPAND_HINT_SUFFIXES, chooseOptionalSuffix } from '../shared/tui-width';
-import { tryRewriteBash, type RewriteDecision, type RewriteTool } from './bash-rewrite';
 import {
   type FallbackSpillInfo,
   type LocalFallbackEngine,
@@ -90,41 +88,7 @@ const FIND_QUERY_GENERIC_TOKENS = new Set([
 const OVERRIDE_BUILTIN_READ = true;
 const OVERRIDE_BUILTIN_GREP = true;
 const OVERRIDE_BUILTIN_FIND = true;
-// Re-writes grep / find / cat / ls / head-like commands inside a bash tool
-// call to a direct call to the structured read / ls / fff_grep / fff_find_files
-// tool. Unrecognized shapes pass through to the real bash tool unchanged.
-const REWRITE_BUILTIN_BASH = true;
 const BUILTIN_TOOL_TIMEOUT_MS = 10_000;
-
-// Bash commands that we did NOT rewrite and that contain one of these
-// tokens as a standalone word get capped at this timeout. Rationale: an
-// unrestricted `grep -r . .` or `find / -name …` on a large tree can hang
-// the agent session for minutes. If we failed to rewrite (unsupported
-// flag shape, chained `&& foo`, etc.), capping forward progress is
-// cheap insurance. The value is deliberately generous — short `--help`
-// / `--version` runs complete in milliseconds; capping at 60s only
-// matters for genuinely expensive invocations.
-const EXPENSIVE_BASH_TOKENS: ReadonlySet<string> = new Set([
-  'grep',
-  'rg',
-  'egrep',
-  'fgrep',
-  'find',
-  'fd',
-  'fdfind',
-  'ag',
-  'ack',
-  // `tree` has no structured rewrite yet and tends to dump thousands
-  // of lines at a monorepo root. Capping at 60s keeps an incidental
-  // `tree .` from flooding the agent's context window.
-  'tree',
-]);
-const PASS_THROUGH_EXPENSIVE_TIMEOUT_MS = 60_000;
-// Word-boundary regex built once at module load. Matches e.g. `grep`,
-// `git grep`, `| rg`, but NOT `grepper` or `findfile`.
-const EXPENSIVE_BASH_TOKEN_PATTERN = new RegExp(
-  `\\b(?:${[...EXPENSIVE_BASH_TOKENS].join('|')})\\b`,
-);
 
 const ALLOWLIST_HINTS = ['~/.pi', '~/.pi/agent', '~/.codex', '~/.claude', '~/.amp'];
 const DAEMON_RESTART_NOTICE =
@@ -181,12 +145,10 @@ export interface CreatePiFffSearchExtensionOptions {
   overrideBuiltinRead?: boolean;
   overrideBuiltinGrep?: boolean;
   overrideBuiltinFind?: boolean;
-  rewriteBuiltinBash?: boolean;
   createBuiltInReadTool?: typeof createReadToolDefinition;
   createBuiltInGrepTool?: typeof createGrepToolDefinition;
   createBuiltInFindTool?: typeof createFindToolDefinition;
   createBuiltInLsTool?: typeof createLsToolDefinition;
-  createBuiltInBashTool?: typeof createBashToolDefinition;
   findGitRootForReadFallback?: (cwd: string) => string | null | Promise<string | null>;
 }
 
@@ -1234,352 +1196,6 @@ async function rewriteReadToLs(args: {
   };
 }
 
-type BashExecuteParams = Parameters<ReturnType<typeof createBashToolDefinition>['execute']>;
-type BashExecuteResult = Awaited<
-  ReturnType<ReturnType<typeof createBashToolDefinition>['execute']>
->;
-
-type ToolContentEntry = { type: 'text'; text: string } | { type: string; [key: string]: unknown };
-
-async function dispatchBashRewrite(args: {
-  decision: RewriteDecision;
-  notice: string;
-  originalCommand: string;
-  toolCallId: string;
-  signal: AbortSignal | undefined;
-  onUpdate: BashExecuteParams[3];
-  ctx: BashExecuteParams[4];
-  ensureDaemon: () => Promise<void>;
-  callTool: (request: PublicToolRequest) => Promise<SearchCoordinatorResult>;
-  runFallback: (args: {
-    toolName: PublicToolName;
-    resolvedWithin: string;
-    publicRequest: PublicToolRequest;
-  }) => Promise<RunLocalFallbackResult>;
-  createBuiltInRead: typeof createReadToolDefinition;
-  createBuiltInLs: typeof createLsToolDefinition;
-}): Promise<BashExecuteResult> {
-  // The `rewriteCall` field carries the structured "grep → fff_grep(…)"
-  // summary in `details` so telemetry / debug / session replay can recover
-  // the exact call shape. We deliberately do NOT prepend it to the
-  // visible text content: the TUI preview chip (renderBashRewritePreview)
-  // already conveys source→target + params to the human, and
-  // renderBashRewriteResult delegates body rendering to the target
-  // tool's normal formatter on routedVia=bash-to-*. Duplicating the
-  // notice into content caused a visible yellow line that shadowed
-  // the clean fff-rendered body.
-  const sharedDetails = {
-    routedVia: `bash-to-${args.decision.tool}` as const,
-    rewriteRecognizer: args.decision.recognizer,
-    rewriteFromCommand: args.originalCommand,
-    rewriteToParams: args.decision.params,
-    rewriteCall: args.notice,
-  };
-
-  if (args.decision.tool === 'fff_grep' || args.decision.tool === 'fff_find_files') {
-    const forwarded = await forwardToolCall({
-      toolName: args.decision.tool,
-      params: args.decision.params,
-      cwd: args.ctx.cwd,
-      ensureDaemonRunning: args.ensureDaemon,
-      callPublicToolOverHttp: args.callTool,
-      runRipgrepFallback: args.runFallback,
-    });
-    return {
-      content: [{ type: 'text' as const, text: forwarded.text }],
-      details: {
-        ...forwarded.details,
-        ...sharedDetails,
-      } as BashExecuteResult['details'],
-    };
-  }
-
-  if (args.decision.tool === 'read') {
-    const builtInRead = args.createBuiltInRead(args.ctx.cwd);
-    const result = await builtInRead.execute(
-      args.toolCallId,
-      args.decision.params as { path: string; offset?: number; limit?: number },
-      withBuiltinToolTimeout(args.signal),
-      args.onUpdate,
-      args.ctx,
-    );
-    return mergeRewriteDetails(result, sharedDetails);
-  }
-
-  // ls
-  const builtInLs = args.createBuiltInLs(args.ctx.cwd);
-  const result = await builtInLs.execute(
-    args.toolCallId,
-    args.decision.params as { path?: string; limit?: number },
-    withBuiltinToolTimeout(args.signal),
-    args.onUpdate,
-    args.ctx,
-  );
-  return mergeRewriteDetails(result, sharedDetails);
-}
-
-/**
- * Pass a builtin read / ls result through unchanged except for attaching
- * bash-rewrite metadata to `details`. Use this in the rewrite branches —
- * content stays clean (body renders via renderBashRewriteResult or the
- * target tool's own formatter); the rewrite story lives in `details`,
- * visible to the TUI via routing but not to the model as content text.
- */
-function mergeRewriteDetails(
-  result: BashExecuteResult,
-  extraDetails: Record<string, unknown>,
-): BashExecuteResult {
-  return {
-    ...result,
-    details: {
-      ...(result.details as Record<string, unknown> | undefined),
-      ...extraDetails,
-    } as BashExecuteResult['details'],
-  };
-}
-
-/**
- * Prepend a bash-rewrite notice to a builtin-bash result without
- * routing to a structured tool. Used for notice-only classifier hits
- * (e.g. `cat -A` on BSD) and for timeout-capped pass-through commands
- * where we still want the raw bash output to reach the agent.
- */
-function prependBashNotice(result: BashExecuteResult, notice: string): BashExecuteResult {
-  return prependNoticeToContent(result, notice, { rewriteNoticeOnly: true });
-}
-
-/**
- * True when `command` contains any of grep / rg / find / fd / ag / ack
- * as a standalone word. Matches `git grep`, `| rg foo`, etc.; does NOT
- * match identifiers like `grepper` or filenames like `findfile.ts`.
- *
- * Exported for tests.
- */
-export function bashCommandContainsExpensiveTool(command: string): boolean {
-  return EXPENSIVE_BASH_TOKEN_PATTERN.test(command);
-}
-
-// ---- Bash-rewrite rendering (Feature 3) ----
-//
-// When a bash call gets rewritten to a structured tool, the agent (and
-// the human watching the TUI) benefits from seeing the actual tool
-// call shape rather than a raw shell command. These helpers:
-//
-//   - renderBashRewritePreview: at call time, peek at the command via
-//     `tryRewriteBash`. If it would rewrite, show a compact one-line
-//     header like `bash → fff_grep(pattern, within=src/, limit=10)` —
-//     same visual convention for all four rewrite targets (fff_grep,
-//     fff_find_files, read, ls). Returns null to fall through to the
-//     builtin bash render when no rewrite matches.
-//
-//   - renderBashRewriteResult: at result time, look at
-//     `details.routedVia`. For fff_grep / fff_find_files we delegate
-//     to the fff formatter used for direct calls (rendering.ts).
-//     For bash-to-read / bash-to-ls we invoke the target tool's own
-//     `renderResult` via createReadToolDefinition / createLsToolDefinition,
-//     so the body is indistinguishable from a direct native call
-//     (syntax-highlighted file view, structured listing, etc.). The
-//     rewrite chip header stays "bash → tool(…)" so provenance
-//     remains visible to the human.
-//
-// The preview helper is pure-ish (no daemon / fs I/O beyond what
-// `tryRewriteBash` does), safe to call on every re-render.
-
-type BashRewriteRouting =
-  | 'bash-to-fff_grep'
-  | 'bash-to-fff_find_files'
-  | 'bash-to-read'
-  | 'bash-to-ls';
-
-function extractBashCommand(args: unknown): string | null {
-  if (!args || typeof args !== 'object') return null;
-  const cmd = (args as { command?: unknown }).command;
-  return typeof cmd === 'string' ? cmd : null;
-}
-
-/** @internal exported for tests; not part of the stable API. */
-export function renderBashRewritePreview(
-  args: unknown,
-  theme: CompactCallTheme,
-  cwd: string | undefined,
-): Component | null {
-  const command = extractBashCommand(args);
-  if (!command) return null;
-  const rewrite = tryRewriteBash(command, cwd ?? process.cwd());
-  if (!rewrite || !rewrite.decision) return null;
-  const d = rewrite.decision;
-
-  if (d.tool === 'fff_grep' || d.tool === 'fff_find_files') {
-    const compact = buildCompactFffSearchSummary(d.tool, d.params, cwd, 'bash');
-    if (compact) {
-      return createWidthAwareText((width) => renderCompactSearchCall(compact, width, theme));
-    }
-  }
-
-  const chip = theme.fg('dim', 'bash →');
-  const summary = formatStructuredToolSignature(d.tool, d.params, cwd);
-  return new Text(`${chip} ${summary}`, 0, 0);
-}
-
-/**
- * Compact one-line signature for any of the four rewrite target tools.
- * Mirrors rendering.ts's rules for "metadata worth surfacing"
- * (e.g. `literal` / `case-sensitive` only when non-default, `limit` only
- * when it differs from the fff default of 20) but lays them out
- * horizontally in keyword=value style.
- */
-function formatStructuredToolSignature(
-  tool: RewriteTool,
-  params: Record<string, unknown>,
-  cwd: string | undefined,
-): string {
-  const parts: string[] = [];
-  const path = typeof params.path === 'string' ? params.path : undefined;
-  if (tool === 'read') {
-    if (path) parts.push(shortenDisplayPath(path, cwd));
-    if (typeof params.offset === 'number') parts.push(`offset=${String(params.offset)}`);
-    if (typeof params.limit === 'number') parts.push(`limit=${String(params.limit)}`);
-    return `read(${parts.join(', ')})`;
-  }
-  if (tool === 'ls') {
-    if (path) parts.push(shortenDisplayPath(path, cwd));
-    if (typeof params.limit === 'number') parts.push(`limit=${String(params.limit)}`);
-    return `ls(${parts.join(', ') || '.'})`;
-  }
-  if (tool === 'fff_grep' || tool === 'fff_find_files') {
-    const primary =
-      tool === 'fff_grep'
-        ? (() => {
-            const patterns = Array.isArray(params.patterns)
-              ? (params.patterns as unknown[]).filter((p): p is string => typeof p === 'string')
-              : [];
-            if (patterns.length > 0) return patterns.join(' | ');
-            return typeof params.pattern === 'string' ? params.pattern : '';
-          })()
-        : typeof params.query === 'string'
-          ? params.query
-          : '';
-    if (primary) parts.push(primary);
-
-    const within = typeof params.within === 'string' ? params.within : undefined;
-    if (within) parts.push(`within=${shortenDisplayPath(within, cwd)}`);
-
-    const glob = typeof params.glob === 'string' ? params.glob : undefined;
-    if (glob) parts.push(`glob=${glob}`);
-
-    // Non-default mode flags surface as bare words. Regex is the default;
-    // `literal` only appears when opted in. Same convention as rendering.ts.
-    if (tool === 'fff_grep') {
-      if (params.literal === true) parts.push('literal');
-      if (params.case_sensitive === true) parts.push('case-sensitive');
-      if (typeof params.context_lines === 'number')
-        parts.push(`ctx=${String(params.context_lines)}`);
-    }
-
-    const extensions = Array.isArray(params.extensions)
-      ? (params.extensions as unknown[]).filter((e): e is string => typeof e === 'string')
-      : [];
-    if (extensions.length > 0) parts.push(`ext=${extensions.join(',')}`);
-
-    const exclude = Array.isArray(params.exclude_paths)
-      ? (params.exclude_paths as unknown[]).filter((e): e is string => typeof e === 'string')
-      : [];
-    if (exclude.length > 0) parts.push(`exclude=${exclude.join(',')}`);
-
-    // Only show limit when it's non-default (20 is fff's baseline).
-    if (typeof params.limit === 'number' && params.limit !== 20) {
-      parts.push(`limit=${String(params.limit)}`);
-    }
-
-    return `${tool}(${parts.join(', ')})`;
-  }
-  // Exhaustive: RewriteTool only has four variants, all handled above.
-  // Throwing (rather than falling through silently) means any future
-  // addition to RewriteTool shows up as a runtime error in tests instead
-  // of a silent empty-chip regression.
-  const exhaustive: never = tool;
-  throw new Error(`formatStructuredToolSignature: unhandled tool ${String(exhaustive)}`);
-}
-
-/** @internal exported for tests; not part of the stable API. */
-export function renderBashRewriteResult(
-  result: { content?: unknown; details?: unknown },
-  options: { expanded?: boolean; isPartial?: boolean },
-  theme: { fg(color: string, text: string): string },
-  context:
-    | {
-        cwd?: string;
-        lastComponent?: Component;
-        showImages?: boolean;
-      }
-    | undefined,
-): Component | null {
-  const details = result.details as
-    | { routedVia?: string; rewriteToParams?: Record<string, unknown> }
-    | undefined;
-  const routedVia = details?.routedVia as BashRewriteRouting | undefined;
-  if (!routedVia) return null;
-
-  // Structured search results: delegate to our own fff formatter.
-  if (routedVia === 'bash-to-fff_grep' || routedVia === 'bash-to-fff_find_files') {
-    const contentText = extractPrimaryText(result.content);
-    if (!contentText) return null;
-    const toolName = routedVia === 'bash-to-fff_grep' ? 'fff_grep' : 'fff_find_files';
-    const expanded = options.expanded === true;
-    return createWidthAwareText((width) => {
-      const summary = expanded
-        ? formatExpandedResultText(toolName, {
-            contentText,
-            cwd: context?.cwd,
-            width,
-          })
-        : formatCollapsedResultText(toolName, {
-            contentText,
-            cwd: context?.cwd,
-            width,
-          });
-      return styleResultText(summary, theme);
-    });
-  }
-
-  // Built-in read/ls rewrites: delegate to the target tool's own
-  // renderResult so the TUI shows syntax-highlighted file views,
-  // icon-prefixed listings, etc. — exactly what the agent would see
-  // if they had called read/ls directly. The target tool's renderer
-  // needs `context.args` (the structured call params) which we stashed
-  // in details.rewriteToParams when the rewrite dispatched.
-  if (routedVia === 'bash-to-read' || routedVia === 'bash-to-ls') {
-    const args = details?.rewriteToParams;
-    if (!args) return null;
-    const cwd = context?.cwd ?? process.cwd();
-    const delegated =
-      routedVia === 'bash-to-read' ? createReadToolDefinition(cwd) : createLsToolDefinition(cwd);
-    // Narrow context to the shape the target tool's renderResult expects.
-    // `lastComponent` is passed through (pi reuses components across renders);
-    // `showImages` defaults to false since rewrite-rendered read outputs
-    // are plain-text slices (images would have been in the raw content).
-    const delegatedContext = {
-      args: args as never,
-      cwd,
-      lastComponent: context?.lastComponent,
-      showImages: context?.showImages ?? false,
-    };
-    const render = (delegated as { renderResult?: (...a: unknown[]) => Component | null })
-      .renderResult;
-    if (!render) return null;
-    try {
-      return render(result as never, options as never, theme as never, delegatedContext as never);
-    } catch {
-      // Any delegation failure (type mismatch from SDK updates, bad args,
-      // etc.) falls through to the builtin bash render — never worse than
-      // the pre-delegation state.
-      return null;
-    }
-  }
-
-  return null;
-}
-
 function extractPrimaryText(content: unknown): string | null {
   if (!Array.isArray(content)) return null;
   const parts: string[] = [];
@@ -1594,56 +1210,6 @@ function extractPrimaryText(content: unknown): string | null {
     }
   }
   return parts.length > 0 ? parts.join('\n\n') : null;
-}
-
-/**
- * If a pass-through (non-rewritten) bash command contains a search
- * tool known to run unbounded (grep/rg/find/…), wrap its AbortSignal
- * with a timeout so the agent session cannot wedge on a runaway
- * traversal. Returns null when no cap is needed, or a signal + warning
- * text otherwise. The warning is prepended to the command's output so
- * the agent sees why a long command may have been truncated.
- */
-function capPassThroughBashSignal(
-  command: string,
-  signal: AbortSignal | undefined,
-  timeoutMs: number = PASS_THROUGH_EXPENSIVE_TIMEOUT_MS,
-): { signal: AbortSignal; warning: string } | null {
-  if (!bashCommandContainsExpensiveTool(command)) return null;
-  const timeoutSignal = AbortSignal.timeout(timeoutMs);
-  const combined = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
-  const seconds = Math.round(timeoutMs / 1000);
-  // Match how pi's own bash tool surfaces timeout intent: a compact
-  // parenthetical rather than a paragraph. The agent already knows which
-  // command ran; the only new information here is the bound.
-  const warning = `(${seconds}s timeout)`;
-  return { signal: combined, warning };
-}
-
-function prependNoticeToContent(
-  result: { content: ReadonlyArray<unknown>; details?: unknown },
-  notice: string,
-  extraDetails: Record<string, unknown>,
-): BashExecuteResult {
-  const entries = result.content as ReadonlyArray<ToolContentEntry>;
-  const first = entries[0];
-  const updatedContent: ToolContentEntry[] =
-    first && first.type === 'text'
-      ? [
-          { type: 'text' as const, text: `${notice}\n\n${(first as { text: string }).text}` },
-          ...entries.slice(1),
-        ]
-      : [{ type: 'text' as const, text: notice }, ...entries];
-
-  const mergedDetails = {
-    ...(result.details && typeof result.details === 'object' ? result.details : {}),
-    ...extraDetails,
-  } as BashExecuteResult['details'];
-
-  return {
-    content: updatedContent as BashExecuteResult['content'],
-    details: mergedDetails,
-  };
 }
 
 function withBuiltinToolTimeout(
@@ -2382,26 +1948,96 @@ export function createPiFffSearchExtension(options: CreatePiFffSearchExtensionOp
   const overrideBuiltinRead = options.overrideBuiltinRead ?? OVERRIDE_BUILTIN_READ;
   const overrideBuiltinGrep = options.overrideBuiltinGrep ?? OVERRIDE_BUILTIN_GREP;
   const overrideBuiltinFind = options.overrideBuiltinFind ?? OVERRIDE_BUILTIN_FIND;
-  const rewriteBuiltinBash = options.rewriteBuiltinBash ?? REWRITE_BUILTIN_BASH;
   const createBuiltInRead = options.createBuiltInReadTool ?? createReadToolDefinition;
   const createBuiltInGrep = options.createBuiltInGrepTool ?? createGrepToolDefinition;
   const createBuiltInFind = options.createBuiltInFindTool ?? createFindToolDefinition;
   const createBuiltInLs = options.createBuiltInLsTool ?? createLsToolDefinition;
-  const createBuiltInBash = options.createBuiltInBashTool ?? createBashToolDefinition;
   const findGitRootForReadFallback =
     options.findGitRootForReadFallback ?? defaultFindGitRootForReadFallback;
   const builtInTemplates =
-    overrideBuiltinRead || overrideBuiltinGrep || overrideBuiltinFind || rewriteBuiltinBash
+    overrideBuiltinRead || overrideBuiltinGrep || overrideBuiltinFind
       ? {
           read: createBuiltInRead(process.cwd()),
           grep: createBuiltInGrep(process.cwd()),
           find: createBuiltInFind(process.cwd()),
           ls: createBuiltInLs(process.cwd()),
-          bash: createBuiltInBash(process.cwd()),
         }
       : null;
 
   return function piFffSearchExtension(pi: ExtensionAPI) {
+    const unregisterBashRewriteProvider =
+      pi.events?.on?.('bash-rewrite:collect-providers', (payload: unknown) => {
+        if (!payload || typeof payload !== 'object') return;
+        const register = (payload as { register?: unknown }).register;
+        if (typeof register !== 'function') return;
+
+        register({
+          id: 'pi-fff-search',
+          priority: 100,
+          tools: ['fff_grep', 'fff_find_files'],
+          fallbackOnExecuteError: true,
+          async execute(
+            decision: { tool: PublicToolName; params: Record<string, unknown> },
+            runtime: { ctx: { cwd: string } },
+          ) {
+            if (decision.tool !== 'fff_grep' && decision.tool !== 'fff_find_files') {
+              throw new Error(
+                `Unsupported pi-fff-search bash rewrite target: ${String(decision.tool)}`,
+              );
+            }
+            const forwarded = await forwardToolCall({
+              toolName: decision.tool,
+              params: decision.params,
+              cwd: runtime.ctx.cwd,
+              ensureDaemonRunning: ensureDaemon,
+              callPublicToolOverHttp: callTool,
+              runRipgrepFallback: runFallback,
+            });
+            return {
+              content: [{ type: 'text' as const, text: forwarded.text }],
+              details: forwarded.details,
+            };
+          },
+          renderPreview(
+            decision: { tool: 'fff_grep' | 'fff_find_files'; params: Record<string, unknown> },
+            theme: CompactCallTheme,
+            runtime: { cwd?: string },
+          ) {
+            const compact = buildCompactFffSearchSummary(
+              decision.tool,
+              decision.params,
+              runtime.cwd,
+              'bash',
+            );
+            return compact
+              ? createWidthAwareText((width) => renderCompactSearchCall(compact, width, theme))
+              : null;
+          },
+          renderResult(
+            result: { content?: unknown },
+            options: { expanded?: boolean },
+            theme: { fg(color: string, text: string): string },
+            context: { cwd?: string } | undefined,
+          ) {
+            const contentText = extractPrimaryText(result.content);
+            if (!contentText) return null;
+            const details = (result as { details?: { routedVia?: string } }).details;
+            const toolName =
+              details?.routedVia === 'bash-to-fff_find_files' ? 'fff_find_files' : 'fff_grep';
+            return createWidthAwareText((width) => {
+              const summary = options.expanded
+                ? formatExpandedResultText(toolName, { contentText, cwd: context?.cwd, width })
+                : formatCollapsedResultText(toolName, { contentText, cwd: context?.cwd, width });
+              return styleResultText(summary, theme);
+            });
+          },
+        });
+      }) ?? (() => {});
+
+    pi.on('session_shutdown', async () => {
+      unregisterBashRewriteProvider();
+    });
+
     pi.on('before_agent_start', async (event) => ({
       systemPrompt: `${event.systemPrompt}\n\n${SEARCH_TOOL_PROMPT}`,
     }));
@@ -2915,93 +2551,6 @@ export function createPiFffSearchExtension(options: CreatePiFffSearchExtensionOp
               onUpdate,
               ctx,
             );
-          }
-        },
-      });
-    }
-
-    if (rewriteBuiltinBash && builtInTemplates) {
-      const templates = builtInTemplates;
-      pi.registerTool({
-        ...templates.bash,
-        renderCall(args, theme, context) {
-          const preview = renderBashRewritePreview(args, theme, context?.cwd);
-          if (preview) return preview;
-          return templates.bash.renderCall!(args, theme, context);
-        },
-        renderResult(result, options, theme, context) {
-          const pretty = renderBashRewriteResult(result, options, theme, context);
-          if (pretty) return pretty;
-          // templates.bash.renderResult has a narrower `result` type
-          // (BashToolDetails-bound). At runtime the shape is compatible;
-          // the cast just placates TS's variance check.
-          return templates.bash.renderResult!(result as never, options, theme, context);
-        },
-        async execute(toolCallId, params, signal, onUpdate, ctx) {
-          const builtInBash = createBuiltInBash(ctx.cwd);
-          const command =
-            typeof (params as Record<string, unknown>).command === 'string'
-              ? ((params as Record<string, unknown>).command as string)
-              : null;
-          const rewrite = command ? tryRewriteBash(command, ctx.cwd) : null;
-          if (!rewrite) {
-            // No rewrite matched. Still cap pass-through commands that
-            // contain grep/rg/find/etc. to protect against runaway
-            // traversals in shapes we couldn't structurally map.
-            const cap = command ? capPassThroughBashSignal(command, signal) : null;
-            if (cap) {
-              const result = await builtInBash.execute(
-                toolCallId,
-                params,
-                cap.signal,
-                onUpdate,
-                ctx,
-              );
-              return prependBashNotice(result, cap.warning);
-            }
-            return builtInBash.execute(toolCallId, params, signal, onUpdate, ctx);
-          }
-
-          // Notice-only result: the classifier had no structured tool to
-          // offer but wants to nudge the agent (e.g. BSD `cat -A` on
-          // macOS). Run bash unchanged and prepend the notice to output.
-          if (!rewrite.decision) {
-            // Still cap expensive shapes even when a notice fires — a
-            // cat -A FILE | grep foo pipeline should be capped too.
-            const cap = command ? capPassThroughBashSignal(command, signal) : null;
-            const effectiveSignal = cap?.signal ?? signal;
-            const result = await builtInBash.execute(
-              toolCallId,
-              params,
-              effectiveSignal,
-              onUpdate,
-              ctx,
-            );
-            const noticed = prependBashNotice(result, rewrite.notice);
-            return cap ? prependBashNotice(noticed, cap.warning) : noticed;
-          }
-
-          try {
-            return await dispatchBashRewrite({
-              decision: rewrite.decision,
-              notice: rewrite.notice,
-              originalCommand: command!,
-              toolCallId,
-              signal,
-              onUpdate,
-              ctx,
-              ensureDaemon,
-              callTool,
-              runFallback,
-              createBuiltInRead,
-              createBuiltInLs,
-            });
-          } catch {
-            // Any failure in the structured path falls back to running the
-            // original bash command unchanged, so the agent still makes
-            // forward progress. Silent — the shell output itself is the
-            // feedback the agent needs.
-            return builtInBash.execute(toolCallId, params, signal, onUpdate, ctx);
           }
         },
       });

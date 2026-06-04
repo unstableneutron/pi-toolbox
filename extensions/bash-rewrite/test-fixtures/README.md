@@ -33,7 +33,7 @@ defense-in-depth.
 ### Refreshing
 
 ```shell
-cd extensions/pi-fff-search
+cd extensions/bash-rewrite
 ./scripts/extract-bash-corpus.ts --from pi-mono \
     --out test-fixtures/bash-corpus.jsonl
 ```
@@ -47,7 +47,7 @@ Optional companion corpus you can build from your own Pi session logs. Never
 committed — the file is listed in `.gitignore`.
 
 ```shell
-cd extensions/pi-fff-search
+cd extensions/bash-rewrite
 ./scripts/extract-bash-corpus.ts --from local --days 7 \
     --out test-fixtures/bash-corpus.local.jsonl
 ```
@@ -61,7 +61,7 @@ when newer models (e.g. opus-4-7, gpt-5.5) start reaching for bash shapes
 that fall through the current recognizers.
 
 ```shell
-cd extensions/pi-fff-search
+cd extensions/bash-rewrite
 ./scripts/extract-bash-corpus.ts --from local --days 3 \
     --out test-fixtures/bash-corpus.local.jsonl --triage
 # → writes test-fixtures/bash-corpus.local.jsonl.triage.md

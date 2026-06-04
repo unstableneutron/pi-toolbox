@@ -1,4 +1,5 @@
 import { parse as shellParse, type ControlOperator, type ParseEntry } from 'shell-quote';
+import { tryRewriteApplyPatchCliBash } from './apply-patch';
 
 /**
  * Decide whether a bash command string collapses to a safe, structured tool call.
@@ -15,7 +16,7 @@ import { parse as shellParse, type ControlOperator, type ParseEntry } from 'shel
  * through untouched. See bash-rewrite.test.ts for the behavior corpus.
  */
 
-export type RewriteTool = 'fff_grep' | 'fff_find_files' | 'read' | 'ls';
+export type RewriteTool = 'fff_grep' | 'fff_find_files' | 'read' | 'ls' | 'apply_patch';
 
 export interface RewriteDecision {
   tool: RewriteTool;
@@ -24,7 +25,7 @@ export interface RewriteDecision {
   recognizer: string;
 }
 
-interface RewriteResult {
+export interface RewriteResult {
   /**
    * Structured tool call to dispatch. Omit for notice-only results:
    * the original bash command still runs, but the notice is prepended
@@ -34,6 +35,10 @@ interface RewriteResult {
    */
   decision?: RewriteDecision;
   notice: string;
+}
+
+interface RewriteOptions {
+  enabledTools?: Iterable<string> | ((toolName: RewriteTool) => boolean);
 }
 
 const GLOB_META_PATTERN = /[*?[\]{}!]/;
@@ -199,6 +204,24 @@ function looksLikeRewriteCandidate(cmd: string): boolean {
   const match = FIRST_TOKEN_PATTERN.exec(cmd);
   if (!match) return false;
   return FIRST_TOKEN_ALLOWLIST.has(match[1]!);
+}
+
+function isRewriteToolEnabled(toolName: RewriteTool, options: RewriteOptions): boolean {
+  const enabledTools = options.enabledTools;
+  if (!enabledTools) return true;
+  if (typeof enabledTools === 'function') return enabledTools(toolName);
+  for (const enabledTool of enabledTools) {
+    if (enabledTool === toolName) return true;
+  }
+  return false;
+}
+
+function filterRewriteResult(
+  result: RewriteResult | null,
+  options: RewriteOptions,
+): RewriteResult | null {
+  if (!result?.decision) return result;
+  return isRewriteToolEnabled(result.decision.tool, options) ? result : null;
 }
 
 type Token = ParseEntry;
@@ -1281,6 +1304,20 @@ function renderParamsForNotice(params: Record<string, unknown>): string {
  * through to the original builtin bash execution.
  */
 export function tryRewriteBash(cmd: string, _cwd: string): RewriteResult | null {
+  return tryRewriteBashWithOptions(cmd, _cwd);
+}
+
+export function tryRewriteBashWithOptions(
+  cmd: string,
+  _cwd: string,
+  options: RewriteOptions = {},
+): RewriteResult | null {
+  const applyPatchRewrite = tryRewriteApplyPatchCliBash(cmd, {
+    availableTools: (toolName) =>
+      toolName === 'apply_patch' && isRewriteToolEnabled(toolName, options),
+  });
+  if (applyPatchRewrite) return applyPatchRewrite;
+
   if (!looksLikeRewriteCandidate(cmd)) return null;
   let tokens: Token[];
   try {
@@ -1322,11 +1359,16 @@ export function tryRewriteBash(cmd: string, _cwd: string): RewriteResult | null 
 
   // Special multi-stage idiom first.
   const idiom = tryFindXargsCatIdiom(strippedStages);
-  if (idiom) return { decision: idiom, notice: formatNotice(cmd.trim(), idiom) };
+  if (idiom)
+    return filterRewriteResult(
+      { decision: idiom, notice: formatNotice(cmd.trim(), idiom) },
+      options,
+    );
 
   if (strippedStages.length === 1) {
     const d = classifySingleStage(strippedStages[0]!);
-    if (d) return { decision: d, notice: formatNotice(cmd.trim(), d) };
+    if (d)
+      return filterRewriteResult({ decision: d, notice: formatNotice(cmd.trim(), d) }, options);
     // No rewrite available — fall through to notice-only classifiers.
     const notice = classifyNoticeOnly(strippedStages[0]!);
     return notice ? { notice: notice.notice } : null;
@@ -1363,7 +1405,7 @@ export function tryRewriteBash(cmd: string, _cwd: string): RewriteResult | null 
           params,
           recognizer: 'cat-grep',
         };
-        return { decision: d, notice: formatNotice(cmd.trim(), d) };
+        return filterRewriteResult({ decision: d, notice: formatNotice(cmd.trim(), d) }, options);
       }
     }
     // `cat FILE | sed -n 'N,Mp'` → read(path=FILE, offset=N, limit=M-N+1).
@@ -1385,7 +1427,7 @@ export function tryRewriteBash(cmd: string, _cwd: string): RewriteResult | null 
           },
           recognizer: 'cat-sed-range',
         };
-        return { decision: d, notice: formatNotice(cmd.trim(), d) };
+        return filterRewriteResult({ decision: d, notice: formatNotice(cmd.trim(), d) }, options);
       }
     }
     const limit = extractHeadLimit(strippedStages[1]!);
@@ -1406,7 +1448,10 @@ export function tryRewriteBash(cmd: string, _cwd: string): RewriteResult | null 
       params: { ...d.params, limit },
       recognizer: `${d.recognizer}+head`,
     };
-    return { decision: withLimit, notice: formatNotice(cmd.trim(), withLimit) };
+    return filterRewriteResult(
+      { decision: withLimit, notice: formatNotice(cmd.trim(), withLimit) },
+      options,
+    );
   }
 
   return null;

@@ -5,14 +5,10 @@ import {
   createLsToolDefinition,
   createReadToolDefinition,
 } from '@earendil-works/pi-coding-agent';
-import { createBashToolDefinition } from '@earendil-works/pi-coding-agent';
 
 import createPiFffSearchExtensionDefault, {
-  bashCommandContainsExpensiveTool,
   createPiFffSearchExtension,
   forwardToolCall,
-  renderBashRewritePreview,
-  renderBashRewriteResult,
 } from './index';
 import { runLocalFallback } from './fallback';
 import {
@@ -59,6 +55,7 @@ type RunRipgrepFallback = NonNullable<Parameters<typeof forwardToolCall>[0]['run
 function createHarness(options?: Parameters<typeof createPiFffSearchExtension>[0]) {
   const tools: RegisteredTool[] = [];
   const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+  const eventHandlers = new Map<string, (data: unknown) => void>();
   const pi = {
     registerTool(tool: RegisteredTool) {
       tools.push(tool);
@@ -66,11 +63,20 @@ function createHarness(options?: Parameters<typeof createPiFffSearchExtension>[0
     on(event: string, handler: (event: unknown, ctx: unknown) => unknown) {
       handlers.set(event, handler);
     },
+    events: {
+      on(event: string, handler: (data: unknown) => void) {
+        eventHandlers.set(event, handler);
+        return () => eventHandlers.delete(event);
+      },
+      emit(event: string, data: unknown) {
+        eventHandlers.get(event)?.(data);
+      },
+    },
   } as any;
 
   createPiFffSearchExtension(options)(pi);
 
-  return { tools, handlers };
+  return { tools, handlers, eventHandlers, pi };
 }
 
 function createTheme() {
@@ -442,7 +448,6 @@ describe('pi-fff-search extension', () => {
       overrideBuiltinRead: false,
       overrideBuiltinGrep: false,
       overrideBuiltinFind: false,
-      rewriteBuiltinBash: false,
     });
 
     expect(tools.map((tool) => tool.name)).toEqual(['fff_find_files', 'fff_grep']);
@@ -462,7 +467,6 @@ describe('pi-fff-search extension', () => {
       overrideBuiltinRead: false,
       overrideBuiltinGrep: false,
       overrideBuiltinFind: false,
-      rewriteBuiltinBash: false,
     });
     const grepTool = tools.find((tool) => tool.name === 'fff_grep');
 
@@ -476,7 +480,6 @@ describe('pi-fff-search extension', () => {
       overrideBuiltinRead: true,
       overrideBuiltinGrep: true,
       overrideBuiltinFind: true,
-      rewriteBuiltinBash: false,
     });
 
     expect(tools.map((tool) => tool.name)).toEqual([
@@ -488,15 +491,24 @@ describe('pi-fff-search extension', () => {
     ]);
   });
 
-  test('also registers the builtin bash rewrite by default', () => {
-    const { tools } = createHarness({
+  test('registers an optional bash-rewrite provider without registering bash', () => {
+    const { tools, pi } = createHarness({
       overrideBuiltinRead: false,
       overrideBuiltinGrep: false,
       overrideBuiltinFind: false,
-      // rewriteBuiltinBash left unset → defaults to true (REWRITE_BUILTIN_BASH).
     });
 
-    expect(tools.map((tool) => tool.name)).toEqual(['fff_find_files', 'fff_grep', 'bash']);
+    const providers: any[] = [];
+    pi.events.emit('bash-rewrite:collect-providers', {
+      apiVersion: 1,
+      register(provider: any) {
+        providers.push(provider);
+      },
+    });
+
+    expect(tools.map((tool) => tool.name)).toEqual(['fff_find_files', 'fff_grep']);
+    expect(providers.map((provider) => provider.id)).toEqual(['pi-fff-search']);
+    expect(providers[0].tools).toEqual(['fff_grep', 'fff_find_files']);
   });
 
   test('injects repository search preference guidance into the system prompt', async () => {
@@ -520,7 +532,6 @@ describe('pi-fff-search extension', () => {
       overrideBuiltinRead: false,
       overrideBuiltinGrep: false,
       overrideBuiltinFind: false,
-      rewriteBuiltinBash: false,
     });
 
     for (const tool of tools) {
@@ -794,7 +805,6 @@ describe('pi-fff-search extension', () => {
       overrideBuiltinRead: true,
       overrideBuiltinGrep: false,
       overrideBuiltinFind: false,
-      rewriteBuiltinBash: false,
     });
     const theme = createTheme();
     const read = tools.find((tool) => tool.name === 'read')!;
@@ -821,7 +831,6 @@ describe('pi-fff-search extension', () => {
       overrideBuiltinRead: true,
       overrideBuiltinGrep: false,
       overrideBuiltinFind: false,
-      rewriteBuiltinBash: false,
     });
     const theme = createTheme();
     const read = tools.find((tool) => tool.name === 'read')!;
@@ -852,7 +861,6 @@ describe('pi-fff-search extension', () => {
       overrideBuiltinRead: true,
       overrideBuiltinGrep: false,
       overrideBuiltinFind: false,
-      rewriteBuiltinBash: false,
     });
     const theme = createTaggedTheme();
     const read = tools.find((tool) => tool.name === 'read')!;
@@ -872,7 +880,6 @@ describe('pi-fff-search extension', () => {
       overrideBuiltinRead: true,
       overrideBuiltinGrep: false,
       overrideBuiltinFind: false,
-      rewriteBuiltinBash: false,
     });
     const theme = createTheme();
     const read = tools.find((tool) => tool.name === 'read')!;
@@ -895,7 +902,6 @@ describe('pi-fff-search extension', () => {
       overrideBuiltinRead: true,
       overrideBuiltinGrep: false,
       overrideBuiltinFind: false,
-      rewriteBuiltinBash: false,
     });
     const theme = createTheme();
     const read = tools.find((tool) => tool.name === 'read')!;
@@ -913,7 +919,6 @@ describe('pi-fff-search extension', () => {
       overrideBuiltinRead: true,
       overrideBuiltinGrep: false,
       overrideBuiltinFind: false,
-      rewriteBuiltinBash: false,
     });
     const theme = createTaggedTheme();
     const read = tools.find((tool) => tool.name === 'read')!;
@@ -934,7 +939,6 @@ describe('pi-fff-search extension', () => {
       overrideBuiltinRead: true,
       overrideBuiltinGrep: false,
       overrideBuiltinFind: false,
-      rewriteBuiltinBash: false,
     });
     const theme = createTheme();
     const read = tools.find((tool) => tool.name === 'read')!;
@@ -953,7 +957,6 @@ describe('pi-fff-search extension', () => {
       overrideBuiltinRead: true,
       overrideBuiltinGrep: false,
       overrideBuiltinFind: false,
-      rewriteBuiltinBash: false,
     });
     const theme = createTaggedTheme();
     const read = tools.find((tool) => tool.name === 'read')!;
@@ -973,7 +976,6 @@ describe('pi-fff-search extension', () => {
       overrideBuiltinRead: true,
       overrideBuiltinGrep: false,
       overrideBuiltinFind: false,
-      rewriteBuiltinBash: false,
     });
     const theme = createTaggedTheme();
     const read = tools.find((tool) => tool.name === 'read')!;
@@ -997,7 +999,6 @@ describe('pi-fff-search extension', () => {
       overrideBuiltinRead: true,
       overrideBuiltinGrep: false,
       overrideBuiltinFind: false,
-      rewriteBuiltinBash: false,
     });
     const theme = createTaggedTheme();
     const read = tools.find((tool) => tool.name === 'read')!;
@@ -1020,7 +1021,6 @@ describe('pi-fff-search extension', () => {
       overrideBuiltinRead: true,
       overrideBuiltinGrep: false,
       overrideBuiltinFind: false,
-      rewriteBuiltinBash: false,
     });
     const theme = createTaggedTheme();
     const read = tools.find((tool) => tool.name === 'read')!;
@@ -1118,7 +1118,6 @@ describe('pi-fff-search extension', () => {
       overrideBuiltinRead: true,
       overrideBuiltinGrep: false,
       overrideBuiltinFind: false,
-      rewriteBuiltinBash: false,
     });
     const theme = createTaggedTheme();
     const read = tools.find((tool) => tool.name === 'read')!;
@@ -1138,7 +1137,6 @@ describe('pi-fff-search extension', () => {
       overrideBuiltinRead: true,
       overrideBuiltinGrep: false,
       overrideBuiltinFind: false,
-      rewriteBuiltinBash: false,
     });
     const theme = createTaggedTheme();
     const read = tools.find((tool) => tool.name === 'read')!;
@@ -1158,7 +1156,6 @@ describe('pi-fff-search extension', () => {
       overrideBuiltinRead: true,
       overrideBuiltinGrep: false,
       overrideBuiltinFind: false,
-      rewriteBuiltinBash: false,
     });
     const theme = createTheme();
     const read = tools.find((tool) => tool.name === 'read')!;
@@ -1190,7 +1187,6 @@ describe('pi-fff-search extension', () => {
       overrideBuiltinRead: false,
       overrideBuiltinGrep: true,
       overrideBuiltinFind: false,
-      rewriteBuiltinBash: false,
     });
     const theme = createTheme();
     const grep = tools.find((tool) => tool.name === 'grep')!;
@@ -1221,7 +1217,6 @@ describe('pi-fff-search extension', () => {
       overrideBuiltinRead: false,
       overrideBuiltinGrep: false,
       overrideBuiltinFind: true,
-      rewriteBuiltinBash: false,
     });
     const theme = createTheme();
     const find = tools.find((tool) => tool.name === 'find')!;
@@ -2560,237 +2555,6 @@ describe('pi-fff-search extension', () => {
         .execute('tool-call', { path: 'scratch' }, undefined, undefined, { cwd: '/repo' }),
     ).rejects.toThrow('EISDIR');
     expect(lsExecute).toHaveBeenCalledTimes(1);
-  });
-
-  test('builtin bash rewrite can be disabled via rewriteBuiltinBash: false', async () => {
-    const ensureDaemonRunning = vi.fn(async () => {});
-    const callPublicToolOverHttp = vi.fn();
-    const bashExecute = vi.fn().mockResolvedValueOnce({
-      content: [{ type: 'text' as const, text: 'raw bash output' }],
-      details: undefined,
-    });
-    const { tools } = createHarness({
-      ensureDaemonRunning,
-      callPublicToolOverHttp,
-      // Explicitly turn off the bash rewrite. The default is now `true`
-      // (REWRITE_BUILTIN_BASH); this test pins the opt-out path.
-      rewriteBuiltinBash: false,
-      createBuiltInBashTool: ((cwd: string) => ({
-        ...createBashToolDefinition(cwd),
-        execute: bashExecute,
-      })) as any,
-    });
-
-    const bashTool = tools.find((tool) => tool.name === 'bash');
-    expect(bashTool).toBeUndefined();
-  });
-
-  test('builtin bash override rewrites `cat FILE` → read and prepends notice', async () => {
-    const ensureDaemonRunning = vi.fn(async () => {});
-    const callPublicToolOverHttp = vi.fn();
-    const bashExecute = vi.fn();
-    const readExecute = vi.fn().mockResolvedValueOnce({
-      content: [{ type: 'text' as const, text: 'export const x = 1;' }],
-      details: undefined,
-    });
-    const { tools } = createHarness({
-      ensureDaemonRunning,
-      callPublicToolOverHttp,
-      rewriteBuiltinBash: true,
-      createBuiltInReadTool: ((cwd: string) => ({
-        ...createReadToolDefinition(cwd),
-        execute: readExecute,
-      })) as any,
-      createBuiltInBashTool: ((cwd: string) => ({
-        ...createBashToolDefinition(cwd),
-        execute: bashExecute,
-      })) as any,
-    });
-
-    const result = await tools
-      .find((tool) => tool.name === 'bash')!
-      .execute('tool-call', { command: 'cat src/foo.ts' }, undefined, undefined, {
-        cwd: '/repo',
-      });
-
-    expect(bashExecute).not.toHaveBeenCalled();
-    expect(readExecute).toHaveBeenCalledWith(
-      'tool-call',
-      { path: 'src/foo.ts' },
-      expect.objectContaining({ aborted: false }),
-      undefined,
-      { cwd: '/repo' },
-    );
-    // Body is the clean read-tool output — no prepended rewrite notice.
-    // The rewrite marker lives in `details.rewriteCall` where the TUI
-    // chip picks it up without double-printing into the visible body.
-    expect(result.content).toEqual([
-      {
-        type: 'text',
-        text: expect.stringMatching(/^export const x = 1;$/),
-      },
-    ]);
-    expect(result.details).toMatchObject({
-      routedVia: 'bash-to-read',
-      rewriteRecognizer: 'cat-file',
-      rewriteFromCommand: 'cat src/foo.ts',
-      rewriteCall: expect.stringMatching(/^cat → read\(/),
-    });
-  });
-
-  test('builtin bash override rewrites `grep -rn PAT src/ | head -20` → fff_grep with limit', async () => {
-    const ensureDaemonRunning = vi.fn(async () => {});
-    const callPublicToolOverHttp = vi.fn(async () => ({
-      ok: true as const,
-      value: {
-        mode: 'compact' as const,
-        base_path: '/repo/src',
-        next_cursor: null,
-        items: [{ path: 'router.ts', line: 12, text: 'foo' }],
-      },
-    }));
-    const bashExecute = vi.fn();
-    const { tools } = createHarness({
-      ensureDaemonRunning,
-      callPublicToolOverHttp,
-      rewriteBuiltinBash: true,
-      createBuiltInBashTool: ((cwd: string) => ({
-        ...createBashToolDefinition(cwd),
-        execute: bashExecute,
-      })) as any,
-    });
-
-    const result = await tools
-      .find((tool) => tool.name === 'bash')!
-      .execute('tool-call', { command: 'grep -rn "foo" src/ | head -20' }, undefined, undefined, {
-        cwd: '/repo',
-      });
-
-    expect(bashExecute).not.toHaveBeenCalled();
-    expect(callPublicToolOverHttp).toHaveBeenCalledWith(
-      expect.objectContaining({
-        tool: 'fff_grep',
-        patterns: ['foo'],
-        within: ['/repo/src'],
-        limit: 20,
-      }),
-    );
-    expect(result.details).toMatchObject({
-      routedVia: 'bash-to-fff_grep',
-      rewriteRecognizer: 'grep-search+head',
-    });
-  });
-
-  test('builtin bash override passes through commands it does not recognize', async () => {
-    const ensureDaemonRunning = vi.fn(async () => {});
-    const callPublicToolOverHttp = vi.fn();
-    const bashExecute = vi.fn().mockResolvedValueOnce({
-      content: [{ type: 'text' as const, text: 'raw bash output' }],
-      details: { truncation: undefined },
-    });
-    const { tools } = createHarness({
-      ensureDaemonRunning,
-      callPublicToolOverHttp,
-      rewriteBuiltinBash: true,
-      createBuiltInBashTool: ((cwd: string) => ({
-        ...createBashToolDefinition(cwd),
-        execute: bashExecute,
-      })) as any,
-    });
-
-    const result = await tools
-      .find((tool) => tool.name === 'bash')!
-      .execute(
-        'tool-call',
-        { command: 'pnpm install --silent 2>&1 | tail -5' },
-        undefined,
-        undefined,
-        { cwd: '/repo' },
-      );
-
-    expect(bashExecute).toHaveBeenCalledTimes(1);
-    expect(callPublicToolOverHttp).not.toHaveBeenCalled();
-    expect(result.content).toEqual([{ type: 'text', text: 'raw bash output' }]);
-  });
-
-  test('builtin bash override falls back to real bash when dispatch throws', async () => {
-    const ensureDaemonRunning = vi.fn(async () => {});
-    const callPublicToolOverHttp = vi.fn();
-    const readExecute = vi.fn().mockRejectedValueOnce(new Error('read blew up'));
-    const bashExecute = vi.fn().mockResolvedValueOnce({
-      content: [{ type: 'text' as const, text: 'cat ran anyway' }],
-      details: undefined,
-    });
-    const { tools } = createHarness({
-      ensureDaemonRunning,
-      callPublicToolOverHttp,
-      rewriteBuiltinBash: true,
-      overrideBuiltinRead: false,
-      createBuiltInReadTool: ((cwd: string) => ({
-        ...createReadToolDefinition(cwd),
-        execute: readExecute,
-      })) as any,
-      createBuiltInBashTool: ((cwd: string) => ({
-        ...createBashToolDefinition(cwd),
-        execute: bashExecute,
-      })) as any,
-    });
-
-    const result = await tools
-      .find((tool) => tool.name === 'bash')!
-      .execute('tool-call', { command: 'cat /tmp/x.txt' }, undefined, undefined, {
-        cwd: '/repo',
-      });
-
-    expect(readExecute).toHaveBeenCalledTimes(1);
-    expect(bashExecute).toHaveBeenCalledTimes(1);
-    expect(result.content).toEqual([{ type: 'text', text: 'cat ran anyway' }]);
-  });
-
-  test('builtin bash override rewrites `find <path> -type f | head -1 | xargs cat | head -80` → read with limit', async () => {
-    const ensureDaemonRunning = vi.fn(async () => {});
-    const callPublicToolOverHttp = vi.fn();
-    const readExecute = vi.fn().mockResolvedValueOnce({
-      content: [{ type: 'text' as const, text: 'first 80 lines here' }],
-      details: undefined,
-    });
-    const bashExecute = vi.fn();
-    const { tools } = createHarness({
-      ensureDaemonRunning,
-      callPublicToolOverHttp,
-      rewriteBuiltinBash: true,
-      createBuiltInReadTool: ((cwd: string) => ({
-        ...createReadToolDefinition(cwd),
-        execute: readExecute,
-      })) as any,
-      createBuiltInBashTool: ((cwd: string) => ({
-        ...createBashToolDefinition(cwd),
-        execute: bashExecute,
-      })) as any,
-    });
-
-    const result = await tools
-      .find((tool) => tool.name === 'bash')!
-      .execute(
-        'tool-call',
-        { command: 'find /a/b.ts -type f | head -1 | xargs cat 2>/dev/null | head -80' },
-        undefined,
-        undefined,
-        { cwd: '/repo' },
-      );
-
-    expect(bashExecute).not.toHaveBeenCalled();
-    expect(readExecute).toHaveBeenCalledWith(
-      'tool-call',
-      { path: '/a/b.ts', limit: 80 },
-      expect.objectContaining({ aborted: false }),
-      undefined,
-      { cwd: '/repo' },
-    );
-    expect(result.details).toMatchObject({
-      routedVia: 'bash-to-read',
-      rewriteRecognizer: 'find-xargs-cat',
-    });
   });
 
   test('rejects broad home within scopes without calling fff or fallback', async () => {
@@ -4302,231 +4066,5 @@ describe('pi-fff-search extension', () => {
 
   test('default export creates the extension factory without throwing', () => {
     expect(typeof createPiFffSearchExtensionDefault).toBe('function');
-  });
-});
-
-// Pass-through bash commands that contain expensive search tools
-// (grep/rg/find/fd/…) get their AbortSignal capped at a conservative
-// timeout so the agent session cannot wedge on an unrewritten runaway
-// traversal. These tests exercise the detection predicate only —
-// signal-combining behavior relies on the platform's native
-// AbortSignal.timeout + AbortSignal.any and is not mocked.
-describe('bash-rewrite pretty rendering', () => {
-  const theme = createTheme();
-
-  test('renderBashRewritePreview shows compact "bash → fff_grep" chip for grep commands', () => {
-    const rendered = renderBashRewritePreview(
-      { command: 'grep -rn "createLsToolDefinition" src/' },
-      theme,
-      '/repo',
-    );
-    expect(rendered).not.toBeNull();
-    const text = renderText(rendered);
-    expect(text).toContain('bash →');
-    expect(text).toContain('fff_grep  ');
-    expect(text).toContain('createLsToolDefinition');
-    expect(text).toContain('within=src/');
-    // Compact chip is a single line — no newlines.
-    expect(text.includes('\n')).toBe(false);
-  });
-
-  test('renderBashRewritePreview shows compact "bash → fff_find_files" chip for find commands', () => {
-    const rendered = renderBashRewritePreview(
-      { command: 'find src/ -name "*router*.ts"' },
-      theme,
-      '/repo',
-    );
-    expect(rendered).not.toBeNull();
-    const text = renderText(rendered);
-    expect(text).toContain('bash →');
-    expect(text).toContain('fff_find_files  ');
-    expect(text).toContain('router');
-    expect(text).toContain('glob=*router*.ts');
-    expect(text.includes('\n')).toBe(false);
-  });
-
-  test('renderBashRewritePreview surfaces literal flag when set', () => {
-    const rendered = renderBashRewritePreview(
-      { command: 'grep -F "foo(bar)" src/' },
-      theme,
-      '/repo',
-    );
-    const text = renderText(rendered);
-    expect(text).toContain('literal');
-  });
-
-  test('renderBashRewritePreview joins multiple patterns with " | " in the chip', () => {
-    const rendered = renderBashRewritePreview(
-      { command: 'grep -n "foo\\|bar" src/router.ts' },
-      theme,
-      '/repo',
-    );
-    const text = renderText(rendered);
-    expect(text).toContain('foo | bar');
-  });
-
-  test('renderBashRewritePreview shows "bash → read(...)" for sed range', () => {
-    const rendered = renderBashRewritePreview(
-      { command: "sed -n '10,20p' src/foo.ts" },
-      theme,
-      '/repo',
-    );
-    expect(rendered).not.toBeNull();
-    const text = renderText(rendered);
-    expect(text).toContain('bash →');
-    expect(text).toContain('read(');
-    expect(text).toContain('offset=10');
-    expect(text).toContain('limit=11');
-  });
-
-  test('renderBashRewritePreview shows "bash → ls(...)" for ls', () => {
-    const rendered = renderBashRewritePreview({ command: 'ls src/' }, theme, '/repo');
-    expect(rendered).not.toBeNull();
-    const text = renderText(rendered);
-    expect(text).toContain('bash →');
-    expect(text).toContain('ls(');
-    expect(text).toContain('src/');
-  });
-
-  test('renderBashRewritePreview returns null for non-rewriteable commands', () => {
-    expect(renderBashRewritePreview({ command: 'pnpm install' }, theme, '/repo')).toBeNull();
-    expect(renderBashRewritePreview({ command: 'git status' }, theme, '/repo')).toBeNull();
-    // Missing command (e.g. malformed params) also yields null, never a throw.
-    expect(renderBashRewritePreview({}, theme, '/repo')).toBeNull();
-    expect(renderBashRewritePreview(null, theme, '/repo')).toBeNull();
-  });
-
-  test('renderBashRewritePreview returns null for notice-only shapes (cat -A)', () => {
-    // Notice-only classifier hits don't produce a decision; preview
-    // should fall through (agent sees the builtin bash render plus
-    // the prepended notice from execute()).
-    expect(renderBashRewritePreview({ command: 'cat -A foo.ts' }, theme, '/repo')).toBeNull();
-  });
-
-  test('renderBashRewriteResult delegates to fff rendering for routedVia=bash-to-fff_grep', () => {
-    // Content is the clean forwarded fff output — no rewrite notice prefix.
-    // The rewrite marker lives in `details.rewriteCall`.
-    const result = {
-      content: [
-        {
-          type: 'text',
-          text: 'base_path: /repo\n\nsrc/router.ts:12: found foo here',
-        },
-      ],
-      details: {
-        routedVia: 'bash-to-fff_grep',
-        rewriteCall: 'grep → fff_grep(patterns=["foo"], within="src/")',
-      },
-    };
-    const rendered = renderBashRewriteResult(result, { expanded: false, isPartial: false }, theme, {
-      cwd: '/repo',
-    });
-    expect(rendered).not.toBeNull();
-    const text = renderText(rendered);
-    // fff rendering produces a structured summary — file path should
-    // appear in the rendered output.
-    expect(text).toContain('router.ts');
-  });
-
-  test('renderBashRewriteResult delegates to read native renderer for routedVia=bash-to-read', () => {
-    // With rewriteToParams present, read's own renderResult is invoked so
-    // the expanded TUI shows the same syntax-highlighted file view the user
-    // would see if they'd called read directly. Native read results are
-    // collapsed until expanded, so this assertion uses expanded mode.
-    const result = {
-      content: [{ type: 'text', text: 'export const x = 1;' }],
-      details: {
-        routedVia: 'bash-to-read',
-        rewriteToParams: { path: 'src/foo.ts' },
-      },
-    };
-    const rendered = renderBashRewriteResult(result, { expanded: true, isPartial: false }, theme, {
-      cwd: '/repo',
-    });
-    expect(rendered).not.toBeNull();
-    const text = renderText(rendered);
-    expect(text).toContain('export const x = 1;');
-  });
-
-  test('renderBashRewriteResult delegates to ls native renderer for routedVia=bash-to-ls', () => {
-    const result = {
-      content: [{ type: 'text', text: 'src/\ntests/\n' }],
-      details: {
-        routedVia: 'bash-to-ls',
-        rewriteToParams: { path: '/repo' },
-      },
-    };
-    const rendered = renderBashRewriteResult(result, { expanded: false, isPartial: false }, theme, {
-      cwd: '/repo',
-    });
-    expect(rendered).not.toBeNull();
-    const text = renderText(rendered);
-    // The ls renderer surfaces directory entries somehow (exact format is
-    // an SDK implementation detail, so we only assert a non-empty render).
-    expect(text.length).toBeGreaterThan(0);
-  });
-
-  test('renderBashRewriteResult falls through for bash-to-read without rewriteToParams', () => {
-    // Missing rewriteToParams means we can't feed the read renderer the
-    // context it needs; return null so pi falls back to the bash render.
-    const result = {
-      content: [{ type: 'text', text: 'file contents' }],
-      details: { routedVia: 'bash-to-read' },
-    };
-    expect(
-      renderBashRewriteResult(result, { expanded: false, isPartial: false }, theme, {
-        cwd: '/repo',
-      }),
-    ).toBeNull();
-  });
-
-  test('renderBashRewriteResult returns null when details has no routedVia', () => {
-    const result = {
-      content: [{ type: 'text', text: 'plain bash output' }],
-      details: { foo: 'bar' },
-    };
-    expect(
-      renderBashRewriteResult(result, { expanded: false, isPartial: false }, theme, {
-        cwd: '/repo',
-      }),
-    ).toBeNull();
-  });
-});
-
-describe('bashCommandContainsExpensiveTool — pass-through timeout-cap predicate', () => {
-  test.each([
-    ['grep -r foo .', true],
-    ['rg --files', true],
-    ['find . -name foo', true],
-    ['fd -t f pattern', true],
-    ['fdfind pattern', true],
-    ['egrep -r foo .', true],
-    ['fgrep -r foo .', true],
-    ['ag foo', true],
-    ['ack foo', true],
-    ['git grep --heading foo', true],
-    ['cat foo.ts | grep bar', true],
-    ['ls -la | rg "foo bar"', true],
-    // `tree` is unstructured but can dump thousands of lines on a
-    // monorepo; capped to protect the context window.
-    ['tree .', true],
-    ['tree -L 3 src', true],
-    ['cd packages && tree', true],
-    ['echo "grepper" | cat', false],
-    ['node --inspect findfile.ts', false],
-    ['pnpm install', false],
-    ['git status', false],
-    ['echo hello', false],
-    ['cat foo.ts', false],
-    ['sed -n "1,20p" foo.ts', false],
-    // Word-boundary sanity: identifiers with "tree" as a substring
-    // (no separator) must not trip the cap. `tree-sitter` DOES trip
-    // the cap because `\btree\b` treats `-` as a word boundary —
-    // consistent with how we handle `grep-helper` / `find-me.sh`.
-    // The 60s ceiling is harmless for those rare false positives.
-    ['cat treeeee.txt', false],
-    ['node treetraversal.ts', false],
-  ])('contains expensive token in %j -> %s', (command, expected) => {
-    expect(bashCommandContainsExpensiveTool(command)).toBe(expected);
   });
 });

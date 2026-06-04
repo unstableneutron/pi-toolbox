@@ -19,6 +19,10 @@
     "extensions/pi-fff-search": {
       "entry": ["index.ts", "scripts/*.ts"],
       "project": ["**/*.ts"]
+    },
+    "extensions/bash-rewrite": {
+      "entry": ["scripts/*.ts"],
+      "project": ["**/*.ts"]
     }
   }
 }
