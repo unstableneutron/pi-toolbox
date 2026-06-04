@@ -320,6 +320,22 @@ function mapStopReason(status: string | undefined): AssistantMessage['stopReason
   return 'stop';
 }
 
+function formatTerminalResponseError(type: string, response: Record<string, any>): string {
+  const message = response.error?.message || response.incomplete_details?.reason;
+  if (typeof message === 'string' && message.length > 0) return message;
+
+  const status = typeof response.status === 'string' ? response.status : 'unknown';
+  const details = [
+    typeof response.id === 'string' ? `response_id=${response.id}` : undefined,
+    typeof response.model === 'string' ? `model=${response.model}` : undefined,
+    typeof response.previous_response_id === 'string'
+      ? `previous_response_id=${response.previous_response_id}`
+      : undefined,
+  ].filter((detail): detail is string => typeof detail === 'string');
+  const suffix = details.length > 0 ? ` (${details.join(', ')})` : '';
+  return `Responses API returned ${type} with status=${status} without error details${suffix}`;
+}
+
 function stripToolCalls(output: AssistantMessage): void {
   output.content = output.content.filter((block) => block.type !== 'toolCall');
 }
@@ -724,11 +740,7 @@ export function createResponsesEventProcessor<TApi extends Api>(
     if (type === 'error') throw new Error(event.message || event.code || JSON.stringify(event));
     if (type === 'response.failed' || type === 'response.cancelled') {
       const response = event.response ?? {};
-      throw new Error(
-        response.error?.message ||
-          response.incomplete_details?.reason ||
-          JSON.stringify(response || event),
-      );
+      throw new Error(formatTerminalResponseError(type, response));
     }
   };
 
