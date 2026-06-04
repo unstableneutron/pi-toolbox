@@ -29,6 +29,25 @@ import {
 } from '@earendil-works/pi-ai';
 import { parse as partialParse } from 'partial-json';
 
+import {
+  TerminalResponseError,
+  isRetryableEmptyResponseFailure,
+} from '../../../../shared/openai-responses-terminal';
+import {
+  analyzeResponsesReasoningSignature,
+  createResponsesReplayState,
+  encodeResponsesTextSignatureV1,
+  noteResponsesReasoningForReplay,
+  responsesDependentItemId,
+  responsesFunctionCallInput,
+  responsesTextSignatureItemId,
+  responsesTextSignaturePhase,
+  sanitizeResponsesText,
+  splitResponsesToolCallId,
+} from '../../../../shared/openai-responses-replay';
+
+export { isRetryableEmptyResponseFailure };
+
 type ResponsesEvent = Record<string, any>;
 type ResponsesInputItem = Record<string, any>;
 type Message = Context['messages'][number];
@@ -57,13 +76,6 @@ type MessageState = {
 type FunctionCallState = { kind: 'function_call'; blockIndex: number; block: ToolCallBlock };
 type OutputState = ReasoningState | MessageState | FunctionCallState;
 
-function sanitizeSurrogates(text: string): string {
-  return text.replace(
-    /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g,
-    '',
-  );
-}
-
 function parsedObject(value: unknown): Record<string, any> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? (value as Record<string, any>)
@@ -86,7 +98,7 @@ function parseResponsesJsonObject(value: string | undefined): Record<string, any
 export function buildResponsesInstructions(
   context: Pick<Context, 'systemPrompt'>,
 ): string | undefined {
-  return context.systemPrompt?.trim() ? sanitizeSurrogates(context.systemPrompt) : undefined;
+  return context.systemPrompt?.trim() ? sanitizeResponsesText(context.systemPrompt) : undefined;
 }
 
 function textFromContent(content: string | (TextContent | ImageContent)[]): string {
@@ -95,37 +107,6 @@ function textFromContent(content: string | (TextContent | ImageContent)[]): stri
     .filter((item): item is TextContent => item.type === 'text')
     .map((item) => item.text)
     .join('\n');
-}
-
-function encodeTextSignatureV1(id: string, phase?: string): string {
-  return JSON.stringify({ v: 1, id, ...(phase ? { phase } : {}) });
-}
-
-function parseTextSignature(
-  signature: string | undefined,
-): { id: string; phase?: string } | undefined {
-  if (!signature) return undefined;
-  if (signature.startsWith('{')) {
-    try {
-      const parsed = JSON.parse(signature) as { v?: number; id?: unknown; phase?: unknown };
-      if (parsed.v === 1 && typeof parsed.id === 'string') {
-        return typeof parsed.phase === 'string'
-          ? { id: parsed.id, phase: parsed.phase }
-          : { id: parsed.id };
-      }
-    } catch {
-      // Fall through to legacy plain-id signatures.
-    }
-  }
-  return { id: signature };
-}
-
-function textSignatureItemId(signature: string | undefined): string | undefined {
-  return parseTextSignature(signature)?.id;
-}
-
-function textSignaturePhase(signature: string | undefined): string | undefined {
-  return parseTextSignature(signature)?.phase;
 }
 
 function isHiddenResponseItemBlock(
@@ -140,71 +121,40 @@ function sanitizeHiddenResponseItem(item: Record<string, any>): ResponsesInputIt
   return JSON.parse(JSON.stringify(item)) as ResponsesInputItem;
 }
 
-function parseReplayableReasoningItem(
-  signature: string | undefined,
-): ResponsesInputItem | undefined {
-  if (!signature) return undefined;
-  try {
-    const item = JSON.parse(signature) as ResponsesInputItem;
-    return item?.type === 'reasoning' ? item : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 export function responseMessageTextSignature(response: Record<string, any>): string | undefined {
   const item = (Array.isArray(response.output) ? response.output : []).find(
     (candidate) => candidate?.type === 'message' && typeof candidate.id === 'string',
   );
-  return item ? encodeTextSignatureV1(item.id, item.phase) : undefined;
+  return item ? encodeResponsesTextSignatureV1(item.id, item.phase) : undefined;
 }
 
 export function isFinalizedTextBlock(block: TextContent): boolean {
-  return !!textSignatureItemId(block.textSignature);
-}
-
-function splitToolCallId(id: string): { callId: string; itemId?: string } {
-  const [callId, itemId] = id.split('|');
-  return { callId: callId || id, itemId };
-}
-
-function functionCallInput(
-  block: ToolCall,
-  options: { includeItemId?: boolean } = {},
-): ResponsesInputItem {
-  const { callId, itemId } = splitToolCallId(block.id);
-  return {
-    type: 'function_call',
-    ...(options.includeItemId === false ? {} : { id: itemId }),
-    call_id: callId,
-    name: block.name,
-    arguments: JSON.stringify(block.arguments),
-  };
+  return !!responsesTextSignatureItemId(block.textSignature);
 }
 
 function toolResultInput(message: Extract<Message, { role: 'toolResult' }>): ResponsesInputItem {
   const outputText = textFromContent(message.content);
-  const { callId } = splitToolCallId(message.toolCallId);
+  const { callId } = splitResponsesToolCallId(message.toolCallId);
   return {
     type: 'function_call_output',
     call_id: callId,
-    output: sanitizeSurrogates(outputText),
+    output: sanitizeResponsesText(outputText),
   };
 }
 
 function syntheticToolResultInput(block: ToolCall): ResponsesInputItem {
-  const { callId } = splitToolCallId(block.id);
+  const { callId } = splitResponsesToolCallId(block.id);
   return { type: 'function_call_output', call_id: callId, output: 'No result provided' };
 }
 
 function userInput(message: Extract<Message, { role: 'user' }>): ResponsesInputItem | undefined {
   if (typeof message.content === 'string') {
-    const text = sanitizeSurrogates(message.content);
+    const text = sanitizeResponsesText(message.content);
     return text.trim() ? { role: 'user', content: [{ type: 'input_text', text }] } : undefined;
   }
   const content = message.content.map((item) =>
     item.type === 'text'
-      ? { type: 'input_text', text: sanitizeSurrogates(item.text) }
+      ? { type: 'input_text', text: sanitizeResponsesText(item.text) }
       : {
           type: 'input_image',
           detail: 'auto',
@@ -220,35 +170,41 @@ function assistantMessageItems(
 ): ResponsesInputItem[] {
   const output: ResponsesInputItem[] = [];
   let textBlockIndex = 0;
-  let hasUnreplayableReasoningBeforeItem = false;
+  const replayState = createResponsesReplayState();
   for (const block of message.content as InternalAssistantContent[]) {
     if (isHiddenResponseItemBlock(block)) {
-      if (!hasUnreplayableReasoningBeforeItem) output.push(block.item);
+      if (!replayState.hasUnreplayableReasoningBeforeItem) output.push(block.item);
       continue;
     }
     if (block.type === 'thinking') {
-      const item = parseReplayableReasoningItem(block.thinkingSignature);
+      const item = noteResponsesReasoningForReplay(replayState, block.thinkingSignature);
       if (item) output.push(item);
-      else hasUnreplayableReasoningBeforeItem = true;
       continue;
     }
     if (block.type === 'text') {
       const fallbackId = `msg_pi_${index}_${textBlockIndex}`;
-      const signature = parseTextSignature(block.textSignature);
+      const signatureId = responsesTextSignatureItemId(block.textSignature);
+      const phase = responsesTextSignaturePhase(block.textSignature);
       textBlockIndex++;
-      const id = hasUnreplayableReasoningBeforeItem ? undefined : (signature?.id ?? fallbackId);
+      const id = responsesDependentItemId(replayState, signatureId ?? fallbackId);
       output.push({
         type: 'message',
         role: 'assistant',
-        content: [{ type: 'output_text', text: sanitizeSurrogates(block.text), annotations: [] }],
+        content: [
+          { type: 'output_text', text: sanitizeResponsesText(block.text), annotations: [] },
+        ],
         status: 'completed',
         ...(id ? { id } : {}),
-        ...(signature?.phase ? { phase: signature.phase } : {}),
+        ...(phase ? { phase } : {}),
       });
       continue;
     }
     if (message.stopReason === 'toolUse' && block.type === 'toolCall') {
-      output.push(functionCallInput(block, { includeItemId: !hasUnreplayableReasoningBeforeItem }));
+      output.push(
+        responsesFunctionCallInput(block, {
+          includeItemId: !replayState.hasUnreplayableReasoningBeforeItem,
+        }),
+      );
     }
   }
   return output;
@@ -333,82 +289,6 @@ function mapStopReason(status: string | undefined): AssistantMessage['stopReason
   if (status === 'incomplete') return 'length';
   if (status === 'failed' || status === 'cancelled') return 'error';
   return 'stop';
-}
-
-function terminalResponseMessage(response: Record<string, any>): string | undefined {
-  const message = response.error?.message || response.incomplete_details?.reason;
-  if (typeof message === 'string' && message.length > 0) return message;
-  return undefined;
-}
-
-function hasTerminalResponseDetails(response: Record<string, any>): boolean {
-  return (
-    response.error != null ||
-    response.incomplete_details != null ||
-    response.content_filters != null ||
-    response.moderation != null
-  );
-}
-
-function terminalResponseOutputItems(response: Record<string, any>): number | undefined {
-  return Array.isArray(response.output) ? response.output.length : undefined;
-}
-
-function hasActionableTerminalOutput(response: Record<string, any>): boolean {
-  return responseOutputItems(response).some(
-    (item) => item.type === 'message' || item.type === 'function_call',
-  );
-}
-
-function formatTerminalResponseError(type: string, response: Record<string, any>): string {
-  const message = terminalResponseMessage(response);
-  if (message) return message;
-
-  const status = typeof response.status === 'string' ? response.status : 'unknown';
-  const details = [
-    typeof response.id === 'string' ? `response_id=${response.id}` : undefined,
-    typeof response.model === 'string' ? `model=${response.model}` : undefined,
-    typeof response.previous_response_id === 'string'
-      ? `previous_response_id=${response.previous_response_id}`
-      : undefined,
-  ].filter((detail): detail is string => typeof detail === 'string');
-  const suffix = details.length > 0 ? ` (${details.join(', ')})` : '';
-  return `Responses API returned ${type} with status=${status} without error details${suffix}`;
-}
-
-export class TerminalResponseError extends Error {
-  readonly eventType: string;
-  readonly status: string;
-  readonly responseId?: string;
-  readonly model?: string;
-  readonly previousResponseId?: string;
-  readonly hasDetails: boolean;
-  readonly outputItems?: number;
-  readonly hasActionableOutput: boolean;
-
-  constructor(type: string, response: Record<string, any>) {
-    super(formatTerminalResponseError(type, response));
-    this.name = 'TerminalResponseError';
-    this.eventType = type;
-    this.status = typeof response.status === 'string' ? response.status : 'unknown';
-    this.responseId = typeof response.id === 'string' ? response.id : undefined;
-    this.model = typeof response.model === 'string' ? response.model : undefined;
-    this.previousResponseId =
-      typeof response.previous_response_id === 'string' ? response.previous_response_id : undefined;
-    this.hasDetails = hasTerminalResponseDetails(response);
-    this.outputItems = terminalResponseOutputItems(response);
-    this.hasActionableOutput = hasActionableTerminalOutput(response);
-  }
-}
-
-export function isRetryableEmptyResponseFailure(error: unknown): error is TerminalResponseError {
-  return (
-    error instanceof TerminalResponseError &&
-    error.eventType === 'response.failed' &&
-    error.status === 'failed' &&
-    !error.hasDetails &&
-    !error.hasActionableOutput
-  );
 }
 
 function stripToolCalls(output: AssistantMessage): void {
@@ -763,7 +643,7 @@ export function createResponsesEventProcessor<TApi extends Api>(
             ? (states.get(index) as MessageState)
             : createMessageState(index);
         state.block.text = messageItemText(item);
-        state.block.textSignature = encodeTextSignatureV1(item.id, item.phase);
+        state.block.textSignature = encodeResponsesTextSignatureV1(item.id, item.phase);
         stream.push({
           type: 'text_end',
           contentIndex: state.blockIndex,
@@ -848,13 +728,8 @@ function responseOutputItems(response: Record<string, any>): Record<string, any>
 }
 
 function reasoningIdFromSignature(signature: string | undefined): string | undefined {
-  if (!signature) return undefined;
-  try {
-    const parsed = JSON.parse(signature) as { id?: unknown };
-    return typeof parsed.id === 'string' ? parsed.id : undefined;
-  } catch {
-    return undefined;
-  }
+  const analysis = analyzeResponsesReasoningSignature(signature);
+  return analysis.kind === 'replayable-reasoning' ? analysis.id : undefined;
 }
 
 export function appendRecoveredReasoningItems(
@@ -955,33 +830,39 @@ export function appendRecoveredFunctionCalls(
 export function assistantMessageToResponseItems(output: AssistantMessage): unknown[] {
   const items: unknown[] = [];
   let textIndex = 0;
-  let hasUnreplayableReasoningBeforeItem = false;
+  const replayState = createResponsesReplayState();
   for (const block of output.content as InternalAssistantContent[]) {
     if (isHiddenResponseItemBlock(block)) {
-      if (!hasUnreplayableReasoningBeforeItem) items.push(block.item);
+      if (!replayState.hasUnreplayableReasoningBeforeItem) items.push(block.item);
       continue;
     }
     if (block.type === 'thinking') {
-      const item = parseReplayableReasoningItem(block.thinkingSignature);
+      const item = noteResponsesReasoningForReplay(replayState, block.thinkingSignature);
       if (item) items.push(item);
-      else hasUnreplayableReasoningBeforeItem = true;
     } else if (block.type === 'text') {
       const fallbackId = `msg_pi_0_${textIndex}`;
-      const id = hasUnreplayableReasoningBeforeItem
-        ? undefined
-        : (textSignatureItemId(block.textSignature) ?? fallbackId);
-      const phase = textSignaturePhase(block.textSignature);
+      const id = responsesDependentItemId(
+        replayState,
+        responsesTextSignatureItemId(block.textSignature) ?? fallbackId,
+      );
+      const phase = responsesTextSignaturePhase(block.textSignature);
       textIndex++;
       items.push({
         type: 'message',
         role: 'assistant',
-        content: [{ type: 'output_text', text: sanitizeSurrogates(block.text), annotations: [] }],
+        content: [
+          { type: 'output_text', text: sanitizeResponsesText(block.text), annotations: [] },
+        ],
         status: 'completed',
         ...(id ? { id } : {}),
         ...(phase ? { phase } : {}),
       });
     } else if (output.stopReason === 'toolUse' && block.type === 'toolCall') {
-      items.push(functionCallInput(block, { includeItemId: !hasUnreplayableReasoningBeforeItem }));
+      items.push(
+        responsesFunctionCallInput(block, {
+          includeItemId: !replayState.hasUnreplayableReasoningBeforeItem,
+        }),
+      );
     }
   }
   return items;

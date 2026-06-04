@@ -7,12 +7,22 @@ import {
 } from '@earendil-works/pi-coding-agent';
 
 import {
+  hasAssistantToolCall,
+  hasUserVisibleAssistantOutput,
+  isSkippableEmptyFailedAssistantArtifact,
+} from '../shared/assistant-message-state';
+import {
+  classifyRetryableProviderError,
+  requiresSessionRepairForRetryableProviderError,
+  type RetryableProviderErrorReason,
+} from '../shared/provider-errors';
+
+import {
   LENGTH_TRUNCATION_CONTINUE_MESSAGE,
   PI_RETRY_RECOVERY_CUSTOM_TYPE,
   buildRecoveryStatus,
   buildRetryableLeafPrompt,
   branchLatestAssistantErrorOutOfMainPath,
-  classifyRetryableProviderError,
   clearRefusalStatus,
   clearRuntimeState,
   detectRetryableTerminalLeaf,
@@ -40,6 +50,7 @@ export {
 } from './refusal-review';
 
 export { classifyRetryableProviderError };
+export { isSkippableEmptyFailedAssistantArtifact };
 
 import { requestRefusalRewrite } from './refusal-review';
 
@@ -67,11 +78,7 @@ export interface AgentSessionModuleLike {
 
 export type LoadAgentSessionModule = () => Promise<AgentSessionModuleLike>;
 
-export type RetryReason =
-  | 'deploymentMissing'
-  | 'encryptedContentVerification'
-  | 'nativeCompactionCreatedBy'
-  | 'providerServerError';
+export type RetryReason = RetryableProviderErrorReason;
 
 export interface AssistantErrorLike {
   role?: string;
@@ -122,7 +129,7 @@ function getRetryableProviderErrorReason(message: AssistantErrorLike): RetryReas
 }
 
 function requiresPiRetryOwnedRecovery(reason: RetryReason | undefined): boolean {
-  return 'encryptedContentVerification' === reason || 'nativeCompactionCreatedBy' === reason;
+  return requiresSessionRepairForRetryableProviderError(reason);
 }
 
 export function isExtraRetryableAssistantError(message: AssistantErrorLike): boolean {
@@ -196,93 +203,6 @@ function isCoreExpectedRetryableError(message: AssistantErrorLike): boolean {
     return false;
   }
   return isLikelyCoreRetryableError(message) || isCoreSafeExtraRetryableAssistantError(message);
-}
-
-function hasUserVisibleAssistantOutput(content: unknown): boolean {
-  if (!Array.isArray(content)) {
-    return false;
-  }
-
-  return content.some((part) => {
-    if (!part || 'object' !== typeof part) {
-      return false;
-    }
-    if ('type' in part && 'toolCall' === part.type) {
-      return true;
-    }
-    if (
-      'type' in part &&
-      'text' === part.type &&
-      'string' === typeof (part as { text?: unknown }).text
-    ) {
-      return 0 < (part as { text: string }).text.trim().length;
-    }
-    return false;
-  });
-}
-
-function hasAssistantToolCall(content: unknown): boolean {
-  if (!Array.isArray(content)) {
-    return false;
-  }
-  return content.some((part) =>
-    Boolean(part && 'object' === typeof part && (part as { type?: unknown }).type === 'toolCall'),
-  );
-}
-
-function hasZeroOrEmptyUsage(usage: unknown): boolean {
-  if (usage === undefined || usage === null) {
-    return true;
-  }
-
-  if ('number' === typeof usage) {
-    return usage === 0;
-  }
-
-  if ('object' !== typeof usage) {
-    return false;
-  }
-
-  const numericValues: number[] = [];
-  const seen = new Set<object>();
-  const stack: unknown[] = [usage];
-
-  while (stack.length > 0) {
-    const current = stack.pop();
-    if (current === undefined || current === null) {
-      continue;
-    }
-    if ('number' === typeof current) {
-      numericValues.push(current);
-      continue;
-    }
-    if ('object' !== typeof current) {
-      continue;
-    }
-    if (seen.has(current)) {
-      continue;
-    }
-    seen.add(current);
-
-    if (Array.isArray(current)) {
-      stack.push(...current);
-      continue;
-    }
-
-    stack.push(...Object.values(current));
-  }
-
-  return numericValues.every((value) => value === 0);
-}
-
-export function isSkippableEmptyFailedAssistantArtifact(message: unknown): boolean {
-  const candidate = asRecord(message);
-  return Boolean(
-    candidate?.role === 'assistant' &&
-    ('error' === candidate.stopReason || 'aborted' === candidate.stopReason) &&
-    !hasUserVisibleAssistantOutput(candidate.content) &&
-    hasZeroOrEmptyUsage(candidate.usage),
-  );
 }
 
 function isLengthTruncatedAssistantMessage(message: unknown): boolean {

@@ -4,6 +4,11 @@ import type { TransportDiagnosticsCollector } from './transport-diagnostics.ts';
 import { cloneHeadersWithTraceparent, type TraceContext } from './trace-context.ts';
 import type { ResponsesBody } from './body.ts';
 import { isRetryableEmptyResponseFailure } from './responses-adapter.ts';
+import {
+  isRetryableResponsesErrorFrame,
+  previousResponseNotFoundMessage,
+  responsesErrorFrameMessage,
+} from '../../shared/openai-responses-terminal';
 
 interface WebSocketLike {
   readyState?: number;
@@ -162,7 +167,7 @@ export function responseCreatePayloadBytes(body: ResponsesBody): number {
   return payloadBytes(responseCreatePayload(body));
 }
 
-export function responseCreatePayload(body: ResponsesBody): string {
+function responseCreatePayload(body: ResponsesBody): string {
   return JSON.stringify({ type: 'response.create', ...body });
 }
 
@@ -450,36 +455,6 @@ function shouldKeepSocketAfterTerminalEvent(event: Record<string, any>): boolean
   if (event.type !== 'response.done') return false;
   const status = typeof event.response?.status === 'string' ? event.response.status : undefined;
   return status === undefined || status === 'completed';
-}
-
-function previousResponseNotFoundMessage(event: Record<string, any>): string | undefined {
-  const error = event.error ?? {};
-  if (event.type !== 'error' || error.code !== 'previous_response_not_found') return undefined;
-  return typeof error.message === 'string' ? error.message : JSON.stringify(event);
-}
-
-function responseErrorMessage(event: Record<string, any>): string {
-  const message = event.error?.message ?? event.message;
-  return typeof message === 'string' && message.length > 0 ? message : JSON.stringify(event);
-}
-
-function isRetryableResponseError(event: Record<string, any>): boolean {
-  if (event.type !== 'error') return false;
-  const status = typeof event.status === 'number' ? event.status : event.error?.status;
-  if (status === 500 || status === 502 || status === 503 || status === 504) return true;
-
-  const text = [event.error?.type, event.error?.code, event.error?.message, event.message]
-    .filter((value): value is string => typeof value === 'string')
-    .join('\n')
-    .toLowerCase();
-  return (
-    text.includes('server_error') ||
-    text.includes('internal_server_error') ||
-    text.includes('internal server') ||
-    text.includes('unexpected eof') ||
-    text.includes('abnormal closure') ||
-    text.includes('close 1006')
-  );
 }
 
 function decodeImmediateData(data: unknown): string | undefined {
@@ -926,8 +901,8 @@ export async function runWebSocketResponse(
           } else {
             responseId = nextResponseId ?? responseId;
           }
-          if (responseId && isRetryableResponseError(parsed)) {
-            throw new RetryableResponseError(responseErrorMessage(parsed));
+          if (responseId && isRetryableResponsesErrorFrame(parsed)) {
+            throw new RetryableResponseError(responsesErrorFrameMessage(parsed));
           }
           const terminalEvent = isTerminalEvent(parsed.type);
           if (terminalEvent) {

@@ -12,6 +12,9 @@ import {
   isLikelyRefusalText,
   pickReviewModels,
 } from './refusal-review';
+import { hasUserVisibleAssistantOutput } from '../shared/assistant-message-state';
+import { isEncryptedResponsesReasoningSignature } from '../shared/openai-responses-replay';
+import { classifyRetryableProviderError } from '../shared/provider-errors';
 
 const DEFAULT_REFUSAL_CONTINUE_ATTEMPTS = 5;
 const DEFAULT_REFUSAL_REWRITE_ATTEMPTS = 2;
@@ -43,12 +46,6 @@ export const STOCK_REFUSAL_CONTINUE_MESSAGES = [
   'Keep going with the same request.',
   'Please proceed and provide the best helpful answer you can for the same task.',
 ] as const;
-
-type RetryableProviderErrorReason =
-  | 'deploymentMissing'
-  | 'encryptedContentVerification'
-  | 'nativeCompactionCreatedBy'
-  | 'providerServerError';
 
 export const PI_RETRY_RECOVERY_CUSTOM_TYPE = 'pi-retry-recovery';
 
@@ -220,61 +217,6 @@ export function pickStockContinueMessage(input?: {
   const pool = 0 < candidates.length ? candidates : [...STOCK_REFUSAL_CONTINUE_MESSAGES];
   const index = Math.min(pool.length - 1, Math.floor(random() * pool.length));
   return pool[index] ?? CONTINUE_RETRY_MESSAGE;
-}
-
-export function classifyRetryableProviderError(
-  errorMessage: string | undefined,
-): RetryableProviderErrorReason | undefined {
-  if (!errorMessage) {
-    return undefined;
-  }
-
-  const text = errorMessage.toLowerCase();
-
-  if (text.includes('api deployment for this resource does not exist')) {
-    return 'deploymentMissing';
-  }
-
-  if (text.includes('encrypted content') && text.includes('could not be verified')) {
-    return 'encryptedContentVerification';
-  }
-
-  if (text.includes('unknown parameter') && text.includes('created_by')) {
-    return 'nativeCompactionCreatedBy';
-  }
-
-  if (
-    text.includes('currently experiencing high demand') &&
-    text.includes('peak load') &&
-    text.includes('provisioned throughput')
-  ) {
-    return 'providerServerError';
-  }
-
-  if (text.includes('server had an error processing your request')) {
-    return 'providerServerError';
-  }
-
-  if (text.includes('model produced invalid content')) {
-    return 'providerServerError';
-  }
-
-  if (text.includes('unknown error (no error details in response)')) {
-    return 'providerServerError';
-  }
-
-  if (text.includes('no tool call found for function call output with call_id')) {
-    return 'providerServerError';
-  }
-
-  if (
-    text.includes('number of toolresult blocks') &&
-    text.includes('exceeds the number of tooluse blocks')
-  ) {
-    return 'providerServerError';
-  }
-
-  return undefined;
 }
 
 function cancelScheduledSuccessStatusClear(sessionId: string): void {
@@ -763,25 +705,6 @@ function appendDebugEntry(_session: PatchedSessionLike, _data: { [key: string]: 
   // Session-persisted debug logging intentionally disabled.
 }
 
-function isOpenAIResponsesEncryptedReasoningSignature(signature: string | undefined): boolean {
-  if (!signature) {
-    return false;
-  }
-
-  try {
-    const parsed = JSON.parse(signature) as { encrypted_content?: unknown; type?: unknown };
-    return (
-      typeof parsed === 'object' &&
-      parsed !== null &&
-      parsed.type === 'reasoning' &&
-      typeof parsed.encrypted_content === 'string' &&
-      parsed.encrypted_content.length > 0
-    );
-  } catch {
-    return false;
-  }
-}
-
 export function sanitizeEncryptedReasoningOnCurrentBranch(session: PatchedSessionLike): {
   sanitizedMessages: number;
   sanitizedBlocks: number;
@@ -823,7 +746,7 @@ export function sanitizeEncryptedReasoningOnCurrentBranch(session: PatchedSessio
     }>) {
       if (
         'thinking' !== block?.type ||
-        !isOpenAIResponsesEncryptedReasoningSignature(block.thinkingSignature)
+        !isEncryptedResponsesReasoningSignature(block.thinkingSignature)
       ) {
         continue;
       }
@@ -1046,29 +969,6 @@ function appendRefusalReviewFailure(
   appendDebugEntry(session, {
     kind: 'refusal-review-failure',
     ...data,
-  });
-}
-
-function hasUserVisibleAssistantOutput(content: unknown): boolean {
-  if (!Array.isArray(content)) {
-    return false;
-  }
-
-  return content.some((part) => {
-    if (!part || 'object' !== typeof part) {
-      return false;
-    }
-    if ('type' in part && 'toolCall' === part.type) {
-      return true;
-    }
-    if (
-      'type' in part &&
-      'text' === part.type &&
-      'string' === typeof (part as { text?: unknown }).text
-    ) {
-      return 0 < (part as { text: string }).text.trim().length;
-    }
-    return false;
   });
 }
 
