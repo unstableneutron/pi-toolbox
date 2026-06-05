@@ -85,7 +85,33 @@ function cacheStatusLabel(status: WebSocketCacheStatus): string {
 }
 
 function recoveryModeLabel(mode: 'resumed' | 'full_replay'): string {
-  return mode === 'resumed' ? 'resumed from previous_response_id' : 'full conversation replay';
+  return mode === 'resumed' ? 'resumed' : 'replayed';
+}
+
+function recoveryRetrySuffix(event: { nextAttempt: number; maxAttempts: number }): string {
+  const retry = Math.max(1, event.nextAttempt - 1);
+  const maxRetries = Math.max(1, event.maxAttempts - 1);
+  return retry <= 1 ? '' : ` · ${retry}/${maxRetries}`;
+}
+
+function retryReasonLabel(event: Extract<WebSocketLifecycleEvent, { type: 'retry' }>): string {
+  return event.reason === 'empty_response_failed_without_details'
+    ? 'empty response'
+    : 'closed before output';
+}
+
+function retryActionLabel(event: Extract<WebSocketLifecycleEvent, { type: 'retry' }>): string {
+  return event.reason === 'empty_response_failed_without_details'
+    ? 'resuming request'
+    : 'retrying request';
+}
+
+function fallbackReasonLabel(
+  event: Extract<WebSocketLifecycleEvent, { type: 'fallback' }>,
+): string {
+  return event.reason === 'empty_response_failed_without_details'
+    ? 'empty response'
+    : 'previous response missing';
 }
 
 export function formatWebSocketStatus(event: WebSocketLifecycleEvent): string | undefined {
@@ -94,17 +120,16 @@ export function formatWebSocketStatus(event: WebSocketLifecycleEvent): string | 
     return `Responses WS: ${event.connectionId} connected · ${cacheStatusLabel(event.cacheStatus)}`;
   }
   if (event.type === 'retry') {
-    return `Responses WS: retrying fresh WebSocket request · attempt ${event.nextAttempt}/${event.maxAttempts}`;
+    return `↻ WS ${retryActionLabel(event)} · ${retryReasonLabel(event)}${recoveryRetrySuffix(event)}`;
   }
   if (event.type === 'fallback') {
-    return `Responses WS: replaying full conversation · attempt ${event.nextAttempt}/${event.maxAttempts}`;
+    return `↻ WS replaying conversation · ${fallbackReasonLabel(event)}${recoveryRetrySuffix(event)}`;
   }
   if (event.type === 'recovering') {
-    return `Responses WS: retrieving response snapshot for ${shortResponseId(event.responseId)}`;
+    return '↻ WS retrieving snapshot · stream interrupted';
   }
   if (event.type === 'recovered') {
-    const target = event.connectionId ? ` on ${event.connectionId}` : '';
-    return `Responses WS: recovered${target} · ${recoveryModeLabel(event.mode)}`;
+    return `✓ WS recovered · ${recoveryModeLabel(event.mode)}`;
   }
   return undefined;
 }
@@ -173,12 +198,9 @@ export function formatWebSocketFailureNotification(
   event: WebSocketLifecycleEvent,
 ): string | undefined {
   if (event.type !== 'failed') return undefined;
-  return [
-    `Responses WS: recovery failed${event.responseId ? ` for response_id=${shortResponseId(event.responseId)}` : ''}.`,
-    event.message ? `Reason: ${event.message}` : undefined,
-  ]
-    .filter((part): part is string => typeof part === 'string')
-    .join(' ');
+  return event.message
+    ? `WS recovery failed · stream interrupted: ${event.message}`
+    : 'WS recovery failed · stream interrupted';
 }
 
 export function createMissingCodexAccountIdNotifier(

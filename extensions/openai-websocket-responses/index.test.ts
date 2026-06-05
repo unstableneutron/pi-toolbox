@@ -3651,7 +3651,7 @@ describe('WebSocket transport', () => {
         responseId: 'resp_ok',
         urlHash: 'urlhash',
       }),
-    ).toBe('Responses WS: recovered on ws#1293 · resumed from previous_response_id');
+    ).toBe('✓ WS recovered · resumed');
     expect(
       formatWebSocketStatus({
         type: 'recovered',
@@ -3660,7 +3660,7 @@ describe('WebSocket transport', () => {
         responseId: 'resp_ok',
         urlHash: 'urlhash',
       }),
-    ).toBe('Responses WS: recovered on ws#1294 · full conversation replay');
+    ).toBe('✓ WS recovered · replayed');
   });
 
   it('formats websocket retry/fallback/recovery as temporary status text', () => {
@@ -3677,7 +3677,20 @@ describe('WebSocket transport', () => {
         responseId: 'resp_0091b44445adddfa006a21cb87efc48194a1b3e5756122ca56',
         previousResponseId: 'resp_0091b44445adddfa006a21cb733a2081948de63f4cd8a9579b',
       }),
-    ).toBe('Responses WS: retrying fresh WebSocket request · attempt 2/3');
+    ).toBe('↻ WS resuming request · empty response');
+    expect(
+      formatWebSocketStatus({
+        type: 'retry',
+        reason: 'midstream_error_before_output',
+        action: 'retry_fresh_websocket_before_output',
+        attempt: 1,
+        nextAttempt: 2,
+        maxAttempts: 3,
+        urlHash: 'abc123',
+        connectionId: 'ws#1292',
+        responseId: 'resp_0091b44445adddfa006a21cb87efc48194a1b3e5756122ca56',
+      }),
+    ).toBe('↻ WS retrying request · closed before output');
     expect(
       formatWebSocketStatus({
         type: 'fallback',
@@ -3691,7 +3704,20 @@ describe('WebSocket transport', () => {
         responseId: 'resp_0091b44445adddfa006a21cb8aac448194b4aee1903076f4c2',
         previousResponseId: 'resp_0091b44445adddfa006a21cb733a2081948de63f4cd8a9579b',
       }),
-    ).toBe('Responses WS: replaying full conversation · attempt 3/3');
+    ).toBe('↻ WS replaying conversation · empty response · 2/2');
+    expect(
+      formatWebSocketStatus({
+        type: 'fallback',
+        reason: 'previous_response_not_found',
+        action: 'replay_full_conversation_without_previous_response_id',
+        attempt: 1,
+        nextAttempt: 2,
+        maxAttempts: 2,
+        urlHash: 'abc123',
+        connectionId: 'ws#1293',
+        previousResponseId: 'resp_0091b44445adddfa006a21cb733a2081948de63f4cd8a9579b',
+      }),
+    ).toBe('↻ WS replaying conversation · previous response missing');
     expect(
       formatWebSocketStatus({
         type: 'recovering',
@@ -3701,7 +3727,7 @@ describe('WebSocket transport', () => {
         responseId: 'resp_0091b44445adddfa006a21cb8aac448194b4aee1903076f4c2',
         message: 'websocket: close 1006 (abnormal closure): unexpected EOF',
       }),
-    ).toBe('Responses WS: retrieving response snapshot for resp_0091b…3076f4c2');
+    ).toBe('↻ WS retrieving snapshot · stream interrupted');
   });
 
   it('formats unrecovered websocket failures as error notifications', () => {
@@ -3713,9 +3739,7 @@ describe('WebSocket transport', () => {
         responseId: 'resp_0091b44445adddfa006a21cb8aac448194b4aee1903076f4c2',
         message: 'Retrieve recovery failed: response not found',
       }),
-    ).toBe(
-      'Responses WS: recovery failed for response_id=resp_0091b…3076f4c2. Reason: Retrieve recovery failed: response not found',
-    );
+    ).toBe('WS recovery failed · stream interrupted: Retrieve recovery failed: response not found');
   });
 
   it('removes an idle cached socket when the server closes it', async () => {
