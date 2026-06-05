@@ -68,6 +68,8 @@ export interface TransportDiagnosticFields {
   responseCreatedMs?: number;
   lastEventMs?: number;
   completedMs?: number;
+  firstReplayUnsafeEventType?: string;
+  replayUnsafeEventSeen?: boolean;
   url?: string;
   websocketResponseId?: string;
   logicalTraceId?: string;

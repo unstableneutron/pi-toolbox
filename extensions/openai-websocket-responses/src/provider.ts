@@ -29,6 +29,7 @@ import {
   createTraceContextForTraceId,
   type TraceContext,
 } from './trace-context.ts';
+import { isReplaySafeOpenAIResponsesTransportDiagnosticDetails } from '../../shared/openai-responses-retry';
 import {
   assistantMessageToResponseItems,
   createResponsesEventProcessor,
@@ -328,7 +329,8 @@ export function createOpenAIWebSocketResponsesStream(
           if (
             !(error instanceof WebSocketMidstreamError) ||
             !settings.recovery.enabled ||
-            !error.responseId
+            !error.responseId ||
+            isReplaySafeOpenAIResponsesTransportDiagnosticDetails(transportDiagnostics?.getFields())
           ) {
             throw error;
           }

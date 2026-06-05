@@ -1,7 +1,10 @@
+import { isReplaySafeOpenAIResponsesTransportFailure } from './openai-responses-retry';
+
 export type RetryableProviderErrorReason =
   | 'deploymentMissing'
   | 'encryptedContentVerification'
   | 'nativeCompactionCreatedBy'
+  | 'openAIResponsesTransportErrorBeforeOutput'
   | 'providerServerError';
 
 export function classifyRetryableProviderError(
@@ -61,4 +64,15 @@ export function requiresSessionRepairForRetryableProviderError(
   reason: RetryableProviderErrorReason | undefined,
 ): boolean {
   return reason === 'encryptedContentVerification' || reason === 'nativeCompactionCreatedBy';
+}
+
+export function classifyRetryableAssistantProviderError(
+  message: { errorMessage?: string } | undefined,
+): RetryableProviderErrorReason | undefined {
+  return (
+    classifyRetryableProviderError(message?.errorMessage) ??
+    (isReplaySafeOpenAIResponsesTransportFailure(message)
+      ? 'openAIResponsesTransportErrorBeforeOutput'
+      : undefined)
+  );
 }

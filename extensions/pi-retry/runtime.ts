@@ -14,7 +14,7 @@ import {
 } from './refusal-review';
 import { hasUserVisibleAssistantOutput } from '../shared/assistant-message-state';
 import { isEncryptedResponsesReasoningSignature } from '../shared/openai-responses-replay';
-import { classifyRetryableProviderError } from '../shared/provider-errors';
+import { classifyRetryableAssistantProviderError } from '../shared/provider-errors';
 
 const DEFAULT_REFUSAL_CONTINUE_ATTEMPTS = 5;
 const DEFAULT_REFUSAL_REWRITE_ATTEMPTS = 2;
@@ -82,6 +82,7 @@ interface AssistantMessageLike {
   stopReason?: string;
   errorMessage?: string;
   usage?: unknown;
+  diagnostics?: unknown;
 }
 
 type RecoveryMessageKind = 'continue' | 'rewrite';
@@ -1130,11 +1131,7 @@ export function detectRetryableTerminalLeaf(
     return undefined;
   }
 
-  if (
-    'error' === message.stopReason &&
-    'string' === typeof message.errorMessage &&
-    classifyRetryableProviderError(message.errorMessage)
-  ) {
+  if ('error' === message.stopReason && classifyRetryableAssistantProviderError(message)) {
     return {
       kind: 'retryable-error',
       entryId: leafEntry?.id,
@@ -1308,8 +1305,7 @@ export async function handleRefusalRecovery(input: {
 
   if (
     'error' === finalAssistant?.stopReason &&
-    'string' === typeof finalAssistant.errorMessage &&
-    classifyRetryableProviderError(finalAssistant.errorMessage)
+    classifyRetryableAssistantProviderError(finalAssistant)
   ) {
     const retryableErrorAttemptLimit = getConfiguredRetryableErrorContinueAttempts(input.ctx.cwd);
     const currentRetryableErrorAttempts = getRetryableErrorContinueAttempts(sessionId);
@@ -1327,8 +1323,7 @@ export async function handleRefusalRecovery(input: {
     }
 
     const nextRetryableErrorAttempt = currentRetryableErrorAttempts + 1;
-    const reason =
-      classifyRetryableProviderError(finalAssistant.errorMessage) ?? 'providerServerError';
+    const reason = classifyRetryableAssistantProviderError(finalAssistant) ?? 'providerServerError';
 
     if ('encryptedContentVerification' === reason) {
       try {
@@ -1360,7 +1355,7 @@ export async function handleRefusalRecovery(input: {
 
     const branchResult = branchLatestAssistantErrorOutOfMainPath(input.patchedSession, {
       attempt: nextRetryableErrorAttempt,
-      errorMessage: finalAssistant.errorMessage,
+      errorMessage: finalAssistant.errorMessage ?? '',
       reason,
     });
 

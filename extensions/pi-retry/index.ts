@@ -12,6 +12,7 @@ import {
   isSkippableEmptyFailedAssistantArtifact,
 } from '../shared/assistant-message-state';
 import {
+  classifyRetryableAssistantProviderError,
   classifyRetryableProviderError,
   requiresSessionRepairForRetryableProviderError,
   type RetryableProviderErrorReason,
@@ -118,14 +119,10 @@ let patchFailureReason: string | undefined;
 let patchFailureNotified = false;
 
 function getRetryableProviderErrorReason(message: AssistantErrorLike): RetryReason | undefined {
-  if (
-    'assistant' !== message.role ||
-    'error' !== message.stopReason ||
-    'string' !== typeof message.errorMessage
-  ) {
+  if ('assistant' !== message.role || 'error' !== message.stopReason) {
     return undefined;
   }
-  return classifyRetryableProviderError(message.errorMessage);
+  return classifyRetryableAssistantProviderError(message);
 }
 
 function requiresPiRetryOwnedRecovery(reason: RetryReason | undefined): boolean {

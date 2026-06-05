@@ -62,6 +62,7 @@ import {
   shouldIncludeSuccessTimeline,
 } from './src/transport-diagnostics.ts';
 import { recoverResponseByRetrieve } from './src/retrieve-recovery.ts';
+import { isReplayUnsafeResponsesEvent } from '../shared/openai-responses-retry.ts';
 import {
   createTraceContext,
   createTraceContextForTraceId,
@@ -1803,6 +1804,23 @@ describe('WebSocket transport', () => {
     return { WebSocketCtor: FakeWebSocket as any, instances };
   }
 
+  it('classifies Responses control events as replay-safe until output starts', () => {
+    expect(
+      isReplayUnsafeResponsesEvent({ type: 'response.created', response: { id: 'resp_1' } }),
+    ).toBe(false);
+    expect(isReplayUnsafeResponsesEvent({ type: 'response.in_progress' })).toBe(false);
+    expect(
+      isReplayUnsafeResponsesEvent({
+        type: 'response.output_item.added',
+        item: { type: 'message', id: 'msg_1' },
+      }),
+    ).toBe(true);
+    expect(
+      isReplayUnsafeResponsesEvent({ type: 'response.output_text.delta', delta: 'hello' }),
+    ).toBe(true);
+    expect(isReplayUnsafeResponsesEvent({ type: 'response.unknown_new_stream_event' })).toBe(true);
+  });
+
   it('fails fast when no first response event arrives', async () => {
     vi.useFakeTimers();
     class FakeWebSocket {
@@ -2548,6 +2566,173 @@ describe('WebSocket transport', () => {
         expect.objectContaining({ type: 'response_completed', responseId: 'resp_1' }),
       ]),
     );
+  });
+
+  it('retries WebSocket close after response.created when no output event was seen', async () => {
+    const { WebSocketCtor, instances } = makeWebSocketCtor([
+      (socket) => {
+        socket.emit('message', {
+          data: JSON.stringify({ type: 'response.created', response: { id: 'resp_created_only' } }),
+        });
+        socket.emit('close', { code: 1006 });
+      },
+      (socket) => {
+        socket.emit('message', {
+          data: JSON.stringify({ type: 'response.created', response: { id: 'resp_retry_ok' } }),
+        });
+        socket.emit('message', {
+          data: JSON.stringify({
+            type: 'response.completed',
+            response: { id: 'resp_retry_ok', status: 'completed' },
+          }),
+        });
+      },
+    ]);
+    const seen: string[] = [];
+    const diagnostics = createTransportDiagnostics({
+      configuredTransport: 'websocket',
+      url: 'wss://example.test/responses',
+    });
+
+    const result = await runWebSocketResponse(
+      {
+        url: 'wss://example.test/responses',
+        headers: new Headers(),
+        body: { model: 'gpt', input: [] },
+        settings: normalizeSettings({ websocket: { retries: 1 } }),
+        WebSocketCtor,
+        diagnostics,
+      },
+      (event) => {
+        seen.push(event.type);
+      },
+    );
+
+    expect(instances).toHaveLength(2);
+    expect(result).toMatchObject({ responseId: 'resp_retry_ok', eventCount: 2 });
+    expect(seen).toEqual(['response.created', 'response.completed']);
+    const message = makeAssistantMessage();
+    attachTransportDiagnostic(message, diagnostics, {
+      finalTransport: 'websocket',
+      outcome: 'websocket_retry_succeeded',
+    });
+    const retryDetails = extractTransportDiagnostics(message)[0]?.details;
+    expect(retryDetails).toMatchObject({ replayUnsafeEventSeen: false });
+    expect(retryDetails).not.toHaveProperty('firstReplayUnsafeEventType');
+    expect(retryDetails?.timeline).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'ws_retry',
+          attempt: 1,
+          reason: 'midstream_error_before_output',
+          responseId: 'resp_created_only',
+        }),
+      ]),
+    );
+  });
+
+  it('does not retry WebSocket close after output has started', async () => {
+    const { WebSocketCtor, instances } = makeWebSocketCtor([
+      (socket) => {
+        socket.emit('message', {
+          data: JSON.stringify({ type: 'response.created', response: { id: 'resp_output' } }),
+        });
+        socket.emit('message', {
+          data: JSON.stringify({
+            type: 'response.output_item.added',
+            output_index: 0,
+            item: { type: 'message', id: 'msg_1' },
+          }),
+        });
+        socket.emit('close', { code: 1006 });
+      },
+      (socket) => {
+        socket.emit('message', {
+          data: JSON.stringify({
+            type: 'response.created',
+            response: { id: 'resp_should_not_run' },
+          }),
+        });
+      },
+    ]);
+    const seen: string[] = [];
+    const diagnostics = createTransportDiagnostics({
+      configuredTransport: 'websocket',
+      url: 'wss://example.test/responses',
+    });
+
+    await expect(
+      runWebSocketResponse(
+        {
+          url: 'wss://example.test/responses',
+          headers: new Headers(),
+          body: { model: 'gpt', input: [] },
+          settings: normalizeSettings({ websocket: { retries: 1 } }),
+          WebSocketCtor,
+          diagnostics,
+        },
+        (event) => {
+          seen.push(event.type);
+        },
+      ),
+    ).rejects.toThrow(WebSocketMidstreamError);
+
+    expect(instances).toHaveLength(1);
+    expect(seen).toEqual(['response.created', 'response.output_item.added']);
+    expect(diagnostics.getFields()).toMatchObject({
+      replayUnsafeEventSeen: true,
+      firstReplayUnsafeEventType: 'response.output_item.added',
+    });
+  });
+
+  it('does not retry a truncated WebSocket frame that partially identifies output', async () => {
+    const { WebSocketCtor, instances } = makeWebSocketCtor([
+      (socket) => {
+        socket.emit('message', {
+          data: JSON.stringify({ type: 'response.created', response: { id: 'resp_partial' } }),
+        });
+        socket.emit('message', {
+          data: '{"type":"response.output_text.delta","response_id":"resp_partial","delta":"hel',
+        });
+      },
+      (socket) => {
+        socket.emit('message', {
+          data: JSON.stringify({
+            type: 'response.created',
+            response: { id: 'resp_should_not_run' },
+          }),
+        });
+      },
+    ]);
+    const seen: string[] = [];
+    const diagnostics = createTransportDiagnostics({
+      configuredTransport: 'websocket',
+      url: 'wss://example.test/responses',
+    });
+
+    await expect(
+      runWebSocketResponse(
+        {
+          url: 'wss://example.test/responses',
+          headers: new Headers(),
+          body: { model: 'gpt', input: [] },
+          settings: normalizeSettings({ websocket: { retries: 1 } }),
+          WebSocketCtor,
+          diagnostics,
+        },
+        (event) => {
+          seen.push(event.type);
+        },
+      ),
+    ).rejects.toThrow('Unterminated string');
+
+    expect(instances).toHaveLength(1);
+    expect(seen).toEqual([]);
+    expect(diagnostics.getFields()).toMatchObject({
+      replayUnsafeEventSeen: true,
+      firstReplayUnsafeEventType: 'response.output_text.delta',
+      websocketResponseId: 'resp_partial',
+    });
   });
 
   it('records close codes when an active socket emits error before close', async () => {
@@ -3692,11 +3877,17 @@ describe('WebSocket transport', () => {
     closeAllCachedWebSockets();
   });
 
-  it('does not retry after response_id has been observed', async () => {
+  it('does not retry after response output has started', async () => {
     const { WebSocketCtor, instances } = makeWebSocketCtor([
       (socket) => {
         socket.emit('message', {
           data: JSON.stringify({ type: 'response.created', response: { id: 'resp_mid' } }),
+        });
+        socket.emit('message', {
+          data: JSON.stringify({
+            type: 'response.output_item.added',
+            item: { type: 'message', id: 'msg_mid' },
+          }),
         });
         socket.emit('close', { code: 1006 });
       },
@@ -4973,5 +5164,80 @@ describe('transparent provider patching', () => {
 
     expect(originalStreamSimple).not.toHaveBeenCalled();
     expect(events.map((event) => event.type)).toEqual(['start', 'error']);
+  });
+
+  it('falls back to SSE when auto WebSocket closes after response.created before output', async () => {
+    const settings = normalizeSettings({
+      patch: { enabled: true, providerModels: ['facade/gpt-5*'] },
+      websocket: { retries: 0, firstEventTimeoutMs: 0 },
+    });
+    class FakeWebSocket {
+      readyState = 1;
+      listeners = new Map<string, Set<(event: any) => void>>();
+
+      constructor() {
+        queueMicrotask(() => this.emit('open', {}));
+      }
+
+      send() {
+        queueMicrotask(() => {
+          this.emit('message', {
+            data: JSON.stringify({ type: 'response.created', response: { id: 'resp_preoutput' } }),
+          });
+          this.emit('close', { code: 1006 });
+        });
+      }
+
+      close() {
+        this.readyState = 3;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void) {
+        const listeners = this.listeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      removeEventListener(type: string, listener: (event: any) => void) {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      emit(type: string, event: any) {
+        for (const listener of this.listeners.get(type) ?? []) listener(event);
+      }
+    }
+    wsModuleMock.WebSocketCtor = FakeWebSocket as any;
+    const originalMessage = makeAssistantMessage(makeModel({ id: 'gpt-5.5' }));
+    const originalStreamSimple = vi.fn((_model: Model<any>, _context: any, _options?: any) =>
+      streamFromEvents(
+        { type: 'start', partial: originalMessage },
+        { type: 'done', reason: 'stop', message: originalMessage },
+      ),
+    );
+    const provider = wrapProviderForWebSocketResponses(
+      {
+        api: 'openai-responses',
+        stream: originalStreamSimple as any,
+        streamSimple: originalStreamSimple,
+      },
+      () => settings,
+      createOpenAIWebSocketResponsesStream(() => settings),
+    );
+
+    try {
+      const events = await collectStreamEvents(
+        provider.streamSimple(
+          makeModel({ id: 'gpt-5.5' }),
+          { messages: [] },
+          { transport: 'auto' },
+        ),
+      );
+
+      expect(originalStreamSimple).toHaveBeenCalledTimes(1);
+      expect(events.map((event) => event.type)).toEqual(['start', 'done']);
+    } finally {
+      wsModuleMock.WebSocketCtor = undefined;
+      closeAllCachedWebSockets();
+    }
   });
 });

@@ -109,6 +109,15 @@ export function formatWebSocketRetryNotification(
   event: WebSocketLifecycleEvent,
 ): string | undefined {
   if (event.type !== 'retry') return undefined;
+  if (event.reason === 'midstream_error_before_output') {
+    return [
+      'Responses WS: stream closed after response_id but before output; retrying fresh WebSocket request.',
+      event.responseId ? `Response_id=${shortResponseId(event.responseId)}.` : undefined,
+      `Attempt ${event.nextAttempt}/${event.maxAttempts}.`,
+    ]
+      .filter((part): part is string => typeof part === 'string')
+      .join(' ');
+  }
   const source = event.connectionId ? `${event.connectionId} returned` : 'API returned';
   return [
     `Responses WS: ${source} response.failed without details; retrying fresh with previous_response_id=${shortResponseId(event.previousResponseId)}.`,

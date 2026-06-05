@@ -1,9 +1,15 @@
+import { parse as partialParse } from 'partial-json';
+
 import { shortHash, writeDebugLog } from './debug.ts';
 import type { OpenAIWebSocketResponsesSettings } from './settings.ts';
 import type { TransportDiagnosticsCollector } from './transport-diagnostics.ts';
 import { cloneHeadersWithTraceparent, type TraceContext } from './trace-context.ts';
 import type { ResponsesBody } from './body.ts';
 import { isRetryableEmptyResponseFailure } from './responses-adapter.ts';
+import {
+  isReplayUnsafeResponsesEvent,
+  shouldRetryResponsesTransportErrorBeforeOutput,
+} from '../../shared/openai-responses-retry';
 import {
   isRetryableResponsesErrorFrame,
   previousResponseNotFoundMessage,
@@ -113,8 +119,10 @@ export type WebSocketLifecycleEvent =
     }
   | {
       type: 'retry';
-      reason: 'empty_response_failed_without_details';
-      action: 'retry_fresh_websocket_same_previous_response_id';
+      reason: 'empty_response_failed_without_details' | 'midstream_error_before_output';
+      action:
+        | 'retry_fresh_websocket_same_previous_response_id'
+        | 'retry_fresh_websocket_before_output';
       attempt: number;
       nextAttempt: number;
       maxAttempts: number;
@@ -122,7 +130,7 @@ export type WebSocketLifecycleEvent =
       connectionId?: string;
       cacheKeyHash?: string;
       responseId?: string;
-      previousResponseId: string;
+      previousResponseId?: string;
     }
   | {
       type: 'fallback';
@@ -466,6 +474,17 @@ function decodeImmediateData(data: unknown): string | undefined {
   return undefined;
 }
 
+function parsePartialWebSocketEvent(text: string): Record<string, any> | undefined {
+  try {
+    const parsed = partialParse(text);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, any>)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function decodeData(data: unknown): Promise<string> {
   const immediate = decodeImmediateData(data);
   if (immediate !== undefined) return immediate;
@@ -786,6 +805,8 @@ export async function runWebSocketResponse(
     );
     let responseId: string | undefined;
     let eventCount = 0;
+    let replayUnsafeEventSeen = false;
+    let firstReplayUnsafeEventType: string | undefined;
     let acquired: Awaited<ReturnType<typeof acquireSocket>> | undefined;
     let keepSocket = true;
     try {
@@ -821,6 +842,8 @@ export async function runWebSocketResponse(
       await new Promise<void>((resolve, reject) => {
         let terminal = false;
         let settled = false;
+        let streamCommitted = false;
+        let pendingReplaySafeEvents: Record<string, any>[] = [];
         let processing = Promise.resolve();
         let firstEventTimer: ReturnType<typeof setTimeout> | undefined;
         let idleTimer: ReturnType<typeof setTimeout> | undefined;
@@ -843,6 +866,21 @@ export async function runWebSocketResponse(
           settled = true;
           cleanup();
           reject(error);
+        };
+        const queueEventForProcessing = (event: Record<string, any>, terminalEvent: boolean) => {
+          processing = processing.then(async () => {
+            await onEvent(event, acquired!.connection);
+            if (terminalEvent) resolveAfterProcessing();
+          });
+          void processing.catch(rejectNow);
+        };
+        const commitAndQueueEvent = (event: Record<string, any>, terminalEvent: boolean) => {
+          const eventsToDeliver = streamCommitted ? [event] : [...pendingReplaySafeEvents, event];
+          pendingReplaySafeEvents = [];
+          streamCommitted = true;
+          for (const item of eventsToDeliver) {
+            queueEventForProcessing(item, terminalEvent && item === event);
+          }
         };
         const armFirstEventTimer = () => {
           if (firstEventTimer) clearTimeout(firstEventTimer);
@@ -877,14 +915,19 @@ export async function runWebSocketResponse(
             );
           }
         };
-        const handleParsedMessage = (parsed: Record<string, any>) => {
-          const previousResponseError = previousResponseNotFoundMessage(parsed);
+        const noteEventMetadata = (
+          parsed: Record<string, any>,
+          options: { partial?: boolean } = {},
+        ): { replayUnsafeEvent: boolean; terminalEvent: boolean } => {
+          const previousResponseError = options.partial
+            ? undefined
+            : previousResponseNotFoundMessage(parsed);
           if (previousResponseError) throw new PreviousResponseNotFoundError(previousResponseError);
           if (eventCount === 0) {
             clearFirstEventTimer();
             request.diagnostics?.record(
               'first_event',
-              { attempt, eventType: parsed.type },
+              { attempt, eventType: parsed.type, partial: options.partial ? true : undefined },
               { significant: false },
             );
           }
@@ -901,10 +944,29 @@ export async function runWebSocketResponse(
           } else {
             responseId = nextResponseId ?? responseId;
           }
-          if (responseId && isRetryableResponsesErrorFrame(parsed)) {
+          if (!options.partial && responseId && isRetryableResponsesErrorFrame(parsed)) {
             throw new RetryableResponseError(responsesErrorFrameMessage(parsed));
           }
-          const terminalEvent = isTerminalEvent(parsed.type);
+          const replayUnsafeEvent = isReplayUnsafeResponsesEvent(parsed);
+          if (replayUnsafeEvent && !replayUnsafeEventSeen) {
+            replayUnsafeEventSeen = true;
+            firstReplayUnsafeEventType = parsed.type;
+            request.diagnostics?.set({ replayUnsafeEventSeen, firstReplayUnsafeEventType });
+            request.diagnostics?.record(
+              'response_output_started',
+              { attempt, responseId, eventCount, eventType: parsed.type },
+              { significant: false },
+            );
+          }
+          if (options.partial) {
+            request.diagnostics?.record(
+              'partial_json_event',
+              { attempt, responseId, eventCount, eventType: parsed.type },
+              { significant: false },
+            );
+            return { replayUnsafeEvent, terminalEvent: false };
+          }
+          const terminalEvent = isTerminalEvent(parsed.type) || parsed.type === 'error';
           if (terminalEvent) {
             terminal = true;
             if (!shouldKeepSocketAfterTerminalEvent(parsed)) keepSocket = false;
@@ -914,25 +976,41 @@ export async function runWebSocketResponse(
               { significant: parsed.type !== 'response.completed' },
             );
           }
-          processing = processing.then(async () => {
-            await onEvent(parsed, acquired!.connection);
-            if (terminalEvent) resolveAfterProcessing();
-          });
-          void processing.catch(rejectNow);
+          return { replayUnsafeEvent, terminalEvent };
+        };
+        const handleInvalidJsonMessage = (text: string, error: unknown) => {
+          const partialEvent = parsePartialWebSocketEvent(text);
+          if (partialEvent) noteEventMetadata(partialEvent, { partial: true });
+          throw error;
+        };
+        const handleParsedMessage = (parsed: Record<string, any>) => {
+          const { replayUnsafeEvent, terminalEvent } = noteEventMetadata(parsed);
+          if (!streamCommitted && !replayUnsafeEvent && !terminalEvent) {
+            pendingReplaySafeEvents.push(parsed);
+            return;
+          }
+          commitAndQueueEvent(parsed, terminalEvent);
         };
         const onMessage = (messageEvent: MessageEvent) => {
           try {
             armIdleTimer();
             const immediate = decodeImmediateData(messageEvent.data);
             if (immediate !== undefined) {
-              handleParsedMessage(JSON.parse(immediate) as Record<string, any>);
+              try {
+                handleParsedMessage(JSON.parse(immediate) as Record<string, any>);
+              } catch (error) {
+                handleInvalidJsonMessage(immediate, error);
+              }
               return;
             }
             void (async () => {
               try {
-                handleParsedMessage(
-                  JSON.parse(await decodeData(messageEvent.data)) as Record<string, any>,
-                );
+                const text = await decodeData(messageEvent.data);
+                try {
+                  handleParsedMessage(JSON.parse(text) as Record<string, any>);
+                } catch (error) {
+                  handleInvalidJsonMessage(text, error);
+                }
               } catch (error) {
                 rejectNow(error);
               }
@@ -1048,6 +1126,8 @@ export async function runWebSocketResponse(
       acquired.release(keepSocket);
       request.diagnostics?.set({
         eventCount,
+        replayUnsafeEventSeen,
+        firstReplayUnsafeEventType,
         responseIdSeen: !!responseId,
         websocketResponseId: responseId,
       });
@@ -1133,9 +1213,52 @@ export async function runWebSocketResponse(
       }
       request.diagnostics?.set({
         eventCount,
+        replayUnsafeEventSeen,
+        firstReplayUnsafeEventType,
         responseIdSeen: !!responseId,
         websocketResponseId: responseId,
       });
+      const retryBeforeOutputResponseId =
+        error instanceof WebSocketMidstreamError ? error.responseId : responseId;
+      if (
+        (error instanceof WebSocketMidstreamError || error instanceof RetryableResponseError) &&
+        shouldRetryResponsesTransportErrorBeforeOutput({
+          attempt,
+          maxRetries: request.settings.websocket.retries,
+          responseId: retryBeforeOutputResponseId,
+          replayUnsafeEventSeen,
+          aborted: request.signal?.aborted,
+        })
+      ) {
+        request.diagnostics?.record('ws_retry', {
+          attempt: attempt + 1,
+          previousAttempt: attempt,
+          reason: 'midstream_error_before_output',
+          action: 'retry_fresh_websocket_before_output',
+          eventCount,
+          responseId: retryBeforeOutputResponseId,
+        });
+        emitLifecycle(request.onLifecycleEvent, {
+          type: 'retry',
+          reason: 'midstream_error_before_output',
+          action: 'retry_fresh_websocket_before_output',
+          attempt: attempt + 1,
+          nextAttempt: attempt + 2,
+          maxAttempts: request.settings.websocket.retries + 1,
+          urlHash: shortHash(request.url) ?? '',
+          connectionId: acquired?.connection.connectionId,
+          cacheKeyHash: request.cacheKey ? shortHash(request.cacheKey) : undefined,
+          responseId: retryBeforeOutputResponseId,
+        });
+        writeDebugLog(request.settings, 'websocket.before_output.retry', {
+          attempt,
+          nextAttempt: attempt + 1,
+          cacheKeyHash: shortHash(request.cacheKey),
+          responseId: retryBeforeOutputResponseId,
+          eventCount,
+        });
+        continue;
+      }
       if (error instanceof RetryableResponseError && responseId) {
         request.diagnostics?.record('transport_error', {
           attempt,

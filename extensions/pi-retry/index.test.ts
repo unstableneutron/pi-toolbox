@@ -14,6 +14,17 @@ import {
 } from './index';
 import * as runtime from './runtime';
 
+const REPLAY_SAFE_WS_TRANSPORT_DIAGNOSTIC = {
+  type: 'openai_websocket_transport',
+  details: {
+    finalTransport: 'websocket',
+    outcome: 'transport_error',
+    responseIdSeen: true,
+    eventCount: 1,
+    replayUnsafeEventSeen: false,
+  },
+};
+
 const ENCRYPTED_CONTENT_ERROR =
   '{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"invalid_encrypted_content","message":"The encrypted content for item rs_123 could not be verified. Reason: Encrypted content could not be decrypted or parsed."}}';
 
@@ -152,6 +163,39 @@ describe('pi-retry extra provider classification', () => {
         stopReason: 'error',
         errorMessage: 'todo entry is locked by another session',
       }),
+    ).toBe(false);
+  });
+
+  test('classifies replay-safe websocket Responses transport failures as retryable', () => {
+    expect(
+      isExtraRetryableAssistantError(
+        makeAssistantErrorMessage('WebSocket closed before response.completed code=1006', {
+          api: 'openai-websocket-responses',
+          diagnostics: [REPLAY_SAFE_WS_TRANSPORT_DIAGNOSTIC],
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  test('does not classify websocket Responses transport failures after output as retryable', () => {
+    expect(
+      isExtraRetryableAssistantError(
+        makeAssistantErrorMessage('WebSocket closed before response.completed code=1006', {
+          api: 'openai-websocket-responses',
+          content: [{ type: 'text', text: 'partial' }],
+          diagnostics: [
+            {
+              type: 'openai_websocket_transport',
+              details: {
+                finalTransport: 'websocket',
+                outcome: 'transport_error',
+                replayUnsafeEventSeen: true,
+                firstReplayUnsafeEventType: 'response.output_text.delta',
+              },
+            },
+          ],
+        }),
+      ),
     ).toBe(false);
   });
 });
@@ -2529,6 +2573,88 @@ describe('pi-retry extension runtime', () => {
             expectedLeafId: 'user-1',
             replacement: {
               supersedesEntryId: 'assistant-refusal-1',
+              parentEntryId: 'user-1',
+            },
+          }),
+        }),
+        options: { triggerTurn: true },
+      },
+    ]);
+  });
+
+  test('turn_end queues replay-safe websocket transport fallback as retryable error', async () => {
+    vi.useFakeTimers();
+
+    const fakeModule = makeFakeAgentSessionModule();
+    const harness = await createExtensionHarness(async () => fakeModule);
+    let leafId = 'assistant-ws-error-1';
+
+    harness.ctx.isIdle = () => true;
+    harness.ctx.hasPendingMessages = () => false;
+    harness.ctx.sessionManager.branch = vi.fn((nextLeafId: string) => {
+      leafId = nextLeafId;
+    });
+    harness.ctx.sessionManager.getLeafId = () => leafId;
+    harness.ctx.sessionManager.getEntries = () => [
+      {
+        id: 'user-1',
+        type: 'message',
+        message: { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+      },
+      {
+        id: 'assistant-ws-error-1',
+        parentId: 'user-1',
+        type: 'message',
+        message: makeAssistantErrorMessage('WebSocket closed before response.completed code=1006', {
+          api: 'openai-websocket-responses',
+          diagnostics: [REPLAY_SAFE_WS_TRANSPORT_DIAGNOSTIC],
+        }),
+      },
+    ];
+
+    const message = makeAssistantErrorMessage(
+      'WebSocket closed before response.completed code=1006',
+      {
+        api: 'openai-websocket-responses',
+        diagnostics: [REPLAY_SAFE_WS_TRANSPORT_DIAGNOSTIC],
+      },
+    );
+
+    await getHandler(harness.handlers, 'turn_end')(
+      {
+        type: 'turn_end',
+        message,
+        toolResults: [],
+      },
+      harness.ctx,
+    );
+
+    expect(harness.ctx.sessionManager.branch).toHaveBeenCalledWith('user-1');
+    expect(harness.sendMessageCalls).toEqual([]);
+
+    await getHandler(harness.handlers, 'agent_end')(
+      {
+        type: 'agent_end',
+        willRetry: false,
+        messages: [message],
+      },
+      harness.ctx,
+    );
+
+    await vi.runAllTimersAsync();
+
+    expect(harness.sendMessageCalls).toEqual([
+      {
+        message: expect.objectContaining({
+          customType: 'pi-retry-recovery',
+          display: false,
+          details: expect.objectContaining({
+            kind: 'retryable-error',
+            messageKind: 'continue',
+            attempt: 1,
+            expectedLeafId: 'user-1',
+            replacement: {
+              supersedesEntryId: 'assistant-ws-error-1',
               parentEntryId: 'user-1',
             },
           }),
