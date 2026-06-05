@@ -20,7 +20,7 @@ import {
   headersFingerprint,
   setContinuation,
 } from './continuation-cache.ts';
-import { buildRequestHeaders, buildWebSocketHeaders } from './headers.ts';
+import { buildRequestHeaders, buildWebSocketHeaders, headersDiagnosticFields } from './headers.ts';
 import { resolveRequestProfile } from './profile.ts';
 import { recoverResponseByRetrieve } from './retrieve-recovery.ts';
 import {
@@ -242,6 +242,7 @@ export function createOpenAIWebSocketResponsesStream(
             typeof body.previous_response_id === 'string' ? body.previous_response_id : undefined,
           url,
           logicalTraceId: logicalTrace?.traceId,
+          ...headersDiagnosticFields(websocketHeaders),
         });
         transportDiagnostics.set({
           continuation: continuationRequest.decision,

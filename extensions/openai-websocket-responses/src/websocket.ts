@@ -789,6 +789,7 @@ export async function runWebSocketResponse(
     enableIdleKeepalive?: boolean;
     diagnostics?: TransportDiagnosticsCollector;
     trace?: WebSocketTraceOptions;
+    attemptMode?: 'full_replay';
   },
   onEvent: (
     event: Record<string, any>,
@@ -800,11 +801,19 @@ export async function runWebSocketResponse(
   if (request.trace?.logicalTraceId)
     request.diagnostics?.set({ logicalTraceId: request.trace.logicalTraceId });
   for (let attempt = 0; attempt <= request.settings.websocket.retries; attempt++) {
+    const currentAttemptMode =
+      request.attemptMode ??
+      (typeof request.body.previous_response_id === 'string'
+        ? retriedEmptyResponseFailure
+          ? 'retry_delta'
+          : 'delta'
+        : 'full_context');
     request.diagnostics?.set({ attempts: attempt + 1 });
     request.diagnostics?.record(
       'ws_attempt_start',
       {
         attempt,
+        mode: currentAttemptMode,
         hasPreviousResponseId: typeof request.body.previous_response_id === 'string',
         inputItems: request.body.input?.length ?? 0,
       },
@@ -839,7 +848,7 @@ export async function runWebSocketResponse(
       });
       request.diagnostics?.record(
         'ws_acquire',
-        { attempt, ...acquired.connection },
+        { attempt, mode: currentAttemptMode, ...acquired.connection },
         { significant: false },
       );
       if (acquired.connection.cacheStatus === 'stale') {
@@ -1195,6 +1204,7 @@ export async function runWebSocketResponse(
             ...request,
             body: request.fallbackBodyOnPreviousResponseNotFound,
             fallbackBodyOnPreviousResponseNotFound: undefined,
+            attemptMode: 'full_replay',
           },
           onEvent,
         );
@@ -1286,6 +1296,10 @@ export async function runWebSocketResponse(
       ) {
         retriedEmptyResponseFailure = true;
         const retryResponseId = error.responseId ?? responseId;
+        request.diagnostics?.set({
+          recoveryPath: 'delta_retry',
+          recoveryAttemptCount: 2,
+        });
         request.diagnostics?.record('ws_retry', {
           attempt: attempt + 1,
           previousAttempt: attempt,
@@ -1329,6 +1343,10 @@ export async function runWebSocketResponse(
           typeof request.body.previous_response_id === 'string'
             ? request.body.previous_response_id
             : undefined;
+        request.diagnostics?.set({
+          recoveryPath: 'delta_retry_full_replay',
+          recoveryAttemptCount: 3,
+        });
         request.diagnostics?.record('empty_response_failed_full_fallback', {
           attempt,
           action: 'replay_full_conversation_without_previous_response_id',
@@ -1362,6 +1380,7 @@ export async function runWebSocketResponse(
             ...request,
             body: request.fallbackBodyOnPreviousResponseNotFound,
             fallbackBodyOnPreviousResponseNotFound: undefined,
+            attemptMode: 'full_replay',
           },
           onEvent,
         );

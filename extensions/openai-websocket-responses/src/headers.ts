@@ -1,9 +1,13 @@
 import type { Api, Model, SimpleStreamOptions } from '@earendil-works/pi-ai';
 
+import { headersFingerprint } from './continuation-cache.ts';
+import { shortHash } from './debug.ts';
 import { resolveRequestProfile, type ResolvedRequestProfile } from './profile.ts';
 
 const JWT_CLAIM_PATH = 'https://api.openai.com/auth';
 const OPENAI_BETA_RESPONSES_WEBSOCKETS = 'responses_websockets=2026-02-06';
+const AUTH_DIAGNOSTIC_HEADER =
+  /^(?:authorization|proxy-authorization|x-api-key|api-key|chatgpt-account-id|cookie)$/i;
 
 interface RuntimeOsModule {
   platform(): string;
@@ -107,4 +111,20 @@ export function buildWebSocketHeaders(
     headers.set('session-id', requestId);
   }
   return headers;
+}
+
+export interface HeadersDiagnosticFields {
+  headersHash: string;
+  authHeaders?: string[];
+  authHeadersHash?: string;
+}
+
+export function headersDiagnosticFields(headers: Headers): HeadersDiagnosticFields {
+  const entries = [...headers.entries()].sort(([a], [b]) => a.localeCompare(b));
+  const authEntries = entries.filter(([key]) => AUTH_DIAGNOSTIC_HEADER.test(key));
+  return {
+    headersHash: shortHash(headersFingerprint(headers)) ?? '',
+    authHeaders: authEntries.length > 0 ? authEntries.map(([key]) => key.toLowerCase()) : undefined,
+    authHeadersHash: authEntries.length > 0 ? shortHash(JSON.stringify(authEntries)) : undefined,
+  };
 }

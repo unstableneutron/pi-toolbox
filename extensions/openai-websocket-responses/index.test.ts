@@ -44,7 +44,11 @@ import {
   setContinuation,
   type ContinuationState,
 } from './src/continuation-cache.ts';
-import { buildRequestHeaders, buildWebSocketHeaders } from './src/headers.ts';
+import {
+  buildRequestHeaders,
+  buildWebSocketHeaders,
+  headersDiagnosticFields,
+} from './src/headers.ts';
 import { shouldPatchModel } from './src/match.ts';
 import { resolveRequestProfile } from './src/profile.ts';
 import {
@@ -717,6 +721,26 @@ describe('URL and header helpers', () => {
     traced.set('traceparent', createTraceContext().traceparent);
 
     expect(headersFingerprint(traced)).toBe(headersFingerprint(base));
+  });
+
+  it('summarizes auth headers for diagnostics without exposing raw values', () => {
+    const headers = new Headers({
+      authorization: 'Bearer secret-token',
+      'x-api-key': 'secret-key',
+      'x-extra': 'safe',
+      traceparent: createTraceContext().traceparent,
+    });
+    const diagnostics = headersDiagnosticFields(headers);
+
+    expect(diagnostics).toEqual({
+      headersHash: shortHash(headersFingerprint(headers)),
+      authHeaders: ['authorization', 'x-api-key'],
+      authHeadersHash: expect.any(String),
+    });
+    expect(JSON.stringify(diagnostics)).not.toContain('secret');
+    expect(headersDiagnosticFields(new Headers({ 'x-extra': 'safe' }))).toEqual({
+      headersHash: expect.any(String),
+    });
   });
 });
 
@@ -4052,6 +4076,12 @@ describe('WebSocket transport', () => {
     const output = makeAssistantMessage(model);
     const stream = createAssistantMessageEventStream();
     const processor = createResponsesEventProcessor(output, stream, model);
+    const url = 'wss://example.test/responses';
+    const headers = new Headers({ authorization: 'Bearer direct-secret' });
+    const diagnostics = createTransportDiagnostics({
+      url,
+      ...headersDiagnosticFields(headers),
+    });
     const fullBody = {
       model: 'gpt',
       input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'full' }] }],
@@ -4059,8 +4089,8 @@ describe('WebSocket transport', () => {
 
     const result = await runWebSocketResponse(
       {
-        url: 'wss://example.test/responses',
-        headers: new Headers(),
+        url,
+        headers,
         body: {
           ...fullBody,
           previous_response_id: 'resp_old',
@@ -4072,6 +4102,7 @@ describe('WebSocket transport', () => {
         settings: normalizeSettings({ websocket: { retries: 1, idleTimeoutMs: 25 } }),
         WebSocketCtor,
         onLifecycleEvent: (event) => lifecycle.push(event),
+        diagnostics,
       },
       (event) => processor.apply(event),
     );
@@ -4108,6 +4139,28 @@ describe('WebSocket transport', () => {
         mode: 'full_replay',
         responseId: 'resp_full',
       }),
+    );
+    const diagnostic = diagnostics.toDiagnostic({
+      outcome: 'empty_response_failed_full_fallback_succeeded',
+      finalTransport: 'websocket',
+    });
+    expect(diagnostic?.details).toMatchObject({
+      headersHash: shortHash(headersFingerprint(headers)),
+      authHeaders: ['authorization'],
+      authHeadersHash: expect.any(String),
+      recoveryPath: 'delta_retry_full_replay',
+      recoveryAttemptCount: 3,
+      finalAttemptMode: 'full_replay',
+    });
+    expect(JSON.stringify(diagnostic?.details)).not.toContain('direct-secret');
+    expect(diagnostic?.details?.timeline).toContainEqual(
+      expect.objectContaining({ type: 'ws_attempt_start', mode: 'delta' }),
+    );
+    expect(diagnostic?.details?.timeline).toContainEqual(
+      expect.objectContaining({ type: 'ws_attempt_start', mode: 'retry_delta' }),
+    );
+    expect(diagnostic?.details?.timeline).toContainEqual(
+      expect.objectContaining({ type: 'ws_attempt_start', mode: 'full_replay' }),
     );
   });
 });
@@ -4179,17 +4232,22 @@ describe('provider transport diagnostics', () => {
       const streamFactory = createOpenAIWebSocketResponsesStream(() => settings);
       const model = makeModel();
       const context = { messages: [{ role: 'user', content: 'hello', timestamp: 1 }] } as any;
+      const options = { apiKey: 'test-token', sessionId: 'session-full' } as any;
+      const profile = resolveRequestProfile(model, settings);
+      const websocketHeaders = buildWebSocketHeaders(model, options, profile);
 
-      const events = await collectStreamEvents(
-        streamFactory(model, context, { apiKey: 'test-token', sessionId: 'session-full' } as any),
-      );
+      const events = await collectStreamEvents(streamFactory(model, context, options));
       const done = events.find((event) => event.type === 'done');
       const [diagnostic] = extractTransportDiagnostics(done?.message ?? {});
 
       expect(diagnostic?.details).toMatchObject({
         continuation: 'no_continuation',
         sentInputItems: 1,
+        headersHash: shortHash(headersFingerprint(websocketHeaders)),
+        authHeaders: ['authorization'],
+        authHeadersHash: expect.any(String),
       });
+      expect(JSON.stringify(diagnostic?.details)).not.toContain('test-token');
       expect(diagnostic?.details).not.toHaveProperty('fullInputItems');
       expect(diagnostic?.details).not.toHaveProperty('fullBytes');
     } finally {

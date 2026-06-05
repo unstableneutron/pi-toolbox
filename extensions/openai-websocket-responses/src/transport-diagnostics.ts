@@ -44,6 +44,9 @@ interface TransportDiagnosticsInit {
   url?: string;
   previousResponseId?: string;
   logicalTraceId?: string;
+  headersHash?: string;
+  authHeaders?: string[];
+  authHeadersHash?: string;
 }
 
 export interface TransportDiagnosticFields {
@@ -79,6 +82,12 @@ export interface TransportDiagnosticFields {
   connectionTraceparent?: string;
   connectionTraceId?: string;
   connectionSpanId?: string;
+  headersHash?: string;
+  authHeaders?: string[];
+  authHeadersHash?: string;
+  recoveryPath?: 'delta_retry' | 'delta_retry_full_replay' | 'full_replay';
+  recoveryAttemptCount?: number;
+  finalAttemptMode?: string;
 }
 
 export interface TransportDiagnosticsCollector {
@@ -194,6 +203,9 @@ export function createTransportDiagnostics(
     requestBytes: init.requestBytes,
     url: sanitizedUrl,
     logicalTraceId: init.logicalTraceId,
+    headersHash: init.headersHash,
+    authHeaders: init.authHeaders,
+    authHeadersHash: init.authHeadersHash,
   };
   const eventTypes = new Set<string>();
   let significant = false;
@@ -241,6 +253,7 @@ export function createTransportDiagnostics(
         fields.connectionTraceId = details.connectionTraceId;
       if (typeof details.connectionSpanId === 'string')
         fields.connectionSpanId = details.connectionSpanId;
+      if (typeof details.mode === 'string') fields.finalAttemptMode = details.mode;
     },
 
     set(nextFields) {
