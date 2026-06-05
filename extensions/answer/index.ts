@@ -29,6 +29,8 @@ import {
   wrapTextWithAnsi,
 } from '@earendil-works/pi-tui';
 
+import { hasTui } from '../shared/ui-mode';
+
 // Structured output format for question extraction
 interface ExtractedQuestion {
   question: string;
@@ -412,8 +414,7 @@ class QnAComponent implements Component {
 
 export default function (pi: ExtensionAPI) {
   const answerHandler = async (ctx: ExtensionContext) => {
-    if (!ctx.hasUI) {
-      ctx.ui.notify('answer requires interactive mode', 'error');
+    if (!hasTui(ctx)) {
       return;
     }
 

@@ -22,6 +22,7 @@ import { buildConversationSnapshot, buildRollingSummaryInput } from './conversat
 import { formatInlineRollingSummary, formatRollingSummaryMarkdown } from './rendering';
 import { readRollingSummarySidecar, writeRollingSummaryCurrent } from './sidecar';
 import { generateRollingSummary } from './unified-summary';
+import { hasTui } from '../shared/ui-mode';
 
 const DISABLE_ENV_VAR = 'PI_SMART_SESSIONS_DISABLED';
 const ENTRY_TYPE_WINDOW = 'smart-sessions/window-name';
@@ -699,7 +700,7 @@ export default function smartSessionsExtension(pi: ExtensionAPI) {
   // handler becomes a no-op; /rename and /summarize commands stay registered
   // below for explicit invocation.
   pi.on('session_start', async (event, ctx) => {
-    if (!ctx.hasUI) return;
+    if (!hasTui(ctx)) return;
     clearPendingExitSummary();
     cancelBackgroundSummary();
     clearInlineSummaryWidget(ctx);
@@ -715,32 +716,32 @@ export default function smartSessionsExtension(pi: ExtensionAPI) {
   });
 
   pi.on('before_agent_start', async (_event, ctx) => {
-    if (!ctx.hasUI) return;
+    if (!hasTui(ctx)) return;
     clearInlineSummaryWidget(ctx);
     cancelBackgroundSummary();
     void maybeRefreshBeforeAgentStart(ctx);
   });
 
   pi.on('agent_start', async (_event, ctx) => {
-    if (!ctx.hasUI) return;
+    if (!hasTui(ctx)) return;
     clearInlineSummaryWidget(ctx);
     cancelBackgroundSummary();
     startBackgroundSummaryRun();
   });
 
   pi.on('turn_end', async (_event, ctx) => {
-    if (!ctx.hasUI) return;
+    if (!hasTui(ctx)) return;
     noteBackgroundSummaryTurn();
   });
 
   pi.on('agent_end', async (_event, ctx) => {
-    if (!ctx.hasUI) return;
+    if (!hasTui(ctx)) return;
     finishBackgroundSummaryRun();
     scheduleBackgroundSummary(ctx);
   });
 
   pi.on('session_shutdown', async (_event, ctx) => {
-    if (!ctx.hasUI) return;
+    if (!hasTui(ctx)) return;
     cancelBackgroundSummary();
     queueExitSummary(ctx);
   });

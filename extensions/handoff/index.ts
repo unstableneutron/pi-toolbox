@@ -21,6 +21,8 @@ import {
   serializeConversation,
 } from '@earendil-works/pi-coding-agent';
 
+import { hasTui } from '../shared/ui-mode';
+
 const SYSTEM_PROMPT = `You are a context transfer assistant. Given a conversation history and the user's goal for a new thread, generate a focused prompt that:
 
 1. Summarizes relevant context from the conversation (decisions made, approaches taken, key findings)
@@ -47,8 +49,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand('handoff', {
     description: 'Transfer context to a new focused session',
     handler: async (args, ctx) => {
-      if (!ctx.hasUI) {
-        ctx.ui.notify('handoff requires interactive mode', 'error');
+      if (!hasTui(ctx)) {
         return;
       }
 

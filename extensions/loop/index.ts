@@ -13,6 +13,8 @@ import { compact } from '@earendil-works/pi-coding-agent';
 import { Container, type SelectItem, SelectList, Text } from '@earendil-works/pi-tui';
 import { DynamicBorder } from '@earendil-works/pi-coding-agent';
 
+import { hasTui } from '../shared/ui-mode';
+
 type LoopMode = 'tests' | 'custom' | 'self';
 
 type LoopStateData = {
@@ -347,31 +349,28 @@ export default function loopExtension(pi: ExtensionAPI): void {
     handler: async (args, ctx) => {
       let nextState = parseArgs(args);
       if (!nextState) {
-        if (!ctx.hasUI) {
-          ctx.ui.notify('Usage: /loop tests | /loop custom <condition> | /loop self', 'warning');
-          return;
-        }
+        if (!hasTui(ctx)) return;
         nextState = await showLoopSelector(ctx);
       }
 
       if (!nextState) {
-        ctx.ui.notify('Loop cancelled', 'info');
+        if (hasTui(ctx)) ctx.ui.notify('Loop cancelled', 'info');
         return;
       }
 
       if (loopState.active) {
-        const confirm = ctx.hasUI
+        const confirm = hasTui(ctx)
           ? await ctx.ui.confirm('Replace active loop?', 'A loop is already active. Replace it?')
           : true;
         if (!confirm) {
-          ctx.ui.notify('Loop unchanged', 'info');
+          if (hasTui(ctx)) ctx.ui.notify('Loop unchanged', 'info');
           return;
         }
       }
 
       const summarizedState: LoopStateData = { ...nextState, summary: undefined, loopCount: 0 };
       setLoopState(summarizedState, ctx);
-      ctx.ui.notify('Loop active', 'info');
+      if (hasTui(ctx)) ctx.ui.notify('Loop active', 'info');
       triggerLoopPrompt(ctx);
 
       const mode = nextState.mode!;

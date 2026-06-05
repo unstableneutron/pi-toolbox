@@ -6,6 +6,7 @@ import {
 import { Key, matchesKey, truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
 
 import { registerExtensionEditorBehavior, type EditorBehavior } from '../shared/editor-behaviors';
+import { hasTui } from '../shared/ui-mode';
 
 /**
  * Verified pi APIs used by this single-file implementation:
@@ -587,14 +588,17 @@ export default function safeEscape(pi: ExtensionAPI) {
   if (!interactive) return;
 
   pi.on('session_start', async (event, ctx) => {
+    if (!hasTui(ctx)) return;
     resetSession(ctx, `session_start:${event.reason}`);
   });
 
   pi.on('session_shutdown', async (_event, ctx) => {
+    if (!hasTui(ctx)) return;
     resetSession(ctx, 'session_shutdown');
   });
 
   pi.on('input', async (event, ctx) => {
+    if (!hasTui(ctx)) return { action: 'continue' as const };
     currentCtx = ctx;
     if (event.source === 'interactive') {
       state.submitPendingUntil = Date.now() + 1000;
@@ -614,6 +618,7 @@ export default function safeEscape(pi: ExtensionAPI) {
   });
 
   pi.on('before_agent_start', async (_event, ctx) => {
+    if (!hasTui(ctx)) return;
     currentCtx = ctx;
     state.submitPendingUntil = 0;
     state.agentActive = true;
@@ -623,6 +628,7 @@ export default function safeEscape(pi: ExtensionAPI) {
   });
 
   pi.on('agent_start', async (_event, ctx) => {
+    if (!hasTui(ctx)) return;
     currentCtx = ctx;
     state.submitPendingUntil = 0;
     state.agentActive = true;
@@ -632,6 +638,7 @@ export default function safeEscape(pi: ExtensionAPI) {
   });
 
   pi.on('agent_end', async (_event, ctx) => {
+    if (!hasTui(ctx)) return;
     currentCtx = ctx;
     state.submitPendingUntil = 0;
     state.agentActive = false;
@@ -641,6 +648,7 @@ export default function safeEscape(pi: ExtensionAPI) {
   });
 
   pi.on('message_start', async (event, ctx) => {
+    if (!hasTui(ctx)) return;
     currentCtx = ctx;
     touch();
     if (classifyStreamingMessage(event.message.role as 'user' | 'assistant' | 'toolResult')) {
@@ -651,6 +659,7 @@ export default function safeEscape(pi: ExtensionAPI) {
   });
 
   pi.on('message_update', async (event, ctx) => {
+    if (!hasTui(ctx)) return;
     currentCtx = ctx;
     touch();
     if (classifyStreamingMessage(event.message.role as 'user' | 'assistant' | 'toolResult')) {
@@ -661,6 +670,7 @@ export default function safeEscape(pi: ExtensionAPI) {
   });
 
   pi.on('message_end', async (event, ctx) => {
+    if (!hasTui(ctx)) return;
     currentCtx = ctx;
     touch();
     if (classifyStreamingMessage(event.message.role as 'user' | 'assistant' | 'toolResult')) {
@@ -671,6 +681,7 @@ export default function safeEscape(pi: ExtensionAPI) {
   });
 
   pi.on('tool_execution_start', async (event, ctx) => {
+    if (!hasTui(ctx)) return;
     currentCtx = ctx;
     touch();
     state.activeToolCalls.add(event.toolCallId);
@@ -679,6 +690,7 @@ export default function safeEscape(pi: ExtensionAPI) {
   });
 
   pi.on('tool_execution_end', async (event, ctx) => {
+    if (!hasTui(ctx)) return;
     currentCtx = ctx;
     touch();
     state.activeToolCalls.delete(event.toolCallId);

@@ -44,6 +44,14 @@ function createHarness() {
 }
 
 describe('handoff', () => {
+  test('returns without touching UI outside TUI mode', async () => {
+    const { commands } = createHarness();
+
+    await expect(
+      commands.get('handoff')?.('continue elsewhere', { mode: 'print', hasUI: false }),
+    ).resolves.toBeUndefined();
+  });
+
   test('generates handoff prompt from compacted session context', async () => {
     completeMock.mockResolvedValue({
       stopReason: 'stop',
@@ -102,6 +110,7 @@ describe('handoff', () => {
 
     const ctx = {
       hasUI: true,
+      mode: 'tui',
       model: { provider: 'anthropic', id: 'claude-haiku-4-5' },
       modelRegistry: {
         getApiKeyAndHeaders: vi.fn().mockResolvedValue({ ok: true, apiKey: 'key', headers: {} }),

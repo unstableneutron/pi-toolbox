@@ -133,6 +133,7 @@ function createHarness(options?: {
   unavailableModels?: string[];
   initialEntries?: Array<Record<string, unknown>>;
   hasUI?: boolean;
+  mode?: string;
   sessionName?: string | undefined;
   sessionId?: string;
 }) {
@@ -238,6 +239,7 @@ function createHarness(options?: {
 
   const ctx = {
     hasUI: options?.hasUI ?? false,
+    mode: options?.mode ?? (options?.hasUI ? 'tui' : 'print'),
     model: { provider: 'gust', id: 'gpt-5.4' },
     modelRegistry: {
       find: vi.fn().mockImplementation((provider: string, id: string) => {
@@ -343,6 +345,17 @@ describe('smart-sessions rolling summary', () => {
     delete process.env.HERDR_SOCKET_PATH;
     delete process.env.HERDR_PANE_ID;
     vi.restoreAllMocks();
+  });
+
+  test('session UI hooks are disabled in RPC mode', async () => {
+    const harness = createHarness({ hasUI: true, mode: 'rpc' });
+
+    await harness.getHandler('session_start')(
+      { type: 'session_start', reason: 'startup' },
+      harness.ctx,
+    );
+
+    expect(harness.ctx.ui.setWidget).not.toHaveBeenCalled();
   });
 
   test('does not report a Herdr pane title outside Herdr', async () => {

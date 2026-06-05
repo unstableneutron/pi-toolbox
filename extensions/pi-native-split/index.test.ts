@@ -117,6 +117,7 @@ function createCommandHarness(execResult: { code: number; stdout?: string; stder
   const ctx = {
     cwd: tempDir,
     hasUI: true,
+    mode: 'tui',
     isIdle: () => true,
     model: { provider: 'openai', id: 'gpt-5', api: 'openai-responses' },
     modelRegistry: {
@@ -154,6 +155,23 @@ function createCommandHarness(execResult: { code: number; stdout?: string; stder
     tempDir,
     userEntry,
   };
+}
+
+function createMinimalCommandHarness(env: NodeJS.ProcessEnv = { TERM_PROGRAM: 'ghostty' } as any) {
+  const registerCommand = vi.fn();
+  const pi = {
+    appendEntry: vi.fn(),
+    exec: vi.fn(),
+    on: vi.fn(),
+    setLabel: vi.fn(),
+    registerCommand: vi.fn(
+      (name: string, options: { handler: (args: string, ctx: any) => Promise<void> }) => {
+        registerCommand(name, options);
+      },
+    ),
+  } as any;
+
+  return { pi, registerCommand, env };
 }
 
 function readJsonl(file: string): any[] {
@@ -196,6 +214,19 @@ describe('detectTerminal', () => {
   test('returns undefined for unsupported terminals', () => {
     expect(detectTerminal({ TERM_PROGRAM: 'iTerm.app' } as NodeJS.ProcessEnv)).toBeUndefined();
   });
+});
+
+describe('pi-native-split mode guards', () => {
+  test.each(['split-fork', 'split-resume', 'split-handoff', 'split-tree'])(
+    '%s returns without touching UI outside TUI mode',
+    async (commandName) => {
+      const harness = createMinimalCommandHarness();
+      await registerPiNativeSplit(harness.pi, harness.env);
+      const handler = getRegisteredHandler(harness.registerCommand, commandName);
+
+      await expect(handler('goal', { mode: 'print', hasUI: false })).resolves.toBeUndefined();
+    },
+  );
 });
 
 describe('command registration', () => {
@@ -481,6 +512,7 @@ exit 0
       { type: 'session_start' },
       {
         hasUI: true,
+        mode: 'tui',
         sessionManager: {
           getEntry: (id: string) =>
             id === 'leaf'
@@ -561,6 +593,7 @@ exit 0
       { type: 'session_start' },
       {
         hasUI: true,
+        mode: 'tui',
         sessionManager: {
           getEntry: (id: string) =>
             id === 'leaf'
@@ -1035,7 +1068,7 @@ describe('split commands', () => {
     await handler('', harness.ctx);
 
     expect(harness.exec).not.toHaveBeenCalled();
-    expect(harness.notify).toHaveBeenCalledWith('split-fork requires interactive mode', 'error');
+    expect(harness.notify).not.toHaveBeenCalled();
   });
 
   test('split-fork launches Herdr by splitting the focused pane above Herdr mobile width', async () => {
@@ -1441,7 +1474,7 @@ describe('split commands', () => {
     await handler('', harness.ctx);
 
     expect(harness.exec).not.toHaveBeenCalled();
-    expect(harness.notify).toHaveBeenCalledWith('split-tree requires interactive mode', 'error');
+    expect(harness.notify).not.toHaveBeenCalled();
   });
 
   test('split-tree fails when there is no persisted current session', async () => {

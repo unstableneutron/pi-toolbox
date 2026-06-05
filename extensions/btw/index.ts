@@ -29,6 +29,8 @@ import {
   type TUI,
 } from '@earendil-works/pi-tui';
 
+import { hasTui } from '../shared/ui-mode';
+
 const BTW_ENTRY_TYPE = 'btw-thread-entry';
 const BTW_RESET_TYPE = 'btw-thread-reset';
 
@@ -690,7 +692,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   async function ensureOverlay(ctx: ExtensionCommandContext | ExtensionContext): Promise<void> {
-    if (!ctx.hasUI) {
+    if (!hasTui(ctx)) {
       return;
     }
 
@@ -850,7 +852,7 @@ export default function (pi: ExtensionAPI) {
 
   async function closeOverlayFlow(ctx: ExtensionContext | ExtensionCommandContext): Promise<void> {
     dismissOverlay();
-    if (!ctx.hasUI) {
+    if (!hasTui(ctx)) {
       return;
     }
 
@@ -967,6 +969,8 @@ export default function (pi: ExtensionAPI) {
     description:
       'Open a simple BTW side-chat popover. `/btw <text>` asks immediately, `/btw` opens the side thread.',
     handler: async (args, ctx) => {
+      if (!hasTui(ctx)) return;
+
       const question = args.trim();
 
       if (!question) {
@@ -1000,10 +1004,12 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on('session_start', async (_event, ctx) => {
+    if (!hasTui(ctx)) return;
     await restoreThread(ctx);
   });
 
   pi.on('session_tree', async (_event, ctx) => {
+    if (!hasTui(ctx)) return;
     await restoreThread(ctx);
   });
 

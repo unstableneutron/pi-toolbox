@@ -17,6 +17,8 @@ import os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { hasTui } from '../shared/ui-mode';
+
 const GHOSTTY_SPLIT_SCRIPT = `on run argv
 	set targetCwd to item 1 of argv
 	set startupInput to item 2 of argv
@@ -1099,8 +1101,7 @@ async function runSplitForkForTerminal(
   env: NodeJS.ProcessEnv,
   pendingParentMarkers: PendingParentMarker[],
 ): Promise<void> {
-  if (!ctx.hasUI) {
-    ctx.ui.notify('split-fork requires interactive mode', 'error');
+  if (!hasTui(ctx)) {
     return;
   }
 
@@ -1162,8 +1163,7 @@ async function runSplitResumeForTerminal(
   ctx: ExtensionCommandContext,
   env: NodeJS.ProcessEnv,
 ): Promise<void> {
-  if (!ctx.hasUI) {
-    ctx.ui.notify('split-resume requires interactive mode', 'error');
+  if (!hasTui(ctx)) {
     return;
   }
 
@@ -1187,8 +1187,7 @@ async function runSplitHandoffForTerminal(
   env: NodeJS.ProcessEnv,
   pendingParentMarkers: PendingParentMarker[],
 ): Promise<void> {
-  if (!ctx.hasUI) {
-    ctx.ui.notify('split-handoff requires interactive mode', 'error');
+  if (!hasTui(ctx)) {
     return;
   }
 
@@ -1254,8 +1253,7 @@ async function runSplitTreeForTerminal(
   ctx: ExtensionCommandContext,
   env: NodeJS.ProcessEnv,
 ): Promise<void> {
-  if (!ctx.hasUI) {
-    ctx.ui.notify('split-tree requires interactive mode', 'error');
+  if (!hasTui(ctx)) {
     return;
   }
 

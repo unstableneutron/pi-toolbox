@@ -382,6 +382,7 @@ describe('safeEscape extension registration', () => {
 
       const ctx = {
         hasUI: true,
+        mode: 'tui',
         isIdle: () => true,
         hasPendingMessages: () => false,
         abort: vi.fn(),
@@ -400,6 +401,66 @@ describe('safeEscape extension registration', () => {
       expect(setEditorComponent).toHaveBeenCalledWith(expect.any(Function));
     });
   });
+
+  test('session_start does not wrap the editor component outside TUI mode', async () => {
+    await withInteractiveTTY(async () => {
+      const { pi, handlers } = createExtensionHarness();
+      const setEditorComponent = vi.fn();
+      const getEditorComponent = vi.fn(() => undefined);
+
+      safeEscape(pi as any);
+
+      const ctx = {
+        hasUI: true,
+        mode: 'rpc',
+        isIdle: () => true,
+        hasPendingMessages: () => false,
+        abort: vi.fn(),
+        ui: {
+          notify: vi.fn(),
+          setWidget: vi.fn(),
+          setStatus: vi.fn(),
+          setEditorComponent,
+          getEditorComponent,
+        },
+      };
+
+      await handlers.get('session_start')?.({}, ctx);
+
+      expect(setEditorComponent).not.toHaveBeenCalled();
+    });
+  });
+
+  test('session_start does not touch UI cleanup outside TUI mode', async () => {
+    await withInteractiveTTY(async () => {
+      const { pi, handlers } = createExtensionHarness();
+      const setWidget = vi.fn();
+      const setStatus = vi.fn();
+
+      safeEscape(pi as any);
+
+      await handlers.get('session_start')?.(
+        { type: 'session_start', reason: 'startup' },
+        {
+          hasUI: true,
+          mode: 'rpc',
+          isIdle: () => true,
+          hasPendingMessages: () => false,
+          abort: vi.fn(),
+          ui: {
+            notify: vi.fn(),
+            setWidget,
+            setStatus,
+            setEditorComponent: vi.fn(),
+            getEditorComponent: vi.fn(() => undefined),
+          },
+        },
+      );
+
+      expect(setWidget).not.toHaveBeenCalled();
+      expect(setStatus).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe('safeEscape integration through the registered behavior', () => {
@@ -413,6 +474,7 @@ describe('safeEscape integration through the registered behavior', () => {
 
       const ctx = {
         hasUI: true,
+        mode: 'tui',
         isIdle: () => false,
         hasPendingMessages: () => false,
         abort: vi.fn(),
@@ -453,6 +515,7 @@ describe('safeEscape integration through the registered behavior', () => {
 
       const ctx = {
         hasUI: true,
+        mode: 'tui',
         isIdle: () => idle,
         hasPendingMessages: () => false,
         abort: vi.fn(),
@@ -487,6 +550,7 @@ describe('safeEscape integration through the registered behavior', () => {
 
       const ctx = {
         hasUI: true,
+        mode: 'tui',
         isIdle: () => idle,
         hasPendingMessages: () => false,
         abort: vi.fn(),
@@ -521,6 +585,7 @@ describe('safeEscape integration through the registered behavior', () => {
 
       const ctx = {
         hasUI: true,
+        mode: 'tui',
         isIdle: () => idle,
         hasPendingMessages: () => false,
         abort: vi.fn(),
@@ -551,6 +616,7 @@ describe('safeEscape integration through the registered behavior', () => {
 
       const ctx = {
         hasUI: true,
+        mode: 'tui',
         isIdle: () => false,
         hasPendingMessages: () => false,
         abort: vi.fn(),
@@ -596,6 +662,7 @@ describe('safeEscape integration through the registered behavior', () => {
 
       const ctx = {
         hasUI: true,
+        mode: 'tui',
         isIdle: () => false,
         hasPendingMessages: () => false,
         abort: vi.fn(),
@@ -624,6 +691,7 @@ describe('safeEscape integration through the registered behavior', () => {
       const setWidget = vi.fn();
       const ctx = {
         hasUI: true,
+        mode: 'tui',
         isIdle: () => false,
         hasPendingMessages: () => false,
         abort: vi.fn(),
@@ -659,6 +727,7 @@ describe('safeEscape integration through the registered behavior', () => {
       const setWidget = vi.fn();
       const ctx = {
         hasUI: true,
+        mode: 'tui',
         isIdle: () => false,
         hasPendingMessages: () => false,
         abort: vi.fn(),
@@ -692,6 +761,7 @@ describe('safeEscape integration through the registered behavior', () => {
       const setWidget = vi.fn();
       const ctx = {
         hasUI: true,
+        mode: 'tui',
         isIdle: () => idle,
         hasPendingMessages: () => false,
         abort: vi.fn(),

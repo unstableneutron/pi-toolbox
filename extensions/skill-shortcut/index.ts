@@ -5,6 +5,8 @@ import { fuzzyFilter } from '@earendil-works/pi-tui';
 import { readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
+import { hasTui } from '../shared/ui-mode';
+
 type SkillCommand = {
   name: string;
   description?: string;
@@ -287,6 +289,7 @@ export default function skillShortcut(pi: ExtensionAPI) {
   }
 
   pi.on('session_start', (_event, ctx) => {
+    if (!hasTui(ctx)) return;
     refreshSkillList();
     ctx.ui.addAutocompleteProvider((current) =>
       createSkillAutocompleteProvider(current, () => skillCommands),

@@ -5,6 +5,8 @@ import {
 } from '@earendil-works/pi-coding-agent';
 import type { EditorComponent } from '@earendil-works/pi-tui';
 
+import { hasTui } from './ui-mode';
+
 /**
  * Composable editor input-hook bridge.
  *
@@ -351,7 +353,7 @@ export function registerExtensionEditorBehavior(
   let restoreEditorComponent: (() => void) | undefined;
 
   pi.on('session_start', (_event, ctx) => {
-    if (disposed || !ctx.hasUI || typeof ctx.ui.getEditorComponent !== 'function') return;
+    if (disposed || !hasTui(ctx) || typeof ctx.ui.getEditorComponent !== 'function') return;
 
     const previous = ctx.ui.getEditorComponent();
     if ((previous as WrappedEditorFactory | undefined)?.[WRAPPED_EDITOR_FACTORY_SYMBOL]) return;

@@ -47,6 +47,8 @@ function createExtensionHarness() {
   };
 
   const ctx = {
+    hasUI: true,
+    mode: 'tui',
     ui: {
       addAutocompleteProvider,
       setEditorComponent,
@@ -339,6 +341,18 @@ describe('extension registration', () => {
     await harness.handlers.get('session_start')?.({ type: 'session_start' }, harness.ctx);
 
     expect(harness.addAutocompleteProvider).toHaveBeenCalledTimes(1);
+  });
+
+  test('session_start skips autocomplete outside TUI mode', async () => {
+    const harness = createExtensionHarness();
+
+    skillShortcut(harness.pi as any);
+    await harness.handlers.get('session_start')?.(
+      { type: 'session_start' },
+      { ...harness.ctx, mode: 'rpc' },
+    );
+
+    expect(harness.addAutocompleteProvider).not.toHaveBeenCalled();
   });
 
   test('session_start does not install a custom editor component', async () => {
