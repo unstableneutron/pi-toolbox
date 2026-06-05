@@ -834,6 +834,111 @@ describe('whimsical extension lifecycle', () => {
     ]);
   });
 
+  test('clears prior UI working message when the next session has no UI', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(1_000));
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+
+    const handlers = new Map<string, (event: any, ctx: any) => Promise<void> | void>();
+    const pi = {
+      on(event: string, handler: (event: any, ctx: any) => Promise<void> | void) {
+        handlers.set(event, handler);
+      },
+    } as any;
+
+    whimsical(pi);
+
+    const workingMessages: Array<string | undefined> = [];
+    const uiCtx = {
+      hasUI: true,
+      model: makeModel(),
+      ui: {
+        theme: makeTheme(),
+        setWorkingMessage(message?: string) {
+          workingMessages.push(message);
+        },
+        setStatus() {},
+      },
+    } as any;
+
+    await handlers.get('agent_start')?.({ type: 'agent_start' }, uiCtx);
+    await handlers.get('turn_start')?.({ type: 'turn_start', turnIndex: 0 }, uiCtx);
+    await handlers.get('before_provider_request')?.({ type: 'before_provider_request' }, uiCtx);
+
+    expect(vi.getTimerCount()).toBe(1);
+
+    await handlers.get('session_start')?.(
+      { type: 'session_start', reason: 'headless' },
+      {
+        hasUI: false,
+      },
+    );
+
+    expect(vi.getTimerCount()).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    expect(workingMessages).toEqual([
+      'Schlepping...',
+      `Schlepping... · via ${hyperlink('https://proxy.example/v1', 'proxy.example')}`,
+      undefined,
+    ]);
+  });
+
+  test('clears prior UI status when the next session has no UI', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(1_000));
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+
+    const handlers = new Map<string, (event: any, ctx: any) => Promise<void> | void>();
+    const pi = {
+      on(event: string, handler: (event: any, ctx: any) => Promise<void> | void) {
+        handlers.set(event, handler);
+      },
+    } as any;
+
+    whimsical(pi);
+
+    const statuses: Array<string | undefined> = [];
+    const uiCtx = {
+      hasUI: true,
+      model: makeModel(),
+      ui: {
+        theme: makeTokenTheme(),
+        setWorkingMessage() {},
+        setStatus(_key: string, text?: string) {
+          statuses.push(text);
+        },
+      },
+    } as any;
+
+    await handlers.get('agent_start')?.({ type: 'agent_start' }, uiCtx);
+    await handlers.get('turn_start')?.({ type: 'turn_start', turnIndex: 0 }, uiCtx);
+    await handlers.get('before_provider_request')?.({ type: 'before_provider_request' }, uiCtx);
+
+    vi.setSystemTime(new Date(2_500));
+    await handlers.get('agent_end')?.(
+      {
+        type: 'agent_end',
+        messages: [makeAssistantErrorMessage('Error: 400 The encrypted content failed.')],
+      },
+      uiCtx,
+    );
+
+    expect(statuses.at(-1)).toBe(
+      '<error>× 400 Error</error> <dim>in</dim> <accent>1.5s</accent> <muted>via proxy.example</muted>',
+    );
+
+    await handlers.get('session_start')?.(
+      { type: 'session_start', reason: 'headless' },
+      {
+        hasUI: false,
+      },
+    );
+
+    expect(statuses.at(-1)).toBeUndefined();
+  });
+
   test('clears the timer ticker on session shutdown', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(1_000));

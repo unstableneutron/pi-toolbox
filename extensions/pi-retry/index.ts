@@ -902,6 +902,10 @@ function refusalRecoveryDisabled(): boolean {
   return '1' === value || 'true' === value || 'yes' === value;
 }
 
+function isSubagentChildProcess(): boolean {
+  return process.env.PI_SUBAGENT_CHILD === '1';
+}
+
 function maybePatchSessionManager(
   SessionManager: { prototype?: Record<PropertyKey, any> } | undefined,
 ): void {
@@ -1387,7 +1391,7 @@ export function createPiRetryExtension(
         return;
       }
 
-      if (refusalRecoveryDisabled()) {
+      if (!ctx.hasUI || isSubagentChildProcess() || refusalRecoveryDisabled()) {
         return;
       }
 

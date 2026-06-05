@@ -225,7 +225,13 @@ export default function (pi: ExtensionAPI) {
   const clearStatus = () => {
     if (statusTimer) clearTimeout(statusTimer);
     statusTimer = undefined;
-    currentCtx?.ui.setStatus(WEBSOCKET_STATUS_KEY, undefined);
+    if (currentCtx?.hasUI) {
+      currentCtx.ui.setStatus(WEBSOCKET_STATUS_KEY, undefined);
+    }
+  };
+  const setCurrentContext = (ctx: ExtensionContext | undefined) => {
+    clearStatus();
+    currentCtx = ctx?.hasUI ? ctx : undefined;
   };
   const onLifecycleEvent = (event: WebSocketLifecycleEvent) => {
     pi.events.emit(WEBSOCKET_LIFECYCLE_EVENT, event);
@@ -269,7 +275,7 @@ export default function (pi: ExtensionAPI) {
   registerOpenAIWebSocketResponsesPatchRefreshHooks(pi, installApiPatches);
 
   pi.on('session_start', (_event, ctx) => {
-    currentCtx = ctx;
+    setCurrentContext(ctx);
     idleKeepaliveActivity.setContext(ctx);
   });
 

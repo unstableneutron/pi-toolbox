@@ -47,6 +47,7 @@ function makeAssistantErrorMessage(
 afterEach(() => {
   vi.restoreAllMocks();
   delete process.env.PI_RETRY_REFUSAL_RECOVERY_DISABLED;
+  delete process.env.PI_SUBAGENT_CHILD;
   resetPiRetryTestState();
 });
 
@@ -2093,6 +2094,94 @@ describe('pi-retry extension runtime', () => {
     const harness = await createExtensionHarness(async () => fakeModule);
 
     expect(harness.handlers.has('session_switch')).toBe(false);
+  });
+
+  test('session_start does not auto-recover stranded tool results inside subagent children', async () => {
+    process.env.PI_SUBAGENT_CHILD = '1';
+    const fakeModule = makeFakeAgentSessionModule();
+    const harness = await createExtensionHarness(async () => fakeModule);
+
+    harness.ctx.sessionManager.getLeafId = () => 'tool-result-read';
+    harness.ctx.sessionManager.getEntries = () => [
+      {
+        id: 'user-1',
+        type: 'message',
+        message: { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+      },
+      {
+        id: 'assistant-tool-use',
+        parentId: 'user-1',
+        type: 'message',
+        message: {
+          role: 'assistant',
+          stopReason: 'toolUse',
+          content: [{ type: 'toolCall', id: 'call_read|provider-id-1', name: 'read' }],
+        },
+      },
+      {
+        id: 'tool-result-read',
+        parentId: 'assistant-tool-use',
+        type: 'message',
+        message: {
+          role: 'toolResult',
+          toolCallId: 'call_read|provider-id-1',
+          content: [{ type: 'text', text: 'file contents' }],
+        },
+      },
+    ];
+    harness.ctx.ui.confirm = vi.fn().mockResolvedValue(true);
+
+    await getHandler(harness.handlers, 'session_start')(
+      { type: 'session_start', reason: 'startup' },
+      harness.ctx,
+    );
+
+    expect(harness.ctx.ui.confirm).not.toHaveBeenCalled();
+    expect(harness.sendMessageCalls).toEqual([]);
+  });
+
+  test('session_start does not auto-recover stranded tool results without UI', async () => {
+    const fakeModule = makeFakeAgentSessionModule();
+    const harness = await createExtensionHarness(async () => fakeModule);
+
+    harness.ctx.hasUI = false;
+    harness.ctx.sessionManager.getLeafId = () => 'tool-result-read';
+    harness.ctx.sessionManager.getEntries = () => [
+      {
+        id: 'user-1',
+        type: 'message',
+        message: { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+      },
+      {
+        id: 'assistant-tool-use',
+        parentId: 'user-1',
+        type: 'message',
+        message: {
+          role: 'assistant',
+          stopReason: 'toolUse',
+          content: [{ type: 'toolCall', id: 'call_read|provider-id-1', name: 'read' }],
+        },
+      },
+      {
+        id: 'tool-result-read',
+        parentId: 'assistant-tool-use',
+        type: 'message',
+        message: {
+          role: 'toolResult',
+          toolCallId: 'call_read|provider-id-1',
+          content: [{ type: 'text', text: 'file contents' }],
+        },
+      },
+    ];
+    harness.ctx.ui.confirm = vi.fn().mockResolvedValue(true);
+
+    await getHandler(harness.handlers, 'session_start')(
+      { type: 'session_start', reason: 'startup' },
+      harness.ctx,
+    );
+
+    expect(harness.ctx.ui.confirm).not.toHaveBeenCalled();
+    expect(harness.sendMessageCalls).toEqual([]);
   });
 
   test('clears bound status and unregisters the patched session on session shutdown', async () => {

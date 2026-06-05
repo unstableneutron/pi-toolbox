@@ -971,6 +971,7 @@ export default function (pi: ExtensionAPI) {
   let workingMessageTicker: ReturnType<typeof setInterval> | undefined;
   let lastWorkingMessage: string | undefined;
   let lastStatusText: string | undefined;
+  let lastUiCtx: StatusUIContext | undefined;
   let workingMessageCtx: StatusUIContext | undefined;
   const minWhimsyColumns = resolveMinWhimsyColumns();
 
@@ -990,19 +991,22 @@ export default function (pi: ExtensionAPI) {
     workingMessageCtx = undefined;
   };
 
-  const clearStatus = (ctx: StatusUIContext): void => {
-    if (!ctx.hasUI || lastStatusText === undefined) {
+  const clearStatus = (ctx?: StatusUIContext): void => {
+    const targetCtx = ctx ?? lastUiCtx;
+    if (!targetCtx?.hasUI || lastStatusText === undefined) {
       return;
     }
 
     lastStatusText = undefined;
-    ctx.ui.setStatus(STATUS_KEY, undefined);
+    targetCtx.ui.setStatus(STATUS_KEY, undefined);
   };
 
   const setStatus = (ctx: StatusUIContext, text: string | undefined): void => {
     if (!ctx.hasUI) {
       return;
     }
+
+    lastUiCtx = ctx;
 
     if (text === undefined) {
       clearStatus(ctx);
@@ -1034,6 +1038,8 @@ export default function (pi: ExtensionAPI) {
     if (!ctx.hasUI || !currentWhimsy) {
       return;
     }
+
+    lastUiCtx = ctx;
 
     const whimsy = shouldShowWhimsy(process.stdout.columns, minWhimsyColumns)
       ? currentWhimsy
@@ -1074,10 +1080,11 @@ export default function (pi: ExtensionAPI) {
     lastWorkingMessage = undefined;
   };
 
-  const resetWorkingMessage = (ctx: StatusUIContext): void => {
+  const resetWorkingMessage = (ctx?: StatusUIContext): void => {
+    const targetCtx = ctx ?? lastUiCtx;
     clearState();
-    if (ctx.hasUI) {
-      ctx.ui.setWorkingMessage();
+    if (targetCtx?.hasUI) {
+      targetCtx.ui.setWorkingMessage();
     }
   };
 
@@ -1089,7 +1096,13 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on('agent_start', async (_event, ctx) => {
-    if (!ctx.hasUI) return;
+    if (!ctx.hasUI) {
+      resetWorkingMessage();
+      clearStatus();
+      lastUiCtx = undefined;
+      return;
+    }
+    lastUiCtx = ctx;
     clearStatus(ctx);
     clearState();
     agentStartedAt = Date.now();
@@ -1139,14 +1152,25 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on('session_start', async (_event, ctx) => {
-    if (!ctx.hasUI) return;
+    if (!ctx.hasUI) {
+      resetWorkingMessage();
+      clearStatus();
+      lastUiCtx = undefined;
+      return;
+    }
+    if (lastUiCtx && lastUiCtx !== ctx) {
+      resetWorkingMessage(lastUiCtx);
+      clearStatus(lastUiCtx);
+    }
+    lastUiCtx = ctx;
     resetWorkingMessage(ctx);
     clearStatus(ctx);
   });
 
   pi.on('session_shutdown', async (_event, ctx) => {
-    if (!ctx.hasUI) return;
-    resetWorkingMessage(ctx);
-    clearStatus(ctx);
+    const targetCtx = ctx.hasUI ? ctx : lastUiCtx;
+    resetWorkingMessage(targetCtx);
+    clearStatus(targetCtx);
+    lastUiCtx = undefined;
   });
 }
