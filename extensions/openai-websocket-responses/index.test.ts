@@ -24,9 +24,7 @@ vi.mock('ws', () => ({
 
 import {
   createIdleKeepaliveActivityTracker,
-  formatWebSocketFallbackNotification,
-  formatWebSocketRecoveryNotification,
-  formatWebSocketRetryNotification,
+  formatWebSocketFailureNotification,
   formatWebSocketStatus,
   IDLE_KEEPALIVE_ACTIVITY_WINDOW_MS,
   installOpenAIWebSocketResponsesApiPatches,
@@ -3665,9 +3663,9 @@ describe('WebSocket transport', () => {
     ).toBe('Responses WS: recovered on ws#1294 · full conversation replay');
   });
 
-  it('formats websocket retry notifications as concise recovery timeline messages', () => {
+  it('formats websocket retry/fallback/recovery as temporary status text', () => {
     expect(
-      formatWebSocketRetryNotification({
+      formatWebSocketStatus({
         type: 'retry',
         reason: 'empty_response_failed_without_details',
         action: 'retry_fresh_websocket_same_previous_response_id',
@@ -3679,14 +3677,9 @@ describe('WebSocket transport', () => {
         responseId: 'resp_0091b44445adddfa006a21cb87efc48194a1b3e5756122ca56',
         previousResponseId: 'resp_0091b44445adddfa006a21cb733a2081948de63f4cd8a9579b',
       }),
-    ).toBe(
-      'Responses WS: ws#1292 returned response.failed without details; retrying fresh with previous_response_id=resp_0091b…d8a9579b. Failed response_id=resp_0091b…6122ca56. Attempt 2/3.',
-    );
-  });
-
-  it('formats websocket fallback notifications as concise recovery timeline messages', () => {
+    ).toBe('Responses WS: retrying fresh WebSocket request · attempt 2/3');
     expect(
-      formatWebSocketFallbackNotification({
+      formatWebSocketStatus({
         type: 'fallback',
         reason: 'empty_response_failed_without_details',
         action: 'replay_full_conversation_without_previous_response_id',
@@ -3698,14 +3691,9 @@ describe('WebSocket transport', () => {
         responseId: 'resp_0091b44445adddfa006a21cb8aac448194b4aee1903076f4c2',
         previousResponseId: 'resp_0091b44445adddfa006a21cb733a2081948de63f4cd8a9579b',
       }),
-    ).toBe(
-      'Responses WS: retry on ws#1293 also returned response.failed; replaying full conversation. Failed response_id=resp_0091b…3076f4c2. Attempt 3/3.',
-    );
-  });
-
-  it('formats retrieve recovery notifications as concise recovery timeline messages', () => {
+    ).toBe('Responses WS: replaying full conversation · attempt 3/3');
     expect(
-      formatWebSocketRecoveryNotification({
+      formatWebSocketStatus({
         type: 'recovering',
         reason: 'midstream_error',
         action: 'retrieve_response_snapshot',
@@ -3713,8 +3701,20 @@ describe('WebSocket transport', () => {
         responseId: 'resp_0091b44445adddfa006a21cb8aac448194b4aee1903076f4c2',
         message: 'websocket: close 1006 (abnormal closure): unexpected EOF',
       }),
+    ).toBe('Responses WS: retrieving response snapshot for resp_0091b…3076f4c2');
+  });
+
+  it('formats unrecovered websocket failures as error notifications', () => {
+    expect(
+      formatWebSocketFailureNotification({
+        type: 'failed',
+        reason: 'recovery_failed',
+        urlHash: 'abc123',
+        responseId: 'resp_0091b44445adddfa006a21cb8aac448194b4aee1903076f4c2',
+        message: 'Retrieve recovery failed: response not found',
+      }),
     ).toBe(
-      'Responses WS: stream error after response_id=resp_0091b…3076f4c2; retrieving response snapshot. Reason: websocket: close 1006 (abnormal closure): unexpected EOF',
+      'Responses WS: recovery failed for response_id=resp_0091b…3076f4c2. Reason: Retrieve recovery failed: response not found',
     );
   });
 

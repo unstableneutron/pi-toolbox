@@ -124,6 +124,17 @@ function formatProviderError(error: unknown): string {
   return message;
 }
 
+function shouldEmitWebSocketRecoveryFailure(
+  diagnostics: TransportDiagnosticsCollector | undefined,
+): boolean {
+  return Boolean(
+    diagnostics?.hasEvent('ws_retry') ||
+    diagnostics?.hasEvent('previous_response_not_found_fallback') ||
+    diagnostics?.hasEvent('empty_response_failed_full_fallback') ||
+    diagnostics?.hasEvent('retrieve_recovery_start'),
+  );
+}
+
 type PersistUnattachedDiagnostic = (diagnostic: AssistantMessageDiagnostic) => void;
 
 function optionHeader(options: SimpleStreamOptions | undefined, name: string): string | undefined {
@@ -185,6 +196,7 @@ export function createOpenAIWebSocketResponsesStream(
     void (async () => {
       const output = createOutput(model);
       let cacheKey: string | undefined;
+      let websocketUrl: string | undefined;
       let transportDiagnostics: TransportDiagnosticsCollector | undefined;
       try {
         const settings = settingsProvider();
@@ -195,6 +207,7 @@ export function createOpenAIWebSocketResponsesStream(
         const requestHeaders = buildRequestHeaders(model, options, profile);
         const websocketHeaders = buildWebSocketHeaders(model, options, profile);
         const url = resolveWebSocketResponsesUrl(model, settings, websocketHeaders, profile);
+        websocketUrl = url;
         if (shouldWarnMissingCodexAccountId(profile, url, websocketHeaders)) {
           try {
             onMissingCodexAccountId?.({ url, model });
@@ -440,6 +453,17 @@ export function createOpenAIWebSocketResponsesStream(
           finalTransport: 'websocket',
           outcome: 'transport_error',
         });
+        if (shouldEmitWebSocketRecoveryFailure(transportDiagnostics)) {
+          onLifecycleEvent?.({
+            type: 'failed',
+            reason: 'recovery_failed',
+            urlHash: shortHash(websocketUrl) ?? '',
+            responseId:
+              output.responseId ??
+              (error instanceof WebSocketMidstreamError ? error.responseId : undefined),
+            message: output.errorMessage,
+          });
+        }
         pushFinalEvent(
           stream,
           { type: 'error', reason: output.stopReason, error: output },

@@ -93,6 +93,15 @@ export function formatWebSocketStatus(event: WebSocketLifecycleEvent): string | 
     if (!event.cacheKeyHash) return undefined;
     return `Responses WS: ${event.connectionId} connected · ${cacheStatusLabel(event.cacheStatus)}`;
   }
+  if (event.type === 'retry') {
+    return `Responses WS: retrying fresh WebSocket request · attempt ${event.nextAttempt}/${event.maxAttempts}`;
+  }
+  if (event.type === 'fallback') {
+    return `Responses WS: replaying full conversation · attempt ${event.nextAttempt}/${event.maxAttempts}`;
+  }
+  if (event.type === 'recovering') {
+    return `Responses WS: retrieving response snapshot for ${shortResponseId(event.responseId)}`;
+  }
   if (event.type === 'recovered') {
     const target = event.connectionId ? ` on ${event.connectionId}` : '';
     return `Responses WS: recovered${target} · ${recoveryModeLabel(event.mode)}`;
@@ -154,6 +163,18 @@ export function formatWebSocketRecoveryNotification(
   if (event.type !== 'recovering') return undefined;
   return [
     `Responses WS: stream error after response_id=${shortResponseId(event.responseId)}; retrieving response snapshot.`,
+    event.message ? `Reason: ${event.message}` : undefined,
+  ]
+    .filter((part): part is string => typeof part === 'string')
+    .join(' ');
+}
+
+export function formatWebSocketFailureNotification(
+  event: WebSocketLifecycleEvent,
+): string | undefined {
+  if (event.type !== 'failed') return undefined;
+  return [
+    `Responses WS: recovery failed${event.responseId ? ` for response_id=${shortResponseId(event.responseId)}` : ''}.`,
     event.message ? `Reason: ${event.message}` : undefined,
   ]
     .filter((part): part is string => typeof part === 'string')
@@ -244,14 +265,9 @@ export default function (pi: ExtensionAPI) {
   };
   const onLifecycleEvent = (event: WebSocketLifecycleEvent) => {
     pi.events.emit(WEBSOCKET_LIFECYCLE_EVENT, event);
-    const retryNotification = formatWebSocketRetryNotification(event);
-    if (retryNotification && currentCtx?.hasUI) currentCtx.ui.notify(retryNotification, 'warning');
-    const fallbackNotification = formatWebSocketFallbackNotification(event);
-    if (fallbackNotification && currentCtx?.hasUI)
-      currentCtx.ui.notify(fallbackNotification, 'warning');
-    const recoveryNotification = formatWebSocketRecoveryNotification(event);
-    if (recoveryNotification && currentCtx?.hasUI)
-      currentCtx.ui.notify(recoveryNotification, 'warning');
+    const failureNotification = formatWebSocketFailureNotification(event);
+    if (failureNotification && currentCtx?.hasUI)
+      currentCtx.ui.notify(failureNotification, 'error');
     const status = formatWebSocketStatus(event);
     if (!status || !currentCtx?.hasUI) return;
     currentCtx.ui.setStatus(WEBSOCKET_STATUS_KEY, status);

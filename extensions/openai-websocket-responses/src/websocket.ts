@@ -160,6 +160,13 @@ export type WebSocketLifecycleEvent =
       cacheKeyHash?: string;
       urlHash: string;
       responseId?: string;
+    }
+  | {
+      type: 'failed';
+      reason: 'recovery_failed';
+      urlHash: string;
+      responseId?: string;
+      message?: string;
     };
 
 export type WebSocketLifecycleObserver = (event: WebSocketLifecycleEvent) => void;
