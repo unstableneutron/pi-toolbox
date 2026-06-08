@@ -7,7 +7,6 @@ import { createConnection } from 'node:net';
 
 import { hasTui } from '../shared/ui-mode';
 
-const HERDR = process.env.HERDR;
 const HERDR_ENV = process.env.HERDR_ENV;
 const socketPath = process.env.HERDR_SOCKET_PATH;
 const paneId = process.env.HERDR_PANE_ID;
@@ -65,7 +64,7 @@ function enabled(): boolean {
 }
 
 function hasHerdrPaneEnv(): boolean {
-  return HERDR === '1' && Boolean(paneId);
+  return HERDR_ENV === '1' && Boolean(paneId);
 }
 
 function isSubagentChildProcess(): boolean {

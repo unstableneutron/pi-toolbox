@@ -157,12 +157,21 @@ afterEach(() => {
 });
 
 describe('herdr agent state extension', () => {
-  test('does not register handlers outside a HERDR=1 pane', async () => {
-    const pi = await loadHarness({ HERDR: '' });
+  test('does not register handlers without HERDR_ENV', async () => {
+    const pi = await loadHarness({ HERDR_ENV: '' });
 
     expect(pi.handlers.size).toBe(0);
     expect(pi.busHandlers.size).toBe(0);
     expect(pi.handlers.get('before_agent_start')).toBeUndefined();
+  });
+
+  test('registers handlers when pi-herdr environment is present without legacy HERDR', async () => {
+    const pi = await loadHarness({ HERDR: '' });
+
+    expect(pi.handlers.get('session_start')).toHaveLength(1);
+    expect(pi.handlers.get('agent_start')).toHaveLength(1);
+    expect(pi.handlers.get('agent_end')).toHaveLength(1);
+    expect(pi.busHandlers.get('herdr:blocked')).toHaveLength(1);
   });
 
   test('does not register handlers without a pane id', async () => {

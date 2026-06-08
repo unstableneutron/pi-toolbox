@@ -37,7 +37,7 @@ a submodule unless the user explicitly asks for that maintenance model.
 The extension module may load, but it should not register handlers unless all
 process-level Herdr pane checks pass:
 
-- `HERDR=1`
+- `HERDR_ENV=1`
 - `HERDR_PANE_ID` is set and non-empty
 - `PI_SUBAGENT_CHILD !== '1'`
 
@@ -52,7 +52,6 @@ patched by `scripts/pi-update-extensions.ts` and applied through
 
 Agent state IPC additionally requires Herdr's socket env:
 
-- `HERDR_ENV=1`
 - `HERDR_SOCKET_PATH` is set
 
 Keep tests covering these gates whenever this extension changes.
