@@ -421,6 +421,92 @@ export async function applyPiCodingAgentResolverPatch(
 }
 
 // ---------------------------------------------------------------------------
+// pi-herdr prompt guidance patch
+//
+// pi-herdr owns the `herdr` tool and is the right place for Herdr-specific
+// tool routing guidance. Keep the local herdr-agent-state fork focused on
+// pane state IPC, and patch pi-herdr's promptGuidelines after package updates.
+// ---------------------------------------------------------------------------
+
+const PI_HERDR_PACKAGE_NAME = '@ogulcancelik/pi-herdr';
+const PI_HERDR_INDEX_RELATIVE_PATH = 'index.ts';
+const PI_HERDR_PROMPT_GUIDANCE_PATCH_MARKER = '__pi_update_extensions:pi-herdr-prompt-guidance__';
+const PI_HERDR_PROMPT_GUIDANCE_TARGET =
+  '\t\t\t"Use `herdr` run for long-running processes in other panes instead of `bash`.",';
+
+const PI_HERDR_BASH_ROUTING_GUIDELINE =
+  'Use `bash` for quick one-shot commands; use `herdr` when a task needs a real pane: prompts, user input, sudo, persistent cwd/env, logs, sentinels, or follow-up commands.';
+const PI_HERDR_SUDO_SENTINEL_GUIDELINE =
+  'For sudo/user-input flows: split a fresh pane down (`pane_split`, `direction: "down"`), set `focus: true` only when the user must type now, verify readiness, run `sudo -v` with `SUDO_READY:<id>`, keep dependent commands in that pane (sudo auth is per pane/TTY), end with `TASK_DONE:<id>`, `watch` both exact sentinels, read final output, then `stop` one-off panes.';
+
+export function buildPiHerdrPromptGuidanceReplacement(): string {
+  return [
+    PI_HERDR_PROMPT_GUIDANCE_TARGET,
+    `\t\t\t// ${PI_HERDR_PROMPT_GUIDANCE_PATCH_MARKER}`,
+    `\t\t\t${JSON.stringify(PI_HERDR_BASH_ROUTING_GUIDELINE)},`,
+    `\t\t\t${JSON.stringify(PI_HERDR_SUDO_SENTINEL_GUIDELINE)},`,
+  ].join('\n');
+}
+
+function isPiHerdrPromptGuidanceSemanticallyPatched(content: string): boolean {
+  return (
+    content.includes(PI_HERDR_BASH_ROUTING_GUIDELINE) &&
+    content.includes(PI_HERDR_SUDO_SENTINEL_GUIDELINE)
+  );
+}
+
+export function isPiHerdrPromptGuidancePatchApplied(packageRoot: string): boolean {
+  const filePath = join(packageRoot, PI_HERDR_INDEX_RELATIVE_PATH);
+  if (!existsSync(filePath)) return false;
+  const content = readFileSync(filePath, 'utf8');
+  return (
+    content.includes(PI_HERDR_PROMPT_GUIDANCE_PATCH_MARKER) ||
+    isPiHerdrPromptGuidanceSemanticallyPatched(content)
+  );
+}
+
+export async function applyPiHerdrPromptGuidancePatch(
+  options: { dryRun?: boolean; packageRoot?: string; cwd?: string } = {},
+): Promise<ApplyPatchResult> {
+  const packageRoot =
+    options.packageRoot ?? findGlobalPackagePath(PI_HERDR_PACKAGE_NAME, { cwd: options.cwd });
+  if (!packageRoot) {
+    throw new Error(
+      `Could not locate installed ${PI_HERDR_PACKAGE_NAME} via configured package manager, aube, or pnpm`,
+    );
+  }
+
+  const version = getPackageVersion(packageRoot) ?? 'unknown';
+  const filePath = join(packageRoot, PI_HERDR_INDEX_RELATIVE_PATH);
+  if (!existsSync(filePath)) {
+    throw new Error(`pi-herdr@${version}: index file not found at ${filePath}`);
+  }
+
+  if (isPiHerdrPromptGuidancePatchApplied(packageRoot)) {
+    return { status: 'already-applied', packageRoot, version, patchPath: filePath };
+  }
+
+  const content = readFileSync(filePath, 'utf8');
+  if (!content.includes(PI_HERDR_PROMPT_GUIDANCE_TARGET)) {
+    throw new Error(
+      `pi-herdr@${version}: target text for pi-herdr prompt guidance patch not found at ${filePath}. ` +
+        `Upstream may have changed; update pi-update-extensions.ts.`,
+    );
+  }
+
+  if (options.dryRun) {
+    return { status: 'would-apply', packageRoot, version, patchPath: filePath };
+  }
+
+  const patched = content.replace(
+    PI_HERDR_PROMPT_GUIDANCE_TARGET,
+    buildPiHerdrPromptGuidanceReplacement(),
+  );
+  writeFileSync(filePath, patched);
+  return { status: 'applied', packageRoot, version, patchPath: filePath };
+}
+
+// ---------------------------------------------------------------------------
 // pi-mermaid compatibility patch
 //
 // Patches the installed pi-mermaid extension after `pi update --extensions`.
@@ -1665,6 +1751,25 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     } catch (error) {
       console.error(
         `Skipped pi-mermaid compatibility patch: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    try {
+      const herdrResult = await applyPiHerdrPromptGuidancePatch({
+        dryRun,
+        cwd: REPO_ROOT,
+        packageRoot: findInstalledNpmPackagePath(installedPackages, PI_HERDR_PACKAGE_NAME),
+      });
+      const label =
+        herdrResult.status === 'already-applied'
+          ? `Already applied: pi-herdr prompt guidance patch (${herdrResult.version})`
+          : herdrResult.status === 'would-apply'
+            ? `Would apply: pi-herdr prompt guidance patch (${herdrResult.version})`
+            : `${herdrResult.status}: pi-herdr prompt guidance patch (${herdrResult.version}) via ${herdrResult.patchPath}`;
+      console.log(label);
+    } catch (error) {
+      console.error(
+        `Skipped pi-herdr prompt guidance patch: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
 

@@ -89,12 +89,15 @@ class FakePi {
   }
 }
 
-function fakeContext(): any {
+function fakeContext(overrides: Record<string, any> = {}): any {
   return {
+    hasUI: true,
+    mode: 'tui',
     sessionManager: {
       getSessionFile: () => '/tmp/herdr-agent-state-test.jsonl',
       getSessionId: () => 'test-session-id',
     },
+    ...overrides,
   };
 }
 
@@ -108,6 +111,7 @@ function resetRecording(): void {
 async function loadHarness(env: Record<string, string> = {}): Promise<FakePi> {
   vi.resetModules();
   Object.assign(process.env, {
+    HERDR: '1',
     HERDR_ENV: '1',
     HERDR_SOCKET_PATH: '/tmp/herdr-agent-state.sock',
     HERDR_PANE_ID: 'p_1',
@@ -140,7 +144,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  delete process.env.HERDR;
   delete process.env.HERDR_ENV;
+  delete process.env.PI_SUBAGENT_CHILD;
   delete process.env.HERDR_SOCKET_PATH;
   delete process.env.HERDR_PANE_ID;
   delete process.env.HERDR_PI_IDLE_DEBOUNCE_MS;
@@ -151,6 +157,51 @@ afterEach(() => {
 });
 
 describe('herdr agent state extension', () => {
+  test('does not register handlers outside a HERDR=1 pane', async () => {
+    const pi = await loadHarness({ HERDR: '' });
+
+    expect(pi.handlers.size).toBe(0);
+    expect(pi.busHandlers.size).toBe(0);
+    expect(pi.handlers.get('before_agent_start')).toBeUndefined();
+  });
+
+  test('does not register handlers without a pane id', async () => {
+    const pi = await loadHarness({ HERDR: '1', HERDR_PANE_ID: '' });
+
+    expect(pi.handlers.size).toBe(0);
+    expect(pi.busHandlers.size).toBe(0);
+    expect(pi.handlers.get('before_agent_start')).toBeUndefined();
+  });
+
+  test('disables Herdr extension handlers in subagent child processes', async () => {
+    const pi = await loadHarness({ HERDR: '1', PI_SUBAGENT_CHILD: '1' });
+
+    expect(pi.handlers.size).toBe(0);
+    expect(pi.busHandlers.size).toBe(0);
+  });
+
+  test('does not register prompt guidance handlers', async () => {
+    const pi = await loadHarness({ HERDR: '1' });
+
+    expect(pi.handlers.get('before_agent_start')).toBeUndefined();
+  });
+
+  test('does not report agent state in non-TUI sessions', async () => {
+    const pi = await loadHarness();
+    const nonTuiContext = fakeContext({ hasUI: false, mode: 'json' });
+
+    await pi.emit('session_start', {}, nonTuiContext);
+    await flushSocketWork();
+    await pi.emit('agent_start', {}, nonTuiContext);
+    await flushSocketWork();
+    await pi.emit('agent_end', { messages: [] }, nonTuiContext);
+    await vi.advanceTimersByTimeAsync(20);
+    await flushSocketWork();
+
+    expect(recording.acceptedReports).toEqual([]);
+    expect(recording.requests).toEqual([]);
+  });
+
   test('reasserts working after a dropped active report', async () => {
     const pi = await loadHarness({ HERDR_PI_ACTIVE_HEARTBEAT_MS: '30' });
     recording.dropNextWorking = true;

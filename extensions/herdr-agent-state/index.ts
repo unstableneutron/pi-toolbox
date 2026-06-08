@@ -1,9 +1,13 @@
-// Forked from Herdr's managed Pi integration.
-// Keep this close to upstream so future Herdr updates are easy to diff.
+// Forked from Herdr's managed Pi integration:
+// https://github.com/ogulcancelik/herdr/blob/master/src/integration/assets/pi/herdr-agent-state.ts
+// Keep changes surgical and close to upstream so future Herdr updates are easy to diff.
 
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { createConnection } from 'node:net';
 
+import { hasTui } from '../shared/ui-mode';
+
+const HERDR = process.env.HERDR;
 const HERDR_ENV = process.env.HERDR_ENV;
 const socketPath = process.env.HERDR_SOCKET_PATH;
 const paneId = process.env.HERDR_PANE_ID;
@@ -58,6 +62,14 @@ let queuedState: QueuedState | undefined;
 
 function enabled(): boolean {
   return HERDR_ENV === '1' && Boolean(socketPath) && Boolean(paneId);
+}
+
+function hasHerdrPaneEnv(): boolean {
+  return HERDR === '1' && Boolean(paneId);
+}
+
+function isSubagentChildProcess(): boolean {
+  return process.env.PI_SUBAGENT_CHILD === '1';
 }
 
 function nextReportSeq(): number {
@@ -242,7 +254,13 @@ function formatDuration(ms: number): string {
 }
 
 export default function herdrAgentState(pi: ExtensionAPI): void {
-  if (!enabled()) {
+  if (!hasHerdrPaneEnv() || isSubagentChildProcess()) {
+    return;
+  }
+
+  const stateReportingEnabled = enabled();
+
+  if (!stateReportingEnabled) {
     return;
   }
 
@@ -265,6 +283,7 @@ export default function herdrAgentState(pi: ExtensionAPI): void {
   let idleTimer: Timer | undefined;
   let retryTimer: Timer | undefined;
   let activeHeartbeatTimer: Timer | undefined;
+  let stateReportingActive = false;
 
   function clearTimer(timer: Timer | undefined): void {
     if (timer) {
@@ -412,11 +431,23 @@ export default function herdrAgentState(pi: ExtensionAPI): void {
   }
 
   pi.on('session_start', (_event, ctx) => {
+    if (!hasTui(ctx)) {
+      stateReportingActive = false;
+      activeToolCalls.clear();
+      clearPendingTimers();
+      return;
+    }
+
+    stateReportingActive = true;
     updateSessionRef(ctx as SessionContextLike | undefined);
     publishState(true);
   });
 
   pi.events.on('herdr:blocked', (data: unknown) => {
+    if (!stateReportingActive) {
+      return;
+    }
+
     const blocked = data as BlockedEventLike | undefined;
     if (!blocked?.active) {
       blockedCount = Math.max(0, blockedCount - 1);
@@ -434,7 +465,11 @@ export default function herdrAgentState(pi: ExtensionAPI): void {
     publishState(true);
   });
 
-  pi.on('agent_start', () => {
+  pi.on('agent_start', (_event, ctx) => {
+    if (!stateReportingActive || !hasTui(ctx)) {
+      return;
+    }
+
     clearPendingTimers();
     clearFailureState();
     startActiveRun();
@@ -442,7 +477,11 @@ export default function herdrAgentState(pi: ExtensionAPI): void {
     publishState(true);
   });
 
-  pi.on('tool_execution_start', (event) => {
+  pi.on('tool_execution_start', (event, ctx) => {
+    if (!stateReportingActive || !hasTui(ctx)) {
+      return;
+    }
+
     const id = toolCallId(event as EventLike);
     if (id) {
       activeToolCalls.add(id);
@@ -454,7 +493,11 @@ export default function herdrAgentState(pi: ExtensionAPI): void {
     publishState(true);
   });
 
-  pi.on('tool_execution_end', (event) => {
+  pi.on('tool_execution_end', (event, ctx) => {
+    if (!stateReportingActive || !hasTui(ctx)) {
+      return;
+    }
+
     const id = toolCallId(event as EventLike);
     if (id) {
       activeToolCalls.delete(id);
@@ -462,7 +505,11 @@ export default function herdrAgentState(pi: ExtensionAPI): void {
     publishOrScheduleIdleAfterActivity();
   });
 
-  pi.on('agent_end', (event) => {
+  pi.on('agent_end', (event, ctx) => {
+    if (!stateReportingActive || !hasTui(ctx)) {
+      return;
+    }
+
     if (!agentActive) {
       // Pi can emit duplicate/late end events while auto-retry is already
       // holding the pane in Working. Do not let an unqualified duplicate end
@@ -482,6 +529,11 @@ export default function herdrAgentState(pi: ExtensionAPI): void {
   });
 
   pi.on('session_shutdown', async () => {
+    if (!stateReportingActive) {
+      return;
+    }
+
+    stateReportingActive = false;
     activeToolCalls.clear();
     clearPendingTimers();
     await releaseAgent();

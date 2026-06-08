@@ -7,9 +7,11 @@ import {
   applyPiCodexGoalPostCompactionUserFollowupPatch,
   applyPiCodingAgentResolverPatch,
   applyPiContinuousLearningPatch,
+  applyPiHerdrPromptGuidancePatch,
   applyPiMermaidPatch,
   applyPiSubagentsApplyPatchToolPatch,
   applyPiSubagentsIntercomDetachPatch,
+  buildPiHerdrPromptGuidanceReplacement,
   buildPiCodingAgentResolverReplacement,
   compareVersions,
   findInstalledNpmPackagePath,
@@ -18,6 +20,7 @@ import {
   isPiCodexGoalPostCompactionUserFollowupPatchApplied,
   isPiCodingAgentResolverPatchApplied,
   isPiContinuousLearningPatchApplied,
+  isPiHerdrPromptGuidancePatchApplied,
   isPiMermaidPatchApplied,
   isPiSubagentsApplyPatchToolPatchApplied,
   isPiSubagentsIntercomDetachPatchApplied,
@@ -160,6 +163,102 @@ describe('package manager command resolution', () => {
         ['install', '@scope/pkg name'],
       ),
     ).toBe('mise exec node@22 -- npm install "@scope/pkg name"');
+  });
+});
+
+describe('pi-herdr prompt guidance patching', () => {
+  const FIXTURE_CONTENT = [
+    'export default function extension(pi) {',
+    '\tpi.registerTool({',
+    '\t\tname: "herdr",',
+    '\t\tpromptGuidelines: [',
+    '\t\t\t"Use `herdr` run for long-running processes in other panes instead of `bash`.",',
+    '\t\t\t"When you want to submit a line or prompt to a pane, prefer `run` over `send` + `Enter` so text and Enter happen atomically.",',
+    '\t\t],',
+    '\t});',
+    '}',
+    '',
+  ].join('\n');
+
+  function setupFakePackage(version: string, indexContent = FIXTURE_CONTENT): string {
+    const packageRoot = makeTempDir('pi-herdr-');
+    writeFileSync(
+      join(packageRoot, 'package.json'),
+      JSON.stringify({ name: '@ogulcancelik/pi-herdr', version }, null, 2),
+    );
+    writeFileSync(join(packageRoot, 'index.ts'), indexContent);
+    return packageRoot;
+  }
+
+  it('reports unpatched fixture as not yet patched', () => {
+    const packageRoot = setupFakePackage('0.2.5');
+    expect(isPiHerdrPromptGuidancePatchApplied(packageRoot)).toBe(false);
+  });
+
+  it('adds concise bash/herdr and sudo sentinel guidance', async () => {
+    const packageRoot = setupFakePackage('0.2.5');
+    const result = await applyPiHerdrPromptGuidancePatch({ packageRoot });
+
+    expect(result).toMatchObject({
+      status: 'applied',
+      packageRoot,
+      version: '0.2.5',
+    });
+    expect(result.patchPath).toBe(join(packageRoot, 'index.ts'));
+
+    const patched = readFileSync(join(packageRoot, 'index.ts'), 'utf8');
+    expect(patched).toContain('__pi_update_extensions:pi-herdr-prompt-guidance__');
+    expect(patched).toContain('Use `bash` for quick one-shot commands');
+    expect(patched).toContain('use `herdr` when a task needs a real pane');
+    expect(patched).toContain('split a fresh pane down');
+    expect(patched).toContain('`SUDO_READY:<id>`');
+    expect(patched).toContain('`TASK_DONE:<id>`');
+    expect(patched).toContain('`watch` both exact sentinels');
+    expect(patched).toContain('read final output, then `stop` one-off panes');
+    expect(patched).not.toContain('interactive_shell');
+    expect(isPiHerdrPromptGuidancePatchApplied(packageRoot)).toBe(true);
+  });
+
+  it('is idempotent after patching', async () => {
+    const packageRoot = setupFakePackage('0.2.5');
+    await applyPiHerdrPromptGuidancePatch({ packageRoot });
+    const second = await applyPiHerdrPromptGuidancePatch({ packageRoot });
+
+    expect(second).toMatchObject({
+      status: 'already-applied',
+      packageRoot,
+      version: '0.2.5',
+    });
+  });
+
+  it('supports dry-run without mutating pi-herdr', async () => {
+    const packageRoot = setupFakePackage('0.2.5');
+    const indexPath = join(packageRoot, 'index.ts');
+    const original = readFileSync(indexPath, 'utf8');
+
+    const result = await applyPiHerdrPromptGuidancePatch({ packageRoot, dryRun: true });
+    expect(result).toMatchObject({
+      status: 'would-apply',
+      packageRoot,
+      version: '0.2.5',
+    });
+    expect(readFileSync(indexPath, 'utf8')).toBe(original);
+    expect(isPiHerdrPromptGuidancePatchApplied(packageRoot)).toBe(false);
+  });
+
+  it('throws a descriptive error when upstream guidance changed', async () => {
+    const packageRoot = setupFakePackage('1.0.0', 'export default function extension() {}\n');
+    await expect(applyPiHerdrPromptGuidancePatch({ packageRoot })).rejects.toThrow(
+      /target text for pi-herdr prompt guidance patch not found/i,
+    );
+  });
+
+  it('builds concise guidance without mentioning unavailable interactive shell', () => {
+    const replacement = buildPiHerdrPromptGuidanceReplacement();
+    expect(replacement).toContain('__pi_update_extensions:pi-herdr-prompt-guidance__');
+    expect(replacement).toContain('Use `bash` for quick one-shot commands');
+    expect(replacement).toContain('`watch` both exact sentinels');
+    expect(replacement).not.toContain('interactive_shell');
   });
 });
 
