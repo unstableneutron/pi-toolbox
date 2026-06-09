@@ -9,7 +9,6 @@
 import { Type } from 'typebox';
 import { complete, type Api, type Model, type UserMessage } from '@earendil-works/pi-ai';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { compact } from '@earendil-works/pi-coding-agent';
 import { Container, type SelectItem, SelectList, Text } from '@earendil-works/pi-tui';
 import { DynamicBorder } from '@earendil-works/pi-coding-agent';
 
@@ -142,11 +141,6 @@ async function summarizeBreakoutCondition(
 
   if (!summary) return fallback;
   return summary.length > 60 ? `${summary.slice(0, 57)}...` : summary;
-}
-
-function getCompactionInstructions(mode: LoopMode, condition?: string): string {
-  const conditionText = getConditionText(mode, condition);
-  return `Loop active. Breakout condition: ${conditionText}. Preserve this loop state and breakout condition in the summary.`;
 }
 
 function updateStatus(ctx: ExtensionContext, state: LoopStateData): void {
@@ -403,35 +397,10 @@ export default function loopExtension(pi: ExtensionAPI): void {
     triggerLoopPrompt(ctx);
   });
 
-  pi.on('session_before_compact', async (event, ctx) => {
-    if (!loopState.active || !loopState.mode || !ctx.model) return;
-    const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
-    if (!auth.ok) return;
-
-    const instructionParts = [
-      event.customInstructions,
-      getCompactionInstructions(loopState.mode, loopState.condition),
-    ]
-      .filter(Boolean)
-      .join('\n\n');
-
-    try {
-      const compaction = await compact(
-        event.preparation,
-        ctx.model,
-        auth.apiKey ?? '',
-        auth.headers,
-        instructionParts,
-        event.signal,
-      );
-      return { compaction };
-    } catch (error) {
-      if (ctx.hasUI) {
-        const message = error instanceof Error ? error.message : String(error);
-        ctx.ui.notify(`Loop compaction failed: ${message}`, 'warning');
-      }
-      return;
-    }
+  pi.on('session_before_compact', async (_event, ctx) => {
+    if (!loopState.active) return;
+    persistState(loopState);
+    updateStatus(ctx, loopState);
   });
 
   async function restoreLoopState(ctx: ExtensionContext): Promise<void> {

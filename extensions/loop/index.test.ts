@@ -4,11 +4,14 @@ import loopExtension from './index';
 
 function createHarness() {
   const commands = new Map<string, (args: string, ctx: any) => Promise<void> | void>();
+  const handlers = new Map<string, (event: any, ctx: any) => Promise<unknown> | unknown>();
   const appendEntry = vi.fn();
   const sendMessage = vi.fn();
   const pi = {
     appendEntry,
-    on: vi.fn(),
+    on: vi.fn((event: string, handler: (event: any, ctx: any) => Promise<unknown> | unknown) => {
+      handlers.set(event, handler);
+    }),
     registerCommand(name: string, command: { handler: (args: string, ctx: any) => Promise<void> }) {
       commands.set(name, command.handler);
     },
@@ -17,7 +20,7 @@ function createHarness() {
   };
 
   loopExtension(pi as any);
-  return { appendEntry, commands, sendMessage };
+  return { appendEntry, commands, handlers, sendMessage };
 }
 
 function createPrintCtx() {
@@ -53,5 +56,30 @@ describe('loop command mode guards', () => {
       expect.objectContaining({ content: expect.stringContaining('Run all tests') }),
       { deliverAs: 'followUp', triggerTurn: true },
     );
+  });
+
+  test('does not provide custom compaction while loop is active', async () => {
+    const { commands, handlers } = createHarness();
+    await expect(commands.get('loop')?.('tests', createPrintCtx())).resolves.toBeUndefined();
+
+    const compactionCtx = {
+      ...createPrintCtx(),
+      model: { provider: 'openai-codex', id: 'gpt-5.5' },
+      modelRegistry: {
+        getApiKeyAndHeaders: vi.fn(async () => ({ ok: false })),
+      },
+    };
+
+    await expect(
+      handlers.get('session_before_compact')?.(
+        {
+          customInstructions: undefined,
+          preparation: {},
+          signal: new AbortController().signal,
+        },
+        compactionCtx,
+      ),
+    ).resolves.toBeUndefined();
+    expect(compactionCtx.modelRegistry.getApiKeyAndHeaders).not.toHaveBeenCalled();
   });
 });
