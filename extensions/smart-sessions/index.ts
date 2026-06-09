@@ -1,11 +1,24 @@
-import { writeSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+  writeSync,
+} from 'node:fs';
+import { createHash } from 'node:crypto';
 import { createConnection } from 'node:net';
+import { homedir } from 'node:os';
+import { basename, dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   BorderedLoader,
   type ExtensionAPI,
   type ExtensionCommandContext,
   type ExtensionContext,
+  getAgentDir,
 } from '@earendil-works/pi-coding-agent';
 import {
   type Component,
@@ -35,6 +48,20 @@ const AUTO_SUMMARY_FALLBACK_IDLE_MS = 5 * 60_000;
 const AUTO_SUMMARY_MIN_TURNS = 1;
 const MAX_ROLLING_REWRITE_COUNT = 12;
 const EXIT_SUMMARY_STATE_KEY = '__PI_SMART_SESSIONS_EXIT_SUMMARY_STATE__';
+const RESUME_RUN_ID_ENV = 'PI_RESUME_RUN_ID';
+const SHIM_VERSION_ENV = 'PI_SMART_SESSION_SHIM_VERSION';
+const SHIM_TARGET_ENV = 'PI_SMART_SESSION_SHIM_TARGET';
+const SHIM_TARGET_MISSING_ENV = 'PI_SMART_SESSION_SHIM_TARGET_MISSING';
+const WRAPPER_SHA_ENV = 'PI_SMART_SESSION_WRAPPER_SHA256';
+const RESUME_HINT_DIR = 'resume-hints';
+const WRAPPER_NOTICE_FILE = 'wrapper-notice-shown';
+const MANAGED_WRAPPER_MARKER = 'PI_SMART_SESSION_WRAPPER=1';
+const SMART_SESSION_SHIM_VERSION = '1';
+
+let bundledSmartSessionScriptSha256: string | undefined;
+
+let generatedResumeRunId: string | undefined;
+let generatedResumeRunIdInUse = false;
 
 let herdrTitleSeq = Date.now() * 1000;
 
@@ -124,15 +151,294 @@ function setPendingExitSummary(text: string): void {
   getExitSummaryState().pendingText = text;
 }
 
-function formatExitSummary(title: string, sessionId: string): string {
+export function formatExitSummary(title: string, sessionId: string): string {
   return [
     '',
     '',
     `\x1b[1;36mπ -\x1b[0m \x1b[1m${title}\x1b[0m`,
     '',
-    `  \x1b[2mpi --session ${sessionId}\x1b[0m`,
+    `\x1b[2mpi --session ${sessionId}\x1b[0m`,
     '',
   ].join('\n');
+}
+
+function sanitizeResumeRunId(value: string | undefined): string | undefined {
+  const sanitized = value
+    ?.trim()
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/^[^A-Za-z0-9]+/, '')
+    .replace(/[^A-Za-z0-9]+$/, '')
+    .slice(0, 160);
+
+  if (!sanitized || sanitized === '.' || sanitized === '..') return undefined;
+  return sanitized;
+}
+
+function getResumeRunId(): string {
+  const explicit = sanitizeResumeRunId(process.env[RESUME_RUN_ID_ENV]);
+  if (explicit && (!generatedResumeRunIdInUse || explicit !== generatedResumeRunId)) {
+    generatedResumeRunIdInUse = false;
+    return explicit;
+  }
+
+  generatedResumeRunId ??= `pi-${Date.now()}-${process.pid}`;
+  generatedResumeRunIdInUse = true;
+  process.env[RESUME_RUN_ID_ENV] = generatedResumeRunId;
+  return generatedResumeRunId;
+}
+
+function getSmartSessionsDir(): string {
+  return join(getAgentDir(), 'smart-sessions');
+}
+
+function getResumeHintPath(): string {
+  return join(getSmartSessionsDir(), RESUME_HINT_DIR, getResumeRunId());
+}
+
+function sanitizeHintField(value: string | undefined): string {
+  return (value ?? '')
+    .replace(/[\t\r\n]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function writeTextFileAtomic(path: string, text: string): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const tempPath = `${path}.${process.pid}.tmp`;
+  writeFileSync(tempPath, text, 'utf8');
+  renameSync(tempPath, path);
+}
+
+function getWrapperNoticePath(): string {
+  return join(getSmartSessionsDir(), WRAPPER_NOTICE_FILE);
+}
+
+function getBundledSmartSessionScriptPath(): string {
+  return fileURLToPath(new URL('./scripts/pi-smart-session', import.meta.url));
+}
+
+function getHomeDir(): string {
+  return process.env.HOME || homedir();
+}
+
+function getDetectedShellName(): string {
+  const shellName = basename(process.env.SHELL || '').toLowerCase();
+  if (shellName.includes('zsh')) return 'Zsh';
+  if (shellName.includes('bash')) return 'Bash';
+  return shellName || 'Unknown shell';
+}
+
+function readTextIfExists(path: string): string {
+  try {
+    return existsSync(path) ? readFileSync(path, 'utf8') : '';
+  } catch {
+    return '';
+  }
+}
+
+function getInstalledSmartSessionWrapperPath(): string {
+  return join(getHomeDir(), '.local', 'bin', 'pi');
+}
+
+function formatHomePath(path: string): string {
+  const home = getHomeDir().replace(/\/$/, '');
+  if (home && home !== '/' && path.startsWith(`${home}/`)) {
+    return `$HOME/${path.slice(home.length + 1)}`;
+  }
+  return path;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function getBundledSmartSessionScriptSha256(): string {
+  bundledSmartSessionScriptSha256 ??= createHash('sha256')
+    .update(readFileSync(getBundledSmartSessionScriptPath()))
+    .digest('hex');
+  return bundledSmartSessionScriptSha256;
+}
+
+function buildSmartSessionShim(): string {
+  const target = getBundledSmartSessionScriptPath();
+  const targetSha = getBundledSmartSessionScriptSha256();
+
+  return `#!/bin/sh
+# ${MANAGED_WRAPPER_MARKER}
+PI_SMART_SESSION_SHIM=1
+PI_SMART_SESSION_SHIM_VERSION=${SMART_SESSION_SHIM_VERSION}
+PI_SMART_SESSION_SHIM_TARGET=${shellQuote(target)}
+PI_SMART_SESSION_WRAPPER_SHA256=${targetSha}
+
+script_path() {
+	case "$0" in
+	/*) printf '%s\n' "$0" ;;
+	*) printf '%s\n' "$(pwd)/$0" ;;
+	esac
+}
+
+canonical_path() {
+	path=$1
+	dir=$(dirname "$path")
+	base=$(basename "$path")
+	if resolved=$(cd "$dir" 2>/dev/null && printf '%s/%s\n' "$(pwd -P)" "$base"); then
+		printf '%s\n' "$resolved"
+	else
+		printf '%s\n' "$path"
+	fi
+}
+
+find_real_pi() {
+	self=$(canonical_path "$(script_path)")
+	old_ifs=$IFS
+	IFS=:
+	for dir in ${'${PATH:-}'}; do
+		[ -n "$dir" ] || dir=.
+		candidate=$dir/pi
+		[ -x "$candidate" ] || continue
+		candidate_path=$(canonical_path "$candidate")
+		[ "$candidate_path" = "$self" ] && continue
+		IFS=$old_ifs
+		printf '%s\n' "$candidate_path"
+		return 0
+	done
+	IFS=$old_ifs
+	return 1
+}
+
+real_pi=$(find_real_pi) || {
+	printf 'pi smart-sessions shim could not find the real pi binary in PATH.\n' >&2
+	exit 127
+}
+
+if [ -x "$PI_SMART_SESSION_SHIM_TARGET" ]; then
+	exec env \
+		PI_SMART_SESSION_REAL_PI="$real_pi" \
+		PI_SMART_SESSION_SHIM_VERSION="$PI_SMART_SESSION_SHIM_VERSION" \
+		PI_SMART_SESSION_SHIM_TARGET="$PI_SMART_SESSION_SHIM_TARGET" \
+		PI_SMART_SESSION_WRAPPER_SHA256="$PI_SMART_SESSION_WRAPPER_SHA256" \
+		"$PI_SMART_SESSION_SHIM_TARGET" "$@"
+fi
+
+printf 'pi smart-sessions shim target is missing; falling back to real pi.\n' >&2
+printf 'Refresh with /smart-sessions-setup, or remove this shim with: rm %s\n' "$(script_path)" >&2
+exec env \
+	PI_SMART_SESSION_SHIM_VERSION="$PI_SMART_SESSION_SHIM_VERSION" \
+	PI_SMART_SESSION_SHIM_TARGET="$PI_SMART_SESSION_SHIM_TARGET" \
+	PI_SMART_SESSION_WRAPPER_SHA256="$PI_SMART_SESSION_WRAPPER_SHA256" \
+	PI_SMART_SESSION_SHIM_TARGET_MISSING=1 \
+	"$real_pi" "$@"
+`;
+}
+
+function wrapperStatus(path: string): 'missing' | 'installed' | 'unmanaged' {
+  if (!existsSync(path)) return 'missing';
+  return readTextIfExists(path).includes(MANAGED_WRAPPER_MARKER) ? 'installed' : 'unmanaged';
+}
+
+function localBinIsInPath(wrapperPath: string): boolean {
+  return (process.env.PATH || '').split(':').includes(dirname(wrapperPath));
+}
+
+function formatSetupStatus(wrapperPath: string): string {
+  const status = wrapperStatus(wrapperPath);
+  const pathStatus = localBinIsInPath(wrapperPath)
+    ? '$HOME/.local/bin is already on PATH.'
+    : 'Add $HOME/.local/bin to PATH before the real pi binary if this wrapper is not found.';
+
+  return [
+    `${getDetectedShellName()} detected.`,
+    '',
+    `Wrapper path: ${formatHomePath(wrapperPath)}`,
+    `Status: ${status}`,
+    '',
+    status === 'installed'
+      ? 'The pi --last wrapper is installed.'
+      : status === 'unmanaged'
+        ? 'An unmanaged pi file already exists at the wrapper path. It will not be overwritten.'
+        : 'Install the smart-sessions pi wrapper at the path above.',
+    '',
+    pathStatus,
+  ].join('\n');
+}
+
+function installSmartSessionWrapper(wrapperPath: string): void {
+  const status = wrapperStatus(wrapperPath);
+  if (status === 'unmanaged') {
+    throw new Error(`Refusing to overwrite unmanaged file: ${wrapperPath}`);
+  }
+  mkdirSync(dirname(wrapperPath), { recursive: true });
+  writeTextFileAtomic(wrapperPath, buildSmartSessionShim());
+  chmodSync(wrapperPath, 0o755);
+}
+
+function currentShimEnvIsFresh(): boolean {
+  return (
+    process.env[SHIM_VERSION_ENV] === SMART_SESSION_SHIM_VERSION &&
+    process.env[SHIM_TARGET_ENV] === getBundledSmartSessionScriptPath() &&
+    process.env[WRAPPER_SHA_ENV] === getBundledSmartSessionScriptSha256() &&
+    !process.env[SHIM_TARGET_MISSING_ENV]
+  );
+}
+
+function processWasLaunchedByLegacyManagedWrapper(): boolean {
+  if (process.env[SHIM_VERSION_ENV]) return false;
+  const wrapperRunId = sanitizeResumeRunId(process.env[RESUME_RUN_ID_ENV]);
+  return Boolean(
+    wrapperRunId && (!generatedResumeRunIdInUse || wrapperRunId !== generatedResumeRunId),
+  );
+}
+
+function maybeRefreshSmartSessionShim(ctx: ExtensionContext): boolean {
+  const sawShimEnv = Boolean(process.env[SHIM_VERSION_ENV]);
+  if (!sawShimEnv && !processWasLaunchedByLegacyManagedWrapper()) return false;
+  if (currentShimEnvIsFresh()) return true;
+
+  const wrapperPath = getInstalledSmartSessionWrapperPath();
+  if (wrapperStatus(wrapperPath) !== 'installed') return false;
+
+  try {
+    installSmartSessionWrapper(wrapperPath);
+    ctx.ui.notify(
+      `Updated smart-sessions pi wrapper at ${formatHomePath(wrapperPath)} for future runs.`,
+      'info',
+    );
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    ctx.ui.notify(`Could not update smart-sessions pi wrapper: ${message}`, 'error');
+  }
+
+  return true;
+}
+
+async function runSmartSessionsSetup(ctx: ExtensionCommandContext): Promise<void> {
+  const wrapperPath = getInstalledSmartSessionWrapperPath();
+
+  while (true) {
+    const status = wrapperStatus(wrapperPath);
+    const choices =
+      status === 'installed'
+        ? ['Check again', 'Exit']
+        : ['Install it for me', 'Check again', 'Exit'];
+    const choice = await ctx.ui.select(formatSetupStatus(wrapperPath), choices);
+
+    if (choice === 'Install it for me') {
+      try {
+        installSmartSessionWrapper(wrapperPath);
+        ctx.ui.notify(
+          `Installed smart-sessions pi wrapper at ${formatHomePath(wrapperPath)}.`,
+          'info',
+        );
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        ctx.ui.notify(message, 'error');
+      }
+      continue;
+    }
+
+    if (choice === 'Check again') continue;
+    return;
+  }
 }
 
 function getBestKnownSessionTitle(ctx: ExtensionContext, currentSessionName?: string): string {
@@ -142,6 +448,38 @@ function getBestKnownSessionTitle(ctx: ExtensionContext, currentSessionName?: st
   const sidecar = readRollingSummarySidecar(ctx.sessionManager.getSessionId());
   if (sidecar.current?.longTitle) return sidecar.current.longTitle;
   return 'Untitled session';
+}
+
+function writeResumeHint(ctx: ExtensionContext, currentSessionName?: string): void {
+  if (!hasTui(ctx)) return;
+
+  try {
+    const sessionId = sanitizeHintField(ctx.sessionManager.getSessionId());
+    if (!sessionId) return;
+
+    const updatedAtMs = String(Date.now());
+    const cwd = sanitizeHintField(ctx.cwd);
+    const title = sanitizeHintField(getBestKnownSessionTitle(ctx, currentSessionName));
+    writeTextFileAtomic(getResumeHintPath(), `${sessionId}\t${updatedAtMs}\t${cwd}\t${title}\n`);
+  } catch {
+    // Resume hints are best-effort and must never disrupt the session.
+  }
+}
+
+function maybeShowWrapperSetupTip(ctx: ExtensionContext): void {
+  if (!hasTui(ctx)) return;
+  if (process.env[SHIM_VERSION_ENV]) return;
+  const wrapperRunId = sanitizeResumeRunId(process.env[RESUME_RUN_ID_ENV]);
+  if (wrapperRunId && (!generatedResumeRunIdInUse || wrapperRunId !== generatedResumeRunId)) return;
+
+  try {
+    const noticePath = getWrapperNoticePath();
+    if (existsSync(noticePath)) return;
+    writeTextFileAtomic(noticePath, `${new Date().toISOString()}\n`);
+    ctx.ui.notify('Tip: enable `pi --last` resume handoff with /smart-sessions-setup', 'info');
+  } catch {
+    // Ignore notice bookkeeping failures.
+  }
 }
 
 async function renameTmuxWindow(pi: ExtensionAPI, name: string): Promise<boolean> {
@@ -471,7 +809,7 @@ export default function smartSessionsExtension(pi: ExtensionAPI) {
   }
 
   async function applySummaryNames(
-    ctx: Pick<ExtensionContext, 'sessionManager'>,
+    ctx: ExtensionContext,
     summary: RollingSessionSummary,
   ): Promise<void> {
     pi.setSessionName(summary.longTitle);
@@ -479,6 +817,7 @@ export default function smartSessionsExtension(pi: ExtensionAPI) {
       pi.appendEntry(ENTRY_TYPE_WINDOW, { windowName: summary.shortTitle });
     }
     await applyWindowName(pi, summary.shortTitle);
+    writeResumeHint(ctx, summary.longTitle);
   }
 
   function getApplicableSummary(ctx: ExtensionContext): RollingSessionSummary | undefined {
@@ -507,6 +846,7 @@ export default function smartSessionsExtension(pi: ExtensionAPI) {
     if (shortTitle) {
       await applyWindowName(pi, shortTitle);
     }
+    writeResumeHint(ctx, longTitle);
   }
 
   async function refreshSummary(
@@ -704,6 +1044,9 @@ export default function smartSessionsExtension(pi: ExtensionAPI) {
     clearPendingExitSummary();
     cancelBackgroundSummary();
     clearInlineSummaryWidget(ctx);
+    writeResumeHint(ctx, pi.getSessionName());
+    const wrapperShimSeen = maybeRefreshSmartSessionShim(ctx);
+    if (!wrapperShimSeen) maybeShowWrapperSetupTip(ctx);
 
     if (event.reason === 'fork') {
       forceRefresh = true;
@@ -743,6 +1086,7 @@ export default function smartSessionsExtension(pi: ExtensionAPI) {
   pi.on('session_shutdown', async (_event, ctx) => {
     if (!hasTui(ctx)) return;
     cancelBackgroundSummary();
+    writeResumeHint(ctx, pi.getSessionName());
     queueExitSummary(ctx);
   });
 
@@ -831,6 +1175,14 @@ export default function smartSessionsExtension(pi: ExtensionAPI) {
 
       await applySummaryNames(ctx, loaderResult.result);
       await showSummaryOverlay(ctx, loaderResult.result);
+    },
+  });
+
+  pi.registerCommand('smart-sessions-setup', {
+    description: 'Show the zsh wrapper for pi --last resume handoff',
+    handler: async (_args, ctx) => {
+      if (!ctx.hasUI) return;
+      await runSmartSessionsSetup(ctx);
     },
   });
 }

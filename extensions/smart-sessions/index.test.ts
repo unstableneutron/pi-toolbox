@@ -1,7 +1,16 @@
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import { wrapTextWithAnsi } from '@earendil-works/pi-tui';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
@@ -71,10 +80,17 @@ vi.mock('@earendil-works/pi-coding-agent', async () => {
 });
 
 import { readRollingSummarySidecar, writeRollingSummaryCurrent } from './sidecar';
-import smartSessionsExtension from './index';
+import smartSessionsExtension, { formatExitSummary } from './index';
 
 let tempAgentDir = '';
 let entryCounter = 0;
+
+function writeFakePi(binDir: string, body: string): string {
+  mkdirSync(binDir, { recursive: true });
+  const path = join(binDir, 'pi');
+  writeFileSync(path, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+  return path;
+}
 
 function nextEntryBase() {
   entryCounter += 1;
@@ -136,6 +152,7 @@ function createHarness(options?: {
   mode?: string;
   sessionName?: string | undefined;
   sessionId?: string;
+  cwd?: string;
 }) {
   const handlers = new Map<string, (event: any, ctx: any) => Promise<unknown>>();
   const commands = new Map<string, (args: any, ctx: any) => Promise<unknown>>();
@@ -215,6 +232,8 @@ function createHarness(options?: {
 
     return result;
   });
+  const selectChoices: string[] = [];
+  const uiSelect = vi.fn(async () => selectChoices.shift());
 
   const renderWidgetContent = (
     content: string[] | ((tui: any, theme: any) => { render(width: number): string[] }) | undefined,
@@ -240,6 +259,7 @@ function createHarness(options?: {
   const ctx = {
     hasUI: options?.hasUI ?? false,
     mode: options?.mode ?? (options?.hasUI ? 'tui' : 'print'),
+    cwd: options?.cwd ?? '/tmp/smart-sessions-project',
     model: { provider: 'gust', id: 'gpt-5.4' },
     modelRegistry: {
       find: vi.fn().mockImplementation((provider: string, id: string) => {
@@ -263,6 +283,8 @@ function createHarness(options?: {
     ui: {
       notify: vi.fn(),
       custom: uiCustom,
+      editor: vi.fn(),
+      select: uiSelect,
       setWidget: vi.fn(
         (
           key: string,
@@ -293,6 +315,9 @@ function createHarness(options?: {
     getWidgetLines(key: string, width = 80, maxLines?: number) {
       return renderWidgetContent(rawWidgets.get(key), width, maxLines);
     },
+    queueSelectChoices(...choices: string[]) {
+      selectChoices.push(...choices);
+    },
     getCommand(name: string) {
       const handler = commands.get(name);
       if (!handler) throw new Error(`Missing command: ${name}`);
@@ -303,6 +328,28 @@ function createHarness(options?: {
       if (!handler) throw new Error(`Missing handler: ${name}`);
       return handler;
     },
+  };
+}
+
+function resumeHintPath(runId: string): string {
+  return join(tempAgentDir, 'smart-sessions', 'resume-hints', runId);
+}
+
+function readResumeHint(runId: string): {
+  sessionId: string;
+  updatedAtMs: number;
+  cwd: string;
+  title: string;
+} {
+  const [sessionId, updatedAt, cwd, title] = readFileSync(resumeHintPath(runId), 'utf8')
+    .trimEnd()
+    .split('\t');
+
+  return {
+    sessionId: sessionId ?? '',
+    updatedAtMs: Number(updatedAt),
+    cwd: cwd ?? '',
+    title: title ?? '',
   };
 }
 
@@ -337,6 +384,11 @@ describe('smart-sessions rolling summary', () => {
     delete process.env.HERDR_ENV;
     delete process.env.HERDR_SOCKET_PATH;
     delete process.env.HERDR_PANE_ID;
+    delete process.env.PI_RESUME_RUN_ID;
+    delete process.env.PI_SMART_SESSION_SHIM_VERSION;
+    delete process.env.PI_SMART_SESSION_SHIM_TARGET;
+    delete process.env.PI_SMART_SESSION_SHIM_TARGET_MISSING;
+    delete process.env.PI_SMART_SESSION_WRAPPER_SHA256;
   });
 
   afterEach(() => {
@@ -344,7 +396,323 @@ describe('smart-sessions rolling summary', () => {
     delete process.env.HERDR_ENV;
     delete process.env.HERDR_SOCKET_PATH;
     delete process.env.HERDR_PANE_ID;
+    delete process.env.PI_RESUME_RUN_ID;
+    delete process.env.PI_SMART_SESSION_SHIM_VERSION;
+    delete process.env.PI_SMART_SESSION_SHIM_TARGET;
+    delete process.env.PI_SMART_SESSION_SHIM_TARGET_MISSING;
+    delete process.env.PI_SMART_SESSION_WRAPPER_SHA256;
     vi.restoreAllMocks();
+  });
+
+  test('formats exit summary resume command without indentation', () => {
+    const summary = formatExitSummary('Untitled session', 'session-test-id');
+
+    expect(summary).toContain('\n\x1b[2mpi --session session-test-id\x1b[0m\n');
+    expect(summary).not.toContain('\n  \x1b[2mpi --session session-test-id\x1b[0m\n');
+  });
+
+  test('writes a global resume hint on TUI session start and shutdown', async () => {
+    process.env.PI_RESUME_RUN_ID = 'run-1';
+
+    const harness = createHarness({
+      hasUI: true,
+      sessionId: 'session-a',
+      sessionName: 'Readable session title',
+      cwd: '/tmp/project-a',
+    });
+
+    await harness.getHandler('session_start')(
+      { type: 'session_start', reason: 'startup' },
+      harness.ctx,
+    );
+
+    expect(readResumeHint('run-1')).toMatchObject({
+      sessionId: 'session-a',
+      cwd: '/tmp/project-a',
+      title: 'Readable session title',
+    });
+    expect(readResumeHint('run-1').updatedAtMs).toEqual(expect.any(Number));
+
+    harness.ctx.sessionManager.getSessionId.mockReturnValue('session-b');
+    await harness.getHandler('session_shutdown')({ type: 'session_shutdown' }, harness.ctx);
+
+    expect(readResumeHint('run-1')).toMatchObject({
+      sessionId: 'session-b',
+      cwd: '/tmp/project-a',
+      title: 'Readable session title',
+    });
+  });
+
+  test('does not write resume hints for non-TUI sessions', async () => {
+    process.env.PI_RESUME_RUN_ID = 'run-non-tui';
+    const harness = createHarness({ hasUI: false });
+
+    await harness.getHandler('session_start')(
+      { type: 'session_start', reason: 'startup' },
+      harness.ctx,
+    );
+
+    expect(existsSync(resumeHintPath('run-non-tui'))).toBe(false);
+  });
+
+  test('uses a process-stable fallback run id when no wrapper run id is set', async () => {
+    const harness = createHarness({ hasUI: true, sessionId: 'fallback-session' });
+
+    await harness.getHandler('session_start')(
+      { type: 'session_start', reason: 'startup' },
+      harness.ctx,
+    );
+
+    const hintDir = join(tempAgentDir, 'smart-sessions', 'resume-hints');
+    const files = readdirSync(hintDir);
+    expect(files).toHaveLength(1);
+    expect(readFileSync(join(hintDir, files[0]!), 'utf8')).toContain('fallback-session\t');
+  });
+
+  test('updates resume hint title after a rolling summary refresh', async () => {
+    process.env.PI_RESUME_RUN_ID = 'run-title';
+    completeSimpleMock.mockResolvedValue(
+      assistantResponse(
+        JSON.stringify({
+          shortTitle: 'Hint title',
+          longTitle: 'Update resume hint title from rolling summary',
+          shortSummary: 'Latest summary ready for resume selection',
+          summaryBullets: ['Completed: wrote the title into the resume hint.'],
+          timelineItems: ['Generated a rolling summary for the hint file.'],
+        }),
+      ) as any,
+    );
+
+    const harness = createHarness({ hasUI: true });
+    await harness.getHandler('session_start')(
+      { type: 'session_start', reason: 'startup' },
+      harness.ctx,
+    );
+    await harness.getCommand('summarize')({}, harness.ctx);
+
+    expect(readResumeHint('run-title')).toMatchObject({
+      sessionId: 'session-test-id',
+      title: 'Update resume hint title from rolling summary',
+    });
+  });
+
+  test('shows a one-time setup tip when the zsh wrapper run id is missing', async () => {
+    const firstHarness = createHarness({ hasUI: true });
+    await firstHarness.getHandler('session_start')(
+      { type: 'session_start', reason: 'startup' },
+      firstHarness.ctx,
+    );
+
+    expect(firstHarness.ctx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining('/smart-sessions-setup'),
+      'info',
+    );
+
+    const secondHarness = createHarness({ hasUI: true });
+    await secondHarness.getHandler('session_start')(
+      { type: 'session_start', reason: 'startup' },
+      secondHarness.ctx,
+    );
+
+    expect(secondHarness.ctx.ui.notify).not.toHaveBeenCalledWith(
+      expect.stringContaining('/smart-sessions-setup'),
+      'info',
+    );
+  });
+
+  test('setup command detects zsh and offers wrapper installation', async () => {
+    const previousShell = process.env.SHELL;
+    const previousHome = process.env.HOME;
+    process.env.SHELL = '/bin/zsh';
+    process.env.HOME = tempAgentDir;
+    const harness = createHarness({ hasUI: true });
+    harness.queueSelectChoices('Exit');
+
+    await harness.getCommand('smart-sessions-setup')({}, harness.ctx);
+
+    const wrapperPath = join(tempAgentDir, '.local', 'bin', 'pi');
+    expect(existsSync(wrapperPath)).toBe(false);
+
+    expect(harness.ctx.ui.select).toHaveBeenCalledWith(expect.stringContaining('Zsh detected'), [
+      'Install it for me',
+      'Check again',
+      'Exit',
+    ]);
+    expect(harness.ctx.ui.select).toHaveBeenCalledWith(
+      expect.stringContaining('$HOME/.local/bin/pi'),
+      expect.any(Array),
+    );
+    process.env.SHELL = previousShell;
+    process.env.HOME = previousHome;
+  });
+
+  test('setup command installs the wrapper idempotently', async () => {
+    const previousShell = process.env.SHELL;
+    const previousHome = process.env.HOME;
+    process.env.SHELL = '/bin/zsh';
+    process.env.HOME = tempAgentDir;
+    const harness = createHarness({ hasUI: true });
+    harness.queueSelectChoices('Install it for me', 'Exit');
+
+    await harness.getCommand('smart-sessions-setup')({}, harness.ctx);
+
+    const wrapperPath = join(tempAgentDir, '.local', 'bin', 'pi');
+    const contents = readFileSync(wrapperPath, 'utf8');
+    expect(contents).toContain('PI_SMART_SESSION_WRAPPER=1');
+    expect(contents).toContain('PI_SMART_SESSION_SHIM_VERSION=1');
+    expect(contents).toContain('PI_SMART_SESSION_SHIM_TARGET=');
+    expect(contents).toContain('PI_SMART_SESSION_WRAPPER_SHA256=');
+    expect(contents).toContain('PI_SMART_SESSION_REAL_PI=');
+    expect(harness.ctx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining('Installed'),
+      'info',
+    );
+
+    const realBin = join(tempAgentDir, 'real-bin');
+    writeFakePi(realBin, 'exit 0');
+    const help = spawnSync(wrapperPath, ['--smart-session-help'], {
+      cwd: tempAgentDir,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${dirname(wrapperPath)}:${realBin}:${process.env.PATH ?? ''}`,
+        PI_CODING_AGENT_DIR: tempAgentDir,
+      },
+    });
+    expect(help.status).toBe(0);
+    expect(help.stdout).toContain('Smart-sessions wrapper for pi');
+
+    const argsFile = join(tempAgentDir, 'fallback-args');
+    const envFile = join(tempAgentDir, 'fallback-env');
+    writeFakePi(
+      realBin,
+      [
+        `printf '%s\\n' "$@" > ${JSON.stringify(argsFile)}`,
+        `printf '%s\\n' "$PI_SMART_SESSION_SHIM_TARGET_MISSING" > ${JSON.stringify(envFile)}`,
+      ].join('\n'),
+    );
+    writeFileSync(
+      wrapperPath,
+      contents.replace(
+        /^PI_SMART_SESSION_SHIM_TARGET=.*$/m,
+        `PI_SMART_SESSION_SHIM_TARGET=${JSON.stringify(join(tempAgentDir, 'missing-target'))}`,
+      ),
+      { mode: 0o755 },
+    );
+    const fallback = spawnSync(wrapperPath, ['hello'], {
+      cwd: tempAgentDir,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${dirname(wrapperPath)}:${realBin}:${process.env.PATH ?? ''}`,
+      },
+    });
+    expect(fallback.status).toBe(0);
+    expect(fallback.stderr).toContain('falling back to real pi');
+    expect(readFileSync(argsFile, 'utf8')).toBe('hello\n');
+    expect(readFileSync(envFile, 'utf8')).toBe('1\n');
+
+    const secondHarness = createHarness({ hasUI: true });
+    secondHarness.queueSelectChoices('Install it for me', 'Exit');
+    await secondHarness.getCommand('smart-sessions-setup')({}, secondHarness.ctx);
+
+    expect(readFileSync(wrapperPath, 'utf8')).toBe(contents);
+    process.env.SHELL = previousShell;
+    process.env.HOME = previousHome;
+  });
+
+  test('session start refreshes a stale managed shim without prompting', async () => {
+    const previousShell = process.env.SHELL;
+    const previousHome = process.env.HOME;
+    process.env.SHELL = '/bin/zsh';
+    process.env.HOME = tempAgentDir;
+    const wrapperPath = join(tempAgentDir, '.local', 'bin', 'pi');
+    mkdirSync(dirname(wrapperPath), { recursive: true });
+    writeFileSync(
+      wrapperPath,
+      '#!/bin/sh\n# PI_SMART_SESSION_WRAPPER=1\nPI_SMART_SESSION_SHIM_VERSION=0\n',
+      'utf8',
+    );
+    process.env.PI_SMART_SESSION_SHIM_VERSION = '0';
+    process.env.PI_SMART_SESSION_SHIM_TARGET = '/old/pi-smart-session';
+    process.env.PI_SMART_SESSION_WRAPPER_SHA256 = 'old-sha';
+
+    const harness = createHarness({ hasUI: true });
+    await harness.getHandler('session_start')(
+      { type: 'session_start', reason: 'startup' },
+      harness.ctx,
+    );
+
+    const contents = readFileSync(wrapperPath, 'utf8');
+    expect(contents).toContain('PI_SMART_SESSION_SHIM_VERSION=1');
+    expect(contents).toContain('PI_SMART_SESSION_SHIM_TARGET=');
+    expect(contents).toContain('PI_SMART_SESSION_WRAPPER_SHA256=');
+    expect(contents).not.toContain('old-sha');
+    expect(harness.ctx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining('Updated smart-sessions pi wrapper'),
+      'info',
+    );
+    expect(harness.ctx.ui.notify).not.toHaveBeenCalledWith(
+      expect.stringContaining('/smart-sessions-setup'),
+      'info',
+    );
+
+    process.env.SHELL = previousShell;
+    process.env.HOME = previousHome;
+    delete process.env.PI_SMART_SESSION_SHIM_VERSION;
+    delete process.env.PI_SMART_SESSION_SHIM_TARGET;
+    delete process.env.PI_SMART_SESSION_WRAPPER_SHA256;
+  });
+
+  test('session start upgrades a legacy copied wrapper without shim env vars', async () => {
+    const previousShell = process.env.SHELL;
+    const previousHome = process.env.HOME;
+    process.env.SHELL = '/bin/zsh';
+    process.env.HOME = tempAgentDir;
+    process.env.PI_RESUME_RUN_ID = 'legacy-wrapper-run';
+    const wrapperPath = join(tempAgentDir, '.local', 'bin', 'pi');
+    mkdirSync(dirname(wrapperPath), { recursive: true });
+    writeFileSync(wrapperPath, '#!/bin/sh\n# PI_SMART_SESSION_WRAPPER=1\n', 'utf8');
+
+    const harness = createHarness({ hasUI: true });
+    await harness.getHandler('session_start')(
+      { type: 'session_start', reason: 'startup' },
+      harness.ctx,
+    );
+
+    const contents = readFileSync(wrapperPath, 'utf8');
+    expect(contents).toContain('PI_SMART_SESSION_SHIM_VERSION=1');
+    expect(contents).toContain('PI_SMART_SESSION_SHIM_TARGET=');
+    expect(harness.ctx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining('Updated smart-sessions pi wrapper'),
+      'info',
+    );
+
+    process.env.SHELL = previousShell;
+    process.env.HOME = previousHome;
+  });
+
+  test('setup command refuses to overwrite an unmanaged pi wrapper', async () => {
+    const previousShell = process.env.SHELL;
+    const previousHome = process.env.HOME;
+    process.env.SHELL = '/bin/bash';
+    process.env.HOME = tempAgentDir;
+    const wrapperPath = join(tempAgentDir, '.local', 'bin', 'pi');
+    mkdirSync(dirname(wrapperPath), { recursive: true });
+    writeFileSync(wrapperPath, '#!/bin/sh\necho unmanaged\n', 'utf8');
+
+    const harness = createHarness({ hasUI: true });
+    harness.queueSelectChoices('Install it for me', 'Exit');
+
+    await harness.getCommand('smart-sessions-setup')({}, harness.ctx);
+
+    expect(readFileSync(wrapperPath, 'utf8')).toContain('unmanaged');
+    expect(harness.ctx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining('Refusing to overwrite'),
+      'error',
+    );
+    process.env.SHELL = previousShell;
+    process.env.HOME = previousHome;
   });
 
   test('session UI hooks are disabled in RPC mode', async () => {

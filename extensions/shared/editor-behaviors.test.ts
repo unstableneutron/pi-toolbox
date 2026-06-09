@@ -209,6 +209,7 @@ describe('global editor behavior patches', () => {
       { type: 'session_start' },
       {
         hasUI: true,
+        mode: 'tui',
         ui: {
           getEditorComponent: () => undefined,
           setEditorComponent,

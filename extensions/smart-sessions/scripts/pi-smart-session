@@ -1,0 +1,209 @@
+#!/bin/sh
+# PI_SMART_SESSION_WRAPPER=1
+set -u
+
+usage() {
+	cat <<'EOF'
+Usage:
+  pi [options]
+  pi --last [session-id] [options]
+
+Smart-sessions wrapper for pi. It records each run with PI_RESUME_RUN_ID,
+removes clean-exit resume hints, and recovers leftover resume hints with
+pi --last.
+EOF
+}
+
+script_path() {
+	case "$0" in
+	/*) printf '%s\n' "$0" ;;
+	*) printf '%s\n' "$(pwd)/$0" ;;
+	esac
+}
+
+canonical_path() {
+	path=$1
+	dir=$(dirname "$path")
+	base=$(basename "$path")
+	if cd "$dir" 2>/dev/null; then
+		printf '%s/%s\n' "$(pwd -P)" "$base"
+	else
+		printf '%s\n' "$path"
+	fi
+}
+
+find_real_pi() {
+	if [ -n "${PI_SMART_SESSION_REAL_PI:-}" ]; then
+		printf '%s\n' "$PI_SMART_SESSION_REAL_PI"
+		return 0
+	fi
+
+	self=$(canonical_path "$(script_path)")
+	old_ifs=$IFS
+	IFS=:
+	for dir in ${PATH:-}; do
+		[ -n "$dir" ] || dir=.
+		candidate=$dir/pi
+		[ -x "$candidate" ] || continue
+		candidate_path=$(canonical_path "$candidate")
+		[ "$candidate_path" = "$self" ] && continue
+		IFS=$old_ifs
+		printf '%s\n' "$candidate_path"
+		return 0
+	done
+	IFS=$old_ifs
+	return 1
+}
+
+agent_dir() {
+	if [ -n "${PI_CODING_AGENT_DIR:-}" ]; then
+		printf '%s\n' "$PI_CODING_AGENT_DIR"
+	elif [ -n "${PI_AGENT_DIR:-}" ]; then
+		printf '%s\n' "$PI_AGENT_DIR"
+	else
+		printf '%s\n' "$HOME/.pi/agent"
+	fi
+}
+
+hint_dir() {
+	printf '%s\n' "$(agent_dir)/smart-sessions/resume-hints"
+}
+
+new_run_id() {
+	printf 'pi-%s-%s\n' "$(date +%s)" "$$"
+}
+
+run_real_pi() {
+	real_pi=$(find_real_pi) || {
+		printf 'pi smart-sessions wrapper could not find the real pi binary in PATH.\n' >&2
+		return 127
+	}
+	run_id=${PI_RESUME_RUN_ID:-$(new_run_id)}
+	hints=$(hint_dir)
+	hint_file=$hints/$run_id
+
+	PI_RESUME_RUN_ID="$run_id" "$real_pi" "$@"
+	status=$?
+
+	if [ -s "$hint_file" ]; then
+		rm -f "$hint_file"
+	fi
+
+	return "$status"
+}
+
+current_root() {
+	git rev-parse --show-toplevel 2>/dev/null || pwd
+}
+
+collect_hints() {
+	hints=$(hint_dir)
+	[ -d "$hints" ] || return 0
+
+	for file in "$hints"/*; do
+		[ -s "$file" ] || continue
+		tab=$(printf '\t')
+		IFS=$tab read -r session_id updated_at cwd title <"$file" || continue
+		[ -n "$session_id" ] || continue
+		[ -n "${updated_at:-}" ] || updated_at=0
+		[ -n "${cwd:-}" ] || cwd='(unknown cwd)'
+		[ -n "${title:-}" ] || title='Untitled session'
+		printf '%s\t%s\t%s\t%s\t%s\n' "$updated_at" "$session_id" "$cwd" "$title" "$file"
+	done | sort -rn
+}
+
+filter_for_current_project() {
+	root=$(current_root)
+	awk -F '\t' -v root="$root" '$3 == root || index($3, root "/") == 1 || index(root, $3 "/") == 1'
+}
+
+print_choices() {
+	awk -F '\t' '{ printf "%d) %s  %s  %s\n", NR, $4, $3, $2 }'
+}
+
+select_hint() {
+	all_entries=$(collect_hints)
+	if [ -z "$all_entries" ]; then
+		printf 'No Pi resume hints found.\n' >&2
+		return 1
+	fi
+
+	local_entries=$(printf '%s\n' "$all_entries" | filter_for_current_project)
+	entries=${local_entries:-$all_entries}
+	count=$(printf '%s\n' "$entries" | awk 'END { print NR }')
+
+	if [ "$count" -eq 1 ]; then
+		printf '%s\n' "$entries"
+		return 0
+	fi
+
+	if [ -t 0 ] && command -v fzf >/dev/null 2>&1; then
+		choice=$(printf '%s\n' "$entries" |
+			awk -F '\t' '{ printf "%s\t%s\t%s\t%s\t%s\n", $4, $3, $2, $1, $5 }' |
+			fzf --prompt='pi --last> ' --height=40% --reverse)
+		[ -n "$choice" ] || return 1
+		title=$(printf '%s' "$choice" | cut -f1)
+		cwd=$(printf '%s' "$choice" | cut -f2)
+		session_id=$(printf '%s' "$choice" | cut -f3)
+		updated_at=$(printf '%s' "$choice" | cut -f4)
+		file=$(printf '%s' "$choice" | cut -f5)
+		printf '%s\t%s\t%s\t%s\t%s\n' "$updated_at" "$session_id" "$cwd" "$title" "$file"
+		return 0
+	fi
+
+	printf 'Recent Pi sessions:\n' >&2
+	printf '%s\n' "$entries" | print_choices >&2
+
+	if [ ! -t 0 ]; then
+		printf 'Multiple Pi resume hints found; rerun interactively or pass pi --session <id>.\n' >&2
+		return 1
+	fi
+
+	printf 'Pick session number: ' >&2
+	read -r pick
+	case "$pick" in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+
+	printf '%s\n' "$entries" | awk -F '\t' -v pick="$pick" 'NR == pick { print }'
+}
+
+run_last() {
+	if [ $# -gt 0 ] && [ "${1#--}" != "$1" ]; then
+		:
+	elif [ $# -gt 0 ]; then
+		session_id=$1
+		shift
+		run_real_pi --session "$session_id" "$@"
+		return $?
+	fi
+
+	selected=$(select_hint) || return $?
+	session_id=$(printf '%s' "$selected" | cut -f2)
+	file=$(printf '%s' "$selected" | cut -f5)
+	[ -n "$file" ] && rm -f "$file"
+	run_real_pi --session "$session_id" "$@"
+}
+
+is_uuid() {
+	printf '%s' "$1" | grep -Eq '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$'
+}
+
+case "${1:-}" in
+--last)
+	shift
+	run_last "$@"
+	;;
+--smart-session-help)
+	usage
+	;;
+*)
+	if [ $# -gt 0 ] && is_uuid "$1"; then
+		session_id=$1
+		shift
+		run_real_pi --session "$session_id" "$@"
+	else
+		run_real_pi "$@"
+	fi
+	;;
+esac
