@@ -13,6 +13,7 @@ import { registerComputerUseTools } from './tools';
 
 export default function piComputerUseExtension(pi: ExtensionAPI): void {
   const session = new ComputerUseSession();
+  let toolsRegistered = false;
 
   const extensionToolNames = [
     'computer_list_apps',
@@ -22,13 +23,15 @@ export default function piComputerUseExtension(pi: ExtensionAPI): void {
     'codex_browser_eval',
   ];
 
-  registerComputerUseTools(pi, session);
-  registerCodexBrowserTools(pi, session);
-
   pi.on('session_start', async (_event, ctx) => {
     const enabled = isCodexComputerUseEnabled(ctx);
     const activeTools = pi.getActiveTools().filter((name) => !extensionToolNames.includes(name));
     if (enabled) {
+      if (!toolsRegistered) {
+        registerComputerUseTools(pi, session);
+        registerCodexBrowserTools(pi, session);
+        toolsRegistered = true;
+      }
       activeTools.push(...extensionToolNames);
       pi.registerCommand('codex-computer-use-disable', {
         description:

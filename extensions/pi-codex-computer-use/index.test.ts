@@ -53,10 +53,13 @@ describe('pi-codex-computer-use extension commands', () => {
 
   test('registers enable alias while disabled', async () => {
     const commands = new Map<string, unknown>();
+    const tools: string[] = [];
     let sessionStart: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
     const pi = {
       getActiveTools: () => [],
-      registerTool() {},
+      registerTool(tool: { name: string }) {
+        tools.push(tool.name);
+      },
       registerCommand(name: string, command: unknown) {
         commands.set(name, command);
       },
@@ -71,6 +74,43 @@ describe('pi-codex-computer-use extension commands', () => {
 
     expect(commands.has('codex-computer-use-enable')).toBe(true);
     expect(commands.has('codex-computer-use-disable')).toBe(false);
+    expect(tools).toEqual([]);
+  });
+
+  test('registers computer and browser tools only while enabled', async () => {
+    const tools: string[] = [];
+    let activeTools: string[] = [];
+    let sessionStart: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
+    const userSettings = path.join(root, 'agent/settings.json');
+    fs.mkdirSync(path.dirname(userSettings), { recursive: true });
+    fs.writeFileSync(userSettings, JSON.stringify({ codexComputerUse: { enabled: true } }));
+    const pi = {
+      getActiveTools: () => activeTools,
+      registerTool(tool: { name: string }) {
+        tools.push(tool.name);
+      },
+      registerCommand() {},
+      on(event: string, handler: (event: unknown, ctx: unknown) => Promise<void>) {
+        if (event === 'session_start') sessionStart = handler;
+      },
+      setActiveTools(nextActiveTools: string[]) {
+        activeTools = nextActiveTools;
+      },
+    };
+
+    piComputerUseExtension(pi as any);
+    expect(tools).toEqual([]);
+
+    await sessionStart?.({ type: 'session_start' }, makeSessionContext(root));
+
+    expect(tools).toEqual([
+      'computer_list_apps',
+      'computer_get_app_state',
+      'computer_action',
+      'codex_browser_list',
+      'codex_browser_eval',
+    ]);
+    expect(activeTools).toEqual(tools);
   });
 
   test('registers disable alias while enabled', async () => {
