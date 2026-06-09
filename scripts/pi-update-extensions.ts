@@ -421,6 +421,228 @@ export async function applyPiCodingAgentResolverPatch(
 }
 
 // ---------------------------------------------------------------------------
+// pi-ai Bedrock provider apiKey bearer patch
+//
+// Patches `dist/providers/amazon-bedrock.js` in the installed
+// @earendil-works/pi-ai so facade Bedrock Converse routes can use the
+// provider-level `apiKey` as the SDK HTTP bearer token. This avoids exporting
+// AWS_BEARER_TOKEN_BEDROCK, which would make the built-in amazon-bedrock
+// provider appear authenticated and load all of its models.
+//
+// Keep the behavior narrowly scoped to local facade providers: built-in
+// amazon-bedrock must continue to use normal AWS credentials, and other
+// providers should not implicitly reinterpret apiKey as a Bedrock bearer token.
+// ---------------------------------------------------------------------------
+
+const PI_AI_PACKAGE_NAME = '@earendil-works/pi-ai';
+const PI_AI_BEDROCK_RELATIVE_PATH = 'dist/providers/amazon-bedrock.js';
+const PI_AI_BEDROCK_API_KEY_BEARER_PATCH_MARKER =
+  '__pi_update_extensions:bedrock-api-key-as-bearer__';
+const PI_AI_BEDROCK_API_KEY_BEARER_PATCH_TARGET =
+  '        const bearerToken = options.bearerToken || process.env.AWS_BEARER_TOKEN_BEDROCK || undefined;';
+
+export function buildPiAiBedrockApiKeyBearerReplacement(): string {
+  return [
+    `        // ${PI_AI_BEDROCK_API_KEY_BEARER_PATCH_MARKER}`,
+    `        // Local facade Bedrock proxies authenticate with provider apiKey`,
+    `        // as an HTTP bearer token. Do not apply this to built-in`,
+    `        // amazon-bedrock, where auth can come from AWS credential-chain`,
+    `        // sentinels instead of a real bearer token.`,
+    `        const bearerToken =`,
+    `            options.bearerToken ||`,
+    `            (["facade", "facade-full"].includes(model.provider) ? options.apiKey : undefined) ||`,
+    `            process.env.AWS_BEARER_TOKEN_BEDROCK ||`,
+    `            undefined;`,
+  ].join('\n');
+}
+
+export function isPiAiBedrockApiKeyBearerPatchApplied(packageRoot: string): boolean {
+  const filePath = join(packageRoot, PI_AI_BEDROCK_RELATIVE_PATH);
+  if (!existsSync(filePath)) return false;
+  return readFileSync(filePath, 'utf8').includes(PI_AI_BEDROCK_API_KEY_BEARER_PATCH_MARKER);
+}
+
+function findPiAiPackageRoot(options: { cwd?: string } = {}): string | undefined {
+  const direct = findGlobalPackagePath(PI_AI_PACKAGE_NAME, { cwd: options.cwd });
+  if (direct) return direct;
+
+  const codingAgentRoot = findGlobalPackagePath(PI_CODING_AGENT_PACKAGE_NAME, { cwd: options.cwd });
+  if (!codingAgentRoot) return undefined;
+
+  const candidates = [
+    join(codingAgentRoot, 'node_modules', '@earendil-works', 'pi-ai'),
+    join(codingAgentRoot, '..', 'pi-ai'),
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate) && readPackageName(candidate) === PI_AI_PACKAGE_NAME) {
+      return realpathSync(candidate);
+    }
+  }
+
+  return undefined;
+}
+
+export async function applyPiAiBedrockApiKeyBearerPatch(
+  options: { dryRun?: boolean; packageRoot?: string; cwd?: string } = {},
+): Promise<ApplyPatchResult> {
+  const packageRoot = options.packageRoot ?? findPiAiPackageRoot({ cwd: options.cwd });
+  if (!packageRoot) {
+    throw new Error(
+      `Could not locate installed ${PI_AI_PACKAGE_NAME} via configured package manager, aube, or pnpm`,
+    );
+  }
+
+  const version = getPackageVersion(packageRoot) ?? 'unknown';
+  const filePath = join(packageRoot, PI_AI_BEDROCK_RELATIVE_PATH);
+  if (!existsSync(filePath)) {
+    throw new Error(`pi-ai@${version}: Bedrock provider file not found at ${filePath}`);
+  }
+
+  if (isPiAiBedrockApiKeyBearerPatchApplied(packageRoot)) {
+    return { status: 'already-applied', packageRoot, version, patchPath: filePath };
+  }
+
+  const content = readFileSync(filePath, 'utf8');
+  if (!content.includes(PI_AI_BEDROCK_API_KEY_BEARER_PATCH_TARGET)) {
+    throw new Error(
+      `pi-ai@${version}: target line for Bedrock apiKey bearer patch not found at ${filePath}. ` +
+        `Expected exact line: ${JSON.stringify(PI_AI_BEDROCK_API_KEY_BEARER_PATCH_TARGET)}. ` +
+        `Upstream may have changed; update pi-update-extensions.ts.`,
+    );
+  }
+
+  if (options.dryRun) {
+    return { status: 'would-apply', packageRoot, version, patchPath: filePath };
+  }
+
+  const patched = content.replace(
+    PI_AI_BEDROCK_API_KEY_BEARER_PATCH_TARGET,
+    buildPiAiBedrockApiKeyBearerReplacement(),
+  );
+  writeFileSync(filePath, patched);
+  return { status: 'applied', packageRoot, version, patchPath: filePath };
+}
+
+// ---------------------------------------------------------------------------
+// pi-ai OpenAI Codex authHeader patch
+//
+// Patches `dist/providers/openai-codex-responses.js` in the installed
+// @earendil-works/pi-ai so OpenAI-Codex-compatible proxy routes that use
+// provider-level `apiKey` + `authHeader: true` do not need the apiKey to be a
+// ChatGPT JWT with a chatgpt_account_id claim. When request auth already
+// supplies Authorization, preserve it and omit chatgpt-account-id.
+// ---------------------------------------------------------------------------
+
+const PI_AI_OPENAI_CODEX_RELATIVE_PATH = 'dist/providers/openai-codex-responses.js';
+const PI_AI_OPENAI_CODEX_AUTH_HEADER_PATCH_MARKER =
+  '__pi_update_extensions:openai-codex-auth-header__';
+const PI_AI_OPENAI_CODEX_ACCOUNT_ID_TARGET =
+  '            const accountId = extractAccountId(apiKey);';
+const PI_AI_OPENAI_CODEX_HEADER_TARGET = [
+  'function buildBaseCodexHeaders(initHeaders, additionalHeaders, accountId, token) {',
+  '    const headers = new Headers(initHeaders);',
+  '    for (const [key, value] of Object.entries(additionalHeaders || {})) {',
+  '        headers.set(key, value);',
+  '    }',
+  '    headers.set("Authorization", `Bearer ${token}`);',
+  '    headers.set("chatgpt-account-id", accountId);',
+  '    headers.set("originator", "pi");',
+  '    const userAgent = _os ? `pi (${_os.platform()} ${_os.release()}; ${_os.arch()})` : "pi (browser)";',
+  '    headers.set("User-Agent", userAgent);',
+  '    return headers;',
+  '}',
+].join('\n');
+
+export function buildPiAiOpenAICodexAccountIdReplacement(): string {
+  return [
+    `            // ${PI_AI_OPENAI_CODEX_AUTH_HEADER_PATCH_MARKER}`,
+    `            const accountId = hasCodexCallerAuthorizationHeader(model.headers, options?.headers)`,
+    `                ? undefined`,
+    `                : extractAccountId(apiKey);`,
+  ].join('\n');
+}
+
+export function buildPiAiOpenAICodexHeaderReplacement(): string {
+  return [
+    `// ${PI_AI_OPENAI_CODEX_AUTH_HEADER_PATCH_MARKER}`,
+    `function hasCodexHeader(headers, name) {`,
+    `    if (!headers)`,
+    `        return false;`,
+    `    const lowerName = name.toLowerCase();`,
+    `    return Object.keys(headers).some((key) => key.toLowerCase() === lowerName);`,
+    `}`,
+    `function hasCodexCallerAuthorizationHeader(...headerSources) {`,
+    `    return headerSources.some((headers) => hasCodexHeader(headers, "authorization"));`,
+    `}`,
+    `function buildBaseCodexHeaders(initHeaders, additionalHeaders, accountId, token) {`,
+    `    const headers = new Headers(initHeaders);`,
+    `    for (const [key, value] of Object.entries(additionalHeaders || {})) {`,
+    `        headers.set(key, value);`,
+    `    }`,
+    `    if (!headers.has("Authorization")) {`,
+    `        headers.set("Authorization", \`Bearer \${token}\`);`,
+    `    }`,
+    `    if (accountId) {`,
+    `        headers.set("chatgpt-account-id", accountId);`,
+    `    }`,
+    `    headers.set("originator", "pi");`,
+    `    const userAgent = _os ? \`pi (\${_os.platform()} \${_os.release()}; \${_os.arch()})\` : "pi (browser)";`,
+    `    headers.set("User-Agent", userAgent);`,
+    `    return headers;`,
+    `}`,
+  ].join('\n');
+}
+
+export function isPiAiOpenAICodexAuthHeaderPatchApplied(packageRoot: string): boolean {
+  const filePath = join(packageRoot, PI_AI_OPENAI_CODEX_RELATIVE_PATH);
+  if (!existsSync(filePath)) return false;
+  return readFileSync(filePath, 'utf8').includes(PI_AI_OPENAI_CODEX_AUTH_HEADER_PATCH_MARKER);
+}
+
+export async function applyPiAiOpenAICodexAuthHeaderPatch(
+  options: { dryRun?: boolean; packageRoot?: string; cwd?: string } = {},
+): Promise<ApplyPatchResult> {
+  const packageRoot = options.packageRoot ?? findPiAiPackageRoot({ cwd: options.cwd });
+  if (!packageRoot) {
+    throw new Error(
+      `Could not locate installed ${PI_AI_PACKAGE_NAME} via configured package manager, aube, or pnpm`,
+    );
+  }
+
+  const version = getPackageVersion(packageRoot) ?? 'unknown';
+  const filePath = join(packageRoot, PI_AI_OPENAI_CODEX_RELATIVE_PATH);
+  if (!existsSync(filePath)) {
+    throw new Error(`pi-ai@${version}: OpenAI Codex provider file not found at ${filePath}`);
+  }
+
+  if (isPiAiOpenAICodexAuthHeaderPatchApplied(packageRoot)) {
+    return { status: 'already-applied', packageRoot, version, patchPath: filePath };
+  }
+
+  const content = readFileSync(filePath, 'utf8');
+  const missingTargets = [
+    PI_AI_OPENAI_CODEX_ACCOUNT_ID_TARGET,
+    PI_AI_OPENAI_CODEX_HEADER_TARGET,
+  ].filter((target) => !content.includes(target));
+  if (missingTargets.length > 0) {
+    throw new Error(
+      `pi-ai@${version}: target text for OpenAI Codex authHeader patch not found at ${filePath}. ` +
+        `Missing ${missingTargets.length} target(s). Upstream may have changed; update pi-update-extensions.ts.`,
+    );
+  }
+
+  if (options.dryRun) {
+    return { status: 'would-apply', packageRoot, version, patchPath: filePath };
+  }
+
+  const patched = content
+    .replace(PI_AI_OPENAI_CODEX_ACCOUNT_ID_TARGET, buildPiAiOpenAICodexAccountIdReplacement())
+    .replace(PI_AI_OPENAI_CODEX_HEADER_TARGET, buildPiAiOpenAICodexHeaderReplacement());
+  writeFileSync(filePath, patched);
+  return { status: 'applied', packageRoot, version, patchPath: filePath };
+}
+
+// ---------------------------------------------------------------------------
 // pi-herdr prompt guidance patch
 //
 // pi-herdr owns the `herdr` tool and is the right place for Herdr-specific
@@ -1733,6 +1955,42 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     } catch (error) {
       console.error(
         `Skipped pi-coding-agent resolver patch: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    try {
+      const bedrockResult = await applyPiAiBedrockApiKeyBearerPatch({
+        dryRun,
+        cwd: REPO_ROOT,
+      });
+      const label =
+        bedrockResult.status === 'already-applied'
+          ? `Already applied: pi-ai Bedrock apiKey bearer patch (${bedrockResult.version})`
+          : bedrockResult.status === 'would-apply'
+            ? `Would apply: pi-ai Bedrock apiKey bearer patch (${bedrockResult.version})`
+            : `${bedrockResult.status}: pi-ai Bedrock apiKey bearer patch (${bedrockResult.version}) via ${bedrockResult.patchPath}`;
+      console.log(label);
+    } catch (error) {
+      console.error(
+        `Skipped pi-ai Bedrock apiKey bearer patch: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    try {
+      const codexAuthResult = await applyPiAiOpenAICodexAuthHeaderPatch({
+        dryRun,
+        cwd: REPO_ROOT,
+      });
+      const label =
+        codexAuthResult.status === 'already-applied'
+          ? `Already applied: pi-ai OpenAI Codex authHeader patch (${codexAuthResult.version})`
+          : codexAuthResult.status === 'would-apply'
+            ? `Would apply: pi-ai OpenAI Codex authHeader patch (${codexAuthResult.version})`
+            : `${codexAuthResult.status}: pi-ai OpenAI Codex authHeader patch (${codexAuthResult.version}) via ${codexAuthResult.patchPath}`;
+      console.log(label);
+    } catch (error) {
+      console.error(
+        `Skipped pi-ai OpenAI Codex authHeader patch: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
 

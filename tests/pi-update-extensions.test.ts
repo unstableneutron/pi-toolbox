@@ -8,9 +8,14 @@ import {
   applyPiCodingAgentResolverPatch,
   applyPiContinuousLearningPatch,
   applyPiHerdrPromptGuidancePatch,
+  applyPiAiBedrockApiKeyBearerPatch,
+  applyPiAiOpenAICodexAuthHeaderPatch,
   applyPiMermaidPatch,
   applyPiSubagentsApplyPatchToolPatch,
   applyPiSubagentsIntercomDetachPatch,
+  buildPiAiBedrockApiKeyBearerReplacement,
+  buildPiAiOpenAICodexAccountIdReplacement,
+  buildPiAiOpenAICodexHeaderReplacement,
   buildPiHerdrPromptGuidanceReplacement,
   buildPiCodingAgentResolverReplacement,
   compareVersions,
@@ -21,6 +26,8 @@ import {
   isPiCodingAgentResolverPatchApplied,
   isPiContinuousLearningPatchApplied,
   isPiHerdrPromptGuidancePatchApplied,
+  isPiAiBedrockApiKeyBearerPatchApplied,
+  isPiAiOpenAICodexAuthHeaderPatchApplied,
   isPiMermaidPatchApplied,
   isPiSubagentsApplyPatchToolPatchApplied,
   isPiSubagentsIntercomDetachPatchApplied,
@@ -955,5 +962,220 @@ describe('pi-coding-agent resolver patching', () => {
     expect(replacement).toContain('__pi_update_extensions:model-resolver-uses-available__');
     expect(replacement).toContain('modelRegistry.getAvailable()');
     expect(replacement).toContain('modelRegistry.getAll()');
+  });
+});
+
+describe('pi-ai Bedrock apiKey bearer patching', () => {
+  const FIXTURE_CONTENT = [
+    'export const streamBedrock = (model, context, options = {}) => {',
+    '    const config = {};',
+    '        // Resolve bearer token for Bedrock API key auth.',
+    '        const bearerToken = options.bearerToken || process.env.AWS_BEARER_TOKEN_BEDROCK || undefined;',
+    '        const useBearerToken = bearerToken !== undefined && process.env.AWS_BEDROCK_SKIP_AUTH !== "1";',
+    '    return config;',
+    '};',
+    '',
+  ].join('\n');
+
+  function setupFakePackage(version: string, bedrockContent = FIXTURE_CONTENT): string {
+    const packageRoot = makeTempDir('pi-ai-');
+    writeFileSync(
+      join(packageRoot, 'package.json'),
+      JSON.stringify({ name: '@earendil-works/pi-ai', version }, null, 2),
+    );
+    mkdirSync(join(packageRoot, 'dist', 'providers'), { recursive: true });
+    writeFileSync(join(packageRoot, 'dist', 'providers', 'amazon-bedrock.js'), bedrockContent);
+    return packageRoot;
+  }
+
+  it('reports unpatched fixture as not yet patched', () => {
+    const packageRoot = setupFakePackage('0.78.1');
+    expect(isPiAiBedrockApiKeyBearerPatchApplied(packageRoot)).toBe(false);
+  });
+
+  it('applies the Bedrock apiKey bearer patch and marks it as applied', async () => {
+    const packageRoot = setupFakePackage('0.78.1');
+    const result = await applyPiAiBedrockApiKeyBearerPatch({ packageRoot });
+
+    expect(result).toMatchObject({
+      status: 'applied',
+      packageRoot,
+      version: '0.78.1',
+    });
+    expect(result.patchPath).toBe(join(packageRoot, 'dist', 'providers', 'amazon-bedrock.js'));
+
+    const patched = readFileSync(
+      join(packageRoot, 'dist', 'providers', 'amazon-bedrock.js'),
+      'utf8',
+    );
+    expect(patched).toContain('__pi_update_extensions:bedrock-api-key-as-bearer__');
+    expect(patched).toContain('options.apiKey');
+    expect(patched).toContain('["facade", "facade-full"].includes(model.provider)');
+    expect(patched).toContain('process.env.AWS_BEARER_TOKEN_BEDROCK');
+    expect(patched).not.toContain(
+      'const bearerToken = options.bearerToken || process.env.AWS_BEARER_TOKEN_BEDROCK || undefined;',
+    );
+    expect(isPiAiBedrockApiKeyBearerPatchApplied(packageRoot)).toBe(true);
+  });
+
+  it('is idempotent after patching', async () => {
+    const packageRoot = setupFakePackage('0.78.1');
+    await applyPiAiBedrockApiKeyBearerPatch({ packageRoot });
+    const second = await applyPiAiBedrockApiKeyBearerPatch({ packageRoot });
+
+    expect(second).toMatchObject({
+      status: 'already-applied',
+      packageRoot,
+      version: '0.78.1',
+    });
+  });
+
+  it('supports dry-run without mutating the file', async () => {
+    const packageRoot = setupFakePackage('0.78.1');
+    const bedrockPath = join(packageRoot, 'dist', 'providers', 'amazon-bedrock.js');
+    const original = readFileSync(bedrockPath, 'utf8');
+
+    const result = await applyPiAiBedrockApiKeyBearerPatch({ packageRoot, dryRun: true });
+    expect(result).toMatchObject({
+      status: 'would-apply',
+      packageRoot,
+      version: '0.78.1',
+    });
+    expect(readFileSync(bedrockPath, 'utf8')).toBe(original);
+    expect(isPiAiBedrockApiKeyBearerPatchApplied(packageRoot)).toBe(false);
+  });
+
+  it('throws a descriptive error when the target line is missing', async () => {
+    const packageRoot = setupFakePackage(
+      '1.0.0',
+      'export function streamBedrock() { /* upstream rewrote auth setup */ }\n',
+    );
+    await expect(applyPiAiBedrockApiKeyBearerPatch({ packageRoot })).rejects.toThrow(
+      /target line for Bedrock apiKey bearer patch not found/i,
+    );
+  });
+
+  it('builds a replacement containing the marker and fallback order', () => {
+    const replacement = buildPiAiBedrockApiKeyBearerReplacement();
+    expect(replacement).toContain('__pi_update_extensions:bedrock-api-key-as-bearer__');
+    expect(replacement).toContain('options.bearerToken');
+    expect(replacement).toContain('options.apiKey');
+    expect(replacement).toContain('process.env.AWS_BEARER_TOKEN_BEDROCK');
+  });
+});
+
+describe('pi-ai OpenAI Codex authHeader patching', () => {
+  const FIXTURE_CONTENT = [
+    'export const streamOpenAICodexResponses = (model, context, options) => {',
+    '    const apiKey = options?.apiKey;',
+    '            const accountId = extractAccountId(apiKey);',
+    '    const sseHeaders = buildSSEHeaders(model.headers, options?.headers, accountId, apiKey, options?.sessionId);',
+    '    return sseHeaders;',
+    '};',
+    'function buildBaseCodexHeaders(initHeaders, additionalHeaders, accountId, token) {',
+    '    const headers = new Headers(initHeaders);',
+    '    for (const [key, value] of Object.entries(additionalHeaders || {})) {',
+    '        headers.set(key, value);',
+    '    }',
+    '    headers.set("Authorization", `Bearer ${token}`);',
+    '    headers.set("chatgpt-account-id", accountId);',
+    '    headers.set("originator", "pi");',
+    '    const userAgent = _os ? `pi (${_os.platform()} ${_os.release()}; ${_os.arch()})` : "pi (browser)";',
+    '    headers.set("User-Agent", userAgent);',
+    '    return headers;',
+    '}',
+    '',
+  ].join('\n');
+
+  function setupFakePackage(version: string, codexContent = FIXTURE_CONTENT): string {
+    const packageRoot = makeTempDir('pi-ai-codex-');
+    writeFileSync(
+      join(packageRoot, 'package.json'),
+      JSON.stringify({ name: '@earendil-works/pi-ai', version }, null, 2),
+    );
+    mkdirSync(join(packageRoot, 'dist', 'providers'), { recursive: true });
+    writeFileSync(
+      join(packageRoot, 'dist', 'providers', 'openai-codex-responses.js'),
+      codexContent,
+    );
+    return packageRoot;
+  }
+
+  it('reports unpatched fixture as not yet patched', () => {
+    const packageRoot = setupFakePackage('0.78.1');
+    expect(isPiAiOpenAICodexAuthHeaderPatchApplied(packageRoot)).toBe(false);
+  });
+
+  it('applies the Codex authHeader patch and marks it as applied', async () => {
+    const packageRoot = setupFakePackage('0.78.1');
+    const result = await applyPiAiOpenAICodexAuthHeaderPatch({ packageRoot });
+
+    expect(result).toMatchObject({
+      status: 'applied',
+      packageRoot,
+      version: '0.78.1',
+    });
+    expect(result.patchPath).toBe(
+      join(packageRoot, 'dist', 'providers', 'openai-codex-responses.js'),
+    );
+
+    const patched = readFileSync(
+      join(packageRoot, 'dist', 'providers', 'openai-codex-responses.js'),
+      'utf8',
+    );
+    expect(patched).toContain('__pi_update_extensions:openai-codex-auth-header__');
+    expect(patched).toContain('hasCodexCallerAuthorizationHeader(model.headers, options?.headers)');
+    expect(patched).toContain('? undefined');
+    expect(patched).toContain(': extractAccountId(apiKey)');
+    expect(patched).toContain('if (!headers.has("Authorization"))');
+    expect(patched).toContain('if (accountId)');
+    expect(isPiAiOpenAICodexAuthHeaderPatchApplied(packageRoot)).toBe(true);
+  });
+
+  it('is idempotent after patching', async () => {
+    const packageRoot = setupFakePackage('0.78.1');
+    await applyPiAiOpenAICodexAuthHeaderPatch({ packageRoot });
+    const second = await applyPiAiOpenAICodexAuthHeaderPatch({ packageRoot });
+
+    expect(second).toMatchObject({
+      status: 'already-applied',
+      packageRoot,
+      version: '0.78.1',
+    });
+  });
+
+  it('supports dry-run without mutating the file', async () => {
+    const packageRoot = setupFakePackage('0.78.1');
+    const codexPath = join(packageRoot, 'dist', 'providers', 'openai-codex-responses.js');
+    const original = readFileSync(codexPath, 'utf8');
+
+    const result = await applyPiAiOpenAICodexAuthHeaderPatch({ packageRoot, dryRun: true });
+    expect(result).toMatchObject({
+      status: 'would-apply',
+      packageRoot,
+      version: '0.78.1',
+    });
+    expect(readFileSync(codexPath, 'utf8')).toBe(original);
+    expect(isPiAiOpenAICodexAuthHeaderPatchApplied(packageRoot)).toBe(false);
+  });
+
+  it('throws a descriptive error when target text is missing', async () => {
+    const packageRoot = setupFakePackage(
+      '1.0.0',
+      'export function streamOpenAICodexResponses() { /* upstream rewrote auth setup */ }\n',
+    );
+    await expect(applyPiAiOpenAICodexAuthHeaderPatch({ packageRoot })).rejects.toThrow(
+      /target text for OpenAI Codex authHeader patch not found/i,
+    );
+  });
+
+  it('builds replacements containing the marker and auth-header behavior', () => {
+    expect(buildPiAiOpenAICodexAccountIdReplacement()).toContain(
+      'hasCodexCallerAuthorizationHeader',
+    );
+    const headerReplacement = buildPiAiOpenAICodexHeaderReplacement();
+    expect(headerReplacement).toContain('__pi_update_extensions:openai-codex-auth-header__');
+    expect(headerReplacement).toContain('headers.has("Authorization")');
+    expect(headerReplacement).toContain('headers.set("chatgpt-account-id", accountId)');
   });
 });
