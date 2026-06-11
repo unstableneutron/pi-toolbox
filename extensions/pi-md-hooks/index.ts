@@ -5,7 +5,6 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   copyToClipboard,
   type ExtensionAPI,
-  type ExtensionCommandContext,
   type ExtensionContext,
 } from '@earendil-works/pi-coding-agent';
 import type { AutocompleteItem, AutocompleteProvider } from '@earendil-works/pi-tui';
@@ -216,7 +215,7 @@ function rebuildCodeBlockMaps(refs: CodeBlockRef[]): void {
   }
 }
 
-function getMessagesFromSession(ctx: ExtensionContext | ExtensionCommandContext): any[] {
+function getMessagesFromSession(ctx: ExtensionContext): any[] {
   const manager = ctx.sessionManager as any;
   const entries =
     'function' === typeof manager.getBranch ? manager.getBranch() : (manager.getEntries?.() ?? []);
@@ -225,7 +224,7 @@ function getMessagesFromSession(ctx: ExtensionContext | ExtensionCommandContext)
     .filter((message: any) => message?.role);
 }
 
-function refreshCodeBlockIndex(ctx: ExtensionContext | ExtensionCommandContext): CodeBlockRef[] {
+function refreshCodeBlockIndex(ctx: ExtensionContext): CodeBlockRef[] {
   const refs = buildCodeBlockIndex(getMessagesFromSession(ctx));
   rebuildCodeBlockMaps(refs);
   return refs;
@@ -626,30 +625,6 @@ export function createPiMdHooksExtension(
   loadMarkdownModule: LoadMarkdownModule = defaultLoadMarkdownModule,
 ) {
   return async function piMdHooks(pi: ExtensionAPI): Promise<void> {
-    pi.registerCommand('copy', {
-      description: 'Copy a labeled code block, for example /copy 1a',
-      handler: async (args, ctx) => {
-        if ('tui' !== ctx.mode) {
-          return;
-        }
-
-        const label = args.trim();
-        if (!label) {
-          return;
-        }
-
-        refreshCodeBlockIndex(ctx);
-        const ref = findCodeBlockRef(label);
-        if (!ref) {
-          ctx.ui.notify(`No code block labeled ${label}`, 'warning');
-          return;
-        }
-
-        await copyToClipboard(ref.content);
-        ctx.ui.notify(`Copied code block ${ref.label}`, 'info');
-      },
-    });
-
     pi.on('session_start', async (_event, ctx) => {
       if ('tui' !== ctx.mode) {
         return;
@@ -666,6 +641,28 @@ export function createPiMdHooksExtension(
       if ('tui' === ctx.mode && 'assistant' === event.message.role) {
         refreshCodeBlockIndex(ctx);
       }
+    });
+
+    pi.on('input', async (event, ctx) => {
+      if ('tui' !== ctx.mode) {
+        return { action: 'continue' };
+      }
+
+      const match = /^\/copy\s+(\S+)\s*$/u.exec(event.text);
+      if (!match) {
+        return { action: 'continue' };
+      }
+
+      refreshCodeBlockIndex(ctx);
+      const ref = findCodeBlockRef(match[1]);
+      if (!ref) {
+        ctx.ui.notify(`No code block labeled ${match[1]}`, 'warning');
+        return { action: 'handled' };
+      }
+
+      await copyToClipboard(ref.content);
+      ctx.ui.notify(`Copied code block ${ref.label}`, 'info');
+      return { action: 'handled' };
     });
 
     pi.on('session_shutdown', async () => {

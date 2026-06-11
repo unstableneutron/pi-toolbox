@@ -69,14 +69,11 @@ async function createExtensionHarness(
   loader: LoadMarkdownModule = async () => ({ Markdown }),
 ) {
   const handlers = new Map<string, (event: any, ctx: any) => Promise<void> | void>();
-  const commands = new Map<string, any>();
   const pi = {
     on(event: string, handler: (event: any, ctx: any) => Promise<void> | void) {
       handlers.set(event, handler);
     },
-    registerCommand(name: string, command: any) {
-      commands.set(name, command);
-    },
+    registerCommand: vi.fn(),
   } as any;
 
   await createPiMdHooksExtension(loader)(pi);
@@ -94,7 +91,7 @@ async function createExtensionHarness(
     },
   } as any;
 
-  return { commands, handlers, ctx, notify };
+  return { handlers, ctx, notify, registerCommand: pi.registerCommand };
 }
 
 function getHandler(
@@ -180,7 +177,7 @@ describe('pi-md-hooks markdown patch', () => {
     expect(after).toContain('// 1a');
   });
 
-  test('copy command copies a labeled code block from the active TUI session', async () => {
+  test('copy input handler copies a labeled code block without registering a conflicting command', async () => {
     const harness = await createExtensionHarness('/tmp/project');
     harness.ctx.sessionManager.getBranch = () => [
       {
@@ -197,9 +194,14 @@ describe('pi-md-hooks markdown patch', () => {
       },
     ];
 
-    const copyCommand = harness.commands.get('copy');
-    await copyCommand.handler('1a', harness.ctx);
+    expect(harness.registerCommand).not.toHaveBeenCalled();
 
+    const result = await getHandler(harness.handlers, 'input')(
+      { text: '/copy 1a', source: 'interactive' },
+      harness.ctx,
+    );
+
+    expect(result).toEqual({ action: 'handled' });
     expect(copyToClipboardMock).toHaveBeenCalledWith(
       'const copied = true;\n  console.log(copied);',
     );
