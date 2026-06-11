@@ -251,7 +251,8 @@ describe('pi-md-hooks markdown patch', () => {
     const after = new Markdown('```ts\nconst before = true;\n```', 0, 0, plainMarkdownTheme)
       .render(120)
       .join('\n');
-    expect(after).toContain('```ts [1a]');
+    expect(after).toContain('```ts · /copy:1a');
+    expect(after).not.toContain('```ts [1a]');
     expect(after).not.toContain('// 1a');
   });
 
@@ -269,8 +270,9 @@ describe('pi-md-hooks markdown patch', () => {
       .render(120)
       .join('\n');
 
-    expect(rendered).toContain('```json [1a]');
-    expect(rendered).toContain('```bash [1b]');
+    expect(rendered).toContain('```json · /copy:1a');
+    expect(rendered).toContain('```bash · /copy:1b');
+    expect(rendered).not.toContain('```json [1a]');
     expect(rendered).not.toContain('// 1a');
   });
 

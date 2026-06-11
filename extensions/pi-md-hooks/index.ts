@@ -618,7 +618,7 @@ function renderPatchedToken(
   }
 
   const lang = 'string' === typeof token.lang && token.lang ? token.lang : '';
-  return [self.theme.codeBlockBorder(`\`\`\`${lang} [${label}]`), ...lines.slice(1)];
+  return [self.theme.codeBlockBorder(`\`\`\`${lang} · /copy:${label}`), ...lines.slice(1)];
 }
 
 export async function installMarkdownPatch(
