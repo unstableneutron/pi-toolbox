@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -50,6 +51,7 @@ interface RuntimeState {
   refsByMarkdownText: Map<string, CodeBlockRef[]>;
   enableLiveCodeBlockLabels: boolean;
   nextStableMessageNumber: number;
+  copyFormatEnabled: boolean;
 }
 
 function getRuntimeState(): RuntimeState {
@@ -65,6 +67,7 @@ function getRuntimeState(): RuntimeState {
     refsByMarkdownText: new Map(),
     enableLiveCodeBlockLabels: false,
     nextStableMessageNumber: 1,
+    copyFormatEnabled: true,
   };
   target[STATE_KEY] = state;
   return state;
@@ -212,6 +215,62 @@ function previewCodeBlock(content: string): string {
 function countNonTrailingCodeLines(content: string): number {
   const trimmed = content.replace(/\s+$/u, '');
   return trimmed ? trimmed.split('\n').length : 0;
+}
+
+function formatterExtensionForLanguage(language: string): string | undefined {
+  const normalized = language.trim().toLowerCase();
+  const extensionByLanguage: Record<string, string> = {
+    cjs: 'cjs',
+    css: 'css',
+    html: 'html',
+    javascript: 'js',
+    js: 'js',
+    json: 'json',
+    jsonc: 'jsonc',
+    jsx: 'jsx',
+    mjs: 'mjs',
+    mts: 'mts',
+    ts: 'ts',
+    tsx: 'tsx',
+    typescript: 'ts',
+  };
+
+  return extensionByLanguage[normalized];
+}
+
+function tryFormatCodeBlock(content: string, language: string, cwd: string): string | undefined {
+  const extension = formatterExtensionForLanguage(language);
+  if (!extension) {
+    return content;
+  }
+
+  const filepath = `copy-block.${extension}`;
+  const candidates: Array<{ command: string; args: string[] }> = [
+    { command: 'oxfmt', args: ['--stdin-filepath', filepath] },
+    { command: 'pnpm', args: ['exec', 'oxfmt', '--stdin-filepath', filepath] },
+    { command: 'aubx', args: ['oxfmt', '--stdin-filepath', filepath] },
+    { command: 'pnpx', args: ['oxfmt', '--stdin-filepath', filepath] },
+    { command: 'npx', args: ['oxfmt', '--stdin-filepath', filepath] },
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      const output = execFileSync(candidate.command, candidate.args, {
+        cwd,
+        encoding: 'utf8',
+        input: content,
+        stdio: ['pipe', 'pipe', 'ignore'],
+        timeout: 5000,
+      });
+      if ('string' === typeof output) {
+        return output.trimEnd();
+      }
+    } catch {
+      // Try the next configured formatter command.
+    }
+  }
+
+  return undefined;
 }
 
 function previewResponse(content: string): string {
@@ -775,6 +834,7 @@ export function resetPiMdHooksTestState(): void {
   state.refsByMarkdownText = new Map();
   state.enableLiveCodeBlockLabels = false;
   state.nextStableMessageNumber = 1;
+  state.copyFormatEnabled = true;
 }
 
 export function createPiMdHooksExtension(
@@ -805,6 +865,13 @@ export function createPiMdHooksExtension(
         return { action: 'continue' };
       }
 
+      if (/^\/copy(?::|\s+)format\s*$/u.test(event.text)) {
+        const state = getRuntimeState();
+        state.copyFormatEnabled = !state.copyFormatEnabled;
+        ctx.ui.notify(`Copy formatter ${state.copyFormatEnabled ? 'enabled' : 'disabled'}`, 'info');
+        return { action: 'handled' };
+      }
+
       const match = /^\/copy(?::|\s+)(\S+)\s*$/u.exec(event.text);
       if (!match) {
         return { action: 'continue' };
@@ -824,7 +891,26 @@ export function createPiMdHooksExtension(
         return { action: 'handled' };
       }
 
-      await copyToClipboard(ref.content);
+      const state = getRuntimeState();
+      let copiedContent = ref.content;
+      if (state.copyFormatEnabled) {
+        const formattedContent = tryFormatCodeBlock(
+          ref.content,
+          ref.language,
+          ctx.sessionManager.getCwd(),
+        );
+        if (formattedContent === undefined) {
+          state.copyFormatEnabled = false;
+          ctx.ui.notify(
+            'No copy formatter found; copied unformatted and disabled formatting',
+            'warning',
+          );
+        } else {
+          copiedContent = formattedContent;
+        }
+      }
+
+      await copyToClipboard(copiedContent);
       ctx.ui.notify(`Copied code block ${match[1]}`, 'info');
       return { action: 'handled' };
     });

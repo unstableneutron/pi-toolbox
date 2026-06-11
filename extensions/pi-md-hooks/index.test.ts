@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 
 const copyToClipboardMock = vi.hoisted(() => vi.fn());
+const execFileSyncMock = vi.hoisted(() => vi.fn());
 
 // Force terminal-capability detection to report hyperlink support before
 // pi-md-hooks is imported. Without this, getCapabilities() inspects the real
@@ -34,6 +35,10 @@ vi.mock('@earendil-works/pi-coding-agent', async () => {
     copyToClipboard: copyToClipboardMock,
   };
 });
+
+vi.mock('node:child_process', () => ({
+  execFileSync: execFileSyncMock,
+}));
 
 import { Markdown, type MarkdownTheme } from '@earendil-works/pi-tui';
 
@@ -109,6 +114,7 @@ function getHandler(
 afterEach(() => {
   vi.restoreAllMocks();
   copyToClipboardMock.mockReset();
+  execFileSyncMock.mockReset();
   resetPiMdHooksTestState();
 });
 
@@ -351,6 +357,89 @@ describe('pi-md-hooks markdown patch', () => {
 
     expect(result).toEqual({ action: 'handled' });
     expect(copyToClipboardMock).toHaveBeenCalledWith('const copied = true;');
+  });
+
+  test('copy input handler formats supported code blocks by default', async () => {
+    execFileSyncMock.mockReturnValue('const copied = true;\n');
+    const harness = await createExtensionHarness('/tmp/project');
+    harness.ctx.sessionManager.getBranch = () => [
+      {
+        type: 'message',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: '```ts\nconst copied=true\n```' }],
+        },
+      },
+    ];
+
+    const result = await getHandler(harness.handlers, 'input')(
+      { text: '/copy:1a', source: 'interactive' },
+      harness.ctx,
+    );
+
+    expect(result).toEqual({ action: 'handled' });
+    expect(execFileSyncMock).toHaveBeenCalledWith(
+      'oxfmt',
+      ['--stdin-filepath', 'copy-block.ts'],
+      expect.objectContaining({ input: 'const copied=true', cwd: '/tmp/project' }),
+    );
+    expect(copyToClipboardMock).toHaveBeenCalledWith('const copied = true;');
+  });
+
+  test('copy format toggle disables formatting for subsequent copies', async () => {
+    execFileSyncMock.mockReturnValue('const copied = true;\n');
+    const harness = await createExtensionHarness('/tmp/project');
+    harness.ctx.sessionManager.getBranch = () => [
+      {
+        type: 'message',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: '```ts\nconst copied=true\n```' }],
+        },
+      },
+    ];
+
+    await getHandler(harness.handlers, 'input')(
+      { text: '/copy:format', source: 'interactive' },
+      harness.ctx,
+    );
+    await getHandler(harness.handlers, 'input')(
+      { text: '/copy:1a', source: 'interactive' },
+      harness.ctx,
+    );
+
+    expect(execFileSyncMock).not.toHaveBeenCalled();
+    expect(copyToClipboardMock).toHaveBeenCalledWith('const copied=true');
+    expect(harness.notify).toHaveBeenCalledWith('Copy formatter disabled', 'info');
+  });
+
+  test('copy formatter disables itself when no formatter command is found', async () => {
+    execFileSyncMock.mockImplementation(() => {
+      const error = new Error('not found') as NodeJS.ErrnoException;
+      error.code = 'ENOENT';
+      throw error;
+    });
+    const harness = await createExtensionHarness('/tmp/project');
+    harness.ctx.sessionManager.getBranch = () => [
+      {
+        type: 'message',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: '```ts\nconst copied=true\n```' }],
+        },
+      },
+    ];
+
+    await getHandler(harness.handlers, 'input')(
+      { text: '/copy:1a', source: 'interactive' },
+      harness.ctx,
+    );
+
+    expect(copyToClipboardMock).toHaveBeenCalledWith('const copied=true');
+    expect(harness.notify).toHaveBeenCalledWith(
+      'No copy formatter found; copied unformatted and disabled formatting',
+      'warning',
+    );
   });
 
   test('copy input handler copies a numbered full assistant response by recency', async () => {
