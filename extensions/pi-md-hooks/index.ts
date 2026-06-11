@@ -12,6 +12,7 @@ import { getCapabilities } from '@earendil-works/pi-tui';
 
 const PATCHED = Symbol.for('pi-md-hooks.markdown.patched');
 const STATE_KEY = Symbol.for('pi-md-hooks.runtime-state');
+const MAX_INDEXED_ASSISTANT_MESSAGES = 10;
 
 export interface PatchInstallResult {
   ok: boolean;
@@ -245,10 +246,14 @@ function getAssistantTextsByRecency(messages: any[]): string[] {
   if (assistantMessages.every((message) => message.timestamp !== undefined)) {
     return [...assistantMessages]
       .sort((left, right) => right.timestamp! - left.timestamp! || right.index - left.index)
+      .slice(0, MAX_INDEXED_ASSISTANT_MESSAGES)
       .map((message) => message.content);
   }
 
-  return assistantMessages.reverse().map((message) => message.content);
+  return assistantMessages
+    .reverse()
+    .slice(0, MAX_INDEXED_ASSISTANT_MESSAGES)
+    .map((message) => message.content);
 }
 
 export function buildMessageIndex(messages: any[]): MessageRef[] {

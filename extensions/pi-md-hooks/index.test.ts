@@ -157,6 +157,44 @@ describe('pi-md-hooks markdown patch', () => {
     ]);
   });
 
+  test('indexes only the latest ten assistant messages', () => {
+    const messages = Array.from({ length: 12 }, (_, index) => ({
+      role: 'assistant',
+      timestamp: index + 1,
+      content: [
+        { type: 'text', text: `Message ${index + 1}\n\`\`\`text\nblock ${index + 1}\n\`\`\`` },
+      ],
+    }));
+
+    const messageIndex = buildMessageIndex(messages as any[]);
+    const codeBlockIndex = buildCodeBlockIndex(messages as any[]);
+
+    expect(messageIndex.map((message) => message.content.split('\n')[0])).toEqual([
+      'Message 12',
+      'Message 11',
+      'Message 10',
+      'Message 9',
+      'Message 8',
+      'Message 7',
+      'Message 6',
+      'Message 5',
+      'Message 4',
+      'Message 3',
+    ]);
+    expect(codeBlockIndex.map((block) => block.label)).toEqual([
+      '1a',
+      '2a',
+      '3a',
+      '4a',
+      '5a',
+      '6a',
+      '7a',
+      '8a',
+      '9a',
+      '10a',
+    ]);
+  });
+
   test('indexes full assistant messages by recency', () => {
     const index = buildMessageIndex([
       {
