@@ -1,3 +1,5 @@
+import { classifyOpenAIResponsesFailure } from './provider-errors';
+
 function responseOutputItems(response: Record<string, any>): Record<string, any>[] {
   return (Array.isArray(response.output) ? response.output : []).filter(
     (item): item is Record<string, any> => typeof item === 'object' && item !== null,
@@ -53,6 +55,9 @@ export class TerminalResponseError extends Error {
   readonly hasDetails: boolean;
   readonly outputItems?: number;
   readonly hasActionableOutput: boolean;
+  readonly failureReason?: string;
+  readonly failureCategory?: string;
+  readonly retryable?: boolean;
 
   constructor(type: string, response: Record<string, any>) {
     super(formatTerminalResponseError(type, response));
@@ -66,6 +71,10 @@ export class TerminalResponseError extends Error {
     this.hasDetails = hasTerminalResponseDetails(response);
     this.outputItems = terminalResponseOutputItems(response);
     this.hasActionableOutput = hasActionableTerminalOutput(response);
+    const classification = classifyOpenAIResponsesFailure({ event: { type, response } });
+    this.failureReason = classification?.reason;
+    this.failureCategory = classification?.category;
+    this.retryable = classification?.retryable;
   }
 }
 
@@ -93,6 +102,8 @@ export function responsesErrorFrameMessage(event: Record<string, any>): string {
 export function isRetryableResponsesErrorFrame(event: Record<string, any>): boolean {
   if (event.type !== 'error') return false;
   const status = typeof event.status === 'number' ? event.status : event.error?.status;
+  const classification = classifyOpenAIResponsesFailure({ status, event });
+  if (classification) return classification.retryable;
   if (status === 500 || status === 502 || status === 503 || status === 504) return true;
 
   const text = [event.error?.type, event.error?.code, event.error?.message, event.message]

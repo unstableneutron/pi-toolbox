@@ -1,29 +1,129 @@
 import { isReplaySafeOpenAIResponsesTransportFailure } from './openai-responses-retry';
 
 export type RetryableProviderErrorReason =
-  | 'deploymentMissing'
   | 'encryptedContentVerification'
   | 'nativeCompactionCreatedBy'
   | 'openAIResponsesTransportErrorBeforeOutput'
   | 'providerServerError';
 
-export function classifyRetryableProviderError(
-  errorMessage: string | undefined,
-): RetryableProviderErrorReason | undefined {
-  if (!errorMessage) return undefined;
+export type ProviderFailureReason =
+  | RetryableProviderErrorReason
+  | 'deploymentMissing'
+  | 'invalidModel'
+  | 'authError'
+  | 'rateLimited';
 
-  const text = errorMessage.toLowerCase();
+export type ProviderFailureCategory =
+  | 'terminal_config_error'
+  | 'terminal_auth_error'
+  | 'transient_retryable'
+  | 'session_repair_retryable';
 
-  if (text.includes('api deployment for this resource does not exist')) {
-    return 'deploymentMissing';
+interface OpenAIResponsesFailureInput {
+  status?: number;
+  body?: unknown;
+  event?: unknown;
+  message?: string;
+}
+
+interface AssistantProviderErrorLike {
+  errorMessage?: string;
+  role?: unknown;
+  stopReason?: unknown;
+  content?: unknown;
+  diagnostics?: unknown;
+}
+
+export interface ProviderFailureClassification {
+  reason: ProviderFailureReason;
+  category: ProviderFailureCategory;
+  retryable: boolean;
+}
+
+function isRetryableProviderErrorReason(
+  reason: ProviderFailureReason,
+): reason is RetryableProviderErrorReason {
+  return (
+    reason === 'encryptedContentVerification' ||
+    reason === 'nativeCompactionCreatedBy' ||
+    reason === 'openAIResponsesTransportErrorBeforeOutput' ||
+    reason === 'providerServerError'
+  );
+}
+
+function collectFailureText(value: unknown, output: string[] = []): string[] {
+  if (typeof value === 'string') {
+    output.push(value);
+    return output;
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    output.push(String(value));
+    return output;
+  }
+  if (!value || typeof value !== 'object') return output;
+  if (Array.isArray(value)) {
+    for (const item of value) collectFailureText(item, output);
+    return output;
+  }
+  const record = value as Record<string, unknown>;
+  for (const key of ['type', 'code', 'message', 'param', 'status', 'reason']) {
+    collectFailureText(record[key], output);
+  }
+  collectFailureText(record.error, output);
+  collectFailureText(record.response, output);
+  collectFailureText(record.incomplete_details, output);
+  return output;
+}
+
+function failureText(input: OpenAIResponsesFailureInput): string {
+  return collectFailureText([input.message, input.body, input.event]).join('\n').toLowerCase();
+}
+
+function retryable(
+  reason: RetryableProviderErrorReason | 'rateLimited',
+  category: ProviderFailureCategory = 'transient_retryable',
+): ProviderFailureClassification {
+  return { reason, category, retryable: true };
+}
+
+function terminal(
+  reason: Exclude<ProviderFailureReason, RetryableProviderErrorReason | 'rateLimited'>,
+  category: Extract<ProviderFailureCategory, 'terminal_config_error' | 'terminal_auth_error'>,
+): ProviderFailureClassification {
+  return { reason, category, retryable: false };
+}
+
+export function classifyOpenAIResponsesFailure(
+  input: OpenAIResponsesFailureInput,
+): ProviderFailureClassification | undefined {
+  const text = failureText(input);
+  const status = input.status;
+
+  if (
+    text.includes('deploymentnotfound') ||
+    text.includes('deploymentmissing') ||
+    text.includes('api deployment for this resource does not exist') ||
+    text.includes('failed to find an active deployment')
+  ) {
+    return terminal('deploymentMissing', 'terminal_config_error');
+  }
+
+  if (text.includes('invalid model name passed') || text.includes('model_not_found')) {
+    return terminal('invalidModel', 'terminal_config_error');
+  }
+
+  if (status === 401 || status === 403) return terminal('authError', 'terminal_auth_error');
+
+  if (status === 429 || text.includes('rate limit') || text.includes('too many requests')) {
+    return retryable('rateLimited');
   }
 
   if (text.includes('encrypted content') && text.includes('could not be verified')) {
-    return 'encryptedContentVerification';
+    return retryable('encryptedContentVerification', 'session_repair_retryable');
   }
 
   if (text.includes('unknown parameter') && text.includes('created_by')) {
-    return 'nativeCompactionCreatedBy';
+    return retryable('nativeCompactionCreatedBy', 'session_repair_retryable');
   }
 
   if (
@@ -31,33 +131,101 @@ export function classifyRetryableProviderError(
     text.includes('peak load') &&
     text.includes('provisioned throughput')
   ) {
-    return 'providerServerError';
+    return retryable('providerServerError');
   }
 
   if (text.includes('server had an error processing your request')) {
-    return 'providerServerError';
+    return retryable('providerServerError');
   }
 
   if (text.includes('model produced invalid content')) {
-    return 'providerServerError';
+    return retryable('providerServerError');
   }
 
   if (text.includes('unknown error (no error details in response)')) {
-    return 'providerServerError';
+    return retryable('providerServerError');
   }
 
   if (text.includes('no tool call found for function call output with call_id')) {
-    return 'providerServerError';
+    return retryable('providerServerError');
   }
 
   if (
     text.includes('number of toolresult blocks') &&
     text.includes('exceeds the number of tooluse blocks')
   ) {
-    return 'providerServerError';
+    return retryable('providerServerError');
+  }
+
+  if (
+    status === 500 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504 ||
+    text.includes('server_error') ||
+    text.includes('internal_server_error') ||
+    text.includes('internal server') ||
+    text.includes('unexpected eof') ||
+    text.includes('abnormal closure') ||
+    text.includes('close 1006')
+  ) {
+    return retryable('providerServerError');
   }
 
   return undefined;
+}
+
+function classificationFromOpenAIResponsesTransportDiagnostics(
+  message: AssistantProviderErrorLike | undefined,
+): ProviderFailureClassification | undefined {
+  const diagnostics = Array.isArray(message?.diagnostics) ? message.diagnostics : [];
+  for (const diagnostic of diagnostics) {
+    if (!diagnostic || typeof diagnostic !== 'object') continue;
+    const record = diagnostic as Record<string, unknown>;
+    if (record.type !== 'openai_websocket_transport') continue;
+    const details = record.details;
+    if (!details || typeof details !== 'object') continue;
+    const candidate = details as Record<string, unknown>;
+    const retryable = candidate.retryable;
+    const reason = candidate.failureReason;
+    const category = candidate.failureCategory;
+    if (
+      typeof retryable === 'boolean' &&
+      typeof reason === 'string' &&
+      typeof category === 'string'
+    ) {
+      return {
+        reason: reason as ProviderFailureReason,
+        category: category as ProviderFailureCategory,
+        retryable,
+      };
+    }
+  }
+  return undefined;
+}
+
+function classifyAssistantProviderFailure(
+  message: AssistantProviderErrorLike | undefined,
+): ProviderFailureClassification | undefined {
+  return (
+    classificationFromOpenAIResponsesTransportDiagnostics(message) ??
+    classifyOpenAIResponsesFailure({ message: message?.errorMessage })
+  );
+}
+
+export function isNonRetryableAssistantProviderError(
+  message: AssistantProviderErrorLike | undefined,
+): boolean {
+  return classifyAssistantProviderFailure(message)?.retryable === false;
+}
+
+export function classifyRetryableProviderError(
+  errorMessage: string | undefined,
+): RetryableProviderErrorReason | undefined {
+  const classification = classifyOpenAIResponsesFailure({ message: errorMessage });
+  return classification?.retryable && isRetryableProviderErrorReason(classification.reason)
+    ? classification.reason
+    : undefined;
 }
 
 export function requiresSessionRepairForRetryableProviderError(
@@ -67,12 +235,15 @@ export function requiresSessionRepairForRetryableProviderError(
 }
 
 export function classifyRetryableAssistantProviderError(
-  message: { errorMessage?: string } | undefined,
+  message: AssistantProviderErrorLike | undefined,
 ): RetryableProviderErrorReason | undefined {
-  return (
-    classifyRetryableProviderError(message?.errorMessage) ??
-    (isReplaySafeOpenAIResponsesTransportFailure(message)
-      ? 'openAIResponsesTransportErrorBeforeOutput'
-      : undefined)
-  );
+  const classification = classifyAssistantProviderFailure(message);
+  if (classification) {
+    return classification.retryable && isRetryableProviderErrorReason(classification.reason)
+      ? classification.reason
+      : undefined;
+  }
+  return isReplaySafeOpenAIResponsesTransportFailure(message)
+    ? 'openAIResponsesTransportErrorBeforeOutput'
+    : undefined;
 }

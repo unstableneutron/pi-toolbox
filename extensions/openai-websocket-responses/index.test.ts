@@ -65,6 +65,7 @@ import {
 } from './src/transport-diagnostics.ts';
 import { recoverResponseByRetrieve } from './src/retrieve-recovery.ts';
 import { isReplayUnsafeResponsesEvent } from '../shared/openai-responses-retry.ts';
+import { TerminalResponseError } from '../shared/openai-responses-terminal.ts';
 import {
   createTraceContext,
   createTraceContextForTraceId,
@@ -1902,6 +1903,286 @@ describe('WebSocket transport', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('does not retry websocket upgrade deployment-not-found errors', async () => {
+    const instances: any[] = [];
+    class FakeWebSocket {
+      readyState = 0;
+      listeners = new Map<string, Set<(...args: any[]) => void>>();
+
+      constructor() {
+        instances.push(this);
+        queueMicrotask(() =>
+          this.emitNode(
+            'unexpected-response',
+            {},
+            {
+              statusCode: 404,
+              headers: { 'content-type': 'application/json' },
+              on(event: string, listener: (...args: any[]) => void) {
+                if (event === 'data') {
+                  listener(
+                    Buffer.from(
+                      JSON.stringify({
+                        error: {
+                          type: 'invalid_request_error',
+                          code: 'DeploymentNotFound',
+                          message: 'The API deployment for this resource does not exist.',
+                        },
+                      }),
+                    ),
+                  );
+                }
+                if (event === 'end') listener();
+                return this;
+              },
+            },
+          ),
+        );
+      }
+
+      send() {}
+
+      close() {
+        this.readyState = 3;
+      }
+
+      addEventListener(type: string, listener: (...args: any[]) => void) {
+        const listeners = this.listeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      removeEventListener(type: string, listener: (...args: any[]) => void) {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      on(type: string, listener: (...args: any[]) => void) {
+        this.addEventListener(type, listener);
+      }
+
+      off(type: string, listener: (...args: any[]) => void) {
+        this.removeEventListener(type, listener);
+      }
+
+      emitNode(type: string, ...args: any[]) {
+        for (const listener of this.listeners.get(type) ?? []) listener(...args);
+      }
+    }
+
+    const diagnostics = createTransportDiagnostics(
+      { configuredTransport: 'auto', url: 'wss://example.test/responses' },
+      () => 1000,
+    );
+
+    await expect(
+      runWebSocketResponse(
+        {
+          url: 'wss://example.test/responses',
+          headers: new Headers(),
+          body: { model: 'gpt', input: [] },
+          settings: normalizeSettings({ websocket: { retries: 2, firstEventTimeoutMs: 0 } }),
+          WebSocketCtor: FakeWebSocket as any,
+          diagnostics,
+        },
+        () => undefined,
+      ),
+    ).rejects.toThrow('The API deployment for this resource does not exist.');
+
+    expect(instances).toHaveLength(1);
+    expect(diagnostics.hasEvent('ws_retry')).toBe(false);
+    expect(diagnostics.getFields()).toMatchObject({
+      httpStatus: 404,
+      failureReason: 'deploymentMissing',
+      failureCategory: 'terminal_config_error',
+      retryable: false,
+    });
+  });
+
+  it('probes empty websocket upgrade 500s before retrying', async () => {
+    const instances: any[] = [];
+    const fetchCalls: any[] = [];
+    class FakeWebSocket {
+      readyState = 0;
+      listeners = new Map<string, Set<(...args: any[]) => void>>();
+
+      constructor() {
+        instances.push(this);
+        queueMicrotask(() =>
+          this.emitNode(
+            'unexpected-response',
+            {},
+            {
+              statusCode: 500,
+              headers: { 'content-length': '0' },
+              on(event: string, listener: (...args: any[]) => void) {
+                if (event === 'end') listener();
+                return this;
+              },
+            },
+          ),
+        );
+      }
+
+      send() {}
+
+      close() {
+        this.readyState = 3;
+      }
+
+      addEventListener(type: string, listener: (...args: any[]) => void) {
+        const listeners = this.listeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      removeEventListener(type: string, listener: (...args: any[]) => void) {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      on(type: string, listener: (...args: any[]) => void) {
+        this.addEventListener(type, listener);
+      }
+
+      off(type: string, listener: (...args: any[]) => void) {
+        this.removeEventListener(type, listener);
+      }
+
+      emitNode(type: string, ...args: any[]) {
+        for (const listener of this.listeners.get(type) ?? []) listener(...args);
+      }
+    }
+
+    const diagnostics = createTransportDiagnostics(
+      { configuredTransport: 'auto', url: 'wss://example.test/responses' },
+      () => 1000,
+    );
+    const fetch = vi.fn(async (url: string, init: any) => {
+      fetchCalls.push({ url, init });
+      return new Response(
+        JSON.stringify({
+          error: {
+            type: 'not_found_error',
+            code: 'not_found',
+            message:
+              'Failed to find an active deployment in region: swedencentral for Azure resource bucket: PROTOTYPE',
+          },
+        }),
+        { status: 404, headers: { 'content-type': 'application/json' } },
+      );
+    });
+
+    await expect(
+      runWebSocketResponse(
+        {
+          url: 'wss://example.test/responses?deployment=missing',
+          headers: new Headers({ authorization: 'Bearer test' }),
+          body: { model: 'gpt', input: [] },
+          settings: normalizeSettings({ websocket: { retries: 2, firstEventTimeoutMs: 0 } }),
+          WebSocketCtor: FakeWebSocket as any,
+          diagnostics,
+          fetch,
+        } as any,
+        () => undefined,
+      ),
+    ).rejects.toThrow('Unexpected server response: 500');
+
+    expect(instances).toHaveLength(1);
+    expect(fetchCalls).toHaveLength(1);
+    expect(fetchCalls[0].url).toBe('https://example.test/responses?deployment=missing');
+    expect(JSON.parse(fetchCalls[0].init.body)).toEqual({});
+    expect(diagnostics.hasEvent('ws_retry')).toBe(false);
+    expect(diagnostics.getFields()).toMatchObject({
+      failureReason: 'deploymentMissing',
+      failureCategory: 'terminal_config_error',
+      retryable: false,
+      classificationProbeStatus: 404,
+    });
+  });
+
+  it('does not retry response.failed deployment-not-found errors', async () => {
+    const instances: any[] = [];
+    class FakeWebSocket {
+      readyState = 1;
+      listeners = new Map<string, Set<(event: any) => void>>();
+
+      constructor() {
+        instances.push(this);
+        queueMicrotask(() => this.emit('open', {}));
+      }
+
+      send() {
+        queueMicrotask(() => {
+          this.emit('message', {
+            data: JSON.stringify({ type: 'response.created', response: { id: 'resp_failed' } }),
+          });
+          this.emit('message', {
+            data: JSON.stringify({
+              type: 'response.failed',
+              response: {
+                id: 'resp_failed',
+                status: 'failed',
+                error: {
+                  type: 'invalid_request_error',
+                  code: 'DeploymentNotFound',
+                  message: 'The API deployment for this resource does not exist.',
+                },
+              },
+            }),
+          });
+        });
+      }
+
+      close() {
+        this.readyState = 3;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void) {
+        const listeners = this.listeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      removeEventListener(type: string, listener: (event: any) => void) {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      emit(type: string, event: any) {
+        for (const listener of this.listeners.get(type) ?? []) listener(event);
+      }
+    }
+
+    const diagnostics = createTransportDiagnostics(
+      { configuredTransport: 'auto', url: 'wss://example.test/responses' },
+      () => 1000,
+    );
+
+    await expect(
+      runWebSocketResponse(
+        {
+          url: 'wss://example.test/responses',
+          headers: new Headers(),
+          body: { model: 'gpt', input: [] },
+          settings: normalizeSettings({ websocket: { retries: 2, firstEventTimeoutMs: 0 } }),
+          WebSocketCtor: FakeWebSocket as any,
+          diagnostics,
+        },
+        (event) => {
+          if (event.type === 'response.failed') {
+            throw new TerminalResponseError(event.type, event.response ?? {});
+          }
+        },
+      ),
+    ).rejects.toThrow('The API deployment for this resource does not exist.');
+
+    expect(instances).toHaveLength(1);
+    expect(diagnostics.hasEvent('ws_retry')).toBe(false);
+    expect(diagnostics.getFields()).toMatchObject({
+      failureReason: 'deploymentMissing',
+      failureCategory: 'terminal_config_error',
+      retryable: false,
+    });
   });
 
   it.each([
@@ -4553,7 +4834,10 @@ describe('provider transport diagnostics', () => {
     vi.doMock('ws', () => ({ WebSocket: FakeWebSocket, default: FakeWebSocket }));
     try {
       const streamFactory = createOpenAIWebSocketResponsesStream(() =>
-        normalizeSettings({ websocket: { retries: 0 } }),
+        normalizeSettings({
+          websocket: { retries: 0 },
+          diagnostics: { successTimelineSampleRate: 0 },
+        }),
       );
       const events = await collectStreamEvents(
         streamFactory(makeModel(), { messages: [] }, {

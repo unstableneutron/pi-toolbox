@@ -1,18 +1,86 @@
 import { describe, expect, test } from 'vitest';
 
 import {
+  classifyOpenAIResponsesFailure,
+  classifyRetryableAssistantProviderError,
   classifyRetryableProviderError,
+  isNonRetryableAssistantProviderError,
   requiresSessionRepairForRetryableProviderError,
 } from './provider-errors';
 
 describe('shared provider error classification', () => {
-  test('classifies retryable provider error strings with stable reasons', () => {
+  test('classifies deployment lookup failures as terminal configuration errors', () => {
+    expect(
+      classifyOpenAIResponsesFailure({
+        status: 404,
+        body: {
+          error: {
+            type: 'invalid_request_error',
+            code: 'DeploymentNotFound',
+            message:
+              'The API deployment for this resource does not exist. If you created the deployment within the last 5 minutes, please wait a moment and try again.',
+          },
+        },
+      }),
+    ).toMatchObject({
+      reason: 'deploymentMissing',
+      retryable: false,
+      category: 'terminal_config_error',
+    });
+
+    expect(
+      classifyOpenAIResponsesFailure({
+        status: 404,
+        body: {
+          error: {
+            type: 'not_found_error',
+            code: 'not_found',
+            message:
+              'Failed to find an active deployment in region: swedencentral for Azure resource bucket: PROTOTYPE',
+          },
+        },
+      }),
+    ).toMatchObject({
+      reason: 'deploymentMissing',
+      retryable: false,
+      category: 'terminal_config_error',
+    });
+  });
+
+  test('does not expose deployment-missing errors as retryable provider errors', () => {
     expect(
       classifyRetryableProviderError(
         '404 The API deployment for this resource does not exist. Please try again later.',
       ),
-    ).toBe('deploymentMissing');
+    ).toBeUndefined();
+  });
 
+  test('does not classify terminal websocket diagnostics as retryable assistant errors', () => {
+    const message = {
+      role: 'assistant',
+      stopReason: 'error',
+      errorMessage: 'Unexpected server response: 500 (deploymentMissing)',
+      diagnostics: [
+        {
+          type: 'openai_websocket_transport',
+          details: {
+            finalTransport: 'websocket',
+            outcome: 'transport_error',
+            replayUnsafeEventSeen: false,
+            firstReplayUnsafeEventType: undefined,
+            failureReason: 'deploymentMissing',
+            failureCategory: 'terminal_config_error',
+            retryable: false,
+          },
+        },
+      ],
+    };
+
+    expect(classifyRetryableAssistantProviderError(message)).toBeUndefined();
+    expect(isNonRetryableAssistantProviderError(message)).toBe(true);
+  });
+
+  test('classifies retryable provider error strings with stable reasons', () => {
     expect(
       classifyRetryableProviderError(
         '{"error":{"code":"invalid_encrypted_content","message":"The encrypted content for item rs_123 could not be verified."}}',
@@ -60,7 +128,6 @@ describe('shared provider error classification', () => {
     );
     expect(requiresSessionRepairForRetryableProviderError('nativeCompactionCreatedBy')).toBe(true);
     expect(requiresSessionRepairForRetryableProviderError('providerServerError')).toBe(false);
-    expect(requiresSessionRepairForRetryableProviderError('deploymentMissing')).toBe(false);
     expect(requiresSessionRepairForRetryableProviderError(undefined)).toBe(false);
   });
 });

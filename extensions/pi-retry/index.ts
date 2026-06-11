@@ -14,6 +14,7 @@ import {
 import {
   classifyRetryableAssistantProviderError,
   classifyRetryableProviderError,
+  isNonRetryableAssistantProviderError,
   requiresSessionRepairForRetryableProviderError,
   type RetryableProviderErrorReason,
 } from '../shared/provider-errors';
@@ -149,6 +150,7 @@ const CORE_RETRYABLE_ERROR_PATTERN =
   /overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|network.?error|connection.?error|connection.?refused|connection.?lost|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|ended without|http2 request did not get a response|timed? out|timeout|terminated|retry delay/i;
 
 function isLikelyCoreRetryableError(message: AssistantErrorLike): boolean {
+  if (isNonRetryableAssistantProviderError(message)) return false;
   return (
     'assistant' === message.role &&
     'error' === message.stopReason &&
@@ -174,6 +176,7 @@ function shouldTreatAsCoreWillRetry(
   lastAssistant: Record<string, unknown> | undefined,
 ): boolean {
   if (event.willRetry === true) {
+    if (lastAssistant && isNonRetryableAssistantProviderError(lastAssistant)) return false;
     return true;
   }
   if (event.willRetry === false) {
@@ -191,10 +194,12 @@ function shouldTreatAsCoreWillRetry(
 }
 
 function isBranchableRetryableError(message: AssistantErrorLike): boolean {
+  if (isNonRetryableAssistantProviderError(message)) return false;
   return isExtraRetryableAssistantError(message) || isLikelyCoreRetryableError(message);
 }
 
 function isCoreExpectedRetryableError(message: AssistantErrorLike): boolean {
+  if (isNonRetryableAssistantProviderError(message)) return false;
   const reason = getRetryableProviderErrorReason(message);
   if (requiresPiRetryOwnedRecovery(reason)) {
     return false;
@@ -988,6 +993,7 @@ export async function installAgentSessionPatch(
     proto._isRetryableError = function patchedIsRetryableError(
       message: AssistantErrorLike,
     ): boolean {
+      if (isNonRetryableAssistantProviderError(message)) return false;
       return Boolean(
         originalIsRetryableError.call(this, message) ||
         isCoreSafeExtraRetryableAssistantError(message),

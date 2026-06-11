@@ -63,12 +63,12 @@ afterEach(() => {
 });
 
 describe('pi-retry extra provider classification', () => {
-  test('classifies deployment-missing 404 as retryable', () => {
+  test('does not classify deployment-missing 404 as retryable', () => {
     expect(
       classifyRetryableProviderError(
         '404 The API deployment for this resource does not exist. If you created the deployment recently, please wait a moment and try again.',
       ),
-    ).toBe('deploymentMissing');
+    ).toBeUndefined();
   });
 
   test('classifies encrypted-content verification 400 as retryable', () => {
@@ -278,7 +278,7 @@ function makeFakeAgentSessionModule() {
 
     _isRetryableError(message: { role?: string; stopReason?: string; errorMessage?: string }) {
       this.baseClassifierCalls.push(message);
-      return 'overloaded_error' === message.errorMessage;
+      return 'overloaded_error' === message.errorMessage || /500/.test(message.errorMessage ?? '');
     }
 
     async _runAutoCompaction(reason: string, willRetry: boolean) {
@@ -529,10 +529,41 @@ describe('pi-retry patch installation', () => {
         stopReason: 'error',
         errorMessage: '404 The API deployment for this resource does not exist.',
       }),
-    ).toBe(true);
+    ).toBe(false);
 
     expect(loader).toHaveBeenCalledTimes(1);
-    expect(session.baseClassifierCalls).toHaveLength(2);
+    expect(session.baseClassifierCalls).toHaveLength(1);
+  });
+
+  test('keeps terminal websocket deployment diagnostics out of the core retry classifier', async () => {
+    const fakeModule = makeFakeAgentSessionModule();
+    const loader = vi.fn().mockResolvedValue(fakeModule);
+
+    await installAgentSessionPatch(loader);
+
+    const session = new fakeModule.AgentSession();
+
+    expect(
+      session._isRetryableError({
+        role: 'assistant',
+        stopReason: 'error',
+        errorMessage: 'Unexpected server response: 500 (deploymentMissing)',
+        diagnostics: [
+          {
+            type: 'openai_websocket_transport',
+            details: {
+              finalTransport: 'websocket',
+              outcome: 'transport_error',
+              retryable: false,
+              failureReason: 'deploymentMissing',
+              failureCategory: 'terminal_config_error',
+            },
+          },
+        ],
+      } as any),
+    ).toBe(false);
+
+    expect(session.baseClassifierCalls).toHaveLength(0);
   });
 
   test('keeps sanitizer-owned provider errors out of the core retry classifier', async () => {
@@ -565,7 +596,7 @@ describe('pi-retry patch installation', () => {
         stopReason: 'error',
         errorMessage: '404 The API deployment for this resource does not exist.',
       }),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   test('patches prompt to suppress retryable prompt failures after awaitable recovery succeeds', async () => {

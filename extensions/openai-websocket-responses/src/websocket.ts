@@ -15,6 +15,10 @@ import {
   previousResponseNotFoundMessage,
   responsesErrorFrameMessage,
 } from '../../shared/openai-responses-terminal';
+import {
+  classifyOpenAIResponsesFailure,
+  type ProviderFailureClassification,
+} from '../../shared/provider-errors';
 
 interface WebSocketLike {
   readyState?: number;
@@ -31,6 +35,64 @@ interface WebSocketLike {
 
 interface WebSocketConstructorLike {
   new (url: string, options?: { headers?: Record<string, string> }): WebSocketLike;
+}
+
+type FetchLike = (
+  input: string,
+  init?: { method?: string; headers?: Headers; body?: string; signal?: AbortSignal },
+) => Promise<{
+  status: number;
+  headers?: Headers | Record<string, string>;
+  text(): Promise<string>;
+}>;
+
+class WebSocketUpgradeResponseError extends Error {
+  readonly status?: number;
+  readonly headers?: Record<string, unknown>;
+  readonly bodyText?: string;
+  readonly bodyJson?: unknown;
+  classification?: ProviderFailureClassification;
+  classificationProbeStatus?: number;
+  classificationProbeHeaders?: Record<string, unknown>;
+  classificationProbeBody?: string;
+
+  constructor(input: {
+    status?: number;
+    headers?: Record<string, unknown>;
+    bodyText?: string;
+    bodyJson?: unknown;
+  }) {
+    const classification = classifyOpenAIResponsesFailure({
+      status: input.status,
+      body: input.bodyJson ?? input.bodyText,
+    });
+    super(formatUpgradeFailureMessage(input, classification));
+    this.name = 'WebSocketUpgradeResponseError';
+    this.status = input.status;
+    this.headers = input.headers;
+    this.bodyText = input.bodyText;
+    this.bodyJson = input.bodyJson;
+    this.classification = classification;
+  }
+
+  applyClassificationProbe(input: {
+    status: number;
+    headers?: Record<string, unknown>;
+    bodyText: string;
+    bodyJson?: unknown;
+    classification?: ProviderFailureClassification;
+  }): void {
+    this.classificationProbeStatus = input.status;
+    this.classificationProbeHeaders = input.headers;
+    this.classificationProbeBody = input.bodyText;
+    if (input.classification) {
+      this.classification = input.classification;
+      this.message = formatUpgradeFailureMessage(
+        { status: this.status, bodyText: this.bodyText, bodyJson: this.bodyJson },
+        input.classification,
+      );
+    }
+  }
 }
 
 interface SocketCacheEntry {
@@ -71,6 +133,158 @@ class RetryableResponseError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'RetryableResponseError';
+  }
+}
+
+function formatUpgradeFailureMessage(
+  input: { status?: number; bodyText?: string; bodyJson?: unknown },
+  classification: ProviderFailureClassification | undefined,
+): string {
+  const body = input.bodyJson && typeof input.bodyJson === 'object' ? input.bodyJson : undefined;
+  const message = (body as any)?.error?.message ?? (body as any)?.message;
+  if (typeof message === 'string' && message.length > 0) return message;
+  if (input.bodyText && input.bodyText.trim().length > 0) return input.bodyText.trim();
+  return `Unexpected server response:${input.status ? ` ${input.status}` : ''}${
+    classification ? ` (${classification.reason})` : ''
+  }`;
+}
+
+function parseJsonBody(text: string | undefined): unknown {
+  if (!text || text.trim().length === 0) return undefined;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+function websocketUrlToHttpUrl(url: string): string | undefined {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === 'wss:') parsed.protocol = 'https:';
+    else if (parsed.protocol === 'ws:') parsed.protocol = 'http:';
+    else return undefined;
+    return parsed.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+function responseHeadersToRecord(headers: Headers | Record<string, string> | undefined) {
+  if (!headers) return undefined;
+  if (typeof (headers as Headers).forEach === 'function') {
+    const output: Record<string, string> = {};
+    (headers as Headers).forEach((value, key) => {
+      output[key] = value;
+    });
+    return output;
+  }
+  return { ...(headers as Record<string, string>) };
+}
+
+function readNodeResponseBody(response: any): Promise<string> {
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = [];
+    response.on?.('data', (chunk: unknown) => {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+    });
+    response.on?.('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    response.on?.('error', () => resolve(Buffer.concat(chunks).toString('utf8')));
+  });
+}
+
+function failureDiagnosticFields(error: unknown): Record<string, unknown> {
+  if (error instanceof WebSocketUpgradeResponseError) {
+    return {
+      httpStatus: error.status,
+      responseHeaders: error.headers,
+      responseBody: error.bodyText,
+      classificationProbeStatus: error.classificationProbeStatus,
+      classificationProbeHeaders: error.classificationProbeHeaders,
+      classificationProbeBody: error.classificationProbeBody,
+      failureReason: error.classification?.reason,
+      failureCategory: error.classification?.category,
+      retryable: error.classification?.retryable,
+    };
+  }
+  if (error && typeof error === 'object') {
+    const candidate = error as Record<string, unknown>;
+    return {
+      failureReason: candidate.failureReason,
+      failureCategory: candidate.failureCategory,
+      retryable: candidate.retryable,
+    };
+  }
+  return {};
+}
+
+function isTerminalProviderFailure(error: unknown): boolean {
+  if (error instanceof WebSocketUpgradeResponseError) {
+    return error.classification?.retryable === false;
+  }
+  return Boolean(error && typeof error === 'object' && (error as any).retryable === false);
+}
+
+function shouldProbeEmptyUpgrade500(error: unknown): error is WebSocketUpgradeResponseError {
+  return Boolean(
+    error instanceof WebSocketUpgradeResponseError &&
+    error.status === 500 &&
+    (!error.bodyText || error.bodyText.trim().length === 0) &&
+    error.classification?.retryable !== false,
+  );
+}
+
+async function probeEmptyUpgrade500Classification(
+  request: {
+    url: string;
+    headers: Headers;
+    signal?: AbortSignal;
+    diagnostics?: TransportDiagnosticsCollector;
+    fetch?: FetchLike;
+  },
+  error: WebSocketUpgradeResponseError,
+): Promise<void> {
+  if (!shouldProbeEmptyUpgrade500(error) || request.signal?.aborted) return;
+  const url = websocketUrlToHttpUrl(request.url);
+  const fetchImpl = request.fetch ?? globalThis.fetch;
+  if (!url || !fetchImpl) return;
+
+  try {
+    const headers = new Headers(request.headers);
+    headers.set('content-type', 'application/json');
+    headers.set('accept', 'application/json');
+    const response = await fetchImpl(url, {
+      method: 'POST',
+      headers,
+      body: '{}',
+      signal: request.signal,
+    });
+    const bodyText = await response.text();
+    const bodyJson = parseJsonBody(bodyText);
+    const classification = classifyOpenAIResponsesFailure({
+      status: response.status,
+      body: bodyJson ?? bodyText,
+    });
+    const responseHeaders = responseHeadersToRecord(response.headers);
+    error.applyClassificationProbe({
+      status: response.status,
+      headers: responseHeaders,
+      bodyText,
+      bodyJson,
+      classification,
+    });
+    request.diagnostics?.record('ws_upgrade_classification_probe', {
+      status: response.status,
+      responseHeaders,
+      responseBody: bodyText,
+      failureReason: classification?.reason,
+      failureCategory: classification?.category,
+      retryable: classification?.retryable,
+    });
+  } catch (probeError) {
+    request.diagnostics?.record('ws_upgrade_classification_probe_error', {
+      message: probeError instanceof Error ? probeError.message : String(probeError),
+    });
   }
 }
 
@@ -518,6 +732,8 @@ async function connectSocket(
       socket.removeEventListener('open', onOpen);
       socket.removeEventListener('error', onError);
       socket.removeEventListener('close', onClose);
+      socket.off?.('unexpected-response', onUnexpectedResponse);
+      socket.removeListener?.('unexpected-response', onUnexpectedResponse);
       signal?.removeEventListener('abort', onAbort);
     };
     const fail = (error: Error, reason?: string) => {
@@ -538,9 +754,22 @@ async function connectSocket(
     const onClose = (event: any) =>
       fail(new Error(`WebSocket closed${event?.code ? ` ${event.code}` : ''}`));
     const onAbort = () => fail(new Error('Request was aborted'), 'aborted');
+    const onUnexpectedResponse = (_request: unknown, response: any) => {
+      void readNodeResponseBody(response).then((bodyText) => {
+        fail(
+          new WebSocketUpgradeResponseError({
+            status: response?.statusCode,
+            headers: response?.headers,
+            bodyText,
+            bodyJson: parseJsonBody(bodyText),
+          }),
+        );
+      });
+    };
     socket.addEventListener('open', onOpen);
     socket.addEventListener('error', onError);
     socket.addEventListener('close', onClose);
+    socket.on?.('unexpected-response', onUnexpectedResponse);
     signal?.addEventListener('abort', onAbort, { once: true });
     if (connectTimeoutMs > 0) {
       timeout = setTimeout(
@@ -588,8 +817,10 @@ async function tracedConnectSocket(
   } catch (error) {
     request.diagnostics?.record('ws_connect_error', {
       message: error instanceof Error ? error.message : String(error),
+      ...failureDiagnosticFields(error),
       ...traceDiagnosticFields(traceContext),
     });
+    request.diagnostics?.set(failureDiagnosticFields(error));
     throw error;
   }
 }
@@ -790,6 +1021,7 @@ export async function runWebSocketResponse(
     diagnostics?: TransportDiagnosticsCollector;
     trace?: WebSocketTraceOptions;
     attemptMode?: 'full_replay';
+    fetch?: FetchLike;
   },
   onEvent: (
     event: Record<string, any>,
@@ -1168,6 +1400,11 @@ export async function runWebSocketResponse(
       keepSocket = false;
       acquired?.release(false);
       lastError = error;
+      request.diagnostics?.set(failureDiagnosticFields(error));
+      if (error instanceof WebSocketUpgradeResponseError) {
+        await probeEmptyUpgrade500Classification(request, error);
+        request.diagnostics?.set(failureDiagnosticFields(error));
+      }
       if (
         error instanceof PreviousResponseNotFoundError &&
         request.fallbackBodyOnPreviousResponseNotFound
@@ -1408,7 +1645,11 @@ export async function runWebSocketResponse(
         throw error;
       }
       const willRetry =
-        eventCount === 0 && !responseId && attempt < request.settings.websocket.retries;
+        eventCount === 0 &&
+        !responseId &&
+        attempt < request.settings.websocket.retries &&
+        !isTerminalProviderFailure(error) &&
+        !request.signal?.aborted;
       writeDebugLog(request.settings, 'websocket.response.error', {
         attempt,
         cacheKeyHash: shortHash(request.cacheKey),
@@ -1424,12 +1665,18 @@ export async function runWebSocketResponse(
           reason: 'no_response_events_or_response_id',
         });
       }
-      if (eventCount > 0 || responseId || attempt >= request.settings.websocket.retries) {
+      if (
+        eventCount > 0 ||
+        responseId ||
+        attempt >= request.settings.websocket.retries ||
+        isTerminalProviderFailure(error)
+      ) {
         request.diagnostics?.record('transport_error', {
           attempt,
           eventCount,
           message: error instanceof Error ? error.message : String(error),
           responseId,
+          ...failureDiagnosticFields(error),
         });
         throw error;
       }

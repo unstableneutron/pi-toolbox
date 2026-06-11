@@ -91,7 +91,8 @@ export function isReplaySafeOpenAIResponsesTransportDiagnosticDetails(details: u
     candidate?.finalTransport === 'websocket' &&
     candidate.outcome === 'transport_error' &&
     candidate.replayUnsafeEventSeen === false &&
-    candidate.firstReplayUnsafeEventType === undefined,
+    candidate.firstReplayUnsafeEventType === undefined &&
+    candidate.retryable !== false,
   );
 }
 
