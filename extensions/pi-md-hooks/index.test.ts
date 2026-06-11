@@ -137,6 +137,26 @@ describe('pi-md-hooks markdown patch', () => {
     ]);
   });
 
+  test('indexes timestamped assistant code blocks by newest message first', () => {
+    const index = buildCodeBlockIndex([
+      {
+        role: 'assistant',
+        timestamp: 200,
+        content: [{ type: 'text', text: 'Newest\n```ts\nconst latest = true;\n```' }],
+      },
+      {
+        role: 'assistant',
+        timestamp: 100,
+        content: [{ type: 'text', text: 'Older\n```bash\necho old\n```' }],
+      },
+    ] as any[]);
+
+    expect(index.map((block) => [block.label, block.content])).toEqual([
+      ['1a', 'const latest = true;'],
+      ['2a', 'echo old'],
+    ]);
+  });
+
   test('indexes full assistant messages by recency', () => {
     const index = buildMessageIndex([
       {
@@ -174,7 +194,7 @@ describe('pi-md-hooks markdown patch', () => {
     const before = new Markdown('```ts\nconst before = true;\n```', 0, 0, plainMarkdownTheme)
       .render(120)
       .join('\n');
-    expect(before).not.toContain('// 1a');
+    expect(before).not.toContain('```ts [1a]');
 
     harness.ctx.sessionManager.getBranch = () => [
       {
@@ -193,7 +213,8 @@ describe('pi-md-hooks markdown patch', () => {
     const after = new Markdown('```ts\nconst before = true;\n```', 0, 0, plainMarkdownTheme)
       .render(120)
       .join('\n');
-    expect(after).toContain('// 1a');
+    expect(after).toContain('```ts [1a]');
+    expect(after).not.toContain('// 1a');
   });
 
   test('renders live labels for TUI code blocks before the message is indexed', async () => {
@@ -210,8 +231,9 @@ describe('pi-md-hooks markdown patch', () => {
       .render(120)
       .join('\n');
 
-    expect(rendered).toContain('// 1a');
-    expect(rendered).toContain('// 1b');
+    expect(rendered).toContain('```json [1a]');
+    expect(rendered).toContain('```bash [1b]');
+    expect(rendered).not.toContain('// 1a');
   });
 
   test('copy input handler copies a labeled code block without registering a conflicting command', async () => {

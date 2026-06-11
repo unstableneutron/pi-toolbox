@@ -103,6 +103,19 @@ function getTextContent(message: any): string {
     .trim();
 }
 
+function getMessageTimestamp(message: any): number | undefined {
+  if ('number' === typeof message?.timestamp && Number.isFinite(message.timestamp)) {
+    return message.timestamp;
+  }
+
+  if ('string' === typeof message?.timestamp) {
+    const timestamp = Date.parse(message.timestamp);
+    return Number.isFinite(timestamp) ? timestamp : undefined;
+  }
+
+  return undefined;
+}
+
 function blockLetter(index: number): string {
   let value = index;
   let result = '';
@@ -220,11 +233,22 @@ export function buildCodeBlockIndex(messages: any[]): CodeBlockRef[] {
 }
 
 function getAssistantTextsByRecency(messages: any[]): string[] {
-  return messages
+  const assistantMessages = messages
     .filter((message) => 'assistant' === message?.role)
-    .map((message) => getTextContent(message))
-    .filter(Boolean)
-    .reverse();
+    .map((message, index) => ({
+      content: getTextContent(message),
+      timestamp: getMessageTimestamp(message),
+      index,
+    }))
+    .filter((message) => Boolean(message.content));
+
+  if (assistantMessages.every((message) => message.timestamp !== undefined)) {
+    return [...assistantMessages]
+      .sort((left, right) => right.timestamp! - left.timestamp! || right.index - left.index)
+      .map((message) => message.content);
+  }
+
+  return assistantMessages.reverse().map((message) => message.content);
 }
 
 export function buildMessageIndex(messages: any[]): MessageRef[] {
@@ -571,7 +595,12 @@ function renderPatchedToken(
   }
 
   const label = nextCodeBlockLabelForMarkdown(self);
-  return label ? [self.theme.codeBlockBorder(`// ${label}`), ...lines] : lines;
+  if (!label || 0 === lines.length) {
+    return lines;
+  }
+
+  const lang = 'string' === typeof token.lang && token.lang ? token.lang : '';
+  return [self.theme.codeBlockBorder(`\`\`\`${lang} [${label}]`), ...lines.slice(1)];
 }
 
 export async function installMarkdownPatch(
