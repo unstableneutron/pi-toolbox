@@ -5,6 +5,8 @@ import { pathToFileURL } from 'node:url';
 
 import { afterEach, describe, expect, test, vi } from 'vitest';
 
+const copyToClipboardMock = vi.hoisted(() => vi.fn());
+
 // Force terminal-capability detection to report hyperlink support before
 // pi-md-hooks is imported. Without this, getCapabilities() inspects the real
 // process env ($TERM, $TERM_PROGRAM, etc.) and typically returns
@@ -23,12 +25,25 @@ vi.mock('@earendil-works/pi-tui', async () => {
   };
 });
 
+vi.mock('@earendil-works/pi-coding-agent', async () => {
+  const actual = await vi.importActual<typeof import('@earendil-works/pi-coding-agent')>(
+    '@earendil-works/pi-coding-agent',
+  );
+  return {
+    ...actual,
+    copyToClipboard: copyToClipboardMock,
+  };
+});
+
 import { Markdown, type MarkdownTheme } from '@earendil-works/pi-tui';
 
 import {
+  buildCodeBlockIndex,
   createPiMdHooksExtension,
   installMarkdownPatch,
+  parseCopyCodeBlockLabel,
   resetPiMdHooksTestState,
+  trimSharedLeadingWhitespace,
   type LoadMarkdownModule,
 } from './index';
 
@@ -54,9 +69,13 @@ async function createExtensionHarness(
   loader: LoadMarkdownModule = async () => ({ Markdown }),
 ) {
   const handlers = new Map<string, (event: any, ctx: any) => Promise<void> | void>();
+  const commands = new Map<string, any>();
   const pi = {
     on(event: string, handler: (event: any, ctx: any) => Promise<void> | void) {
       handlers.set(event, handler);
+    },
+    registerCommand(name: string, command: any) {
+      commands.set(name, command);
     },
   } as any;
 
@@ -65,15 +84,17 @@ async function createExtensionHarness(
   const notify = vi.fn();
   const ctx = {
     hasUI: true,
+    mode: 'tui',
     sessionManager: {
       getCwd: () => cwd,
     },
     ui: {
       notify,
+      addAutocompleteProvider: vi.fn(),
     },
   } as any;
 
-  return { handlers, ctx, notify };
+  return { commands, handlers, ctx, notify };
 }
 
 function getHandler(
@@ -89,10 +110,133 @@ function getHandler(
 
 afterEach(() => {
   vi.restoreAllMocks();
+  copyToClipboardMock.mockReset();
   resetPiMdHooksTestState();
 });
 
 describe('pi-md-hooks markdown patch', () => {
+  test('indexes fenced code blocks by assistant recency and block letter', () => {
+    const index = buildCodeBlockIndex([
+      {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Old\n```bash\necho old\n```' }],
+      },
+      {
+        role: 'assistant',
+        content: [
+          {
+            type: 'text',
+            text: 'New\n```ts\nconst newer = true;\n```\nThen\n```json\n{"ok":true}\n```',
+          },
+        ],
+      },
+    ] as any[]);
+
+    expect(index.map((block) => [block.label, block.language, block.content])).toEqual([
+      ['1a', 'ts', 'const newer = true;'],
+      ['1b', 'json', '{"ok":true}'],
+      ['2a', 'bash', 'echo old'],
+    ]);
+  });
+
+  test('parses copy-codeblock labels case-insensitively', () => {
+    expect(parseCopyCodeBlockLabel('1a')).toEqual({ messageNumber: 1, blockIndex: 0 });
+    expect(parseCopyCodeBlockLabel('2C')).toEqual({ messageNumber: 2, blockIndex: 2 });
+    expect(parseCopyCodeBlockLabel('0a')).toBeUndefined();
+    expect(parseCopyCodeBlockLabel('1')).toBeUndefined();
+  });
+
+  test('trims shared leading whitespace from copied code blocks', () => {
+    expect(trimSharedLeadingWhitespace('    one\n      two\n\n    three')).toBe(
+      'one\n  two\n\nthree',
+    );
+  });
+
+  test('renders labels before indexed assistant code blocks only after TUI session_start', async () => {
+    const harness = await createExtensionHarness('/tmp/project');
+
+    const before = new Markdown('```ts\nconst before = true;\n```', 0, 0, plainMarkdownTheme)
+      .render(120)
+      .join('\n');
+    expect(before).not.toContain('// 1a');
+
+    harness.ctx.sessionManager.getBranch = () => [
+      {
+        type: 'message',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: '```ts\nconst before = true;\n```' }],
+        },
+      },
+    ];
+    await getHandler(harness.handlers, 'session_start')(
+      { type: 'session_start' },
+      { ...harness.ctx, mode: 'tui' },
+    );
+
+    const after = new Markdown('```ts\nconst before = true;\n```', 0, 0, plainMarkdownTheme)
+      .render(120)
+      .join('\n');
+    expect(after).toContain('// 1a');
+  });
+
+  test('copy command copies a labeled code block from the active TUI session', async () => {
+    const harness = await createExtensionHarness('/tmp/project');
+    harness.ctx.sessionManager.getBranch = () => [
+      {
+        type: 'message',
+        message: {
+          role: 'assistant',
+          content: [
+            {
+              type: 'text',
+              text: '```ts\n    const copied = true;\n      console.log(copied);\n```',
+            },
+          ],
+        },
+      },
+    ];
+
+    const copyCommand = harness.commands.get('copy');
+    await copyCommand.handler('1a', harness.ctx);
+
+    expect(copyToClipboardMock).toHaveBeenCalledWith(
+      'const copied = true;\n  console.log(copied);',
+    );
+    expect(harness.notify).toHaveBeenCalledWith('Copied code block 1a', 'info');
+  });
+
+  test('autocomplete suggests labeled code blocks for copy arguments', async () => {
+    const harness = await createExtensionHarness('/tmp/project');
+    harness.ctx.sessionManager.getBranch = () => [
+      {
+        type: 'message',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: '```bash\npnpm test\n```' }],
+        },
+      },
+    ];
+    await getHandler(harness.handlers, 'session_start')({ type: 'session_start' }, harness.ctx);
+
+    const wrapper = harness.ctx.ui.addAutocompleteProvider.mock.calls[0][0];
+    const delegate = {
+      getSuggestions: vi.fn(),
+      applyCompletion: vi.fn(),
+      shouldTriggerFileCompletion: vi.fn(),
+    };
+
+    const provider = wrapper(delegate);
+    const suggestions = await provider.getSuggestions(['/copy '], 0, 6, {
+      signal: new AbortController().signal,
+    });
+
+    expect(suggestions).toEqual({
+      prefix: '',
+      items: [{ value: '1a', label: '1a', description: 'bash  pnpm test' }],
+    });
+  });
+
   test('delegates markdown link rendering to the underlying Markdown implementation', async () => {
     class FakeMarkdown {
       theme = plainMarkdownTheme;

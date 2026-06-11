@@ -2,7 +2,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
+import {
+  copyToClipboard,
+  type ExtensionAPI,
+  type ExtensionCommandContext,
+  type ExtensionContext,
+} from '@earendil-works/pi-coding-agent';
+import type { AutocompleteItem, AutocompleteProvider } from '@earendil-works/pi-tui';
 import { getCapabilities } from '@earendil-works/pi-tui';
 
 const PATCHED = Symbol.for('pi-md-hooks.markdown.patched');
@@ -30,7 +36,17 @@ interface RuntimeState {
   patchFailureReason?: string;
   patchFailureNotified?: boolean;
   originalRenderInlineTokens?: (this: unknown, tokens: unknown[], styleContext?: unknown) => string;
+  originalRenderToken?: (
+    this: unknown,
+    token: unknown,
+    width: number,
+    nextTokenType?: string,
+    styleContext?: unknown,
+  ) => string[];
+  originalRender?: (this: unknown, width: number) => string[];
   patchedPrototype?: Record<PropertyKey, any>;
+  codeBlockRefs: CodeBlockRef[];
+  refsByMarkdownText: Map<string, CodeBlockRef[]>;
 }
 
 function getRuntimeState(): RuntimeState {
@@ -40,9 +56,229 @@ function getRuntimeState(): RuntimeState {
     return existing;
   }
 
-  const state: RuntimeState = {};
+  const state: RuntimeState = {
+    codeBlockRefs: [],
+    refsByMarkdownText: new Map(),
+  };
   target[STATE_KEY] = state;
   return state;
+}
+
+export interface CodeBlockRef {
+  label: string;
+  messageNumber: number;
+  blockIndex: number;
+  language: string;
+  content: string;
+  preview: string;
+  sourceText: string;
+}
+
+interface ParsedCopyCodeBlockLabel {
+  messageNumber: number;
+  blockIndex: number;
+}
+
+const CODE_BLOCK_RENDER_INDEX = Symbol.for('pi-md-hooks.code-block-render-index');
+
+function getTextContent(message: any): string {
+  if (!message || !Array.isArray(message.content)) {
+    return '';
+  }
+
+  return message.content
+    .filter((content: any) => 'text' === content?.type && 'string' === typeof content.text)
+    .map((content: any) => content.text)
+    .join('\n')
+    .trim();
+}
+
+function blockLetter(index: number): string {
+  let value = index;
+  let result = '';
+  do {
+    result = String.fromCharCode(97 + (value % 26)) + result;
+    value = Math.floor(value / 26) - 1;
+  } while (value >= 0);
+  return result;
+}
+
+function blockIndexFromLetters(letters: string): number | undefined {
+  if (!/^[a-z]+$/i.test(letters)) {
+    return undefined;
+  }
+
+  let value = 0;
+  for (const char of letters.toLowerCase()) {
+    value = value * 26 + (char.charCodeAt(0) - 96);
+  }
+  return value - 1;
+}
+
+export function parseCopyCodeBlockLabel(label: string): ParsedCopyCodeBlockLabel | undefined {
+  const match = /^(\d+)([a-z]+)$/i.exec(label.trim());
+  if (!match) {
+    return undefined;
+  }
+
+  const messageNumber = Number.parseInt(match[1], 10);
+  const blockIndex = blockIndexFromLetters(match[2]);
+  if (
+    !Number.isSafeInteger(messageNumber) ||
+    messageNumber < 1 ||
+    blockIndex === undefined ||
+    blockIndex < 0
+  ) {
+    return undefined;
+  }
+
+  return { messageNumber, blockIndex };
+}
+
+export function trimSharedLeadingWhitespace(text: string): string {
+  const lines = text.replace(/\s+$/u, '').split('\n');
+  const indents = lines
+    .filter((line) => line.trim().length > 0)
+    .map((line) => /^\s*/u.exec(line)?.[0].length ?? 0);
+
+  if (0 === indents.length) {
+    return text.trimEnd();
+  }
+
+  const sharedIndent = Math.min(...indents);
+  if (0 === sharedIndent) {
+    return lines.join('\n');
+  }
+
+  return lines.map((line) => (line.trim() ? line.slice(sharedIndent) : line)).join('\n');
+}
+
+function extractFencedCodeBlocks(text: string): Array<{ language: string; content: string }> {
+  const blocks: Array<{ language: string; content: string }> = [];
+  const codeBlockPattern = /^[ \t]{0,3}(`{3,}|~{3,})([^\n]*)\n([\s\S]*?)^[ \t]{0,3}\1[ \t]*$/gm;
+
+  for (const match of text.matchAll(codeBlockPattern)) {
+    const info = (match[2] ?? '').trim();
+    const language = info.split(/\s+/u)[0] ?? '';
+    blocks.push({
+      language,
+      content: trimSharedLeadingWhitespace(match[3] ?? ''),
+    });
+  }
+
+  return blocks;
+}
+
+function previewCodeBlock(content: string): string {
+  return (
+    content
+      .split('\n')
+      .map((line) => line.trim())
+      .find(Boolean) ?? ''
+  );
+}
+
+export function buildCodeBlockIndex(messages: any[]): CodeBlockRef[] {
+  const assistantTexts = messages
+    .filter((message) => 'assistant' === message?.role)
+    .map((message) => getTextContent(message))
+    .filter(Boolean)
+    .reverse();
+
+  const refs: CodeBlockRef[] = [];
+  assistantTexts.forEach((sourceText, messageOffset) => {
+    const messageNumber = messageOffset + 1;
+    extractFencedCodeBlocks(sourceText).forEach((block, blockIndex) => {
+      refs.push({
+        label: `${messageNumber}${blockLetter(blockIndex)}`,
+        messageNumber,
+        blockIndex,
+        language: block.language,
+        content: block.content,
+        preview: previewCodeBlock(block.content),
+        sourceText,
+      });
+    });
+  });
+
+  return refs;
+}
+
+function rebuildCodeBlockMaps(refs: CodeBlockRef[]): void {
+  const state = getRuntimeState();
+  state.codeBlockRefs = refs;
+  state.refsByMarkdownText = new Map();
+
+  for (const ref of refs) {
+    const existing = state.refsByMarkdownText.get(ref.sourceText) ?? [];
+    existing[ref.blockIndex] = ref;
+    state.refsByMarkdownText.set(ref.sourceText, existing);
+  }
+}
+
+function getMessagesFromSession(ctx: ExtensionContext | ExtensionCommandContext): any[] {
+  const manager = ctx.sessionManager as any;
+  const entries =
+    'function' === typeof manager.getBranch ? manager.getBranch() : (manager.getEntries?.() ?? []);
+  return entries
+    .map((entry: any) => ('message' === entry?.type ? entry.message : entry))
+    .filter((message: any) => message?.role);
+}
+
+function refreshCodeBlockIndex(ctx: ExtensionContext | ExtensionCommandContext): CodeBlockRef[] {
+  const refs = buildCodeBlockIndex(getMessagesFromSession(ctx));
+  rebuildCodeBlockMaps(refs);
+  return refs;
+}
+
+function findCodeBlockRef(label: string): CodeBlockRef | undefined {
+  const parsed = parseCopyCodeBlockLabel(label);
+  if (!parsed) {
+    return undefined;
+  }
+
+  return getRuntimeState().codeBlockRefs.find(
+    (ref) => ref.messageNumber === parsed.messageNumber && ref.blockIndex === parsed.blockIndex,
+  );
+}
+
+function copyCodeBlockCompletions(prefix: string): AutocompleteItem[] | null {
+  const normalizedPrefix = prefix.trim().toLowerCase();
+  const items = getRuntimeState()
+    .codeBlockRefs.filter((ref) => ref.label.startsWith(normalizedPrefix))
+    .map((ref) => ({
+      value: ref.label,
+      label: ref.label,
+      description: [ref.language || 'text', ref.preview].filter(Boolean).join('  '),
+    }));
+
+  return items.length ? items : null;
+}
+
+function createCopyAutocompleteProvider(
+  current: AutocompleteProvider,
+  ctx: ExtensionContext,
+): AutocompleteProvider {
+  return {
+    async getSuggestions(lines, cursorLine, cursorCol, options) {
+      const currentLine = lines[cursorLine] ?? '';
+      const textBeforeCursor = currentLine.slice(0, cursorCol);
+      const match = /^\/copy\s+([^\s]*)$/u.exec(textBeforeCursor);
+      if (!match) {
+        return current.getSuggestions(lines, cursorLine, cursorCol, options);
+      }
+
+      refreshCodeBlockIndex(ctx);
+      const items = copyCodeBlockCompletions(match[1] ?? '');
+      return items ? { prefix: match[1] ?? '', items } : null;
+    },
+    applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
+      return current.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
+    },
+    shouldTriggerFileCompletion(lines, cursorLine, cursorCol) {
+      return current.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ?? true;
+    },
+  };
 }
 
 export async function defaultLoadMarkdownModule(): Promise<MarkdownModuleLike> {
@@ -241,6 +477,43 @@ function renderPatchedInlineTokens(
   return result;
 }
 
+function nextCodeBlockLabelForMarkdown(self: any): string | undefined {
+  const text = 'string' === typeof self.text ? self.text.trim() : '';
+  if (!text) {
+    return undefined;
+  }
+
+  const refs = getRuntimeState().refsByMarkdownText.get(text);
+  if (!refs?.length) {
+    return undefined;
+  }
+
+  const currentIndex = (self[CODE_BLOCK_RENDER_INDEX] as number | undefined) ?? 0;
+  self[CODE_BLOCK_RENDER_INDEX] = currentIndex + 1;
+  return refs[currentIndex]?.label;
+}
+
+function renderPatchedToken(
+  self: any,
+  token: any,
+  width: number,
+  nextTokenType?: string,
+  styleContext?: unknown,
+): string[] {
+  const original = getRuntimeState().originalRenderToken;
+  if (!original) {
+    return [];
+  }
+
+  const lines = original.call(self, token, width, nextTokenType, styleContext);
+  if ('code' !== token?.type) {
+    return lines;
+  }
+
+  const label = nextCodeBlockLabelForMarkdown(self);
+  return label ? [self.theme.codeBlockBorder(`// ${label}`), ...lines] : lines;
+}
+
 export async function installMarkdownPatch(
   loadMarkdownModule: LoadMarkdownModule = defaultLoadMarkdownModule,
 ): Promise<PatchInstallResult> {
@@ -281,6 +554,32 @@ export async function installMarkdownPatch(
       return renderPatchedInlineTokens(this, tokens as any[], styleContext as InlineStyleContext);
     };
 
+    const originalRenderToken = proto.renderToken;
+    if ('function' === typeof originalRenderToken) {
+      state.originalRenderToken = originalRenderToken;
+      proto.renderToken = function patchedRenderToken(
+        this: unknown,
+        token: unknown,
+        width: number,
+        nextTokenType?: string,
+        styleContext?: unknown,
+      ): string[] {
+        return renderPatchedToken(this, token, width, nextTokenType, styleContext);
+      };
+    }
+
+    const originalRender = proto.render;
+    if ('function' === typeof originalRender) {
+      state.originalRender = originalRender;
+      proto.render = function patchedRender(
+        this: Record<PropertyKey, unknown>,
+        width: number,
+      ): string[] {
+        this[CODE_BLOCK_RENDER_INDEX] = 0;
+        return originalRender.call(this, width);
+      };
+    }
+
     Object.defineProperty(proto, PATCHED, {
       value: true,
       enumerable: false,
@@ -302,6 +601,12 @@ export function resetPiMdHooksTestState(): void {
   const state = getRuntimeState();
   if (state.patchedPrototype && state.originalRenderInlineTokens) {
     state.patchedPrototype.renderInlineTokens = state.originalRenderInlineTokens;
+    if (state.originalRenderToken) {
+      state.patchedPrototype.renderToken = state.originalRenderToken;
+    }
+    if (state.originalRender) {
+      state.patchedPrototype.render = state.originalRender;
+    }
     delete state.patchedPrototype[PATCHED];
   }
 
@@ -310,22 +615,62 @@ export function resetPiMdHooksTestState(): void {
   state.patchFailureReason = undefined;
   state.patchFailureNotified = false;
   state.originalRenderInlineTokens = undefined;
+  state.originalRenderToken = undefined;
+  state.originalRender = undefined;
   state.patchedPrototype = undefined;
+  state.codeBlockRefs = [];
+  state.refsByMarkdownText = new Map();
 }
 
 export function createPiMdHooksExtension(
   loadMarkdownModule: LoadMarkdownModule = defaultLoadMarkdownModule,
 ) {
   return async function piMdHooks(pi: ExtensionAPI): Promise<void> {
-    await installMarkdownPatch(loadMarkdownModule);
+    pi.registerCommand('copy', {
+      description: 'Copy a labeled code block, for example /copy 1a',
+      handler: async (args, ctx) => {
+        if ('tui' !== ctx.mode) {
+          return;
+        }
+
+        const label = args.trim();
+        if (!label) {
+          return;
+        }
+
+        refreshCodeBlockIndex(ctx);
+        const ref = findCodeBlockRef(label);
+        if (!ref) {
+          ctx.ui.notify(`No code block labeled ${label}`, 'warning');
+          return;
+        }
+
+        await copyToClipboard(ref.content);
+        ctx.ui.notify(`Copied code block ${ref.label}`, 'info');
+      },
+    });
 
     pi.on('session_start', async (_event, ctx) => {
+      if ('tui' !== ctx.mode) {
+        return;
+      }
+
+      await installMarkdownPatch(loadMarkdownModule);
       setActiveCwd(ctx.sessionManager.getCwd());
+      refreshCodeBlockIndex(ctx);
+      ctx.ui.addAutocompleteProvider((current) => createCopyAutocompleteProvider(current, ctx));
       maybeWarnAboutPatchFailure(ctx);
+    });
+
+    pi.on('message_end', async (event, ctx) => {
+      if ('tui' === ctx.mode && 'assistant' === event.message.role) {
+        refreshCodeBlockIndex(ctx);
+      }
     });
 
     pi.on('session_shutdown', async () => {
       setActiveCwd(undefined);
+      rebuildCodeBlockMaps([]);
     });
   };
 }
