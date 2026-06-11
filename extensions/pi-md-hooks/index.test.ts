@@ -130,14 +130,16 @@ describe('pi-md-hooks markdown patch', () => {
       },
     ] as any[]);
 
-    expect(index.map((block) => [block.label, block.language, block.content])).toEqual([
-      ['1a', 'ts', 'const newer = true;'],
-      ['1b', 'json', '{"ok":true}'],
-      ['2a', 'bash', 'echo old'],
+    expect(
+      index.map((block) => [block.label, block.relativeLabel, block.language, block.content]),
+    ).toEqual([
+      ['r2a', '1a', 'ts', 'const newer = true;'],
+      ['r2b', '1b', 'json', '{"ok":true}'],
+      ['r1a', '2a', 'bash', 'echo old'],
     ]);
   });
 
-  test('indexes timestamped assistant code blocks by newest message first', () => {
+  test('indexes timestamped assistant code blocks with stable and relative labels', () => {
     const index = buildCodeBlockIndex([
       {
         role: 'assistant',
@@ -151,9 +153,9 @@ describe('pi-md-hooks markdown patch', () => {
       },
     ] as any[]);
 
-    expect(index.map((block) => [block.label, block.content])).toEqual([
-      ['1a', 'const latest = true;'],
-      ['2a', 'echo old'],
+    expect(index.map((block) => [block.label, block.relativeLabel, block.content])).toEqual([
+      ['r1a', '1a', 'const latest = true;'],
+      ['r2a', '2a', 'echo old'],
     ]);
   });
 
@@ -181,7 +183,7 @@ describe('pi-md-hooks markdown patch', () => {
       'Message 4',
       'Message 3',
     ]);
-    expect(codeBlockIndex.map((block) => block.label)).toEqual([
+    expect(codeBlockIndex.map((block) => block.relativeLabel)).toEqual([
       '1a',
       '2a',
       '3a',
@@ -207,10 +209,12 @@ describe('pi-md-hooks markdown patch', () => {
       },
     ] as any[]);
 
-    expect(index.map((message) => [message.label, message.content])).toEqual([
-      ['1', 'Latest response'],
-      ['2', 'Older response'],
-    ]);
+    expect(index.map((message) => [message.label, message.relativeLabel, message.content])).toEqual(
+      [
+        ['r2', '1', 'Latest response'],
+        ['r1', '2', 'Older response'],
+      ],
+    );
   });
 
   test('parses copy-codeblock labels case-insensitively', () => {
@@ -251,7 +255,7 @@ describe('pi-md-hooks markdown patch', () => {
     const after = new Markdown('```ts\nconst before = true;\n```', 0, 0, plainMarkdownTheme)
       .render(120)
       .join('\n');
-    expect(after).toContain('```ts · /copy:1a');
+    expect(after).toContain('```ts · /copy:r1a');
     expect(after).not.toContain('```ts [1a]');
     expect(after).not.toContain('// 1a');
   });
@@ -270,8 +274,8 @@ describe('pi-md-hooks markdown patch', () => {
       .render(120)
       .join('\n');
 
-    expect(rendered).toContain('```json · /copy:1a');
-    expect(rendered).toContain('```bash · /copy:1b');
+    expect(rendered).toContain('```json · /copy:r1a');
+    expect(rendered).toContain('```bash · /copy:r1b');
     expect(rendered).not.toContain('```json [1a]');
     expect(rendered).not.toContain('// 1a');
   });
@@ -305,6 +309,27 @@ describe('pi-md-hooks markdown patch', () => {
       'const copied = true;\n  console.log(copied);',
     );
     expect(harness.notify).toHaveBeenCalledWith('Copied code block 1a', 'info');
+  });
+
+  test('copy input handler accepts stable rendered labels', async () => {
+    const harness = await createExtensionHarness('/tmp/project');
+    harness.ctx.sessionManager.getBranch = () => [
+      {
+        type: 'message',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: '```ts\nconst stable = true;\n```' }],
+        },
+      },
+    ];
+
+    const result = await getHandler(harness.handlers, 'input')(
+      { text: '/copy:r1a', source: 'interactive' },
+      harness.ctx,
+    );
+
+    expect(result).toEqual({ action: 'handled' });
+    expect(copyToClipboardMock).toHaveBeenCalledWith('const stable = true;');
   });
 
   test('copy input handler accepts colon-delimited labels for easier text selection', async () => {
@@ -386,7 +411,9 @@ describe('pi-md-hooks markdown patch', () => {
       prefix: '',
       items: [
         { value: '1', label: '1', description: 'response  pnpm test' },
+        { value: 'r1', label: 'r1', description: 'response  pnpm test' },
         { value: '1a', label: '1a', description: 'bash  2 lines  pnpm test' },
+        { value: 'r1a', label: 'r1a', description: 'bash  2 lines  pnpm test' },
       ],
     });
   });
@@ -416,7 +443,7 @@ describe('pi-md-hooks markdown patch', () => {
       signal: new AbortController().signal,
     });
 
-    expect(suggestions?.items.map((item: any) => item.value)).toEqual(['1', '1a']);
+    expect(suggestions?.items.map((item: any) => item.value)).toEqual(['1', 'r1', '1a', 'r1a']);
   });
 
   test('delegates markdown link rendering to the underlying Markdown implementation', async () => {

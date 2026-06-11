@@ -49,6 +49,7 @@ interface RuntimeState {
   codeBlockRefs: CodeBlockRef[];
   refsByMarkdownText: Map<string, CodeBlockRef[]>;
   enableLiveCodeBlockLabels: boolean;
+  nextStableMessageNumber: number;
 }
 
 function getRuntimeState(): RuntimeState {
@@ -63,6 +64,7 @@ function getRuntimeState(): RuntimeState {
     codeBlockRefs: [],
     refsByMarkdownText: new Map(),
     enableLiveCodeBlockLabels: false,
+    nextStableMessageNumber: 1,
   };
   target[STATE_KEY] = state;
   return state;
@@ -70,7 +72,9 @@ function getRuntimeState(): RuntimeState {
 
 export interface CodeBlockRef {
   label: string;
+  relativeLabel: string;
   messageNumber: number;
+  stableMessageNumber: number;
   blockIndex: number;
   language: string;
   content: string;
@@ -81,7 +85,9 @@ export interface CodeBlockRef {
 
 export interface MessageRef {
   label: string;
+  relativeLabel: string;
   messageNumber: number;
+  stableMessageNumber: number;
   content: string;
   preview: string;
 }
@@ -221,12 +227,15 @@ export function buildCodeBlockIndex(messages: any[]): CodeBlockRef[] {
   const assistantTexts = getAssistantTextsByRecency(messages);
 
   const refs: CodeBlockRef[] = [];
-  assistantTexts.forEach((sourceText, messageOffset) => {
+  assistantTexts.forEach(({ content: sourceText, stableMessageNumber }, messageOffset) => {
     const messageNumber = messageOffset + 1;
     extractFencedCodeBlocks(sourceText).forEach((block, blockIndex) => {
+      const blockSuffix = blockLetter(blockIndex);
       refs.push({
-        label: `${messageNumber}${blockLetter(blockIndex)}`,
+        label: `r${stableMessageNumber}${blockSuffix}`,
+        relativeLabel: `${messageNumber}${blockSuffix}`,
         messageNumber,
+        stableMessageNumber,
         blockIndex,
         language: block.language,
         content: block.content,
@@ -240,36 +249,56 @@ export function buildCodeBlockIndex(messages: any[]): CodeBlockRef[] {
   return refs;
 }
 
-function getAssistantTextsByRecency(messages: any[]): string[] {
+interface AssistantTextRef {
+  content: string;
+  stableMessageNumber: number;
+}
+
+function getAssistantTextsByRecency(messages: any[]): AssistantTextRef[] {
+  let stableMessageNumber = 0;
   const assistantMessages = messages
     .filter((message) => 'assistant' === message?.role)
-    .map((message, index) => ({
-      content: getTextContent(message),
-      timestamp: getMessageTimestamp(message),
-      index,
-    }))
+    .map((message, index) => {
+      stableMessageNumber++;
+      return {
+        content: getTextContent(message),
+        timestamp: getMessageTimestamp(message),
+        index,
+        stableMessageNumber,
+      };
+    })
     .filter((message) => Boolean(message.content));
 
   if (assistantMessages.every((message) => message.timestamp !== undefined)) {
     return [...assistantMessages]
       .sort((left, right) => right.timestamp! - left.timestamp! || right.index - left.index)
       .slice(0, MAX_INDEXED_ASSISTANT_MESSAGES)
-      .map((message) => message.content);
+      .map((message) => ({
+        content: message.content,
+        stableMessageNumber: message.stableMessageNumber,
+      }));
   }
 
   return assistantMessages
     .reverse()
     .slice(0, MAX_INDEXED_ASSISTANT_MESSAGES)
-    .map((message) => message.content);
+    .map((message) => ({
+      content: message.content,
+      stableMessageNumber: message.stableMessageNumber,
+    }));
 }
 
 export function buildMessageIndex(messages: any[]): MessageRef[] {
-  return getAssistantTextsByRecency(messages).map((content, messageOffset) => ({
-    label: String(messageOffset + 1),
-    messageNumber: messageOffset + 1,
-    content,
-    preview: previewResponse(content),
-  }));
+  return getAssistantTextsByRecency(messages).map(
+    ({ content, stableMessageNumber }, messageOffset) => ({
+      label: `r${stableMessageNumber}`,
+      relativeLabel: String(messageOffset + 1),
+      messageNumber: messageOffset + 1,
+      stableMessageNumber,
+      content,
+      preview: previewResponse(content),
+    }),
+  );
 }
 
 function rebuildCodeBlockMaps(refs: CodeBlockRef[]): void {
@@ -301,6 +330,8 @@ function getMessagesFromSession(ctx: ExtensionContext): any[] {
 
 function refreshCodeBlockIndex(ctx: ExtensionContext): CodeBlockRef[] {
   const messages = getMessagesFromSession(ctx);
+  getRuntimeState().nextStableMessageNumber =
+    messages.filter((message) => 'assistant' === message?.role).length + 1;
   const messageRefs = buildMessageIndex(messages);
   const codeBlockRefs = buildCodeBlockIndex(messages);
   rebuildCopyIndexes(messageRefs, codeBlockRefs);
@@ -309,18 +340,25 @@ function refreshCodeBlockIndex(ctx: ExtensionContext): CodeBlockRef[] {
 
 function findMessageRef(label: string): MessageRef | undefined {
   const trimmed = label.trim();
-  if (!/^\d+$/u.test(trimmed)) {
+  if (!/^(?:r\d+|\d+)$/iu.test(trimmed)) {
     return undefined;
   }
 
-  return getRuntimeState().messageRefs.find((ref) => ref.label === trimmed);
+  return getRuntimeState().messageRefs.find(
+    (ref) => ref.label.toLowerCase() === trimmed.toLowerCase() || ref.relativeLabel === trimmed,
+  );
 }
 
 function findCodeBlockRef(label: string): CodeBlockRef | undefined {
+  const normalized = label.trim().toLowerCase();
+  const directMatch = getRuntimeState().codeBlockRefs.find(
+    (ref) =>
+      ref.label.toLowerCase() === normalized || ref.relativeLabel.toLowerCase() === normalized,
+  );
+  if (directMatch) return directMatch;
+
   const parsed = parseCopyCodeBlockLabel(label);
-  if (!parsed) {
-    return undefined;
-  }
+  if (!parsed) return undefined;
 
   return getRuntimeState().codeBlockRefs.find(
     (ref) => ref.messageNumber === parsed.messageNumber && ref.blockIndex === parsed.blockIndex,
@@ -330,26 +368,30 @@ function findCodeBlockRef(label: string): CodeBlockRef | undefined {
 function copyCodeBlockCompletions(prefix: string): AutocompleteItem[] | null {
   const normalizedPrefix = prefix.trim().toLowerCase();
   const state = getRuntimeState();
-  const messageItems = state.messageRefs
-    .filter((ref) => ref.label.startsWith(normalizedPrefix))
-    .map((ref) => ({
-      value: ref.label,
-      label: ref.label,
-      description: ['response', ref.preview].filter(Boolean).join('  '),
-    }));
-  const codeBlockItems = state.codeBlockRefs
-    .filter((ref) => ref.label.startsWith(normalizedPrefix))
-    .map((ref) => ({
-      value: ref.label,
-      label: ref.label,
-      description: [
-        ref.language || 'text',
-        ref.lineCount > 1 ? `${ref.lineCount} lines` : undefined,
-        ref.preview,
-      ]
-        .filter(Boolean)
-        .join('  '),
-    }));
+  const messageItems = state.messageRefs.flatMap((ref) =>
+    [ref.relativeLabel, ref.label]
+      .filter((label) => label.startsWith(normalizedPrefix))
+      .map((label) => ({
+        value: label,
+        label,
+        description: ['response', ref.preview].filter(Boolean).join('  '),
+      })),
+  );
+  const codeBlockItems = state.codeBlockRefs.flatMap((ref) =>
+    [ref.relativeLabel, ref.label]
+      .filter((label) => label.startsWith(normalizedPrefix))
+      .map((label) => ({
+        value: label,
+        label,
+        description: [
+          ref.language || 'text',
+          ref.lineCount > 1 ? `${ref.lineCount} lines` : undefined,
+          ref.preview,
+        ]
+          .filter(Boolean)
+          .join('  '),
+      })),
+  );
   const items = [...messageItems, ...codeBlockItems];
 
   return items.length ? items : null;
@@ -592,7 +634,10 @@ function nextCodeBlockLabelForMarkdown(self: any): string | undefined {
     return indexedLabel;
   }
 
-  return getRuntimeState().enableLiveCodeBlockLabels ? `1${blockLetter(currentIndex)}` : undefined;
+  const state = getRuntimeState();
+  return state.enableLiveCodeBlockLabels
+    ? `r${state.nextStableMessageNumber}${blockLetter(currentIndex)}`
+    : undefined;
 }
 
 function renderPatchedToken(
@@ -729,6 +774,7 @@ export function resetPiMdHooksTestState(): void {
   state.codeBlockRefs = [];
   state.refsByMarkdownText = new Map();
   state.enableLiveCodeBlockLabels = false;
+  state.nextStableMessageNumber = 1;
 }
 
 export function createPiMdHooksExtension(
@@ -768,7 +814,7 @@ export function createPiMdHooksExtension(
       const messageRef = findMessageRef(match[1]);
       if (messageRef) {
         await copyToClipboard(messageRef.content);
-        ctx.ui.notify(`Copied response ${messageRef.label}`, 'info');
+        ctx.ui.notify(`Copied response ${match[1]}`, 'info');
         return { action: 'handled' };
       }
 
@@ -779,7 +825,7 @@ export function createPiMdHooksExtension(
       }
 
       await copyToClipboard(ref.content);
-      ctx.ui.notify(`Copied code block ${ref.label}`, 'info');
+      ctx.ui.notify(`Copied code block ${match[1]}`, 'info');
       return { action: 'handled' };
     });
 
