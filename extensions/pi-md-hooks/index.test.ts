@@ -305,6 +305,27 @@ describe('pi-md-hooks markdown patch', () => {
     expect(harness.notify).toHaveBeenCalledWith('Copied code block 1a', 'info');
   });
 
+  test('copy input handler accepts colon-delimited labels for easier text selection', async () => {
+    const harness = await createExtensionHarness('/tmp/project');
+    harness.ctx.sessionManager.getBranch = () => [
+      {
+        type: 'message',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: '```ts\nconst copied = true;\n```' }],
+        },
+      },
+    ];
+
+    const result = await getHandler(harness.handlers, 'input')(
+      { text: '/copy:1a', source: 'interactive' },
+      harness.ctx,
+    );
+
+    expect(result).toEqual({ action: 'handled' });
+    expect(copyToClipboardMock).toHaveBeenCalledWith('const copied = true;');
+  });
+
   test('copy input handler copies a numbered full assistant response by recency', async () => {
     const harness = await createExtensionHarness('/tmp/project');
     harness.ctx.sessionManager.getBranch = () => [
@@ -334,14 +355,14 @@ describe('pi-md-hooks markdown patch', () => {
     expect(harness.notify).toHaveBeenCalledWith('Copied response 2', 'info');
   });
 
-  test('autocomplete suggests labeled code blocks for copy arguments', async () => {
+  test('autocomplete suggests labeled code blocks for copy arguments with line counts', async () => {
     const harness = await createExtensionHarness('/tmp/project');
     harness.ctx.sessionManager.getBranch = () => [
       {
         type: 'message',
         message: {
           role: 'assistant',
-          content: [{ type: 'text', text: '```bash\npnpm test\n```' }],
+          content: [{ type: 'text', text: '```bash\npnpm test\npnpm lint\n```' }],
         },
       },
     ];
@@ -363,9 +384,37 @@ describe('pi-md-hooks markdown patch', () => {
       prefix: '',
       items: [
         { value: '1', label: '1', description: 'response  pnpm test' },
-        { value: '1a', label: '1a', description: 'bash  pnpm test' },
+        { value: '1a', label: '1a', description: 'bash  2 lines  pnpm test' },
       ],
     });
+  });
+
+  test('autocomplete also suggests labels after /copy colon prefix', async () => {
+    const harness = await createExtensionHarness('/tmp/project');
+    harness.ctx.sessionManager.getBranch = () => [
+      {
+        type: 'message',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: '```bash\npnpm test\n```' }],
+        },
+      },
+    ];
+    await getHandler(harness.handlers, 'session_start')({ type: 'session_start' }, harness.ctx);
+
+    const wrapper = harness.ctx.ui.addAutocompleteProvider.mock.calls[0][0];
+    const delegate = {
+      getSuggestions: vi.fn(),
+      applyCompletion: vi.fn(),
+      shouldTriggerFileCompletion: vi.fn(),
+    };
+
+    const provider = wrapper(delegate);
+    const suggestions = await provider.getSuggestions(['/copy:'], 0, 6, {
+      signal: new AbortController().signal,
+    });
+
+    expect(suggestions?.items.map((item: any) => item.value)).toEqual(['1', '1a']);
   });
 
   test('delegates markdown link rendering to the underlying Markdown implementation', async () => {

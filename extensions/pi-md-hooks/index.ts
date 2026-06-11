@@ -74,6 +74,7 @@ export interface CodeBlockRef {
   blockIndex: number;
   language: string;
   content: string;
+  lineCount: number;
   preview: string;
   sourceText: string;
 }
@@ -202,6 +203,11 @@ function previewCodeBlock(content: string): string {
   );
 }
 
+function countNonTrailingCodeLines(content: string): number {
+  const trimmed = content.replace(/\s+$/u, '');
+  return trimmed ? trimmed.split('\n').length : 0;
+}
+
 function previewResponse(content: string): string {
   return (
     content
@@ -224,6 +230,7 @@ export function buildCodeBlockIndex(messages: any[]): CodeBlockRef[] {
         blockIndex,
         language: block.language,
         content: block.content,
+        lineCount: countNonTrailingCodeLines(block.content),
         preview: previewCodeBlock(block.content),
         sourceText,
       });
@@ -335,7 +342,13 @@ function copyCodeBlockCompletions(prefix: string): AutocompleteItem[] | null {
     .map((ref) => ({
       value: ref.label,
       label: ref.label,
-      description: [ref.language || 'text', ref.preview].filter(Boolean).join('  '),
+      description: [
+        ref.language || 'text',
+        ref.lineCount > 1 ? `${ref.lineCount} lines` : undefined,
+        ref.preview,
+      ]
+        .filter(Boolean)
+        .join('  '),
     }));
   const items = [...messageItems, ...codeBlockItems];
 
@@ -350,7 +363,7 @@ function createCopyAutocompleteProvider(
     async getSuggestions(lines, cursorLine, cursorCol, options) {
       const currentLine = lines[cursorLine] ?? '';
       const textBeforeCursor = currentLine.slice(0, cursorCol);
-      const match = /^\/copy\s+([^\s]*)$/u.exec(textBeforeCursor);
+      const match = /^\/copy(?::|\s+)([^\s]*)$/u.exec(textBeforeCursor);
       if (!match) {
         return current.getSuggestions(lines, cursorLine, cursorCol, options);
       }
@@ -746,7 +759,7 @@ export function createPiMdHooksExtension(
         return { action: 'continue' };
       }
 
-      const match = /^\/copy\s+(\S+)\s*$/u.exec(event.text);
+      const match = /^\/copy(?::|\s+)(\S+)\s*$/u.exec(event.text);
       if (!match) {
         return { action: 'continue' };
       }
