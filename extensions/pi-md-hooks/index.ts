@@ -44,8 +44,10 @@ interface RuntimeState {
   ) => string[];
   originalRender?: (this: unknown, width: number) => string[];
   patchedPrototype?: Record<PropertyKey, any>;
+  messageRefs: MessageRef[];
   codeBlockRefs: CodeBlockRef[];
   refsByMarkdownText: Map<string, CodeBlockRef[]>;
+  enableLiveCodeBlockLabels: boolean;
 }
 
 function getRuntimeState(): RuntimeState {
@@ -56,8 +58,10 @@ function getRuntimeState(): RuntimeState {
   }
 
   const state: RuntimeState = {
+    messageRefs: [],
     codeBlockRefs: [],
     refsByMarkdownText: new Map(),
+    enableLiveCodeBlockLabels: false,
   };
   target[STATE_KEY] = state;
   return state;
@@ -71,6 +75,13 @@ export interface CodeBlockRef {
   content: string;
   preview: string;
   sourceText: string;
+}
+
+export interface MessageRef {
+  label: string;
+  messageNumber: number;
+  content: string;
+  preview: string;
 }
 
 interface ParsedCopyCodeBlockLabel {
@@ -177,12 +188,17 @@ function previewCodeBlock(content: string): string {
   );
 }
 
+function previewResponse(content: string): string {
+  return (
+    content
+      .split('\n')
+      .map((line) => line.trim())
+      .find((line) => line && !line.startsWith('```') && !line.startsWith('~~~')) ?? ''
+  );
+}
+
 export function buildCodeBlockIndex(messages: any[]): CodeBlockRef[] {
-  const assistantTexts = messages
-    .filter((message) => 'assistant' === message?.role)
-    .map((message) => getTextContent(message))
-    .filter(Boolean)
-    .reverse();
+  const assistantTexts = getAssistantTextsByRecency(messages);
 
   const refs: CodeBlockRef[] = [];
   assistantTexts.forEach((sourceText, messageOffset) => {
@@ -203,6 +219,23 @@ export function buildCodeBlockIndex(messages: any[]): CodeBlockRef[] {
   return refs;
 }
 
+function getAssistantTextsByRecency(messages: any[]): string[] {
+  return messages
+    .filter((message) => 'assistant' === message?.role)
+    .map((message) => getTextContent(message))
+    .filter(Boolean)
+    .reverse();
+}
+
+export function buildMessageIndex(messages: any[]): MessageRef[] {
+  return getAssistantTextsByRecency(messages).map((content, messageOffset) => ({
+    label: String(messageOffset + 1),
+    messageNumber: messageOffset + 1,
+    content,
+    preview: previewResponse(content),
+  }));
+}
+
 function rebuildCodeBlockMaps(refs: CodeBlockRef[]): void {
   const state = getRuntimeState();
   state.codeBlockRefs = refs;
@@ -215,6 +248,12 @@ function rebuildCodeBlockMaps(refs: CodeBlockRef[]): void {
   }
 }
 
+function rebuildCopyIndexes(messageRefs: MessageRef[], codeBlockRefs: CodeBlockRef[]): void {
+  const state = getRuntimeState();
+  state.messageRefs = messageRefs;
+  rebuildCodeBlockMaps(codeBlockRefs);
+}
+
 function getMessagesFromSession(ctx: ExtensionContext): any[] {
   const manager = ctx.sessionManager as any;
   const entries =
@@ -225,9 +264,20 @@ function getMessagesFromSession(ctx: ExtensionContext): any[] {
 }
 
 function refreshCodeBlockIndex(ctx: ExtensionContext): CodeBlockRef[] {
-  const refs = buildCodeBlockIndex(getMessagesFromSession(ctx));
-  rebuildCodeBlockMaps(refs);
-  return refs;
+  const messages = getMessagesFromSession(ctx);
+  const messageRefs = buildMessageIndex(messages);
+  const codeBlockRefs = buildCodeBlockIndex(messages);
+  rebuildCopyIndexes(messageRefs, codeBlockRefs);
+  return codeBlockRefs;
+}
+
+function findMessageRef(label: string): MessageRef | undefined {
+  const trimmed = label.trim();
+  if (!/^\d+$/u.test(trimmed)) {
+    return undefined;
+  }
+
+  return getRuntimeState().messageRefs.find((ref) => ref.label === trimmed);
 }
 
 function findCodeBlockRef(label: string): CodeBlockRef | undefined {
@@ -243,13 +293,22 @@ function findCodeBlockRef(label: string): CodeBlockRef | undefined {
 
 function copyCodeBlockCompletions(prefix: string): AutocompleteItem[] | null {
   const normalizedPrefix = prefix.trim().toLowerCase();
-  const items = getRuntimeState()
-    .codeBlockRefs.filter((ref) => ref.label.startsWith(normalizedPrefix))
+  const state = getRuntimeState();
+  const messageItems = state.messageRefs
+    .filter((ref) => ref.label.startsWith(normalizedPrefix))
+    .map((ref) => ({
+      value: ref.label,
+      label: ref.label,
+      description: ['response', ref.preview].filter(Boolean).join('  '),
+    }));
+  const codeBlockItems = state.codeBlockRefs
+    .filter((ref) => ref.label.startsWith(normalizedPrefix))
     .map((ref) => ({
       value: ref.label,
       label: ref.label,
       description: [ref.language || 'text', ref.preview].filter(Boolean).join('  '),
     }));
+  const items = [...messageItems, ...codeBlockItems];
 
   return items.length ? items : null;
 }
@@ -482,14 +541,16 @@ function nextCodeBlockLabelForMarkdown(self: any): string | undefined {
     return undefined;
   }
 
-  const refs = getRuntimeState().refsByMarkdownText.get(text);
-  if (!refs?.length) {
-    return undefined;
-  }
-
   const currentIndex = (self[CODE_BLOCK_RENDER_INDEX] as number | undefined) ?? 0;
   self[CODE_BLOCK_RENDER_INDEX] = currentIndex + 1;
-  return refs[currentIndex]?.label;
+
+  const refs = getRuntimeState().refsByMarkdownText.get(text);
+  const indexedLabel = refs?.[currentIndex]?.label;
+  if (indexedLabel) {
+    return indexedLabel;
+  }
+
+  return getRuntimeState().enableLiveCodeBlockLabels ? `1${blockLetter(currentIndex)}` : undefined;
 }
 
 function renderPatchedToken(
@@ -617,8 +678,10 @@ export function resetPiMdHooksTestState(): void {
   state.originalRenderToken = undefined;
   state.originalRender = undefined;
   state.patchedPrototype = undefined;
+  state.messageRefs = [];
   state.codeBlockRefs = [];
   state.refsByMarkdownText = new Map();
+  state.enableLiveCodeBlockLabels = false;
 }
 
 export function createPiMdHooksExtension(
@@ -631,6 +694,7 @@ export function createPiMdHooksExtension(
       }
 
       await installMarkdownPatch(loadMarkdownModule);
+      getRuntimeState().enableLiveCodeBlockLabels = true;
       setActiveCwd(ctx.sessionManager.getCwd());
       refreshCodeBlockIndex(ctx);
       ctx.ui.addAutocompleteProvider((current) => createCopyAutocompleteProvider(current, ctx));
@@ -654,6 +718,13 @@ export function createPiMdHooksExtension(
       }
 
       refreshCodeBlockIndex(ctx);
+      const messageRef = findMessageRef(match[1]);
+      if (messageRef) {
+        await copyToClipboard(messageRef.content);
+        ctx.ui.notify(`Copied response ${messageRef.label}`, 'info');
+        return { action: 'handled' };
+      }
+
       const ref = findCodeBlockRef(match[1]);
       if (!ref) {
         ctx.ui.notify(`No code block labeled ${match[1]}`, 'warning');
@@ -667,7 +738,8 @@ export function createPiMdHooksExtension(
 
     pi.on('session_shutdown', async () => {
       setActiveCwd(undefined);
-      rebuildCodeBlockMaps([]);
+      getRuntimeState().enableLiveCodeBlockLabels = false;
+      rebuildCopyIndexes([], []);
     });
   };
 }

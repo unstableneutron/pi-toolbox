@@ -39,6 +39,7 @@ import { Markdown, type MarkdownTheme } from '@earendil-works/pi-tui';
 
 import {
   buildCodeBlockIndex,
+  buildMessageIndex,
   createPiMdHooksExtension,
   installMarkdownPatch,
   parseCopyCodeBlockLabel,
@@ -136,6 +137,24 @@ describe('pi-md-hooks markdown patch', () => {
     ]);
   });
 
+  test('indexes full assistant messages by recency', () => {
+    const index = buildMessageIndex([
+      {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Older response' }],
+      },
+      {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Latest response' }],
+      },
+    ] as any[]);
+
+    expect(index.map((message) => [message.label, message.content])).toEqual([
+      ['1', 'Latest response'],
+      ['2', 'Older response'],
+    ]);
+  });
+
   test('parses copy-codeblock labels case-insensitively', () => {
     expect(parseCopyCodeBlockLabel('1a')).toEqual({ messageNumber: 1, blockIndex: 0 });
     expect(parseCopyCodeBlockLabel('2C')).toEqual({ messageNumber: 2, blockIndex: 2 });
@@ -177,6 +196,24 @@ describe('pi-md-hooks markdown patch', () => {
     expect(after).toContain('// 1a');
   });
 
+  test('renders live labels for TUI code blocks before the message is indexed', async () => {
+    const harness = await createExtensionHarness('/tmp/project');
+    harness.ctx.sessionManager.getBranch = () => [];
+    await getHandler(harness.handlers, 'session_start')({ type: 'session_start' }, harness.ctx);
+
+    const rendered = new Markdown(
+      '```json\n{"copyLabels":true}\n```\n\n```bash\necho second\n```',
+      0,
+      0,
+      plainMarkdownTheme,
+    )
+      .render(120)
+      .join('\n');
+
+    expect(rendered).toContain('// 1a');
+    expect(rendered).toContain('// 1b');
+  });
+
   test('copy input handler copies a labeled code block without registering a conflicting command', async () => {
     const harness = await createExtensionHarness('/tmp/project');
     harness.ctx.sessionManager.getBranch = () => [
@@ -208,6 +245,35 @@ describe('pi-md-hooks markdown patch', () => {
     expect(harness.notify).toHaveBeenCalledWith('Copied code block 1a', 'info');
   });
 
+  test('copy input handler copies a numbered full assistant response by recency', async () => {
+    const harness = await createExtensionHarness('/tmp/project');
+    harness.ctx.sessionManager.getBranch = () => [
+      {
+        type: 'message',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Older full response' }],
+        },
+      },
+      {
+        type: 'message',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Latest full response' }],
+        },
+      },
+    ];
+
+    const result = await getHandler(harness.handlers, 'input')(
+      { text: '/copy 2', source: 'interactive' },
+      harness.ctx,
+    );
+
+    expect(result).toEqual({ action: 'handled' });
+    expect(copyToClipboardMock).toHaveBeenCalledWith('Older full response');
+    expect(harness.notify).toHaveBeenCalledWith('Copied response 2', 'info');
+  });
+
   test('autocomplete suggests labeled code blocks for copy arguments', async () => {
     const harness = await createExtensionHarness('/tmp/project');
     harness.ctx.sessionManager.getBranch = () => [
@@ -235,7 +301,10 @@ describe('pi-md-hooks markdown patch', () => {
 
     expect(suggestions).toEqual({
       prefix: '',
-      items: [{ value: '1a', label: '1a', description: 'bash  pnpm test' }],
+      items: [
+        { value: '1', label: '1', description: 'response  pnpm test' },
+        { value: '1a', label: '1a', description: 'bash  pnpm test' },
+      ],
     });
   });
 
