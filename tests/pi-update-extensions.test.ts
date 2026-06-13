@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
+  applyAmasterPiComputerUseAnalyzeScreenshotPatch,
   applyPiCodexGoalPostCompactionUserFollowupPatch,
   applyPiCodingAgentResolverPatch,
   applyPiContinuousLearningPatch,
@@ -28,6 +29,7 @@ import {
   isPiHerdrPromptGuidancePatchApplied,
   isPiAiBedrockApiKeyBearerPatchApplied,
   isPiAiOpenAICodexAuthHeaderPatchApplied,
+  isAmasterPiComputerUseAnalyzeScreenshotPatchApplied,
   isPiMermaidPatchApplied,
   isPiSubagentsApplyPatchToolPatchApplied,
   isPiSubagentsIntercomDetachPatchApplied,
@@ -170,6 +172,162 @@ describe('package manager command resolution', () => {
         ['install', '@scope/pkg name'],
       ),
     ).toBe('mise exec node@22 -- npm install "@scope/pkg name"');
+  });
+});
+
+describe('@amaster.ai/pi-computer-use analyze_screenshot patching', () => {
+  const FIXTURE_CONTENT = [
+    "import { Type } from 'typebox';",
+    "import { loadConfigFromFile, resolveConfig } from './config.js';",
+    "import { CuaDriverClient } from './mcp-client.js';",
+    "import { createPiVisionCaller } from './vision.js';",
+    "const TOOL_PREFIX = 'computer_use_';",
+    'function computerUseExtension(pi) {',
+    '    function registerVisionTool() {',
+    '        const visionConfig = {};',
+    '        pi.registerTool({',
+    '            name: `${TOOL_PREFIX}analyze_screenshot`,',
+    '            label: `${TOOL_PREFIX}analyze_screenshot`,',
+    "            description: 'Capture a screenshot using ScreenCaptureKit and analyze it visually using a vision model. Returns analysis for a single window in the requested format (default png).\\n\\n`window_id` is required. Get window ids from `list_windows`.\\n\\nRequires the Screen Recording TCC grant — call `check_permissions` first if unsure.',",
+    '            parameters: Type.Object({',
+    '                window_id: Type.Number({',
+    "                    description: 'Required CGWindowID / kCGWindowNumber to capture.',",
+    '                }),',
+    '                instruction: Type.Optional(Type.String({',
+    '                    description: \'What to identify or analyze visually (e.g., "Find the coordinates of the blue submit button").\'',
+    '                })),',
+    "                format: Type.Optional(Type.Union([Type.Literal('png'), Type.Literal('jpeg')], {",
+    "                    description: 'Image format. Default: png.',",
+    '                })),',
+    '                quality: Type.Optional(Type.Number({',
+    "                    description: 'JPEG quality 1-95; ignored for png.',",
+    '                    minimum: 1,',
+    '                    maximum: 95,',
+    '                })),',
+    '            }),',
+    '            async execute(_toolCallId, params, _signal, _onUpdate, ctx) {',
+    '                const screenshotArgs = { window_id: params.window_id };',
+    '                if (params.format)',
+    '                    screenshotArgs.format = params.format;',
+    '                if (params.quality)',
+    '                    screenshotArgs.quality = params.quality;',
+    "                const screenshotResult = await client.callTool('screenshot', screenshotArgs);",
+    "                const imageContent = screenshotResult.content?.find((c) => c.type === 'image' && c.data);",
+    "                console.error('[pi-computer-use analyze_screenshot] screenshot result', JSON.stringify({",
+    '                    window_id: params.window_id,',
+    '                    isError: screenshotResult.isError,',
+    '                    contentTypes: screenshotResult.content?.map((c) => c.type),',
+    '                    imageDataLength: imageContent?.data?.length,',
+    '                    imageMimeType: imageContent?.mimeType,',
+    '                }, null, 2));',
+    '                if (!imageContent?.data) {',
+    '                    const errorText = screenshotResult.content',
+    "                        ?.filter((c) => c.type === 'text' && c.text)",
+    '                        .map((c) => c.text)',
+    "                        .join('\\n') || 'Failed to capture screenshot.';",
+    "                    const formatted = formatToolError('screenshot', errorText, params);",
+    '                    return {',
+    "                        content: [{ type: 'text', text: formatted ?? errorText }],",
+    '                        details: undefined,',
+    '                        isError: true,',
+    '                    };',
+    '                }',
+    '                const callVision = createPiVisionCaller(visionConfig, ctx);',
+    '                const instruction = params.instruction ??',
+    "                    'Describe the full screen: identify all visible windows, UI elements, buttons, text fields, and their positions.';",
+    "                const analysis = await callVision(instruction, imageContent.data, imageContent.mimeType ?? 'image/png');",
+    "                console.error('[pi-computer-use analyze_screenshot] vision analysis', JSON.stringify({",
+    '                    analysisLength: analysis.length,',
+    '                    analysisPreview: analysis.slice(0, 200),',
+    '                }, null, 2));',
+    '                return {',
+    "                    content: [{ type: 'text', text: analysis }],",
+    '                    details: undefined,',
+    '                };',
+    '            },',
+    '        });',
+    '    }',
+    '}',
+    'function formatToolError(toolName, errorText, params) {',
+    '    return undefined;',
+    '}',
+    '',
+  ].join('\n');
+
+  function setupFakePackage(version: string, indexContent = FIXTURE_CONTENT): string {
+    const packageRoot = makeTempDir('amaster-pi-computer-use-');
+    writeFileSync(
+      join(packageRoot, 'package.json'),
+      JSON.stringify({ name: '@amaster.ai/pi-computer-use', version }, null, 2),
+    );
+    mkdirSync(join(packageRoot, 'dist'), { recursive: true });
+    writeFileSync(join(packageRoot, 'dist', 'index.js'), indexContent);
+    return packageRoot;
+  }
+
+  it('reports unpatched fixture as not yet patched', () => {
+    const packageRoot = setupFakePackage('0.1.1');
+    expect(isAmasterPiComputerUseAnalyzeScreenshotPatchApplied(packageRoot)).toBe(false);
+  });
+
+  it('rewires analyze_screenshot to file input or get_window_state capture', async () => {
+    const packageRoot = setupFakePackage('0.1.1');
+    const result = await applyAmasterPiComputerUseAnalyzeScreenshotPatch({ packageRoot });
+
+    expect(result).toMatchObject({
+      status: 'applied',
+      packageRoot,
+      version: '0.1.1',
+    });
+    expect(result.patchPath).toBe(join(packageRoot, 'dist', 'index.js'));
+
+    const patched = readFileSync(join(packageRoot, 'dist', 'index.js'), 'utf8');
+    expect(patched).toContain(
+      '__pi_update_extensions:amaster-computer-use-analyze-get-window-state__',
+    );
+    expect(patched).toContain('screenshot_file_path');
+    expect(patched).toContain("client.callTool('get_window_state'");
+    expect(patched).toContain("capture_mode: 'vision'");
+    expect(patched).toContain('readScreenshotFileAsBase64');
+    expect(patched).not.toContain("client.callTool('screenshot'");
+    expect(isAmasterPiComputerUseAnalyzeScreenshotPatchApplied(packageRoot)).toBe(true);
+  });
+
+  it('is idempotent after patching', async () => {
+    const packageRoot = setupFakePackage('0.1.1');
+    await applyAmasterPiComputerUseAnalyzeScreenshotPatch({ packageRoot });
+    const second = await applyAmasterPiComputerUseAnalyzeScreenshotPatch({ packageRoot });
+
+    expect(second).toMatchObject({
+      status: 'already-applied',
+      packageRoot,
+      version: '0.1.1',
+    });
+  });
+
+  it('supports dry-run without mutating the extension', async () => {
+    const packageRoot = setupFakePackage('0.1.1');
+    const indexPath = join(packageRoot, 'dist', 'index.js');
+    const original = readFileSync(indexPath, 'utf8');
+
+    const result = await applyAmasterPiComputerUseAnalyzeScreenshotPatch({
+      packageRoot,
+      dryRun: true,
+    });
+    expect(result).toMatchObject({
+      status: 'would-apply',
+      packageRoot,
+      version: '0.1.1',
+    });
+    expect(readFileSync(indexPath, 'utf8')).toBe(original);
+    expect(isAmasterPiComputerUseAnalyzeScreenshotPatchApplied(packageRoot)).toBe(false);
+  });
+
+  it('throws a descriptive error when the target text is missing', async () => {
+    const packageRoot = setupFakePackage('1.0.0', 'export default function extension() {}\n');
+    await expect(applyAmasterPiComputerUseAnalyzeScreenshotPatch({ packageRoot })).rejects.toThrow(
+      /target text for @amaster\.ai\/pi-computer-use analyze_screenshot patch not found/i,
+    );
   });
 });
 

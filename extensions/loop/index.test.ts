@@ -4,12 +4,12 @@ import loopExtension from './index';
 
 function createHarness() {
   const commands = new Map<string, (args: string, ctx: any) => Promise<void> | void>();
-  const handlers = new Map<string, (event: any, ctx: any) => Promise<unknown> | unknown>();
+  const handlers = new Map<string, (event: any, ctx: any) => unknown>();
   const appendEntry = vi.fn();
   const sendMessage = vi.fn();
   const pi = {
     appendEntry,
-    on: vi.fn((event: string, handler: (event: any, ctx: any) => Promise<unknown> | unknown) => {
+    on: vi.fn((event: string, handler: (event: any, ctx: any) => unknown) => {
       handlers.set(event, handler);
     }),
     registerCommand(name: string, command: { handler: (args: string, ctx: any) => Promise<void> }) {

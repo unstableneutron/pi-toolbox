@@ -371,6 +371,67 @@ export function findGlobalPackagePath(
   return undefined;
 }
 
+function findPackagePathInAubeState(
+  workspaceRoot: string,
+  packageName: string,
+): string | undefined {
+  type AubeStatePackage = { name?: unknown; package_json_path?: unknown };
+  type AubeState = { layout?: { packages?: Record<string, AubeStatePackage> } };
+
+  for (const stateFileName of ['fresh.json', 'state.json']) {
+    const statePath = join(workspaceRoot, 'node_modules', '.aube-state', stateFileName);
+    if (!existsSync(statePath)) continue;
+
+    try {
+      const state = JSON.parse(readFileSync(statePath, 'utf8')) as AubeState;
+      const packages = state.layout?.packages;
+      if (!packages) continue;
+
+      for (const packageEntry of Object.values(packages)) {
+        if (packageEntry.name !== packageName) continue;
+        if (typeof packageEntry.package_json_path !== 'string') continue;
+
+        const packageJsonPath = resolve(workspaceRoot, packageEntry.package_json_path);
+        if (existsSync(packageJsonPath)) {
+          return realpathSync(dirname(packageJsonPath));
+        }
+      }
+    } catch {
+      // Ignore malformed temp state files and try other workspaces.
+    }
+  }
+
+  return undefined;
+}
+
+function findPackagePathInPiExtensionTempWorkspaces(packageName: string): string | undefined {
+  const tempExtensionsRoot = join(homedir(), '.pi', 'agent', 'tmp', 'extensions', 'npm');
+  if (!existsSync(tempExtensionsRoot)) return undefined;
+
+  const workspaceRoots = readdirSync(tempExtensionsRoot)
+    .map((entry) => join(tempExtensionsRoot, entry))
+    .filter((entryPath) => {
+      try {
+        return statSync(entryPath).isDirectory();
+      } catch {
+        return false;
+      }
+    })
+    .sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs);
+
+  for (const workspaceRoot of workspaceRoots) {
+    const directPackageJsonPath = join(workspaceRoot, 'node_modules', packageName, 'package.json');
+    if (existsSync(directPackageJsonPath)) {
+      return realpathSync(dirname(directPackageJsonPath));
+    }
+
+    const statePackagePath = findPackagePathInAubeState(workspaceRoot, packageName);
+    if (statePackagePath) return statePackagePath;
+  }
+
+  return undefined;
+}
+
 export function isPiCodingAgentResolverPatchApplied(packageRoot: string): boolean {
   const filePath = join(packageRoot, PI_CODING_AGENT_RESOLVER_RELATIVE_PATH);
   if (!existsSync(filePath)) return false;
@@ -638,6 +699,270 @@ export async function applyPiAiOpenAICodexAuthHeaderPatch(
   const patched = content
     .replace(PI_AI_OPENAI_CODEX_ACCOUNT_ID_TARGET, buildPiAiOpenAICodexAccountIdReplacement())
     .replace(PI_AI_OPENAI_CODEX_HEADER_TARGET, buildPiAiOpenAICodexHeaderReplacement());
+  writeFileSync(filePath, patched);
+  return { status: 'applied', packageRoot, version, patchPath: filePath };
+}
+
+// ---------------------------------------------------------------------------
+// @amaster.ai/pi-computer-use analyze_screenshot patch
+//
+// @amaster.ai/pi-computer-use@0.1.1 implements
+// `computer_use_analyze_screenshot` by calling an upstream CuaDriver MCP tool
+// named `screenshot`. Current CuaDriver versions expose screenshots through
+// `get_window_state` with `capture_mode: "vision"` instead. Rewire the tool to
+// either read an existing `screenshot_file_path` or capture `pid + window_id`
+// through `get_window_state`, keeping base64 conversion internal to the vision
+// model call.
+// ---------------------------------------------------------------------------
+
+const AMASTER_PI_COMPUTER_USE_PACKAGE_NAME = '@amaster.ai/pi-computer-use';
+const AMASTER_PI_COMPUTER_USE_INDEX_RELATIVE_PATH = 'dist/index.js';
+const AMASTER_PI_COMPUTER_USE_ANALYZE_PATCH_MARKER =
+  '__pi_update_extensions:amaster-computer-use-analyze-get-window-state__';
+const AMASTER_PI_COMPUTER_USE_IMPORT_TARGET = "import { Type } from 'typebox';";
+const AMASTER_PI_COMPUTER_USE_PARAMS_TARGET = [
+  "            description: 'Capture a screenshot using ScreenCaptureKit and analyze it visually using a vision model. Returns analysis for a single window in the requested format (default png).\\n\\n`window_id` is required. Get window ids from `list_windows`.\\n\\nRequires the Screen Recording TCC grant — call `check_permissions` first if unsure.',",
+  '            parameters: Type.Object({',
+  '                window_id: Type.Number({',
+  "                    description: 'Required CGWindowID / kCGWindowNumber to capture.',",
+  '                }),',
+  '                instruction: Type.Optional(Type.String({',
+  '                    description: \'What to identify or analyze visually (e.g., "Find the coordinates of the blue submit button").\'',
+  '                })),',
+  "                format: Type.Optional(Type.Union([Type.Literal('png'), Type.Literal('jpeg')], {",
+  "                    description: 'Image format. Default: png.',",
+  '                })),',
+  '                quality: Type.Optional(Type.Number({',
+  "                    description: 'JPEG quality 1-95; ignored for png.',",
+  '                    minimum: 1,',
+  '                    maximum: 95,',
+  '                })),',
+  '            }),',
+].join('\n');
+const AMASTER_PI_COMPUTER_USE_CAPTURE_TARGET = [
+  '                const screenshotArgs = { window_id: params.window_id };',
+  '                if (params.format)',
+  '                    screenshotArgs.format = params.format;',
+  '                if (params.quality)',
+  '                    screenshotArgs.quality = params.quality;',
+  "                const screenshotResult = await client.callTool('screenshot', screenshotArgs);",
+  "                const imageContent = screenshotResult.content?.find((c) => c.type === 'image' && c.data);",
+  "                console.error('[pi-computer-use analyze_screenshot] screenshot result', JSON.stringify({",
+  '                    window_id: params.window_id,',
+  '                    isError: screenshotResult.isError,',
+  '                    contentTypes: screenshotResult.content?.map((c) => c.type),',
+  '                    imageDataLength: imageContent?.data?.length,',
+  '                    imageMimeType: imageContent?.mimeType,',
+  '                }, null, 2));',
+  '                if (!imageContent?.data) {',
+  '                    const errorText = screenshotResult.content',
+  "                        ?.filter((c) => c.type === 'text' && c.text)",
+  '                        .map((c) => c.text)',
+  "                        .join('\\n') || 'Failed to capture screenshot.';",
+  "                    const formatted = formatToolError('screenshot', errorText, params);",
+  '                    return {',
+  "                        content: [{ type: 'text', text: formatted ?? errorText }],",
+  '                        details: undefined,',
+  '                        isError: true,',
+  '                    };',
+  '                }',
+  '                const callVision = createPiVisionCaller(visionConfig, ctx);',
+  '                const instruction = params.instruction ??',
+  "                    'Describe the full screen: identify all visible windows, UI elements, buttons, text fields, and their positions.';",
+  "                const analysis = await callVision(instruction, imageContent.data, imageContent.mimeType ?? 'image/png');",
+].join('\n');
+const AMASTER_PI_COMPUTER_USE_FORMAT_ERROR_TARGET =
+  'function formatToolError(toolName, errorText, params) {';
+
+function buildAmasterPiComputerUseImportReplacement(): string {
+  return [
+    AMASTER_PI_COMPUTER_USE_IMPORT_TARGET,
+    `// ${AMASTER_PI_COMPUTER_USE_ANALYZE_PATCH_MARKER}`,
+    "import { mkdtemp, readFile, rm } from 'node:fs/promises';",
+    "import os from 'node:os';",
+    "import path from 'node:path';",
+  ].join('\n');
+}
+
+function buildAmasterPiComputerUseParamsReplacement(): string {
+  return [
+    '            description: \'Analyze a screenshot visually using a configured vision model. Provide either `screenshot_file_path` for an existing image file, or both `pid` and `window_id` to capture that window via get_window_state(capture_mode="vision").\\n\\nGet pid/window_id from `list_windows` or `get_accessibility_tree`. Capturing a window requires the Screen Recording TCC grant — call `check_permissions` first if unsure.\',',
+    '            parameters: Type.Object({',
+    '                pid: Type.Optional(Type.Number({',
+    "                    description: 'Target process ID. Required with window_id when screenshot_file_path is not provided.',",
+    '                })),',
+    '                window_id: Type.Optional(Type.Number({',
+    "                    description: 'CGWindowID / kCGWindowNumber to capture. Required with pid when screenshot_file_path is not provided.',",
+    '                })),',
+    '                screenshot_file_path: Type.Optional(Type.String({',
+    "                    description: 'Existing local screenshot file to analyze. If provided, pid/window_id are not used.',",
+    '                })),',
+    '                instruction: Type.Optional(Type.String({',
+    '                    description: \'What to identify or analyze visually (e.g., "Find the coordinates of the blue submit button").\'',
+    '                })),',
+    '            }),',
+  ].join('\n');
+}
+
+function buildAmasterPiComputerUseCaptureReplacement(): string {
+  return [
+    '                let screenshot;',
+    '                try {',
+    '                    screenshot = await resolveComputerUseAnalyzeScreenshotInput(client, params);',
+    '                }',
+    '                catch (err) {',
+    '                    const errorText = err instanceof Error ? err.message : String(err);',
+    "                    const formatted = formatToolError('screenshot', errorText, params);",
+    '                    return {',
+    "                        content: [{ type: 'text', text: formatted ?? errorText }],",
+    '                        details: undefined,',
+    '                        isError: true,',
+    '                    };',
+    '                }',
+    "                console.error('[pi-computer-use analyze_screenshot] screenshot input', JSON.stringify({",
+    "                    source: params.screenshot_file_path ? 'file' : 'get_window_state',",
+    '                    pid: params.pid,',
+    '                    window_id: params.window_id,',
+    '                    screenshotFilePath: params.screenshot_file_path,',
+    '                    imageBase64Length: screenshot.imageBase64.length,',
+    '                    mimeType: screenshot.mimeType,',
+    '                }, null, 2));',
+    '                const callVision = createPiVisionCaller(visionConfig, ctx);',
+    '                const instruction = params.instruction ??',
+    "                    'Describe the full screen: identify all visible windows, UI elements, buttons, text fields, and their positions.';",
+    '                const analysis = await callVision(instruction, screenshot.imageBase64, screenshot.mimeType);',
+  ].join('\n');
+}
+
+function buildAmasterPiComputerUseHelperInsertion(): string {
+  return [
+    `// ${AMASTER_PI_COMPUTER_USE_ANALYZE_PATCH_MARKER}`,
+    'async function resolveComputerUseAnalyzeScreenshotInput(client, params) {',
+    "    const hasFile = typeof params.screenshot_file_path === 'string' && params.screenshot_file_path.length > 0;",
+    '    const hasWindow = params.pid !== undefined || params.window_id !== undefined;',
+    '    if (hasFile && hasWindow) {',
+    "        throw new Error('Provide either screenshot_file_path or pid + window_id, not both.');",
+    '    }',
+    '    if (hasFile) {',
+    '        return await readScreenshotFileAsBase64(params.screenshot_file_path);',
+    '    }',
+    "    if (typeof params.pid !== 'number' || typeof params.window_id !== 'number') {",
+    "        throw new Error('Provide screenshot_file_path, or provide both pid and window_id to capture a window.');",
+    '    }',
+    "    const tempDir = await mkdtemp(path.join(os.tmpdir(), 'pi-computer-use-'));",
+    '    const screenshotPath = path.join(tempDir, `window-${params.window_id}.png`);',
+    '    try {',
+    "        const result = await client.callTool('get_window_state', {",
+    '            pid: params.pid,',
+    '            window_id: params.window_id,',
+    "            capture_mode: 'vision',",
+    '            screenshot_out_file: screenshotPath,',
+    '        });',
+    '        if (result.isError) {',
+    '            const errorText = result.content',
+    "                ?.filter((c) => c.type === 'text' && c.text)",
+    '                .map((c) => c.text)',
+    "                .join('\\n') || 'Failed to capture screenshot via get_window_state.';",
+    '            throw new Error(errorText);',
+    '        }',
+    '        return await readScreenshotFileAsBase64(screenshotPath);',
+    '    }',
+    '    finally {',
+    '        await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);',
+    '    }',
+    '}',
+    'async function readScreenshotFileAsBase64(filePath) {',
+    '    const data = await readFile(filePath);',
+    '    return {',
+    "        imageBase64: data.toString('base64'),",
+    '        mimeType: mimeTypeForScreenshotPath(filePath),',
+    '    };',
+    '}',
+    'function mimeTypeForScreenshotPath(filePath) {',
+    '    const ext = path.extname(filePath).toLowerCase();',
+    "    if (ext === '.jpg' || ext === '.jpeg')",
+    "        return 'image/jpeg';",
+    "    if (ext === '.webp')",
+    "        return 'image/webp';",
+    "    if (ext === '.gif')",
+    "        return 'image/gif';",
+    "    return 'image/png';",
+    '}',
+    AMASTER_PI_COMPUTER_USE_FORMAT_ERROR_TARGET,
+  ].join('\n');
+}
+
+function isAmasterPiComputerUseAnalyzeScreenshotSemanticallyPatched(content: string): boolean {
+  return (
+    content.includes('screenshot_file_path') &&
+    content.includes("client.callTool('get_window_state'") &&
+    content.includes("capture_mode: 'vision'") &&
+    content.includes('readScreenshotFileAsBase64') &&
+    !content.includes("client.callTool('screenshot'")
+  );
+}
+
+export function isAmasterPiComputerUseAnalyzeScreenshotPatchApplied(packageRoot: string): boolean {
+  const filePath = join(packageRoot, AMASTER_PI_COMPUTER_USE_INDEX_RELATIVE_PATH);
+  if (!existsSync(filePath)) return false;
+  const content = readFileSync(filePath, 'utf8');
+  return (
+    content.includes(AMASTER_PI_COMPUTER_USE_ANALYZE_PATCH_MARKER) ||
+    isAmasterPiComputerUseAnalyzeScreenshotSemanticallyPatched(content)
+  );
+}
+
+export async function applyAmasterPiComputerUseAnalyzeScreenshotPatch(
+  options: { dryRun?: boolean; packageRoot?: string; cwd?: string } = {},
+): Promise<ApplyPatchResult> {
+  const packageRoot =
+    options.packageRoot ??
+    findGlobalPackagePath(AMASTER_PI_COMPUTER_USE_PACKAGE_NAME, { cwd: options.cwd }) ??
+    findPackagePathInPiExtensionTempWorkspaces(AMASTER_PI_COMPUTER_USE_PACKAGE_NAME);
+  if (!packageRoot) {
+    throw new Error(
+      `Could not locate installed ${AMASTER_PI_COMPUTER_USE_PACKAGE_NAME} via configured package manager, aube, or pnpm`,
+    );
+  }
+
+  const version = getPackageVersion(packageRoot) ?? 'unknown';
+  const filePath = join(packageRoot, AMASTER_PI_COMPUTER_USE_INDEX_RELATIVE_PATH);
+  if (!existsSync(filePath)) {
+    throw new Error(
+      `${AMASTER_PI_COMPUTER_USE_PACKAGE_NAME}@${version}: dist index file not found at ${filePath}`,
+    );
+  }
+
+  if (isAmasterPiComputerUseAnalyzeScreenshotPatchApplied(packageRoot)) {
+    return { status: 'already-applied', packageRoot, version, patchPath: filePath };
+  }
+
+  const content = readFileSync(filePath, 'utf8');
+  const missingTargets = [
+    AMASTER_PI_COMPUTER_USE_IMPORT_TARGET,
+    AMASTER_PI_COMPUTER_USE_PARAMS_TARGET,
+    AMASTER_PI_COMPUTER_USE_CAPTURE_TARGET,
+    AMASTER_PI_COMPUTER_USE_FORMAT_ERROR_TARGET,
+  ].filter((target) => !content.includes(target));
+  if (missingTargets.length > 0) {
+    throw new Error(
+      `${AMASTER_PI_COMPUTER_USE_PACKAGE_NAME}@${version}: target text for @amaster.ai/pi-computer-use analyze_screenshot patch not found at ${filePath}. ` +
+        `Missing ${missingTargets.length} target(s). Upstream may have changed; update pi-update-extensions.ts.`,
+    );
+  }
+
+  if (options.dryRun) {
+    return { status: 'would-apply', packageRoot, version, patchPath: filePath };
+  }
+
+  const patched = content
+    .replace(AMASTER_PI_COMPUTER_USE_IMPORT_TARGET, buildAmasterPiComputerUseImportReplacement())
+    .replace(AMASTER_PI_COMPUTER_USE_PARAMS_TARGET, buildAmasterPiComputerUseParamsReplacement())
+    .replace(AMASTER_PI_COMPUTER_USE_CAPTURE_TARGET, buildAmasterPiComputerUseCaptureReplacement())
+    .replace(
+      AMASTER_PI_COMPUTER_USE_FORMAT_ERROR_TARGET,
+      buildAmasterPiComputerUseHelperInsertion(),
+    );
   writeFileSync(filePath, patched);
   return { status: 'applied', packageRoot, version, patchPath: filePath };
 }
@@ -1991,6 +2316,28 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     } catch (error) {
       console.error(
         `Skipped pi-ai OpenAI Codex authHeader patch: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    try {
+      const computerUseResult = await applyAmasterPiComputerUseAnalyzeScreenshotPatch({
+        dryRun,
+        cwd: REPO_ROOT,
+        packageRoot: findInstalledNpmPackagePath(
+          installedPackages,
+          AMASTER_PI_COMPUTER_USE_PACKAGE_NAME,
+        ),
+      });
+      const label =
+        computerUseResult.status === 'already-applied'
+          ? `Already applied: @amaster.ai/pi-computer-use analyze_screenshot patch (${computerUseResult.version})`
+          : computerUseResult.status === 'would-apply'
+            ? `Would apply: @amaster.ai/pi-computer-use analyze_screenshot patch (${computerUseResult.version})`
+            : `${computerUseResult.status}: @amaster.ai/pi-computer-use analyze_screenshot patch (${computerUseResult.version}) via ${computerUseResult.patchPath}`;
+      console.log(label);
+    } catch (error) {
+      console.error(
+        `Skipped @amaster.ai/pi-computer-use analyze_screenshot patch: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
 
