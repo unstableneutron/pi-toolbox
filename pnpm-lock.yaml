@@ -177,8 +177,8 @@ importers:
   extensions/pi-fff-search:
     dependencies:
       fff-router:
-        specifier: github:unstableneutron/fff-router#semver:>=0.6.1
-        version: https://github.com/unstableneutron/fff-router.git#049cc199944a95b956cafa2f5086198074bcc26d
+        specifier: github:unstableneutron/fff-router#semver:>=0.7.1
+        version: https://github.com/unstableneutron/fff-router.git#14a2b4e7465b460c60b8c344d8461556e5a38b55
       picomatch:
         specifier: ^4.0.3
         version: 4.0.4
@@ -1706,8 +1706,8 @@ packages:
     resolution: {integrity: sha512-7yAQpD2UMJzLi1Dqv7qFYnPbaPx7ZfFK6PiIxQ4PfkGPyNyl2Ugx+a/umUonmKqjhM4DnfbMvdX6otXq83soQQ==}
     engines: {node: ^12.20 || >= 14.13}
 
-  fff-router@https://github.com/unstableneutron/fff-router.git#049cc199944a95b956cafa2f5086198074bcc26d:
-    resolution: {integrity: sha512-/UQOBknomj4DpvsNMf8f3SZls9+zXD8t0EtTKU6E6foDe69tVOI2EyIgJ2UExA/xsF9MbD+tlybHg4yp4nu7JQ==, gitHosted: true, commit: 049cc199944a95b956cafa2f5086198074bcc26d, repo: https://github.com/unstableneutron/fff-router.git, type: git}
+  fff-router@https://github.com/unstableneutron/fff-router.git#14a2b4e7465b460c60b8c344d8461556e5a38b55:
+    resolution: {integrity: sha512-rI4YYiAqzvqJ0uNgK1M6AoodYHp7bZvmQFLQkC+4AzcIz6bXNj2M+SJotBl2ZeyUeosx460KEGsFHDzxffkUAA==, gitHosted: true, commit: 14a2b4e7465b460c60b8c344d8461556e5a38b55, repo: https://github.com/unstableneutron/fff-router.git, type: git}
 
   ffi-rs@1.3.2:
     resolution: {integrity: sha512-4s8dX9VbBw/jd5NOuE3EJRqXaIVdjMyiumeeDzrOhtjQRwp6Bz2za7iksWXTnvTQKV/tTdm1s1w7mObe92zPjQ==}
@@ -3980,7 +3980,7 @@ snapshots:
       node-domexception: 1.0.0
       web-streams-polyfill: 3.3.3
 
-  fff-router@https://github.com/unstableneutron/fff-router.git#049cc199944a95b956cafa2f5086198074bcc26d:
+  fff-router@https://github.com/unstableneutron/fff-router.git#14a2b4e7465b460c60b8c344d8461556e5a38b55:
     dependencies:
       '@ff-labs/fff-node': 0.5.2
       '@modelcontextprotocol/sdk': 1.29.0(zod@4.3.6)

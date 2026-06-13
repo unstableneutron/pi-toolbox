@@ -17,7 +17,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "fff-router": "github:unstableneutron/fff-router#semver:>=0.6.1",
+    "fff-router": "github:unstableneutron/fff-router#semver:>=0.7.1",
     "picomatch": "^4.0.3"
   },
   "devDependencies": {
