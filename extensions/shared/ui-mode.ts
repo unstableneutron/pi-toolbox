@@ -4,5 +4,9 @@ export type UiModeLike = {
 };
 
 export function hasTui(ctx: UiModeLike | undefined): boolean {
-  return ctx?.mode === 'tui' && ctx.hasUI !== false;
+  if (!ctx) return false;
+  if (ctx.mode !== undefined) {
+    return ctx.mode === 'tui' && ctx.hasUI !== false;
+  }
+  return ctx.hasUI === true;
 }

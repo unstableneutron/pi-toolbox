@@ -27,8 +27,8 @@
     "shell-quote": "^1.8.3"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.78.0",
-    "@earendil-works/pi-tui": "^0.78.0",
+    "@earendil-works/pi-coding-agent": "^0.79.0",
+    "@earendil-works/pi-tui": "^0.79.0",
     "@types/node": "^24.3.0",
     "@types/shell-quote": "^1.7.5",
     "oxfmt": "^0.44.0",

@@ -217,6 +217,55 @@ describe('buildCodexComputerUseDoctorReport', () => {
       expect.objectContaining({ id: 'computer-use-bridge-missing' }),
     ]);
   });
+
+  test('reports Chromium browser bridge environment overrides and selected target source', async () => {
+    const report = await buildCodexComputerUseDoctorReport({
+      paths,
+      deps: {
+        exists: () => true,
+        readBundleInfo: async () => ({
+          bundleId: 'com.openai.sky.CUAService',
+          teamIdentifier: '2DC432GLL2',
+          version: '1.0',
+          build: '799',
+        }),
+        readTccRows: async () => okTccRows,
+        readDisplayState: async () => ({ displayAsleep: false }),
+        findProcesses: async () => [],
+        readComputerUsePluginStatus: async () => installedPluginStatus,
+        readBrowserBridgeStatus: async () => ({
+          debugUrl: { value: 'http://127.0.0.1:9224', source: 'PI_CODEX_CHROME_DEBUG_URL' },
+          extensionId: {
+            value: 'hehggadaopoacecdllhhajmbjkdcmajg',
+            source: 'detected official Codex extension',
+          },
+          appServerOrigin: {
+            value: 'chrome-extension://hehggadaopoacecdllhhajmbjkdcmajg',
+            source: 'default official Codex extension origin',
+          },
+          devToolsReachable: true,
+          nativeMessagingConfigured: true,
+          nativeBridgeResponsive: false,
+          devToolsFallbackUsable: true,
+          guidance: [
+            'Native bridge did not respond within 8000ms; browser tools will use DevTools fallback.',
+          ],
+        }),
+      },
+    });
+
+    expect(report.text).toContain('Chromium browser bridge:');
+    expect(report.text).toContain(
+      '✓ DevTools endpoint reachable: http://127.0.0.1:9224 (PI_CODEX_CHROME_DEBUG_URL)',
+    );
+    expect(report.text).toContain(
+      '✓ Codex extension selected: hehggadaopoacecdllhhajmbjkdcmajg (detected official Codex extension)',
+    );
+    expect(report.text).toContain('✗ Native browser bridge did not respond within probe timeout');
+    expect(report.text).toContain('✓ DevTools fallback usable for browser tools');
+    expect(report.text).toContain('Environment overrides:');
+    expect(report.text).toContain('PI_CODEX_CHROME_DEBUG_URL');
+  });
 });
 
 describe('parseTccRowsFromOutputs', () => {
@@ -382,6 +431,70 @@ describe('runCodexComputerUseDoctor', () => {
 
     expect(resetBridge).toHaveBeenCalledTimes(1);
     expect(readBridgeMcpStatus).toHaveBeenCalledTimes(2);
+    expect(custom).toHaveBeenCalledTimes(2);
+  });
+
+  test('repairs Chromium native host manifests from a selected browser doctor action and rechecks', async () => {
+    const custom = vi.fn(async () =>
+      custom.mock.calls.length === 1 ? 'chrome-native-host-manifest-missing-origin' : 'close',
+    );
+    const repairChromeNativeHostManifests = vi.fn(async () => {});
+    const readBrowserBridgeStatus = vi
+      .fn()
+      .mockResolvedValueOnce({
+        debugUrl: { value: 'http://127.0.0.1:9224', source: 'default Chromium DevTools URL' },
+        extensionId: {
+          value: 'hehggadaopoacecdllhhajmbjkdcmajg',
+          source: 'detected official Codex extension',
+        },
+        appServerOrigin: {
+          value: 'chrome-extension://hehggadaopoacecdllhhajmbjkdcmajg',
+          source: 'default official Codex extension origin',
+        },
+        devToolsReachable: true,
+        nativeMessagingConfigured: false,
+        repairNativeMessagingAvailable: true,
+        nativeBridgeResponsive: false,
+        devToolsFallbackUsable: true,
+        guidance: [],
+      })
+      .mockResolvedValueOnce({
+        debugUrl: { value: 'http://127.0.0.1:9224', source: 'default Chromium DevTools URL' },
+        extensionId: {
+          value: 'hehggadaopoacecdllhhajmbjkdcmajg',
+          source: 'detected official Codex extension',
+        },
+        appServerOrigin: {
+          value: 'chrome-extension://hehggadaopoacecdllhhajmbjkdcmajg',
+          source: 'default official Codex extension origin',
+        },
+        devToolsReachable: true,
+        nativeMessagingConfigured: true,
+        nativeBridgeResponsive: true,
+        devToolsFallbackUsable: true,
+        guidance: [],
+      });
+
+    await runCodexComputerUseDoctor({ hasUI: true, ui: { custom, notify: vi.fn() } } as any, {
+      paths,
+      deps: {
+        exists: () => true,
+        readBundleInfo: async () => ({
+          bundleId: 'com.openai.sky.CUAService',
+          teamIdentifier: '2DC432GLL2',
+          version: '1.0',
+          build: '799',
+        }),
+        readTccRows: async () => okTccRows,
+        readDisplayState: async () => ({ displayAsleep: false }),
+        findProcesses: async () => [],
+        readBrowserBridgeStatus,
+        repairChromeNativeHostManifests,
+      },
+    });
+
+    expect(repairChromeNativeHostManifests).toHaveBeenCalledTimes(1);
+    expect(readBrowserBridgeStatus).toHaveBeenCalledTimes(2);
     expect(custom).toHaveBeenCalledTimes(2);
   });
 

@@ -6,6 +6,13 @@ import { promisify } from 'node:util';
 
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 
+import {
+  ensureChromeExtensionAppServer,
+  getChromeExtensionOrigin,
+  getConfiguredChromeAppServerOrigin,
+  getConfiguredChromeDebugBaseUrl,
+  getConfiguredChromeExtensionId,
+} from './chrome-extension-host';
 import { getCodexComputerUsePaths } from './codex-paths';
 import {
   formatCodexComputerUseEnablementStatus,
@@ -24,6 +31,17 @@ const SCREEN_CAPTURE_SETTINGS_URL =
 const ACCESSIBILITY_SETTINGS_URL =
   'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility';
 const DEFAULT_CAFFEINATE_SECONDS = 600;
+const OFFICIAL_CODEX_CHROME_EXTENSION_ID = 'hehggadaopoacecdllhhajmbjkdcmajg';
+const BROWSER_ENV_NAMES = [
+  'PI_CODEX_CHROME_DEBUG_URL',
+  'PI_CODEX_CHROME_EXTENSION_ID',
+  'PI_CODEX_CHROME_APP_SERVER_ORIGIN',
+  'PI_COMPUTER_USE_CODEX_APP',
+  'PI_COMPUTER_USE_CODEX_EXECUTABLE',
+  'CODEX_HOME',
+  'PI_CODEX_COMPUTER_USE_AUTO_APPROVE',
+];
+const CHROMIUM_DEBUG_PORTS = [9224, 9222, 9223, 9225, 9230];
 
 interface CodexComputerUsePathsForDoctor {
   codexApp: string;
@@ -67,11 +85,30 @@ export interface BridgeMcpStatus {
   computerUseAvailable: boolean;
 }
 
+interface DoctorValueWithSource {
+  source: string;
+  value: string;
+}
+
+interface BrowserBridgeStatus {
+  appServerOrigin: DoctorValueWithSource;
+  debugUrl: DoctorValueWithSource;
+  devToolsFallbackUsable: boolean;
+  devToolsReachable: boolean;
+  environmentOverrides?: Record<string, string | undefined>;
+  extensionId: DoctorValueWithSource;
+  guidance: string[];
+  nativeBridgeResponsive: boolean;
+  nativeMessagingConfigured: boolean;
+  repairNativeMessagingAvailable?: boolean;
+}
+
 export interface DoctorFixableIssue {
   caffeinateSeconds?: number;
   id: string;
   installComputerUsePlugin?: boolean;
   instructions: string;
+  repairChromeNativeHostManifests?: boolean;
   resetBridge?: boolean;
   revealPath?: string;
   settingsUrl?: string;
@@ -89,12 +126,14 @@ export interface CodexComputerUseDoctorDeps {
   findProcesses?: () => Promise<ProcessInfo[]>;
   installComputerUsePlugin?: () => Promise<void>;
   openSettingsUrl?: (url: string) => Promise<void>;
+  readBrowserBridgeStatus?: () => Promise<BrowserBridgeStatus>;
   readBridgeMcpStatus?: () => Promise<BridgeMcpStatus>;
   readBundleInfo?: (appPath: string) => Promise<BundleInfo>;
   readComputerUsePluginStatus?: () => Promise<ComputerUsePluginStatus>;
   readDisplayState?: () => Promise<DisplayState>;
   readTccRows?: () => Promise<TccRow[]>;
   resetBridge?: () => Promise<void> | void;
+  repairChromeNativeHostManifests?: () => Promise<void>;
   revealInFinder?: (filePath: string) => Promise<void>;
   startWakeGuard?: (seconds: number) => Promise<void>;
 }
@@ -321,6 +360,227 @@ async function defaultStartWakeGuard(seconds: number): Promise<void> {
   child.unref();
 }
 
+function extensionIdFromUrl(url: string | undefined): string | undefined {
+  return url?.match(/^chrome-extension:\/\/([a-p]{32})\//u)?.[1];
+}
+
+function getEnvironmentOverrides(): Record<string, string | undefined> {
+  return Object.fromEntries(BROWSER_ENV_NAMES.map((name) => [name, process.env[name]]));
+}
+
+function getDebugUrlCandidates(): string[] {
+  const envDebugUrl = process.env.PI_CODEX_CHROME_DEBUG_URL?.trim();
+  if (envDebugUrl) return [envDebugUrl];
+  const configured = getConfiguredChromeDebugBaseUrl();
+  return [
+    ...new Set([configured, ...CHROMIUM_DEBUG_PORTS.map((port) => `http://127.0.0.1:${port}`)]),
+  ];
+}
+
+async function fetchChromeDebugTargets(debugUrl: string): Promise<any[]> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 2_500);
+  try {
+    const response = await fetch(new URL('/json/list', debugUrl), { signal: controller.signal });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return (await response.json()) as any[];
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function findReachableChromiumDebugTarget(): Promise<
+  | {
+      debugUrl: string;
+      targets: any[];
+    }
+  | undefined
+> {
+  let firstReachable:
+    | {
+        debugUrl: string;
+        targets: any[];
+      }
+    | undefined;
+  for (const debugUrl of getDebugUrlCandidates()) {
+    try {
+      const targets = await fetchChromeDebugTargets(debugUrl);
+      const extensionId = selectExtensionId(targets).value;
+      const reachable = { debugUrl, targets };
+      if (
+        targets.some((target) =>
+          String(target?.url ?? '').startsWith(`${getChromeExtensionOrigin(extensionId)}/`),
+        )
+      ) {
+        return reachable;
+      }
+      firstReachable ??= reachable;
+    } catch {
+      // Try the next common Chromium DevTools port.
+    }
+  }
+  return firstReachable;
+}
+
+function detectCodexExtensionIds(targets: any[]): string[] {
+  const ids = targets
+    .filter(
+      (target) =>
+        (typeof target?.title === 'string' && target.title.toLowerCase().includes('codex')) ||
+        (target?.type === 'service_worker' && String(target?.url ?? '').endsWith('/background.js')),
+    )
+    .map((target) => extensionIdFromUrl(target?.url))
+    .filter((value): value is string => typeof value === 'string');
+  return [...new Set(ids)];
+}
+
+function selectExtensionId(targets: any[]): DoctorValueWithSource {
+  const envExtensionId = process.env.PI_CODEX_CHROME_EXTENSION_ID?.trim();
+  if (envExtensionId) return { value: envExtensionId, source: 'PI_CODEX_CHROME_EXTENSION_ID' };
+
+  const detectedIds = detectCodexExtensionIds(targets);
+  if (detectedIds.includes(OFFICIAL_CODEX_CHROME_EXTENSION_ID)) {
+    return {
+      value: OFFICIAL_CODEX_CHROME_EXTENSION_ID,
+      source: 'detected official Codex extension',
+    };
+  }
+  if (detectedIds.length > 0) {
+    return { value: detectedIds[0]!, source: 'detected Codex extension target' };
+  }
+  return { value: getConfiguredChromeExtensionId(), source: 'default official Codex extension ID' };
+}
+
+function getAppServerOriginValue(): DoctorValueWithSource {
+  const envOrigin = process.env.PI_CODEX_CHROME_APP_SERVER_ORIGIN?.trim();
+  if (envOrigin) {
+    return { value: envOrigin.replace(/\/+$/u, ''), source: 'PI_CODEX_CHROME_APP_SERVER_ORIGIN' };
+  }
+  return {
+    value: getConfiguredChromeAppServerOrigin(),
+    source: 'default official Codex extension origin',
+  };
+}
+
+function nativeHostManifestPaths(): string[] {
+  const appSupport = path.join(os.homedir(), 'Library/Application Support');
+  return [
+    path.join(appSupport, 'Google/Chrome/NativeMessagingHosts/com.openai.codexextension.json'),
+    path.join(
+      appSupport,
+      'BraveSoftware/Brave-Browser/NativeMessagingHosts/com.openai.codexextension.json',
+    ),
+    path.join(appSupport, 'Chromium/NativeMessagingHosts/com.openai.codexextension.json'),
+    path.join(appSupport, 'Microsoft Edge/NativeMessagingHosts/com.openai.codexextension.json'),
+    path.join(appSupport, 'Vivaldi/NativeMessagingHosts/com.openai.codexextension.json'),
+    path.join(
+      appSupport,
+      'com.operasoftware.Opera/NativeMessagingHosts/com.openai.codexextension.json',
+    ),
+    path.join(appSupport, 'Arc/User Data/NativeMessagingHosts/com.openai.codexextension.json'),
+  ];
+}
+
+function manifestAllowsOrigin(filePath: string, origin: string): boolean {
+  try {
+    const manifest = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    return Array.isArray(manifest.allowed_origins) && manifest.allowed_origins.includes(origin);
+  } catch {
+    return false;
+  }
+}
+
+function getNativeMessagingManifestState(extensionId: string): {
+  configured: boolean;
+  repairAvailable: boolean;
+} {
+  const origin = `${getChromeExtensionOrigin(extensionId)}/`;
+  const manifests = nativeHostManifestPaths().filter((filePath) => fs.existsSync(filePath));
+  return {
+    configured: manifests.some((filePath) => manifestAllowsOrigin(filePath, origin)),
+    repairAvailable: manifests.some((filePath) => !manifestAllowsOrigin(filePath, origin)),
+  };
+}
+
+export async function repairChromeNativeHostManifestsForDetectedExtension(): Promise<void> {
+  const reachable = await findReachableChromiumDebugTarget();
+  const extensionId = selectExtensionId(reachable?.targets ?? []).value;
+  const origin = `${getChromeExtensionOrigin(extensionId)}/`;
+  for (const filePath of nativeHostManifestPaths()) {
+    if (!fs.existsSync(filePath)) continue;
+    const manifest = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    const allowedOrigins = Array.isArray(manifest.allowed_origins) ? manifest.allowed_origins : [];
+    if (allowedOrigins.includes(origin)) continue;
+    fs.writeFileSync(
+      filePath,
+      `${JSON.stringify({ ...manifest, allowed_origins: [...allowedOrigins, origin] }, null, 2)}\n`,
+    );
+  }
+}
+
+export async function readDefaultBrowserBridgeStatus(): Promise<BrowserBridgeStatus> {
+  const reachable = await findReachableChromiumDebugTarget();
+  const debugUrl: DoctorValueWithSource = reachable
+    ? {
+        value: reachable.debugUrl,
+        source: process.env.PI_CODEX_CHROME_DEBUG_URL
+          ? 'PI_CODEX_CHROME_DEBUG_URL'
+          : reachable.debugUrl === getConfiguredChromeDebugBaseUrl()
+            ? 'default Chromium DevTools URL'
+            : 'detected reachable Chromium DevTools endpoint',
+      }
+    : { value: getConfiguredChromeDebugBaseUrl(), source: 'default Chromium DevTools URL' };
+  const extensionId = selectExtensionId(reachable?.targets ?? []);
+  const nativeMessaging = getNativeMessagingManifestState(extensionId.value);
+  const devToolsFallbackUsable = Boolean(
+    reachable?.targets.some((target) =>
+      String(target?.url ?? '').startsWith(`${getChromeExtensionOrigin(extensionId.value)}/`),
+    ),
+  );
+  let nativeBridgeResponsive = false;
+  if (reachable && devToolsFallbackUsable) {
+    nativeBridgeResponsive = await ensureChromeExtensionAppServer({
+      debugBaseUrl: debugUrl.value,
+      extensionId: extensionId.value,
+      timeoutMs: 3_000,
+    })
+      .then(() => true)
+      .catch(() => false);
+  }
+
+  const guidance: string[] = [];
+  if (!reachable) {
+    guidance.push(
+      'Start a Chrome-family browser with remote debugging, for example: open -na "Brave Browser" --args --remote-debugging-port=9224',
+    );
+  } else if (!devToolsFallbackUsable) {
+    guidance.push('Enable the Codex Chrome extension in the selected Chromium browser.');
+  }
+  if (!nativeMessaging.configured) {
+    guidance.push(
+      `Native messaging manifests do not allow ${getChromeExtensionOrigin(extensionId.value)}/; doctor can add this exact origin to existing manifests after confirmation.`,
+    );
+  }
+  if (devToolsFallbackUsable && !nativeBridgeResponsive) {
+    guidance.push(
+      'Native bridge did not respond within 3000ms; browser tools will use DevTools fallback.',
+    );
+  }
+
+  return {
+    appServerOrigin: getAppServerOriginValue(),
+    debugUrl,
+    devToolsFallbackUsable,
+    devToolsReachable: Boolean(reachable),
+    environmentOverrides: getEnvironmentOverrides(),
+    extensionId,
+    guidance,
+    nativeBridgeResponsive,
+    nativeMessagingConfigured: nativeMessaging.configured,
+    repairNativeMessagingAvailable: nativeMessaging.repairAvailable,
+  };
+}
+
 function hasGrantedTcc(rows: TccRow[], client: string, service: string): boolean {
   return rows.some(
     (row) => row.client === client && row.service === service && row.authValue === 2,
@@ -379,6 +639,16 @@ function makeBridgeMissingIssue(): DoctorFixableIssue {
   };
 }
 
+function makeBrowserNativeMessagingIssue(): DoctorFixableIssue {
+  return {
+    id: 'chrome-native-host-manifest-missing-origin',
+    instructions:
+      'Add the selected Codex extension origin to existing com.openai.codexextension native messaging manifests for installed Chrome-family browsers. This preserves the native host name and does not add wildcard origins.',
+    repairChromeNativeHostManifests: true,
+    title: 'Chromium native messaging manifests do not allow the selected Codex extension',
+  };
+}
+
 function makeDisplayAsleepIssue(): DoctorFixableIssue {
   return {
     caffeinateSeconds: DEFAULT_CAFFEINATE_SECONDS,
@@ -399,10 +669,51 @@ function actionLabelForIssue(issue: DoctorFixableIssue): string {
     return `Start a ${formatDuration(issue.caffeinateSeconds)} caffeinate guard`;
   }
   if (issue.installComputerUsePlugin) return 'Install Computer Use plugin from Codex.app';
+  if (issue.repairChromeNativeHostManifests) return 'Repair Chromium native host manifests';
   if (issue.resetBridge) return 'Reset Computer Use bridge';
   if (issue.id === 'screen-recording-missing') return 'Open Screen Recording settings';
   if (issue.id === 'accessibility-missing') return 'Open Accessibility settings';
   return issue.instructions;
+}
+
+function formatEnvironmentOverrides(overrides: Record<string, string | undefined>): string[] {
+  return BROWSER_ENV_NAMES.map((name) => `  ${name}: ${overrides[name] ?? '(unset)'}`);
+}
+
+function appendBrowserBridgeStatus(
+  lines: string[],
+  fixableIssues: DoctorFixableIssue[],
+  status: BrowserBridgeStatus,
+): void {
+  lines.push('', 'Chromium browser bridge:');
+  lines.push(
+    `${boolMark(status.devToolsReachable)} DevTools endpoint ${status.devToolsReachable ? 'reachable' : 'not reachable'}: ${status.debugUrl.value} (${status.debugUrl.source})`,
+  );
+  lines.push(
+    `${boolMark(status.devToolsFallbackUsable)} Codex extension selected: ${status.extensionId.value} (${status.extensionId.source})`,
+  );
+  lines.push(
+    `  App-server origin: ${status.appServerOrigin.value} (${status.appServerOrigin.source})`,
+  );
+  lines.push(
+    `${boolMark(status.nativeMessagingConfigured)} Native messaging manifests ${status.nativeMessagingConfigured ? 'allow selected extension origin' : 'do not allow selected extension origin'}`,
+  );
+  lines.push(
+    `${boolMark(status.nativeBridgeResponsive)} Native browser bridge ${status.nativeBridgeResponsive ? 'responded within probe timeout' : 'did not respond within probe timeout'}`,
+  );
+  lines.push(
+    `${boolMark(status.devToolsFallbackUsable)} DevTools fallback ${status.devToolsFallbackUsable ? 'usable for browser tools' : 'not usable yet'}`,
+  );
+  lines.push(
+    'Environment overrides:',
+    ...formatEnvironmentOverrides(status.environmentOverrides ?? {}),
+  );
+  if (status.guidance.length > 0) {
+    lines.push('Guidance:', ...status.guidance.map((item) => `  - ${item}`));
+  }
+  if (!status.nativeMessagingConfigured && status.repairNativeMessagingAvailable) {
+    fixableIssues.push(makeBrowserNativeMessagingIssue());
+  }
 }
 
 function formatDoctorReportText(lines: string[], fixableIssues: DoctorFixableIssue[]): string {
@@ -546,6 +857,18 @@ export async function buildCodexComputerUseDoctorReport(
     }
   }
 
+  if (deps.readBrowserBridgeStatus) {
+    try {
+      appendBrowserBridgeStatus(lines, fixableIssues, await deps.readBrowserBridgeStatus());
+    } catch (error) {
+      lines.push(
+        '',
+        'Chromium browser bridge:',
+        `⚠ Could not inspect Chromium browser bridge: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   lines.push('', 'Runtime:');
   try {
     const processes = await (deps.findProcesses ?? defaultFindProcesses)();
@@ -615,6 +938,8 @@ async function runFixableIssue(
     deps.installComputerUsePlugin ?? (() => defaultInstallComputerUsePlugin(paths));
   const openSettingsUrl = deps.openSettingsUrl ?? defaultOpenSettingsUrl;
   const revealInFinder = deps.revealInFinder ?? defaultRevealInFinder;
+  const repairChromeNativeHostManifests =
+    deps.repairChromeNativeHostManifests ?? repairChromeNativeHostManifestsForDetectedExtension;
   const startWakeGuard = deps.startWakeGuard ?? defaultStartWakeGuard;
 
   if (issue.caffeinateSeconds !== undefined) {
@@ -628,6 +953,12 @@ async function runFixableIssue(
     await installComputerUsePlugin();
     await deps.resetBridge?.();
     notify(ctx, 'Installed Computer Use plugin from Codex.app. Re-checking status.');
+    return;
+  }
+
+  if (issue.repairChromeNativeHostManifests) {
+    await repairChromeNativeHostManifests();
+    notify(ctx, 'Updated existing Chromium native messaging manifests. Re-checking status.');
     return;
   }
 
@@ -667,7 +998,11 @@ async function runDoctorFallback(
       continue;
     }
 
-    if (issue.installComputerUsePlugin || issue.resetBridge) {
+    if (
+      issue.installComputerUsePlugin ||
+      issue.resetBridge ||
+      issue.repairChromeNativeHostManifests
+    ) {
       const shouldRun = await ctx.ui.confirm('Fix Codex Computer Use?', issue.instructions);
       if (shouldRun) await runFixableIssue(ctx, issue, deps, paths);
       continue;

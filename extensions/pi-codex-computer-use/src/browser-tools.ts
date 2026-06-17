@@ -68,6 +68,7 @@ interface BrowserToolSpec {
 interface ChromeDebugBrowserToolOptions {
   debugUrl?: string;
   extensionId?: string;
+  signal?: AbortSignal;
 }
 
 interface ChromeNativeBridgeOptions {
@@ -374,6 +375,8 @@ function isChromeBridgeUnavailableError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return (
     message.includes('Codex extension-host WebSocket upgrade') ||
+    message.includes('Chrome debug Runtime.evaluate timed out') ||
+    message.includes('Chrome debug target connection timed out') ||
     message.includes('Could not find a debuggable Codex Chrome Extension') ||
     message.includes('Could not open a debuggable Codex Chrome Extension page') ||
     message.includes('No handler registered for method: ensureCodexAppServer')
@@ -426,6 +429,7 @@ export function registerCodexBrowserTools(
         const chromeOptions: ChromeDebugBrowserToolOptions = {
           ...(input.debugUrl ? { debugUrl: input.debugUrl } : {}),
           ...(input.extensionId ? { extensionId: input.extensionId } : {}),
+          ...(signal ? { signal } : {}),
         };
         const chromeNativeOptions: ChromeNativeBridgeOptions = {
           ...(input.debugUrl ? { debugBaseUrl: input.debugUrl } : {}),

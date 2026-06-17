@@ -282,6 +282,9 @@ describe('multi-edit extension', () => {
       on(event: string, handler: Function) {
         handlers.set(event, [...(handlers.get(event) ?? []), handler]);
       },
+      getActiveTools() {
+        return activeTools;
+      },
       getAllTools() {
         return allTools;
       },
@@ -495,6 +498,86 @@ describe('multi-edit extension', () => {
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
+  });
+
+  test('preserves user-excluded tools while applying codex-compatible policy', async () => {
+    const handlers = new Map<string, Function[]>();
+    let activeTools: string[] = ['read', 'apply_patch'];
+    const allTools = ['read', 'grep', 'ls', 'bash', 'edit', 'write', 'apply_patch'].map((name) => ({
+      name,
+    }));
+    const pi = {
+      registerTool() {},
+      on(event: string, handler: Function) {
+        handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+      },
+      getActiveTools() {
+        return activeTools;
+      },
+      getAllTools() {
+        return allTools;
+      },
+      setActiveTools(names: string[]) {
+        activeTools = [...names];
+      },
+    } as any;
+
+    multiEditExtension(pi);
+
+    const beforeAgentStart = handlers.get('before_agent_start')?.[0];
+    expect(beforeAgentStart).toBeTypeOf('function');
+    if (!beforeAgentStart) {
+      throw new Error('Expected before_agent_start handler');
+    }
+    const result = await beforeAgentStart(
+      { systemPrompt: 'BASE' },
+      { model: { id: 'gpt-5.4', provider: 'openai' } },
+    );
+
+    expect(activeTools).toEqual(['read', 'apply_patch']);
+    expect(result.systemPrompt).not.toContain(
+      'Use edit for exact text replacements with { path, edits[] }.',
+    );
+    expect(result.systemPrompt).toContain('when apply_patch would suffice');
+  });
+
+  test('does not re-enable user-inactive edit for extended profiles', async () => {
+    const handlers = new Map<string, Function[]>();
+    let activeTools: string[] = ['read', 'bash', 'apply_patch'];
+    const allTools = ['read', 'bash', 'edit', 'write', 'apply_patch'].map((name) => ({ name }));
+    const pi = {
+      registerTool() {},
+      on(event: string, handler: Function) {
+        handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+      },
+      getActiveTools() {
+        return activeTools;
+      },
+      getAllTools() {
+        return allTools;
+      },
+      setActiveTools(names: string[]) {
+        activeTools = [...names];
+      },
+    } as any;
+
+    multiEditExtension(pi);
+
+    const beforeAgentStart = handlers.get('before_agent_start')?.[0];
+    expect(beforeAgentStart).toBeTypeOf('function');
+    if (!beforeAgentStart) {
+      throw new Error('Expected before_agent_start handler');
+    }
+    const result = await beforeAgentStart(
+      { systemPrompt: 'BASE' },
+      { model: { id: 'claude-sonnet-4-6', provider: 'anthropic' } },
+    );
+
+    expect(activeTools).toEqual(['read', 'bash', 'apply_patch']);
+    expect(result.systemPrompt).not.toContain(
+      'Use edit for exact text replacements with { path, edits[] }.',
+    );
+    expect(result.systemPrompt).toContain('when apply_patch would suffice');
   });
 
   test('keeps all tools enabled for Claude Opus 4 family models', async () => {

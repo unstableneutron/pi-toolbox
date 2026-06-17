@@ -262,6 +262,69 @@ describe('CodexAppServerWebSocketClient', () => {
     expect(observed.messages.map((message) => message.method)).toContain('initialized');
   });
 
+  test('connects to a Unix-socket app-server WebSocket URL', async () => {
+    const socketPath = path.join(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'pi-codex-ws-unix-')),
+      'app.sock',
+    );
+    const observed: { messages: any[]; request?: string } = { messages: [] };
+    const server = net.createServer((socket) => {
+      let header = '';
+      let frameBuffer = Buffer.alloc(0);
+      socket.on('data', (chunk) => {
+        if (!header) {
+          const raw = chunk.toString('utf8');
+          const headerEnd = raw.indexOf('\r\n\r\n');
+          if (headerEnd < 0) return;
+          header = raw.slice(0, headerEnd);
+          observed.request = header;
+          socket.write(
+            [
+              'HTTP/1.1 101 Switching Protocols',
+              'Upgrade: websocket',
+              'Connection: Upgrade',
+              'Sec-WebSocket-Accept: test',
+              '',
+              '',
+            ].join('\r\n'),
+          );
+          frameBuffer = Buffer.from(raw.slice(headerEnd + 4), 'binary');
+        } else {
+          frameBuffer = Buffer.concat([frameBuffer, chunk]);
+        }
+
+        let decoded;
+        while ((decoded = decodeClientFrame(frameBuffer))) {
+          frameBuffer = Buffer.from(decoded.rest);
+          observed.messages.push(decoded.value);
+          if (decoded.value.method === 'initialize') {
+            socket.write(encodeServerFrame({ id: decoded.value.id, result: { ok: true } }));
+          }
+        }
+      });
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+
+    const client = new CodexAppServerWebSocketClient({
+      clientName: 'test-client',
+      origin: OPENAI_EXTENSION_ORIGIN,
+      url: `unix://${socketPath}`,
+    });
+    try {
+      await client.init();
+      await waitFor(() => observed.messages.some((message) => message.method === 'initialized'));
+    } finally {
+      client.close();
+      fs.rmSync(path.dirname(socketPath), { force: true, recursive: true });
+    }
+
+    expect(observed.request).toContain('GET / HTTP/1.1');
+    expect(observed.request).toContain('Upgrade: websocket');
+    expect(observed.messages.map((message) => message.method)).toContain('initialize');
+    expect(observed.messages.map((message) => message.method)).toContain('initialized');
+  });
+
   test('aborts pending WebSocket MCP tool requests without waiting for timeout', async () => {
     const observed: { messages: any[] } = { messages: [] };
     const server = net.createServer((socket) => {

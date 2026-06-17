@@ -2,7 +2,21 @@
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "tags": ["-lintignore"],
   "ignoreBinaries": ["aubr"],
-  "ignoreDependencies": ["@earendil-works/pi-agent-core", "@aws-sdk/client-bedrock-runtime", "tsx"],
+  "ignoreDependencies": [
+    "@earendil-works/pi-agent-core",
+    "@aws-sdk/client-bedrock-runtime",
+    "fff-router",
+    "partial-json",
+    "picomatch",
+    "shell-quote",
+    "tsx",
+    "ws"
+  ],
+  "ignoreFiles": ["extensions/pi-fff-search/fff-router.d.ts"],
+  "ignoreExportsUsedInFile": {
+    "interface": true,
+    "type": true
+  },
   "workspaces": {
     ".": {
       "entry": ["extensions/**/index.ts", "scripts/*.ts"],
@@ -17,8 +31,12 @@
       "project": ["**/*.ts"]
     },
     "extensions/pi-fff-search": {
-      "entry": ["index.ts", "scripts/*.ts"],
+      "entry": ["index.ts"],
       "project": ["**/*.ts"]
+    },
+    "extensions/pi-codex-browser": {
+      "entry": ["scripts/*.mjs"],
+      "project": ["scripts/*.mjs", "scripts/*.ts"]
     },
     "extensions/bash-rewrite": {
       "entry": ["scripts/*.ts"],

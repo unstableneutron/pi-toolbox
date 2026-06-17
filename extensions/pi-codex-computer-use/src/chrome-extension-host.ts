@@ -18,13 +18,45 @@ interface EnsureChromeExtensionAppServerOptions {
   debugBaseUrl?: string;
   extensionId?: string;
   fetchImpl?: typeof fetch;
+  signal?: AbortSignal;
+  timeoutMs?: number;
   WebSocketImpl?: typeof WebSocket;
 }
 
 const DEFAULT_CHROME_DEBUG_BASE_URL = 'http://127.0.0.1:9224';
 const DEFAULT_EXTENSION_ID = 'hehggadaopoacecdllhhajmbjkdcmajg';
+const DEFAULT_NATIVE_PROBE_TIMEOUT_MS = 8_000;
 const CHROME_EXTENSION_ID_ENV = 'PI_CODEX_CHROME_EXTENSION_ID';
 const CHROME_APP_SERVER_ORIGIN_ENV = 'PI_CODEX_CHROME_APP_SERVER_ORIGIN';
+
+function createOperationAbortedError(): Error {
+  return new Error('Operation aborted');
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw createOperationAbortedError();
+}
+
+function addAbortListener(signal: AbortSignal | undefined, onAbort: () => void): () => void {
+  if (!signal) return () => {};
+  signal.addEventListener('abort', onAbort, { once: true });
+  return () => signal.removeEventListener('abort', onAbort);
+}
+
+function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  throwIfAborted(signal);
+  return new Promise((resolve, reject) => {
+    let cleanupAbort = () => {};
+    const timer = setTimeout(() => {
+      cleanupAbort();
+      resolve();
+    }, ms);
+    cleanupAbort = addAbortListener(signal, () => {
+      clearTimeout(timer);
+      reject(createOperationAbortedError());
+    });
+  });
+}
 
 export function getConfiguredChromeDebugBaseUrl(): string {
   return process.env.PI_CODEX_CHROME_DEBUG_URL ?? DEFAULT_CHROME_DEBUG_BASE_URL;
@@ -116,8 +148,13 @@ export async function ensureChromeExtensionAppServer(
   const extensionId = options.extensionId ?? getConfiguredChromeExtensionId();
   const fetchImpl = options.fetchImpl ?? fetch;
   const WebSocketImpl = options.WebSocketImpl ?? WebSocket;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_NATIVE_PROBE_TIMEOUT_MS;
   const readTargets = async () => {
-    const targetsResponse = await fetchImpl(new URL('/json/list', debugBaseUrl));
+    throwIfAborted(options.signal);
+    const targetsResponse = await fetchImpl(
+      new URL('/json/list', debugBaseUrl),
+      options.signal ? { signal: options.signal } : undefined,
+    );
     if (!targetsResponse.ok) {
       throw new Error(`Could not inspect Chrome debug targets at ${debugBaseUrl}.`);
     }
@@ -137,6 +174,8 @@ export async function ensureChromeExtensionAppServer(
     }
     const created = (await evaluateInDebugTarget({
       expression: buildCreateExtensionPageExpression(),
+      signal: options.signal,
+      timeoutMs,
       webSocketDebuggerUrl: serviceWorkerTarget.webSocketDebuggerUrl,
       WebSocketImpl,
     })) as { tabId?: unknown };
@@ -146,7 +185,7 @@ export async function ensureChromeExtensionAppServer(
       targets = await readTargets();
       pageTarget = findChromeExtensionPageTarget(targets, extensionId);
       if (pageTarget) break;
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await sleep(100, options.signal);
     }
   }
 
@@ -157,6 +196,8 @@ export async function ensureChromeExtensionAppServer(
   try {
     const runtimeResult = await evaluateInDebugTarget({
       expression: buildEnsureExpression(),
+      signal: options.signal,
+      timeoutMs,
       webSocketDebuggerUrl: pageTarget.webSocketDebuggerUrl,
       WebSocketImpl,
     });
@@ -165,6 +206,8 @@ export async function ensureChromeExtensionAppServer(
     if (createdTabId !== undefined && serviceWorkerTarget?.webSocketDebuggerUrl) {
       await evaluateInDebugTarget({
         expression: buildCloseExtensionPageExpression(createdTabId),
+        signal: options.signal,
+        timeoutMs,
         webSocketDebuggerUrl: serviceWorkerTarget.webSocketDebuggerUrl,
         WebSocketImpl,
       }).catch(() => {});
@@ -174,16 +217,35 @@ export async function ensureChromeExtensionAppServer(
 
 async function evaluateInDebugTarget({
   expression,
+  signal,
+  timeoutMs,
   webSocketDebuggerUrl,
   WebSocketImpl,
 }: {
   expression: string;
+  signal?: AbortSignal;
+  timeoutMs: number;
   webSocketDebuggerUrl: string;
   WebSocketImpl: typeof WebSocket;
 }): Promise<unknown> {
+  throwIfAborted(signal);
   const socket = new WebSocketImpl(webSocketDebuggerUrl);
+  let closed = false;
+  const closeSocket = () => {
+    if (closed) return;
+    closed = true;
+    socket.close();
+  };
   let nextId = 1;
   const pending = new Map<number, { reject(error: Error): void; resolve(value: any): void }>();
+  const failAll = (error: Error) => {
+    for (const callbacks of pending.values()) callbacks.reject(error);
+    pending.clear();
+  };
+  const cleanupAbort = addAbortListener(signal, () => {
+    failAll(createOperationAbortedError());
+    closeSocket();
+  });
   socket.addEventListener('message', (event) => {
     const message = JSON.parse(String(event.data));
     if (!message.id || !pending.has(message.id)) return;
@@ -197,10 +259,25 @@ async function evaluateInDebugTarget({
   });
 
   await new Promise<void>((resolve, reject) => {
-    socket.addEventListener('open', () => resolve(), { once: true });
+    const timer = setTimeout(() => {
+      closeSocket();
+      reject(new Error(`Chrome debug target connection timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    const cleanup = () => clearTimeout(timer);
+    socket.addEventListener(
+      'open',
+      () => {
+        cleanup();
+        resolve();
+      },
+      { once: true },
+    );
     socket.addEventListener(
       'error',
-      () => reject(new Error('Could not connect to Chrome debug target.')),
+      () => {
+        cleanup();
+        reject(new Error('Could not connect to Chrome debug target.'));
+      },
       {
         once: true,
       },
@@ -209,8 +286,22 @@ async function evaluateInDebugTarget({
 
   const send = (method: string, params: Record<string, unknown> = {}) =>
     new Promise<any>((resolve, reject) => {
+      throwIfAborted(signal);
       const id = nextId++;
-      pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        reject(new Error(`Chrome debug ${method} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      pending.set(id, {
+        reject(error) {
+          clearTimeout(timer);
+          reject(error);
+        },
+        resolve(value) {
+          clearTimeout(timer);
+          resolve(value);
+        },
+      });
       socket.send(JSON.stringify({ id, method, params }));
     });
 
@@ -227,6 +318,7 @@ async function evaluateInDebugTarget({
     }
     return result.result?.value;
   } finally {
-    socket.close();
+    closeSocket();
+    cleanupAbort();
   }
 }

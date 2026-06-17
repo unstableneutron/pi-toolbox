@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 
 import { listChromeDebugBrowserTabs, runChromeDebugBrowserEval } from './chrome-debug-browser';
 
@@ -101,6 +101,23 @@ afterEach(() => {
 });
 
 describe('listChromeDebugBrowserTabs', () => {
+  test('passes AbortSignal to Chromium DevTools fetches', async () => {
+    const controller = new AbortController();
+    const fetchImpl = vi.fn(async (_input: URL | RequestInfo, init?: RequestInit) => {
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      return makeResponse(targets);
+    });
+
+    await listChromeDebugBrowserTabs({
+      debugBaseUrl,
+      extensionId,
+      fetchImpl: fetchImpl as typeof fetch,
+      signal: controller.signal,
+    });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   test('accepts public debugUrl and auto-detects the loaded Codex extension id', async () => {
     const requestedUrls: string[] = [];
     const fetchImpl = async (input: URL | RequestInfo) => {
@@ -117,6 +134,62 @@ describe('listChromeDebugBrowserTabs', () => {
     ).resolves.toMatchObject({ browserId: 'chrome-devtools' });
 
     expect(requestedUrls).toEqual(['http://127.0.0.1:9333/json/list']);
+  });
+
+  test('auto-detects a reachable Chromium DevTools port when no debug URL override is set', async () => {
+    const requestedUrls: string[] = [];
+    const fetchImpl = async (input: URL | RequestInfo) => {
+      const url = input instanceof URL ? input.href : input instanceof Request ? input.url : input;
+      requestedUrls.push(url);
+      if (url.startsWith('http://127.0.0.1:9224/')) throw new Error('connection refused');
+      return makeResponse(targets);
+    };
+
+    await expect(
+      listChromeDebugBrowserTabs({
+        extensionId,
+        fetchImpl: fetchImpl as typeof fetch,
+      }),
+    ).resolves.toMatchObject({ browserId: 'chrome-devtools' });
+
+    expect(requestedUrls).toEqual([
+      'http://127.0.0.1:9224/json/list',
+      'http://127.0.0.1:9222/json/list',
+    ]);
+  });
+
+  test('skips reachable Chromium DevTools endpoints that do not have the Codex extension loaded', async () => {
+    const requestedUrls: string[] = [];
+    const fetchImpl = async (input: URL | RequestInfo) => {
+      const url = input instanceof URL ? input.href : input instanceof Request ? input.url : input;
+      requestedUrls.push(url);
+      if (url.startsWith('http://127.0.0.1:9224/')) {
+        return makeResponse([
+          {
+            id: 'plain-page',
+            type: 'page',
+            title: 'No extension here',
+            url: 'https://example.test/',
+            webSocketDebuggerUrl: 'ws://plain-page',
+          },
+        ]);
+      }
+      return makeResponse(targets);
+    };
+
+    await expect(
+      listChromeDebugBrowserTabs({
+        extensionId,
+        fetchImpl: fetchImpl as typeof fetch,
+      }),
+    ).resolves.toMatchObject({
+      selectedTab: { id: 'page-1', url: 'https://example.com/' },
+    });
+
+    expect(requestedUrls).toEqual([
+      'http://127.0.0.1:9224/json/list',
+      'http://127.0.0.1:9222/json/list',
+    ]);
   });
 
   test('lists debuggable Brave page targets and verifies the configured Codex extension is loaded', async () => {
@@ -180,6 +253,31 @@ return { title: await newTab.title(), text: await newTab.evaluate(() => document
     ]);
     expect(FakeWebSocket.urls).toEqual(['ws://new-page']);
     expect(FakeWebSocket.navigations).toEqual(['https://example.com/']);
+    expect(FakeWebSocket.closeCount).toBe(1);
+  });
+
+  test('closes DevTools sockets when an abort signal cancels an evaluation', async () => {
+    class HangingWebSocket extends FakeWebSocket {
+      send(raw: string): void {
+        const message = JSON.parse(raw);
+        if (message.method === 'Runtime.evaluate') return;
+        super.send(raw);
+      }
+    }
+    const controller = new AbortController();
+    const fetchImpl = async () => makeResponse(targets);
+    const operation = runChromeDebugBrowserEval({
+      debugBaseUrl,
+      extensionId,
+      fetchImpl: fetchImpl as typeof fetch,
+      WebSocketImpl: HangingWebSocket as any,
+      signal: controller.signal,
+      script: 'return await tab.evaluate(() => document.title);',
+    });
+
+    setTimeout(() => controller.abort(), 5);
+
+    await expect(operation).rejects.toThrow('Operation aborted');
     expect(FakeWebSocket.closeCount).toBe(1);
   });
 });

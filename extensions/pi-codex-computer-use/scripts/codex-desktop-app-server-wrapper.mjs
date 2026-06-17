@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync } from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -15,6 +15,7 @@ const DEFAULT_SOCKET_PATH = path.join(
   'app-server.sock',
 );
 const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
+const DEFAULT_MAX_LOG_PAYLOAD_CHARS = 50_000;
 const CONNECT_RETRY_DELAY_MS = 50;
 
 /**
@@ -160,6 +161,79 @@ function getConnectTimeoutMs(env = process.env) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_CONNECT_TIMEOUT_MS;
 }
 
+function readPositiveInteger(value, fallback) {
+  const parsed = Number(String(value ?? '').trim());
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function getBridgeLogOptions(env = process.env) {
+  const logPath = env.PI_CODEX_DESKTOP_APP_SERVER_LOG?.trim();
+  if (!logPath) return undefined;
+  return {
+    logPath,
+    maxPayloadChars: readPositiveInteger(
+      env.PI_CODEX_DESKTOP_APP_SERVER_LOG_MAX_PAYLOAD_CHARS,
+      DEFAULT_MAX_LOG_PAYLOAD_CHARS,
+    ),
+  };
+}
+
+function summarizeJsonRpcLine(direction, line, maxPayloadChars = DEFAULT_MAX_LOG_PAYLOAD_CHARS) {
+  const payloadText = line.trim();
+  const payloadTruncated = payloadText.length > maxPayloadChars;
+  const summary = {
+    direction,
+    isJson: false,
+    payloadBytes: Buffer.byteLength(payloadText),
+    payloadTruncated,
+    ts: new Date().toISOString(),
+  };
+
+  let payload;
+  try {
+    payload = JSON.parse(payloadText);
+    summary.isJson = true;
+  } catch (error) {
+    summary.parseError = error instanceof Error ? error.message : String(error);
+  }
+
+  if (payload && typeof payload === 'object') {
+    if ('id' in payload) summary.id = payload.id;
+    if (typeof payload.method === 'string') summary.method = payload.method;
+    if ('result' in payload) summary.hasResult = true;
+    if ('error' in payload) {
+      summary.hasError = true;
+      const error = payload.error;
+      summary.error =
+        error && typeof error === 'object' && typeof error.message === 'string'
+          ? error.message
+          : JSON.stringify(error);
+    }
+  }
+
+  if (payloadTruncated) {
+    summary.payloadPreview = `${payloadText.slice(0, maxPayloadChars)}…`;
+  } else if (payload !== undefined) {
+    summary.payload = payload;
+  } else {
+    summary.payload = payloadText;
+  }
+  return summary;
+}
+
+function appendBridgeLogLine(logPath, entry) {
+  mkdirSync(path.dirname(logPath), { recursive: true, mode: 0o700 });
+  appendFileSync(logPath, `${JSON.stringify(entry)}\n`, 'utf8');
+}
+
+function logBridgeLine(options, direction, line) {
+  if (!options?.logPath || line.trim().length === 0) return;
+  appendBridgeLogLine(
+    options.logPath,
+    summarizeJsonRpcLine(direction, line, options.maxPayloadChars),
+  );
+}
+
 export function buildRealAppServerArgs(argv, socketPath) {
   const rewritten = ['app-server', '--listen', unixListenUrl(socketPath)];
   for (let index = 1; index < argv.length; index++) {
@@ -302,13 +376,19 @@ async function connectWebSocketUnixWithRetry(
  * @param {NodeJS.WritableStream} [stdout]
  * @returns {{ dispose(): void }}
  */
-export function bridgeStdioToWebSocket(socket, stdin = process.stdin, stdout = process.stdout) {
+export function bridgeStdioToWebSocket(
+  socket,
+  stdin = process.stdin,
+  stdout = process.stdout,
+  options = {},
+) {
   let stdinBuffer = '';
   let socketBuffer = Buffer.alloc(0);
   const disposers = [];
 
   const sendLine = (line) => {
     if (line.trim().length === 0) return;
+    logBridgeLine(options, 'desktop->app-server', line);
     socket.write(encodeClientTextFrame(line));
   };
 
@@ -330,6 +410,7 @@ export function bridgeStdioToWebSocket(socket, stdin = process.stdin, stdout = p
       if (frame.opcode === 0x9) {
         socket.write(encodeClientPongFrame(frame.payload));
       } else if (frame.opcode === 0x1 && frame.text !== undefined) {
+        logBridgeLine(options, 'app-server->desktop', frame.text);
         stdout.write(`${frame.text}\n`);
       } else if (frame.opcode === 0x8) {
         socket.end();
@@ -379,7 +460,12 @@ async function runExistingBridge(plan) {
     throw new Error(`Codex app-server socket does not exist: ${plan.socketPath}`);
   }
   const socket = await connectWebSocketUnix(plan.socketPath, { timeoutMs: getConnectTimeoutMs() });
-  const bridge = bridgeStdioToWebSocket(socket);
+  const bridge = bridgeStdioToWebSocket(
+    socket,
+    process.stdin,
+    process.stdout,
+    getBridgeLogOptions(),
+  );
 
   await new Promise((resolve) => {
     const finish = (exitCode) => {
@@ -417,7 +503,7 @@ async function runBridge(plan) {
       timeoutMs: getConnectTimeoutMs(),
       getChildError: () => childSpawnError,
     });
-    bridge = bridgeStdioToWebSocket(socket);
+    bridge = bridgeStdioToWebSocket(socket, process.stdin, process.stdout, getBridgeLogOptions());
   } catch (error) {
     socket?.destroy();
     killChildIfRunning(child);

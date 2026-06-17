@@ -499,8 +499,10 @@ const PI_AI_PACKAGE_NAME = '@earendil-works/pi-ai';
 const PI_AI_BEDROCK_RELATIVE_PATH = 'dist/providers/amazon-bedrock.js';
 const PI_AI_BEDROCK_API_KEY_BEARER_PATCH_MARKER =
   '__pi_update_extensions:bedrock-api-key-as-bearer__';
-const PI_AI_BEDROCK_API_KEY_BEARER_PATCH_TARGET =
-  '        const bearerToken = options.bearerToken || process.env.AWS_BEARER_TOKEN_BEDROCK || undefined;';
+const PI_AI_BEDROCK_API_KEY_BEARER_PATCH_TARGETS = [
+  '        const bearerToken = options.bearerToken || process.env.AWS_BEARER_TOKEN_BEDROCK || undefined;',
+  '        const bearerToken = options.bearerToken || getProviderEnvValue("AWS_BEARER_TOKEN_BEDROCK", options.env) || undefined;',
+] as const;
 
 export function buildPiAiBedrockApiKeyBearerReplacement(): string {
   return [
@@ -509,10 +511,14 @@ export function buildPiAiBedrockApiKeyBearerReplacement(): string {
     `        // as an HTTP bearer token. Do not apply this to built-in`,
     `        // amazon-bedrock, where auth can come from AWS credential-chain`,
     `        // sentinels instead of a real bearer token.`,
+    `        const envBearerToken =`,
+    `            typeof getProviderEnvValue === "function"`,
+    `                ? getProviderEnvValue("AWS_BEARER_TOKEN_BEDROCK", options.env)`,
+    `                : process.env.AWS_BEARER_TOKEN_BEDROCK;`,
     `        const bearerToken =`,
     `            options.bearerToken ||`,
     `            (["facade", "facade-full"].includes(model.provider) ? options.apiKey : undefined) ||`,
-    `            process.env.AWS_BEARER_TOKEN_BEDROCK ||`,
+    `            envBearerToken ||`,
     `            undefined;`,
   ].join('\n');
 }
@@ -564,10 +570,13 @@ export async function applyPiAiBedrockApiKeyBearerPatch(
   }
 
   const content = readFileSync(filePath, 'utf8');
-  if (!content.includes(PI_AI_BEDROCK_API_KEY_BEARER_PATCH_TARGET)) {
+  const target = PI_AI_BEDROCK_API_KEY_BEARER_PATCH_TARGETS.find((candidate) =>
+    content.includes(candidate),
+  );
+  if (!target) {
     throw new Error(
       `pi-ai@${version}: target line for Bedrock apiKey bearer patch not found at ${filePath}. ` +
-        `Expected exact line: ${JSON.stringify(PI_AI_BEDROCK_API_KEY_BEARER_PATCH_TARGET)}. ` +
+        `Expected one of: ${JSON.stringify([...PI_AI_BEDROCK_API_KEY_BEARER_PATCH_TARGETS])}. ` +
         `Upstream may have changed; update pi-update-extensions.ts.`,
     );
   }
@@ -576,10 +585,7 @@ export async function applyPiAiBedrockApiKeyBearerPatch(
     return { status: 'would-apply', packageRoot, version, patchPath: filePath };
   }
 
-  const patched = content.replace(
-    PI_AI_BEDROCK_API_KEY_BEARER_PATCH_TARGET,
-    buildPiAiBedrockApiKeyBearerReplacement(),
-  );
+  const patched = content.replace(target, buildPiAiBedrockApiKeyBearerReplacement());
   writeFileSync(filePath, patched);
   return { status: 'applied', packageRoot, version, patchPath: filePath };
 }

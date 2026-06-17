@@ -371,8 +371,12 @@ function getDisabledToolsForProfile(profile: ToolProfile, allTools: string[]): s
     : allTools.filter((name) => CODEX_COMPATIBLE_DISABLED_TOOLS.has(name));
 }
 
+function areToolNameListsEqual(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
 function applyModelToolPolicy(
-  pi: Pick<ExtensionAPI, 'getAllTools' | 'setActiveTools'>,
+  pi: Pick<ExtensionAPI, 'getActiveTools' | 'getAllTools' | 'setActiveTools'>,
   model:
     | {
         provider?: string;
@@ -381,15 +385,27 @@ function applyModelToolPolicy(
     | undefined,
 ): string[] {
   const profile = getToolProfileForModel(model);
-  if (typeof pi.getAllTools !== 'function' || typeof pi.setActiveTools !== 'function') {
+  if (typeof pi.getAllTools !== 'function') {
     return profile === 'extended' ? [] : ['edit', 'write'];
   }
 
   const allTools = pi.getAllTools().map((tool) => tool.name);
-  const disabled = new Set(getDisabledToolsForProfile(profile, allTools));
-  const nextActive = allTools.filter((name) => !disabled.has(name));
-  pi.setActiveTools(nextActive);
-  return [...disabled];
+  const activeTools = typeof pi.getActiveTools === 'function' ? pi.getActiveTools() : [...allTools];
+  const disabledByProfile = new Set(getDisabledToolsForProfile(profile, allTools));
+  const nextActive = activeTools.filter((name) => !disabledByProfile.has(name));
+
+  if (
+    profile !== 'extended' &&
+    typeof pi.setActiveTools === 'function' &&
+    !areToolNameListsEqual(activeTools, nextActive)
+  ) {
+    pi.setActiveTools(nextActive);
+  }
+
+  const activeAfterPolicy = new Set(nextActive);
+  return allTools.filter(
+    (name) => CODEX_COMPATIBLE_DISABLED_TOOLS.has(name) && !activeAfterPolicy.has(name),
+  );
 }
 
 function getToolPathArg(value: unknown): string | undefined {

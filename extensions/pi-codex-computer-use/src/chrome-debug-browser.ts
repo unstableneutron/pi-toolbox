@@ -17,6 +17,8 @@ interface ChromeDebugBrowserOptions {
   debugBaseUrl?: string;
   extensionId?: string;
   fetchImpl?: typeof fetch;
+  requestTimeoutMs?: number;
+  signal?: AbortSignal;
   WebSocketImpl?: typeof WebSocket;
 }
 
@@ -43,9 +45,51 @@ interface ChromeDebugToolResult {
 }
 
 const CHROME_DEBUG_REQUEST_TIMEOUT_MS = 30_000;
+const CHROME_DEBUG_FETCH_TIMEOUT_MS = 5_000;
+const CHROME_DEBUG_DEFAULT_PORTS = [9224, 9222, 9223, 9225, 9230];
+
+function createOperationAbortedError(): Error {
+  return new Error('Operation aborted');
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw createOperationAbortedError();
+}
+
+function addAbortListener(signal: AbortSignal | undefined, onAbort: () => void): () => void {
+  if (!signal) return () => {};
+  signal.addEventListener('abort', onAbort, { once: true });
+  return () => signal.removeEventListener('abort', onAbort);
+}
+
+function buildTimeoutSignal(
+  signal: AbortSignal | undefined,
+  timeoutMs: number | undefined,
+): { cleanup(): void; signal?: AbortSignal } {
+  if (!timeoutMs || timeoutMs <= 0) return { cleanup() {}, ...(signal ? { signal } : {}) };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const cleanupAbort = addAbortListener(signal, () => controller.abort());
+  return {
+    cleanup() {
+      clearTimeout(timeout);
+      cleanupAbort();
+    },
+    signal: controller.signal,
+  };
+}
 
 function getOptionDebugBaseUrl(value: string | undefined): string {
   return value ?? getConfiguredChromeDebugBaseUrl();
+}
+
+function getDebugBaseUrlCandidates(value: string | undefined): string[] {
+  if (value) return [value];
+  const envValue = process.env.PI_CODEX_CHROME_DEBUG_URL?.trim();
+  if (envValue) return [envValue];
+  const defaults = [getConfiguredChromeDebugBaseUrl()];
+  for (const port of CHROME_DEBUG_DEFAULT_PORTS) defaults.push(`http://127.0.0.1:${port}`);
+  return [...new Set(defaults)];
 }
 
 function getOptionFetch(fetchImpl: typeof fetch | undefined): typeof fetch {
@@ -61,16 +105,37 @@ async function fetchChromeDebugJson<T>(
   path: string,
   init?: RequestInit,
 ): Promise<T> {
-  const debugBaseUrl = getOptionDebugBaseUrl(options.debugBaseUrl ?? options.debugUrl);
+  throwIfAborted(options.signal);
+  const debugBaseUrls = getDebugBaseUrlCandidates(options.debugBaseUrl ?? options.debugUrl);
   const fetchImpl = getOptionFetch(options.fetchImpl);
-  const response = await fetchImpl(new URL(path, debugBaseUrl), init);
-  if (!response.ok) {
-    const body = await response.text().catch(() => '');
-    throw new Error(
-      `Chrome debug endpoint ${debugBaseUrl}${path} failed with ${response.status}${body ? `: ${body}` : ''}`,
+  let lastError: unknown;
+  for (const debugBaseUrl of debugBaseUrls) {
+    const timeoutSignal = buildTimeoutSignal(
+      options.signal,
+      options.requestTimeoutMs ?? CHROME_DEBUG_FETCH_TIMEOUT_MS,
     );
+    try {
+      const response = await fetchImpl(new URL(path, debugBaseUrl), {
+        ...init,
+        ...(timeoutSignal.signal ? { signal: timeoutSignal.signal } : {}),
+      });
+      if (!response.ok) {
+        const body = await response.text().catch(() => '');
+        throw new Error(
+          `Chrome debug endpoint ${debugBaseUrl}${path} failed with ${response.status}${body ? `: ${body}` : ''}`,
+        );
+      }
+      return (await response.json()) as T;
+    } catch (error) {
+      if (options.signal?.aborted) throw createOperationAbortedError();
+      lastError = error;
+    } finally {
+      timeoutSignal.cleanup();
+    }
   }
-  return (await response.json()) as T;
+  throw lastError instanceof Error
+    ? lastError
+    : new Error(`Could not reach a Chromium DevTools endpoint for ${path}.`);
 }
 
 function isExtensionTarget(target: ChromeDebugTarget, extensionId: string): boolean {
@@ -131,7 +196,47 @@ function targetToTabInfo(target: ChromeDebugTarget): ChromeDebugTabInfo | undefi
 async function readChromeDebugTargets(
   options: ChromeDebugBrowserOptions,
 ): Promise<ChromeDebugTarget[]> {
-  return await fetchChromeDebugJson<ChromeDebugTarget[]>(options, '/json/list');
+  return (await resolveChromeDebugTargets(options)).targets;
+}
+
+async function resolveChromeDebugTargets(options: ChromeDebugBrowserOptions): Promise<{
+  debugBaseUrl: string;
+  targets: ChromeDebugTarget[];
+}> {
+  const explicitDebugBaseUrl = options.debugBaseUrl ?? options.debugUrl;
+  const envDebugBaseUrl = process.env.PI_CODEX_CHROME_DEBUG_URL?.trim();
+  const candidates = getDebugBaseUrlCandidates(explicitDebugBaseUrl);
+  if (explicitDebugBaseUrl || envDebugBaseUrl) {
+    const debugBaseUrl = candidates[0]!;
+    return {
+      debugBaseUrl,
+      targets: await fetchChromeDebugJson<ChromeDebugTarget[]>(
+        { ...options, debugBaseUrl },
+        '/json/list',
+      ),
+    };
+  }
+
+  let lastReachable: { debugBaseUrl: string; targets: ChromeDebugTarget[] } | undefined;
+  let lastError: unknown;
+  for (const debugBaseUrl of candidates) {
+    try {
+      const targets = await fetchChromeDebugJson<ChromeDebugTarget[]>(
+        { ...options, debugBaseUrl },
+        '/json/list',
+      );
+      const extensionId = getTargetExtensionId(options, targets);
+      const resolved = { debugBaseUrl, targets };
+      if (targets.some((target) => isExtensionTarget(target, extensionId))) return resolved;
+      lastReachable = resolved;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (lastReachable) return lastReachable;
+  throw lastError instanceof Error
+    ? lastError
+    : new Error('Could not reach a Chromium DevTools endpoint.');
 }
 
 async function assertConfiguredExtensionLoaded(
@@ -172,19 +277,43 @@ class ChromeDebugProtocolClient {
   >();
   private readonly socket: WebSocket;
   private readonly eventListeners = new Map<string, Array<(params: any) => void>>();
+  private closed = false;
   private opened?: Promise<void>;
+  private readonly cleanupAbort: () => void;
 
-  constructor(webSocketDebuggerUrl: string, WebSocketImpl: typeof WebSocket) {
+  constructor(
+    webSocketDebuggerUrl: string,
+    WebSocketImpl: typeof WebSocket,
+    private readonly signal?: AbortSignal,
+  ) {
     this.socket = new WebSocketImpl(webSocketDebuggerUrl);
     this.socket.addEventListener('message', (event) => this.handleMessage(event));
+    this.cleanupAbort = addAbortListener(signal, () => {
+      this.rejectAll(createOperationAbortedError());
+      this.close();
+    });
   }
 
   async open(): Promise<void> {
+    throwIfAborted(this.signal);
     this.opened ??= new Promise<void>((resolve, reject) => {
-      this.socket.addEventListener('open', () => resolve(), { once: true });
+      const cleanupAbort = addAbortListener(this.signal, () =>
+        reject(createOperationAbortedError()),
+      );
+      this.socket.addEventListener(
+        'open',
+        () => {
+          cleanupAbort();
+          resolve();
+        },
+        { once: true },
+      );
       this.socket.addEventListener(
         'error',
-        () => reject(new Error('Could not connect to Chrome debug target.')),
+        () => {
+          cleanupAbort();
+          reject(new Error('Could not connect to Chrome debug target.'));
+        },
         {
           once: true,
         },
@@ -199,6 +328,7 @@ class ChromeDebugProtocolClient {
     timeoutMs = CHROME_DEBUG_REQUEST_TIMEOUT_MS,
   ) {
     await this.open();
+    throwIfAborted(this.signal);
     const id = this.nextId++;
     const request = JSON.stringify({ id, method, params });
     return await new Promise<any>((resolve, reject) => {
@@ -206,13 +336,20 @@ class ChromeDebugProtocolClient {
         this.pending.delete(id);
         reject(new Error(`Chrome debug ${method} timed out after ${timeoutMs}ms`));
       }, timeoutMs);
+      const cleanupAbort = addAbortListener(this.signal, () => {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(createOperationAbortedError());
+      });
       this.pending.set(id, {
         reject: (error) => {
           clearTimeout(timer);
+          cleanupAbort();
           reject(error);
         },
         resolve: (value) => {
           clearTimeout(timer);
+          cleanupAbort();
           resolve(value);
         },
       });
@@ -232,6 +369,7 @@ class ChromeDebugProtocolClient {
       };
       const cleanup = () => {
         clearTimeout(timer);
+        cleanupAbort();
         const listeners = this.eventListeners.get(method) ?? [];
         this.eventListeners.set(
           method,
@@ -241,11 +379,23 @@ class ChromeDebugProtocolClient {
       const listeners = this.eventListeners.get(method) ?? [];
       listeners.push(listener);
       this.eventListeners.set(method, listeners);
+      const cleanupAbort = addAbortListener(this.signal, () => {
+        cleanup();
+        reject(createOperationAbortedError());
+      });
     });
   }
 
   close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.cleanupAbort();
     this.socket.close();
+  }
+
+  private rejectAll(error: Error): void {
+    for (const pending of this.pending.values()) pending.reject(error);
+    this.pending.clear();
   }
 
   private handleMessage(event: MessageEvent): void {
@@ -274,6 +424,7 @@ class ChromeDebugTab {
     readonly id: string,
     private readonly webSocketDebuggerUrl: string,
     private readonly WebSocketImpl: typeof WebSocket,
+    private readonly signal?: AbortSignal,
   ) {}
 
   async goto(url: string): Promise<void> {
@@ -323,7 +474,11 @@ class ChromeDebugTab {
 
   private async getClient(): Promise<ChromeDebugProtocolClient> {
     if (!this.client) {
-      this.client = new ChromeDebugProtocolClient(this.webSocketDebuggerUrl, this.WebSocketImpl);
+      this.client = new ChromeDebugProtocolClient(
+        this.webSocketDebuggerUrl,
+        this.WebSocketImpl,
+        this.signal,
+      );
       await this.client.open();
     }
     return this.client;
@@ -389,6 +544,7 @@ class ChromeDebugTabs {
       target.id,
       target.webSocketDebuggerUrl,
       this.options.WebSocketImpl,
+      this.options.signal,
     );
     this.openedTabs.push(tab);
     return tab;
@@ -455,9 +611,10 @@ export async function runChromeDebugBrowserList(
 export async function runChromeDebugBrowserEval(
   options: ChromeDebugBrowserEvalOptions,
 ): Promise<ChromeDebugToolResult> {
-  const targets = await readChromeDebugTargets(options);
+  const resolved = await resolveChromeDebugTargets(options);
+  const targets = resolved.targets;
   await assertConfiguredExtensionLoaded(options, targets);
-  const browser = new ChromeDebugBrowser(options);
+  const browser = new ChromeDebugBrowser({ ...options, debugBaseUrl: resolved.debugBaseUrl });
   const tab = (await browser.tabs.selected()) ?? (await browser.tabs.new());
   const writes: string[] = [];
   const images: Array<{ type: 'image'; data: string }> = [];

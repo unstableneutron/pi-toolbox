@@ -113,12 +113,23 @@ Codex browser automation is routed through Codex app-server's `node_repl` MCP
 server when possible. That preserves Codex thread metadata needed by the in-app
 browser (`iab`) backend and by the official Codex Chrome browser-client runtime.
 
-For local Brave/unpacked-extension development, the Chrome backend has an
-explicit fallback: if Codex's extension-host app-server WebSocket is unavailable
-or refuses the direct Pi connection, Pi verifies the configured Codex extension
-is loaded in the target browser and then drives Brave through its DevTools debug
-endpoint. This fallback is intentionally small and documented; it does not
-replace or modify Codex.app's trusted `browser-client.mjs` or native host.
+For local Chromium-family browser development, the Chrome backend has an
+explicit fallback: if Codex's extension-host app-server WebSocket is unavailable,
+refuses the direct Pi connection, or its native app-server probe times out, Pi
+verifies the configured Codex extension is loaded in the target browser and then
+drives the browser through its DevTools debug endpoint. Brave is the common local
+target, but the fallback is generic to Chrome-family browsers such as Chrome,
+Chromium, Edge, Arc, Vivaldi, and Opera when they expose a DevTools endpoint.
+This fallback is intentionally small and documented; it does not replace or
+modify Codex.app's trusted `browser-client.mjs` or native host.
+
+For direct Codex.app parity and protocol debugging, prefer the shared Desktop
+app-server mode documented below. In that mode Pi talks to the same app-server
+instance that Codex.app launched, and both the in-app browser (`iab`) and the
+Chrome/Brave extension browser (`chrome`) are driven through Codex's
+`node_repl` + `browser-client.mjs` runtime. The DevTools fallback is only a
+local Chromium escape hatch; it is not evidence that the official Codex browser
+bridge path works.
 
 | Pi tool              | Purpose                                           |
 | -------------------- | ------------------------------------------------- |
@@ -141,7 +152,17 @@ another Chromium debug endpoint without restarting Pi:
 
 `debugUrl` is the Chromium DevTools base URL. `extensionId` is optional; when it
 is omitted, the fallback first uses `PI_CODEX_CHROME_EXTENSION_ID` when set and
-otherwise auto-detects a loaded Codex extension target from `/json/list`.
+otherwise auto-detects a loaded Codex extension target from `/json/list`. If no
+per-call or environment debug URL is configured, the DevTools fallback probes the
+default/common local ports `9224`, `9222`, `9223`, `9225`, and `9230` and uses
+the first reachable Chromium endpoint with the selected Codex extension.
+
+Selection precedence is:
+
+1. per-call `debugUrl` / `extensionId`
+2. environment overrides
+3. auto-detected Chromium DevTools endpoint and Codex extension target
+4. built-in defaults
 
 By default the Chrome bridge targets the official Codex Chrome extension ID
 `hehggadaopoacecdllhhajmbjkdcmajg`. For local unpacked-extension experiments,
@@ -175,6 +196,12 @@ needed for tab listing, opening tabs, navigation, page title/URL/text reads,
 full Codex browser-client capability surface remains available only when Codex's
 native Chrome backend is discovered successfully.
 
+Native Chrome bridge setup and DevTools fallback operations are bounded and
+abort-aware. If Pi cancels a browser tool call, the extension propagates the
+abort signal through native app-server setup, Chrome extension probing, DevTools
+fetches, WebSocket protocol requests, navigation, and evaluation, then closes any
+opened sockets/tabs it owns before returning `Operation aborted`.
+
 For the Chrome backend, keep Codex Desktop and bundled plugins current:
 
 ```bash
@@ -196,6 +223,68 @@ The extension resolves `scripts/browser-client.mjs` in this order:
 1. `~/.codex/plugins/cache/openai-bundled/<plugin>/latest/scripts/browser-client.mjs`
 2. the highest version-like cache directory under that plugin
 3. the installed Codex.app bundled plugin path
+
+### Local native-host shim
+
+For local protocol debugging, `scripts/codex-native-host-shim.mjs` can stand in
+as the `com.openai.codexextension` native messaging host. It forwards native
+messaging bytes unchanged to the real extension host while writing JSONL logs of
+complete frames:
+
+- `extension->host` frames from the Chrome extension
+- `host->extension` frames from the real native host
+- lifecycle events such as `shim-start`, `child-exit`, and incomplete frames
+
+The shim defaults to the official cached host at:
+
+```text
+~/.codex/plugins/cache/openai-bundled/chrome/latest/extension-host/macos/arm64/extension-host
+```
+
+Override it with `PI_CODEX_NATIVE_HOST_SHIM_REAL_HOST` or a local config file at
+`~/.codex/pi-codex-computer-use/native-host-shim-config.json`:
+
+```json
+{
+  "realHostPath": "/path/to/extension-host",
+  "logPath": "/tmp/codex-native-host.jsonl",
+  "maxPayloadChars": 50000,
+  "fakeGetInfo": false,
+  "fakeGetInfoVersion": "1.1.5",
+  "rewriteCloseTargetToFinalizeTabs": false
+}
+```
+
+Set `fakeGetInfo` to `true` only for local protocol debugging. In that mode,
+the shim intercepts native-host `getInfo` requests and replies with a synthetic
+Chrome extension info object instead of forwarding the request to the extension.
+This is useful for isolating failures after the extension's current
+`chrome.runtime.getVersion()` call. The same mode can be enabled with
+`PI_CODEX_NATIVE_HOST_SHIM_FAKE_GET_INFO=1` and the version can be overridden
+with `PI_CODEX_NATIVE_HOST_SHIM_FAKE_GET_INFO_VERSION`.
+
+Set `rewriteCloseTargetToFinalizeTabs` to `true` only for local protocol
+debugging of Chrome-extension tab cleanup. In that mode, host-to-extension CDP
+`executeCdp` calls for `Target.closeTarget` are rewritten to a same-id
+`finalizeTabs({ keep: [] })` request before they reach the extension. This
+works around Chrome rejecting `Target.closeTarget` through
+`chrome.debugger.sendCommand` with `Not allowed`, while preserving a real
+extension response to the original request id. Keep this disabled by default:
+`keep: []` closes all non-kept agent-created tabs for the turn/session and is
+therefore close to cleanup semantics, but not identical to a precise one-tab CDP
+close. The same mode can be enabled with
+`PI_CODEX_NATIVE_HOST_SHIM_REWRITE_CLOSE_TARGET_TO_FINALIZE_TABS=1`.
+
+Logs default to:
+
+```text
+~/.codex/pi-codex-computer-use/native-host-shim-<timestamp>-<pid>.jsonl
+```
+
+Use the shim only in disposable browser profiles or after backing up the native
+messaging manifest you edit. The manifest `name` stays
+`com.openai.codexextension`; only the manifest `path` should point to the shim.
+The shim is a debugging aid, not part of the published runtime path.
 
 ## Skills
 
@@ -222,13 +311,22 @@ skill paths.
 
 Use `/codex-computer-use-doctor` for actionable setup checks. It verifies the
 Codex Computer Use app/helper paths, bundle identities, TCC permissions, helper
-process state, and display capture readiness. In Pi's TUI it opens an
-input-capturing doctor view with colored check results and actions. `Re-check`
-is always available, all check lines render directly in the view, and any
-assistable issue appears as a selectable action: opening the matching System
-Settings pane for missing Screen Recording or Accessibility permission, or
-starting a short `caffeinate -dimsu -t 600` guard when the display appears
-asleep.
+process state, display capture readiness, and the Chromium browser bridge. The
+browser section reports the selected DevTools URL, selected Codex extension ID,
+app-server origin, relevant environment overrides, native messaging status,
+native bridge responsiveness, DevTools fallback usability, and guidance for any
+manual steps that cannot be completed automatically.
+
+In Pi's TUI it opens an input-capturing doctor view with colored check results
+and actions. `Re-check` is always available, all check lines render directly in
+the view, and any assistable issue appears as a selectable action: opening the
+matching System Settings pane for missing Screen Recording or Accessibility
+permission, starting a short `caffeinate -dimsu -t 600` guard when the display
+appears asleep, installing the bundled `computer-use@openai-bundled` plugin,
+resetting the live bridge, or adding the exact selected Codex extension origin to
+existing `com.openai.codexextension` native messaging manifests. The manifest
+repair is confirmation-gated and does not add wildcard origins or change the
+native host name.
 
 ## Elicitation auto-approval
 
@@ -259,6 +357,7 @@ Launch Codex Desktop directly with `CODEX_CLI_PATH` pointing at the wrapper:
 ```bash
 PI_CODEX_DESKTOP_REAL_CODEX=/Applications/Codex.app/Contents/Resources/codex \
 PI_CODEX_DESKTOP_APP_SERVER_SOCKET="$HOME/.codex/pi-codex-desktop/app-server.sock" \
+PI_CODEX_DESKTOP_APP_SERVER_LOG="$HOME/.codex/pi-codex-desktop/app-server.jsonl" \
 CODEX_CLI_PATH="$PWD/extensions/pi-codex-computer-use/scripts/codex-desktop-app-server-wrapper.mjs" \
 /Applications/Codex.app/Contents/MacOS/Codex
 ```
@@ -278,6 +377,35 @@ codex app-server --listen unix://$PI_CODEX_DESKTOP_APP_SERVER_SOCKET --analytics
 Then it bridges Desktop stdio JSON-RPC to the Unix-socket WebSocket transport.
 Use the exposed socket with `scripts/codex-control.mjs --socket ...` for
 additional same-process clients.
+
+When `PI_CODEX_DESKTOP_APP_SERVER_LOG` is set, the wrapper writes JSONL protocol
+summaries for every complete JSON-RPC message it bridges:
+
+- `desktop->app-server` for Codex.app requests and notifications
+- `app-server->desktop` for app-server responses, requests, and notifications
+
+Each entry includes timestamp, direction, JSON-RPC id/method when present,
+result/error markers, payload byte size, and either the full payload or a
+truncated preview. Set `PI_CODEX_DESKTOP_APP_SERVER_LOG_MAX_PAYLOAD_CHARS` to
+override the default 50KB per-message payload cap.
+
+To make the Pi extension use that same running Desktop app-server instead of
+spawning its own stdio app-server, start Pi with the matching socket path and an
+explicit opt-in:
+
+```bash
+PI_CODEX_USE_DESKTOP_APP_SERVER=1 \
+PI_CODEX_DESKTOP_APP_SERVER_SOCKET="$HOME/.codex/pi-codex-desktop/app-server.sock" \
+pi
+```
+
+With that opt-in, `codex_browser_eval` and `codex_browser_list` route both
+`backend: "iab"` and `backend: "chrome"` through the shared Desktop app-server's
+`node_repl` MCP server. This is the preferred path for verifying that Pi can
+drive the same built-in Browser and connected Chrome/Brave extension instance
+that Codex.app is using. Keep the opt-in disabled by default: sharing the
+Desktop app-server couples Pi tool calls to the live Codex.app runtime and is
+best suited to local protocol debugging and end-to-end validation.
 
 ## Development
 

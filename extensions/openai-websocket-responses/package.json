@@ -24,8 +24,8 @@
     "ws": "^8.18.3"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "^0.78.0",
-    "@earendil-works/pi-coding-agent": "^0.78.0",
+    "@earendil-works/pi-ai": "^0.79.0",
+    "@earendil-works/pi-coding-agent": "^0.79.0",
     "@types/node": "^24.3.0",
     "@types/ws": "^8.18.1",
     "oxfmt": "^0.44.0",

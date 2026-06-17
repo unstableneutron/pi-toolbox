@@ -349,4 +349,49 @@ describe('codex desktop app-server wrapper stdio bridge', () => {
 
     expect(Buffer.concat(chunks).toString('utf8')).toBe('{"id":1,"result":{}}\n');
   });
+
+  test('optionally logs JSON-RPC messages crossing the Desktop app-server bridge', async () => {
+    const { bridgeStdioToWebSocket } = await import('./codex-desktop-app-server-wrapper.mjs');
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'pi-codex-wrapper-log-test-'));
+    tempDirs.push(directory);
+    const logPath = path.join(directory, 'app-server-bridge.jsonl');
+    const socket = new MockSocket();
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const chunks: Buffer[] = [];
+    stdout.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+
+    const bridge = bridgeStdioToWebSocket(socket, stdin, stdout, {
+      logPath,
+      maxPayloadChars: 1000,
+    });
+    stdin.write('{"id":1,"method":"initialize","params":{"clientInfo":{"name":"Codex"}}}\n');
+    socket.emit('data', encodeServerTextFrame('{"id":1,"result":{"ok":true}}'));
+
+    await waitForOutput(chunks, '{"id":1,"result":{"ok":true}}\n');
+    bridge.dispose();
+
+    const logLines = (await readFile(logPath, 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    expect(logLines).toEqual([
+      expect.objectContaining({
+        direction: 'desktop->app-server',
+        id: 1,
+        method: 'initialize',
+        payload: {
+          id: 1,
+          method: 'initialize',
+          params: { clientInfo: { name: 'Codex' } },
+        },
+      }),
+      expect.objectContaining({
+        direction: 'app-server->desktop',
+        hasResult: true,
+        id: 1,
+        payload: { id: 1, result: { ok: true } },
+      }),
+    ]);
+  });
 });

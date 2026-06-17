@@ -1135,6 +1135,18 @@ describe('pi-ai Bedrock apiKey bearer patching', () => {
     '',
   ].join('\n');
 
+  const PROVIDER_ENV_FIXTURE_CONTENT = [
+    'export const streamBedrock = (model, context, options = {}) => {',
+    '    const config = {};',
+    '        // Resolve bearer token for Bedrock API key auth.',
+    '        const skipAuth = getProviderEnvValue("AWS_BEDROCK_SKIP_AUTH", options.env) === "1";',
+    '        const bearerToken = options.bearerToken || getProviderEnvValue("AWS_BEARER_TOKEN_BEDROCK", options.env) || undefined;',
+    '        const useBearerToken = bearerToken !== undefined && !skipAuth;',
+    '    return config;',
+    '};',
+    '',
+  ].join('\n');
+
   function setupFakePackage(version: string, bedrockContent = FIXTURE_CONTENT): string {
     const packageRoot = makeTempDir('pi-ai-');
     writeFileSync(
@@ -1169,9 +1181,34 @@ describe('pi-ai Bedrock apiKey bearer patching', () => {
     expect(patched).toContain('__pi_update_extensions:bedrock-api-key-as-bearer__');
     expect(patched).toContain('options.apiKey');
     expect(patched).toContain('["facade", "facade-full"].includes(model.provider)');
+    expect(patched).toContain('envBearerToken');
+    expect(patched).toContain('getProviderEnvValue("AWS_BEARER_TOKEN_BEDROCK", options.env)');
     expect(patched).toContain('process.env.AWS_BEARER_TOKEN_BEDROCK');
     expect(patched).not.toContain(
       'const bearerToken = options.bearerToken || process.env.AWS_BEARER_TOKEN_BEDROCK || undefined;',
+    );
+    expect(isPiAiBedrockApiKeyBearerPatchApplied(packageRoot)).toBe(true);
+  });
+
+  it('applies the Bedrock apiKey bearer patch to provider-env-helper upstream builds', async () => {
+    const packageRoot = setupFakePackage('0.79.5', PROVIDER_ENV_FIXTURE_CONTENT);
+    const result = await applyPiAiBedrockApiKeyBearerPatch({ packageRoot });
+
+    expect(result).toMatchObject({
+      status: 'applied',
+      packageRoot,
+      version: '0.79.5',
+    });
+
+    const patched = readFileSync(
+      join(packageRoot, 'dist', 'providers', 'amazon-bedrock.js'),
+      'utf8',
+    );
+    expect(patched).toContain('__pi_update_extensions:bedrock-api-key-as-bearer__');
+    expect(patched).toContain('envBearerToken');
+    expect(patched).toContain('options.apiKey');
+    expect(patched).not.toContain(
+      'const bearerToken = options.bearerToken || getProviderEnvValue("AWS_BEARER_TOKEN_BEDROCK", options.env) || undefined;',
     );
     expect(isPiAiBedrockApiKeyBearerPatchApplied(packageRoot)).toBe(true);
   });
@@ -1218,6 +1255,7 @@ describe('pi-ai Bedrock apiKey bearer patching', () => {
     expect(replacement).toContain('__pi_update_extensions:bedrock-api-key-as-bearer__');
     expect(replacement).toContain('options.bearerToken');
     expect(replacement).toContain('options.apiKey');
+    expect(replacement).toContain('getProviderEnvValue("AWS_BEARER_TOKEN_BEDROCK", options.env)');
     expect(replacement).toContain('process.env.AWS_BEARER_TOKEN_BEDROCK');
   });
 });

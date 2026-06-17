@@ -1,7 +1,11 @@
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
 import { registerCodexBrowserTools } from './browser-tools';
-import { runCodexComputerUseDoctor } from './doctor';
+import {
+  readDefaultBrowserBridgeStatus,
+  repairChromeNativeHostManifestsForDetectedExtension,
+  runCodexComputerUseDoctor,
+} from './doctor';
 import {
   getCodexComputerUseEnablementStatus,
   isCodexComputerUseEnabled,
@@ -65,6 +69,8 @@ export default function piComputerUseExtension(pi: ExtensionAPI): void {
             const status = await session.getMcpServerAvailability(ctx);
             return { computerUseAvailable: status.computerUseAvailable };
           },
+          readBrowserBridgeStatus: readDefaultBrowserBridgeStatus,
+          repairChromeNativeHostManifests: repairChromeNativeHostManifestsForDetectedExtension,
           resetBridge: () => session.resetBridge(),
         },
       });

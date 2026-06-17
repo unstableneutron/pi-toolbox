@@ -188,10 +188,12 @@ function decodeServerWebSocketFrames(buffer: Buffer): {
 
 function buildWebSocketUpgradeRequest(url: URL, origin: string): string {
   const key = crypto.randomBytes(16).toString('base64');
-  const requestPath = `${url.pathname || '/'}${url.search}`;
+  const isUnixSocket = url.protocol === 'unix:';
+  const requestPath = isUnixSocket ? '/' : `${url.pathname || '/'}${url.search}`;
+  const host = isUnixSocket ? 'localhost' : url.host;
   return [
     `GET ${requestPath} HTTP/1.1`,
-    `Host: ${url.host}`,
+    `Host: ${host}`,
     'Upgrade: websocket',
     'Connection: Upgrade',
     `Sec-WebSocket-Key: ${key}`,
@@ -200,6 +202,12 @@ function buildWebSocketUpgradeRequest(url: URL, origin: string): string {
     '',
     '',
   ].join('\r\n');
+}
+
+function getUnixSocketPath(url: URL): string {
+  const socketPath = decodeURIComponent(url.pathname);
+  if (!socketPath) throw new Error('Unix app-server URL is missing a socket path');
+  return socketPath;
 }
 
 export class CodexAppServerClient {
@@ -244,13 +252,16 @@ export class CodexAppServerClient {
     };
   }
 
-  async init(): Promise<void> {
-    this.initialized ??= this.initialize();
+  async init(signal?: AbortSignal): Promise<void> {
+    this.initialized ??= this.initialize(signal).catch((error: unknown) => {
+      this.initialized = undefined;
+      throw error;
+    });
     await this.initialized;
   }
 
   async startThread(options: CodexThreadStartOptions): Promise<string> {
-    await this.init();
+    await this.init(options.signal);
     const response = await this.request(
       'thread/start',
       {
@@ -284,7 +295,7 @@ export class CodexAppServerClient {
     signal?: AbortSignal;
     _meta?: Record<string, unknown>;
   }): Promise<any> {
-    await this.init();
+    await this.init(input.signal);
     return await this.request(
       'mcpServer/tool/call',
       {
@@ -334,11 +345,16 @@ export class CodexAppServerClient {
     }
   }
 
-  private async initialize(): Promise<void> {
-    await this.request('initialize', {
-      clientInfo: { name: this.clientName, title: null, version: '0' },
-      capabilities: null,
-    });
+  private async initialize(signal?: AbortSignal): Promise<void> {
+    await this.request(
+      'initialize',
+      {
+        clientInfo: { name: this.clientName, title: null, version: '0' },
+        capabilities: null,
+      },
+      DEFAULT_REQUEST_TIMEOUT_MS,
+      signal,
+    );
     sendJsonLine(this.process.stdin, { method: 'initialized' });
   }
 
@@ -483,13 +499,16 @@ export class CodexAppServerWebSocketClient {
     };
   }
 
-  async init(): Promise<void> {
-    this.initialized ??= this.initialize();
+  async init(signal?: AbortSignal): Promise<void> {
+    this.initialized ??= this.initialize(signal).catch((error: unknown) => {
+      this.initialized = undefined;
+      throw error;
+    });
     await this.initialized;
   }
 
   async startThread(options: CodexThreadStartOptions): Promise<string> {
-    await this.init();
+    await this.init(options.signal);
     const response = await this.request(
       'thread/start',
       {
@@ -523,7 +542,7 @@ export class CodexAppServerWebSocketClient {
     signal?: AbortSignal;
     _meta?: Record<string, unknown>;
   }): Promise<any> {
-    await this.init();
+    await this.init(input.signal);
     return await this.request(
       'mcpServer/tool/call',
       {
@@ -564,17 +583,22 @@ export class CodexAppServerWebSocketClient {
     this.initialized = undefined;
   }
 
-  private async initialize(): Promise<void> {
-    await this.connect();
+  private async initialize(signal?: AbortSignal): Promise<void> {
+    await this.connect(signal);
     try {
-      await this.request('initialize', {
-        clientInfo: { name: this.clientName, title: null, version: '0' },
-        capabilities: {
-          experimentalApi: true,
-          requestAttestation: false,
-          optOutNotificationMethods: [],
+      await this.request(
+        'initialize',
+        {
+          clientInfo: { name: this.clientName, title: null, version: '0' },
+          capabilities: {
+            experimentalApi: true,
+            requestAttestation: false,
+            optOutNotificationMethods: [],
+          },
         },
-      });
+        DEFAULT_REQUEST_TIMEOUT_MS,
+        signal,
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (!message.includes('Already initialized')) throw error;
@@ -582,28 +606,51 @@ export class CodexAppServerWebSocketClient {
     this.sendJson({ method: 'initialized' });
   }
 
-  private async connect(): Promise<void> {
-    this.connected ??= this.openSocket();
+  private async connect(signal?: AbortSignal): Promise<void> {
+    this.connected ??= this.openSocket(signal).catch((error: unknown) => {
+      this.connected = undefined;
+      throw error;
+    });
     await this.connected;
   }
 
-  private async openSocket(): Promise<void> {
-    if (this.url.protocol !== 'ws:') {
+  private async openSocket(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) throw createOperationAbortedError();
+    if (this.url.protocol !== 'ws:' && this.url.protocol !== 'unix:') {
       throw new Error(`Unsupported Codex extension-host app-server URL: ${this.url.protocol}`);
     }
 
-    const socket = net.createConnection({
-      host: this.url.hostname,
-      port: Number(this.url.port),
-    });
+    const socket =
+      this.url.protocol === 'unix:'
+        ? net.createConnection(getUnixSocketPath(this.url))
+        : net.createConnection({
+            host: this.url.hostname,
+            port: Number(this.url.port),
+          });
     this.socket = socket;
     await new Promise<void>((resolve, reject) => {
-      socket.once('connect', resolve);
-      socket.once('error', reject);
+      let cleanupAbort = () => {};
+      if (signal) {
+        const onAbort = () => {
+          cleanupAbort();
+          socket.destroy();
+          reject(createOperationAbortedError());
+        };
+        cleanupAbort = () => signal.removeEventListener('abort', onAbort);
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+      socket.once('connect', () => {
+        cleanupAbort();
+        resolve();
+      });
+      socket.once('error', (error) => {
+        cleanupAbort();
+        reject(error);
+      });
     });
 
     socket.write(buildWebSocketUpgradeRequest(this.url, this.origin));
-    await this.waitForUpgrade(socket);
+    await this.waitForUpgrade(socket, signal);
     socket.on('data', (chunk) => this.handleData(chunk));
     socket.on('error', (error) => this.rejectAll(error));
     socket.on('close', () => this.rejectAll(new Error('Codex extension-host app-server closed')));
@@ -614,13 +661,14 @@ export class CodexAppServerWebSocketClient {
     }
   }
 
-  private async waitForUpgrade(socket: net.Socket): Promise<void> {
+  private async waitForUpgrade(socket: net.Socket, signal?: AbortSignal): Promise<void> {
     await new Promise<void>((resolve, reject) => {
       const chunks: Buffer[] = [];
       const cleanup = () => {
         clearTimeout(timer);
         socket.off('data', onData);
         socket.off('error', onError);
+        signal?.removeEventListener('abort', onAbort);
       };
       const fail = (error: Error) => {
         cleanup();
@@ -632,6 +680,7 @@ export class CodexAppServerWebSocketClient {
         5_000,
       );
       const onError = (error: Error) => fail(error);
+      const onAbort = () => fail(createOperationAbortedError());
       const onData = (chunk: Buffer) => {
         chunks.push(chunk);
         const raw = Buffer.concat(chunks);
@@ -648,6 +697,7 @@ export class CodexAppServerWebSocketClient {
       };
       socket.on('data', onData);
       socket.once('error', onError);
+      signal?.addEventListener('abort', onAbort, { once: true });
     });
   }
 

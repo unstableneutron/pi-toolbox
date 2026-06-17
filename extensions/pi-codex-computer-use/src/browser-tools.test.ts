@@ -297,6 +297,37 @@ describe('registerCodexBrowserTools', () => {
     ]);
   });
 
+  test('passes AbortSignal to Chrome DevTools fallback calls', async () => {
+    const registered: any[] = [];
+    const controller = new AbortController();
+    const directCalls: any[] = [];
+    const session = {
+      async callBrowserMcpTool() {
+        throw new Error('Timed out waiting for Codex extension-host WebSocket upgrade');
+      },
+    };
+    registerCodexBrowserTools(
+      { registerTool: (tool: any) => registered.push(tool) },
+      session as any,
+      {
+        async runChromeDebugBrowserList(input: any) {
+          directCalls.push(input);
+          return {
+            content: [{ type: 'text', text: 'direct chrome result' }],
+            details: { server: 'chrome-devtools' },
+          };
+        },
+      },
+    );
+
+    const listTool = registered.find((tool) => tool.name === 'codex_browser_list');
+    await listTool.execute('tool-call-1', { backend: 'chrome' }, controller.signal, undefined, {
+      cwd: '/tmp/project',
+    });
+
+    expect(directCalls).toEqual([{ signal: controller.signal }]);
+  });
+
   test('falls back to the Chrome DevTools bridge when the native proxy lacks ensureCodexAppServer', async () => {
     const registered: any[] = [];
     const directCalls: any[] = [];
@@ -327,5 +358,37 @@ describe('registerCodexBrowserTools', () => {
     ).resolves.toMatchObject({ content: [{ type: 'text', text: 'direct chrome result' }] });
 
     expect(directCalls).toEqual([{}]);
+  });
+
+  test('falls back to the Chrome DevTools bridge when native app-server probing times out', async () => {
+    const registered: any[] = [];
+    const session = {
+      async callBrowserMcpTool() {
+        throw new Error('Chrome debug Runtime.evaluate timed out after 8000ms');
+      },
+    };
+    registerCodexBrowserTools(
+      { registerTool: (tool: any) => registered.push(tool) },
+      session as any,
+      {
+        async runChromeDebugBrowserEval() {
+          return {
+            content: [{ type: 'text', text: 'direct eval result' }],
+            details: { server: 'chrome-devtools' },
+          };
+        },
+      },
+    );
+
+    const evalTool = registered.find((tool) => tool.name === 'codex_browser_eval');
+    await expect(
+      evalTool.execute(
+        'tool-call-1',
+        { backend: 'chrome', script: 'return 1;' },
+        undefined,
+        undefined,
+        { cwd: '/tmp/project' },
+      ),
+    ).resolves.toMatchObject({ content: [{ type: 'text', text: 'direct eval result' }] });
   });
 });

@@ -1,6 +1,6 @@
 {
   "name": "pi-toolbox",
-  "version": "0.78.16",
+  "version": "0.79.6",
   "private": true,
   "description": "My own pi-toolbox of extensions, skills, prompts, and subagent templates.",
   "license": "MIT",
@@ -14,14 +14,19 @@
   },
   "dependencies": {
     "diff": ">=8.0.0",
-    "parallel-web": "^0.3.2"
+    "fff-router": "github:unstableneutron/fff-router#semver:>=0.8.0",
+    "parallel-web": "^0.3.2",
+    "partial-json": "^0.1.7",
+    "picomatch": "^4.0.3",
+    "shell-quote": "^1.8.3",
+    "ws": "^8.18.3"
   },
   "devDependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1027.0",
-    "@earendil-works/pi-agent-core": "0.78.1",
-    "@earendil-works/pi-ai": "0.78.1",
-    "@earendil-works/pi-coding-agent": "0.78.1",
-    "@earendil-works/pi-tui": "0.78.1",
+    "@earendil-works/pi-agent-core": "0.79.6",
+    "@earendil-works/pi-ai": "0.79.6",
+    "@earendil-works/pi-coding-agent": "0.79.6",
+    "@earendil-works/pi-tui": "0.79.6",
     "@types/node": "^24.3.0",
     "knip": "^6.3.1",
     "oxfmt": "^0.44.0",

@@ -98,6 +98,7 @@ const appServerInfo = {
 };
 
 class FakeWebSocket {
+  static closeCount = 0;
   static expressions: Array<{ url: string; expression: string }> = [];
   static urls: string[] = [];
 
@@ -137,7 +138,9 @@ class FakeWebSocket {
     }
   }
 
-  close(): void {}
+  close(): void {
+    FakeWebSocket.closeCount += 1;
+  }
 
   private emit(event: string, payload: any): void {
     for (const listener of this.listeners.get(event) ?? []) listener(payload);
@@ -145,6 +148,7 @@ class FakeWebSocket {
 }
 
 function resetFakeWebSocket(): void {
+  FakeWebSocket.closeCount = 0;
   FakeWebSocket.expressions = [];
   FakeWebSocket.urls = [];
 }
@@ -210,5 +214,30 @@ describe('ensureChromeExtensionAppServer', () => {
     expect(expressions).toContain('chrome.tabs.create');
     expect(expressions).toContain('ensure_codex_app_server');
     expect(expressions).toContain('chrome.tabs.remove');
+  });
+
+  test('aborts a hung native app-server request and closes the DevTools socket', async () => {
+    vi.stubEnv('PI_CODEX_CHROME_EXTENSION_ID', '');
+    resetFakeWebSocket();
+    class HangingWebSocket extends FakeWebSocket {
+      send(raw: string): void {
+        const message = JSON.parse(raw);
+        if (message.method === 'Runtime.evaluate') return;
+        super.send(raw);
+      }
+    }
+    const controller = new AbortController();
+    const fetchImpl = async () => makeResponse([pageTarget()]);
+    const operation = ensureChromeExtensionAppServer({
+      debugBaseUrl,
+      fetchImpl: fetchImpl as typeof fetch,
+      WebSocketImpl: HangingWebSocket as any,
+      signal: controller.signal,
+    });
+
+    setTimeout(() => controller.abort(), 5);
+
+    await expect(operation).rejects.toThrow('Operation aborted');
+    expect(FakeWebSocket.closeCount).toBe(1);
   });
 });

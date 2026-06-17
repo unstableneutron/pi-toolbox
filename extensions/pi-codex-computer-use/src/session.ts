@@ -16,6 +16,11 @@ const COMPUTER_USE_SERVER = 'computer-use';
 const NODE_REPL_SERVER = 'node_repl';
 const RETRYABLE_OBSERVATION_TOOLS = new Set(['list_apps', 'get_app_state']);
 const TRANSIENT_PROCESS_ERROR = /NSOSStatusErrorDomain Code=-600|procNotFound/;
+const USE_DESKTOP_APP_SERVER_ENV = 'PI_CODEX_USE_DESKTOP_APP_SERVER';
+const DESKTOP_APP_SERVER_SOCKET_ENV = 'PI_CODEX_DESKTOP_APP_SERVER_SOCKET';
+const DESKTOP_APP_SERVER_ORIGIN_ENV = 'PI_CODEX_DESKTOP_APP_SERVER_ORIGIN';
+
+type CodexAppServerBridgeClient = CodexAppServerClient | CodexAppServerWebSocketClient;
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) return Promise.reject(new Error('Operation aborted'));
@@ -62,6 +67,26 @@ function isRetryableMcpError(server: string, codexTool: string, message: string)
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function readBooleanEnv(name: string): boolean {
+  const value = process.env[name]?.trim().toLowerCase();
+  return value === '1' || value === 'true' || value === 'yes' || value === 'on';
+}
+
+function getConfiguredDesktopAppServerSocket(): string | undefined {
+  if (!readBooleanEnv(USE_DESKTOP_APP_SERVER_ENV)) return undefined;
+  const socketPath = process.env[DESKTOP_APP_SERVER_SOCKET_ENV]?.trim();
+  if (!socketPath) {
+    throw new Error(
+      `${USE_DESKTOP_APP_SERVER_ENV}=1 requires ${DESKTOP_APP_SERVER_SOCKET_ENV} to point at the Codex.app wrapper socket.`,
+    );
+  }
+  return socketPath;
+}
+
+function getConfiguredDesktopAppServerOrigin(): string {
+  return process.env[DESKTOP_APP_SERVER_ORIGIN_ENV]?.trim() || 'app://codex';
 }
 
 function isUnknownMcpServerError(error: unknown): boolean {
@@ -203,7 +228,7 @@ export interface CodexDiagnosticStatusOptions {
 }
 
 export class ComputerUseSession {
-  private client?: CodexAppServerClient;
+  private client?: CodexAppServerBridgeClient;
   private chromeClient?: CodexAppServerWebSocketClient;
   private chromeClientKey?: string;
   private chromeThreadId?: string;
@@ -297,7 +322,7 @@ export class ComputerUseSession {
   ): Promise<{ threadId: string; rawResult: any }> {
     let lastError: unknown;
     for (let bridgeAttempt = 0; bridgeAttempt < 2; bridgeAttempt++) {
-      const client = await this.getClient();
+      const client = await this.getClient(signal);
       const threadId = await this.getThreadId(ctx, client, signal);
       const restore = client.setElicitationHandler((params) =>
         answerComputerUseElicitation(params, ctx),
@@ -354,7 +379,11 @@ export class ComputerUseSession {
       return await this.callMcpTool(ctx, input, signal);
     }
 
-    const client = await this.getChromeClient(options);
+    if (getConfiguredDesktopAppServerSocket()) {
+      return await this.callMcpTool(ctx, input, signal);
+    }
+
+    const client = await this.getChromeClient(options, signal);
     const threadId = await this.getChromeThreadId(ctx, client, signal);
     const restore = client.setElicitationHandler((params) =>
       answerComputerUseElicitation(params, ctx),
@@ -421,21 +450,30 @@ export class ComputerUseSession {
     this.chromeThreadId = undefined;
   }
 
-  private async getClient(): Promise<CodexAppServerClient> {
+  private async getClient(signal?: AbortSignal): Promise<CodexAppServerBridgeClient> {
     if (!this.client) {
-      const paths = getCodexComputerUsePaths();
-      this.client = new CodexAppServerClient({
-        codexExecutable: paths.codexExecutable,
-        codexHome: paths.codexHome,
-      });
-      await this.client.init();
+      const desktopSocket = getConfiguredDesktopAppServerSocket();
+      if (desktopSocket) {
+        this.client = new CodexAppServerWebSocketClient({
+          clientName: 'pi-codex-computer-use-desktop',
+          origin: getConfiguredDesktopAppServerOrigin(),
+          url: `unix://${desktopSocket}`,
+        });
+      } else {
+        const paths = getCodexComputerUsePaths();
+        this.client = new CodexAppServerClient({
+          codexExecutable: paths.codexExecutable,
+          codexHome: paths.codexHome,
+        });
+      }
+      await this.client.init(signal);
     }
     return this.client;
   }
 
   private async getThreadId(
     ctx: ExtensionContext,
-    client: CodexAppServerClient,
+    client: CodexAppServerBridgeClient,
     signal?: AbortSignal,
   ): Promise<string> {
     if (!this.threadId) {
@@ -450,6 +488,7 @@ export class ComputerUseSession {
 
   private async getChromeClient(
     options: ChromeBrowserBridgeOptions = {},
+    signal?: AbortSignal,
   ): Promise<CodexAppServerWebSocketClient> {
     const origin = getConfiguredChromeAppServerOrigin();
     const key = JSON.stringify({
@@ -466,12 +505,13 @@ export class ComputerUseSession {
       const appServer = await ensureChromeExtensionAppServer({
         debugBaseUrl: options.debugBaseUrl,
         extensionId: options.extensionId,
+        signal,
       });
       this.chromeClient = new CodexAppServerWebSocketClient({
         origin,
         url: appServer.localAppServerUrl,
       });
-      await this.chromeClient.init();
+      await this.chromeClient.init(signal);
       this.chromeClientKey = key;
     }
     return this.chromeClient;
