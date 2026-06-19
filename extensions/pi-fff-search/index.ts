@@ -167,6 +167,43 @@ function formatFindFilesResult(result: PublicCompactFindFilesResult): string {
   return `base_path: ${result.base_path}\n\n${body}`;
 }
 
+function stripRenderedFindFilesSuffix(line: string): string {
+  return line
+    .replace(/\s+-\s+(hot|warm|frequent)(\s+git:[^\s]+)?$/, '')
+    .replace(/\s+git:[^\s]+$/, '')
+    .trim();
+}
+
+function parseRenderedFindFilePaths(text: string): string[] {
+  const paths: string[] = [];
+
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trimEnd();
+    if (
+      !line ||
+      line.startsWith('→') ||
+      line.startsWith('cursor:') ||
+      /^\d+\/\d+\s+matches(?:\s+shown)?$/i.test(line) ||
+      /^0\s+results/i.test(line)
+    ) {
+      continue;
+    }
+
+    const pathValue = stripRenderedFindFilesSuffix(line);
+    if (pathValue) {
+      paths.push(pathValue);
+    }
+  }
+
+  return paths;
+}
+
+function formatRenderedFindFilesResult(result: { base_path: string; text: string }): string {
+  const paths = parseRenderedFindFilePaths(result.text);
+  const body = paths.length > 0 ? paths.join('\n') : '(no files found)';
+  return `base_path: ${result.base_path}\n\n${body}`;
+}
+
 function isRenderedTextResult(
   result: PublicToolResult,
 ): result is PublicToolResult & { mode: 'compact'; text: string; base_path: string } {
@@ -242,7 +279,9 @@ function formatToolText(toolName: PublicToolName, result: PublicToolResult): str
 
   switch (toolName) {
     case 'fff_find_files':
-      return formatFindFilesResult(result as PublicCompactFindFilesResult);
+      return isRenderedTextResult(result)
+        ? formatRenderedFindFilesResult(result)
+        : formatFindFilesResult(result as PublicCompactFindFilesResult);
     case 'fff_search_terms':
     case 'fff_grep':
       return isRenderedTextResult(result)

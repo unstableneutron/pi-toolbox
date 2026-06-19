@@ -1682,6 +1682,35 @@ describe('pi-fff-search extension', () => {
     expect(result.text).toBe('base_path: /repo\n\nrouter.ts\ncoordinator.ts');
   });
 
+  test('formats rendered compact find-files text returned by fff-mcp', async () => {
+    const ensureDaemonRunning = vi.fn(async () => {});
+    const callPublicToolOverHttp = vi.fn(async () => ({
+      ok: true as const,
+      value: {
+        mode: 'compact' as const,
+        base_path: '/repo',
+        next_cursor: null,
+        text: [
+          '50/40294 matches',
+          '→ Read src/router.ts (only match)',
+          'src/router.ts git:clean',
+          'src/app.ts - hot git:dirty',
+          'cursor: 6',
+        ].join('\n'),
+      },
+    }));
+
+    const result = await forwardToolCall({
+      toolName: 'fff_find_files',
+      params: { query: 'router' },
+      cwd: '/repo',
+      ensureDaemonRunning,
+      callPublicToolOverHttp,
+    });
+
+    expect(result.text).toBe('base_path: /repo\n\nsrc/router.ts\nsrc/app.ts');
+  });
+
   test('repairs common fff_grep alias fields before validation', async () => {
     const ensureDaemonRunning = vi.fn(async () => {});
     const callPublicToolOverHttp = vi.fn(async () => ({
