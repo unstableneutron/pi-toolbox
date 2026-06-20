@@ -4,6 +4,14 @@ import { Type } from 'typebox';
 export default function (pi: ExtensionAPI) {
   // Queue of commands to execute after agent turn ends
   let pendingCommand: { command: string; reason?: string } | null = null;
+  let pendingAnswerTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const clearPendingAnswerTimer = (): void => {
+    if (pendingAnswerTimer) {
+      clearTimeout(pendingAnswerTimer);
+      pendingAnswerTimer = undefined;
+    }
+  };
 
   // Tool to execute a command/message directly (self-invoke)
   pi.registerTool({
@@ -78,7 +86,9 @@ export default function (pi: ExtensionAPI) {
 
       // Special handling for /answer via event bus (needs context)
       if (command === '/answer') {
-        setTimeout(() => {
+        clearPendingAnswerTimer();
+        pendingAnswerTimer = setTimeout(() => {
+          pendingAnswerTimer = undefined;
           pi.events.emit('trigger:answer', ctx);
         }, 100);
       }
@@ -90,5 +100,10 @@ export default function (pi: ExtensionAPI) {
         }
       }
     }
+  });
+
+  pi.on('session_shutdown', async () => {
+    pendingCommand = null;
+    clearPendingAnswerTimer();
   });
 }

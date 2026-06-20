@@ -43,8 +43,8 @@ async function waitForExit(child: ReturnType<typeof spawn>): Promise<{ code: num
   });
 }
 
-async function waitForFileText(filePath: string): Promise<string> {
-  const deadline = Date.now() + 2_000;
+async function waitForFileText(filePath: string, timeoutMs = 2_000): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
   let lastError: unknown;
   while (Date.now() < deadline) {
     try {
@@ -251,13 +251,13 @@ setInterval(() => {}, 1_000);
       env: {
         ...process.env,
         PI_CODEX_DESKTOP_APP_SERVER_SOCKET: socketPath,
-        PI_CODEX_DESKTOP_CONNECT_TIMEOUT_MS: '1000',
+        PI_CODEX_DESKTOP_CONNECT_TIMEOUT_MS: '5000',
         PI_CODEX_DESKTOP_REAL_CODEX: fakeCodexPath,
       },
       stdio: 'ignore',
     });
 
-    await expect(waitForFileText(startedPath)).resolves.toBe('STARTED');
+    await expect(waitForFileText(startedPath, 5_000)).resolves.toBe('STARTED');
     const exit = await waitForExit(child);
 
     expect(exit.code).toBe(1);

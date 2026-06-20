@@ -547,6 +547,74 @@ exit 0
     fs.rmSync(rootDir, { recursive: true, force: true });
   });
 
+  test('child marker notification is cancelled on session shutdown', async () => {
+    vi.useFakeTimers();
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-native-split-child-shutdown-'));
+    const markerFile = path.join(rootDir, 'marker.json');
+    const appendEntry = vi.fn();
+    const notify = vi.fn();
+    const setLabel = vi.fn();
+    const eventHandlers = new Map<string, Function[]>();
+    const pi = {
+      appendEntry,
+      on: vi.fn((eventName: string, handler: Function) => {
+        const handlers = eventHandlers.get(eventName) ?? [];
+        handlers.push(handler);
+        eventHandlers.set(eventName, handlers);
+      }),
+      registerCommand: vi.fn(),
+      setLabel,
+    } as any;
+    const seed = {
+      customType: 'pi-native-split.split-fork.child-session',
+      data: {
+        v: 1,
+        id: 'boundary',
+        side: 'child',
+        kind: 'split-fork',
+        at: '2026-06-04T00:00:00.000Z',
+        parent: { id: 'parent', file: '/tmp/parent.jsonl', leaf: 'leaf' },
+        child: { id: 'child-session', file: '/tmp/child.jsonl' },
+        prompt: 'raw',
+        native: { terminal: 'kitty', parent: { window: '18' } },
+      },
+    };
+    fs.mkdirSync(rootDir, { recursive: true });
+    fs.writeFileSync(markerFile, JSON.stringify(seed), 'utf8');
+
+    await registerPiNativeSplit(pi, {
+      TERM_PROGRAM: 'kitty',
+      KITTY_WINDOW_ID: '19',
+      PI_NATIVE_SPLIT_MARKER_FILE: markerFile,
+    } as NodeJS.ProcessEnv);
+
+    const ctx = {
+      hasUI: true,
+      mode: 'tui',
+      sessionManager: {
+        getEntry: (id: string) =>
+          id === 'leaf'
+            ? { id, type: 'message', message: { role: 'user', content: 'source' } }
+            : undefined,
+        getLabel: () => undefined,
+        getLeafId: () => 'marker-entry',
+      },
+      ui: { notify },
+    };
+
+    await eventHandlers.get('session_start')![0]!({ type: 'session_start' }, ctx);
+    await eventHandlers.get('session_shutdown')![0]!(
+      { type: 'session_shutdown', reason: 'resume' },
+      ctx,
+    );
+
+    vi.advanceTimersByTime(100);
+
+    expect(notify).not.toHaveBeenCalled();
+
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  });
+
   test('child session_start marker records Herdr child environment details', async () => {
     vi.useFakeTimers();
     const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-native-split-child-herdr-'));

@@ -327,7 +327,15 @@ function installChildMarkerHandler(pi: ExtensionAPI, env: NodeJS.ProcessEnv): vo
   const markerFile = env[SPLIT_MARKER_ENV];
   if (!markerFile) return;
 
+  let notifyTimer: ReturnType<typeof setTimeout> | undefined;
+  const clearNotifyTimer = (): void => {
+    if (!notifyTimer) return;
+    clearTimeout(notifyTimer);
+    notifyTimer = undefined;
+  };
+
   pi.on?.('session_start', (_event, ctx) => {
+    clearNotifyTimer();
     const seed = readMarkerSeed(markerFile);
     cleanupTempPath(markerFile);
     if (!seed) return;
@@ -338,7 +346,14 @@ function installChildMarkerHandler(pi: ExtensionAPI, env: NodeJS.ProcessEnv): vo
     };
     pi.appendEntry(seed.customType, data);
     labelSplitMarker(pi, ctx, data);
-    setTimeout(() => notifySplitMarker(ctx, data), CHILD_MARKER_NOTIFY_DELAY_MS);
+    notifyTimer = setTimeout(() => {
+      notifyTimer = undefined;
+      notifySplitMarker(ctx, data);
+    }, CHILD_MARKER_NOTIFY_DELAY_MS);
+  });
+
+  pi.on?.('session_shutdown', () => {
+    clearNotifyTimer();
   });
 }
 

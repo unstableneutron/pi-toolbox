@@ -1,3 +1,5 @@
+import { homedir } from 'node:os';
+
 import { describe, expect, test, vi } from 'vitest';
 import {
   createFindToolDefinition,
@@ -668,17 +670,18 @@ describe('pi-fff-search extension', () => {
       overrideBuiltinFind: false,
     });
     const theme = createTheme();
+    const home = homedir();
 
     const rendered = tools.find((tool) => tool.name === 'grep')!.renderCall!(
       {
         pattern: 'getToolDefinition|toolCallId|definition.execute|execute\\(',
-        path: '/Users/thinh/.cache/aube/virtual-store/@earendil-works+pi-coding-agent@0.78.0_ws@8.21.0_zod@4.4.3_-954be6349bfa0d7d/node_modules/@earendil-works/pi-coding-agent/dist/core',
+        path: `${home}/.cache/aube/virtual-store/@earendil-works+pi-coding-agent@0.78.0_ws@8.21.0_zod@4.4.3_-954be6349bfa0d7d/node_modules/@earendil-works/pi-coding-agent/dist/core`,
         glob: '*.js',
         context: 4,
         limit: 200,
       },
       theme,
-      { cwd: '/Users/thinh/Projects/pi-toolbox' } as any,
+      { cwd: `${home}/Projects/pi-toolbox` } as any,
     );
 
     const lines = renderTextTrimmed(rendered, 96).split('\n');
