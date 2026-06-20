@@ -64,6 +64,7 @@ let generatedResumeRunId: string | undefined;
 let generatedResumeRunIdInUse = false;
 
 let herdrTitleSeq = Date.now() * 1000;
+const herdrAgentRenameInFlight = new Set<string>();
 
 const SUMMARY_MARKDOWN_THEME = {
   heading: (text: string) => `\x1b[1;36m${text}\x1b[0m`,
@@ -535,16 +536,17 @@ function nextHerdrTitleSeq(): number {
   return herdrTitleSeq;
 }
 
-function sendHerdrPaneTitle(socketPath: string, request: unknown): Promise<void> {
+function sendHerdrPaneRequest(socketPath: string, request: unknown): Promise<unknown> {
   return new Promise((resolve) => {
     let done = false;
     let socket: ReturnType<typeof createConnection> | undefined;
-    const finish = () => {
+    let responseBuffer = '';
+    const finish = (response?: unknown) => {
       if (done) return;
 
       done = true;
       socket?.destroy();
-      resolve();
+      resolve(response);
     };
 
     try {
@@ -556,33 +558,112 @@ function sendHerdrPaneTitle(socketPath: string, request: unknown): Promise<void>
 
     socket.on('error', finish);
     socket.on('connect', () => socket?.write(`${JSON.stringify(request)}\n`));
-    socket.on('data', finish);
+    socket.on('data', (data) => {
+      responseBuffer += data.toString();
+      const lineEnd = responseBuffer.indexOf('\n');
+      if (lineEnd === -1) return;
+
+      const line = responseBuffer.slice(0, lineEnd).trim();
+      try {
+        finish(JSON.parse(line) as unknown);
+      } catch {
+        finish();
+      }
+    });
     socket.on('end', finish);
     const timeout = setTimeout(finish, 500);
     timeout.unref?.();
   });
 }
 
-function reportHerdrPaneTitle(title: string): void {
+function getHerdrAgentLookup(response: unknown): { ok: true; name?: string } | { ok: false } {
+  if (!response || typeof response !== 'object' || 'error' in response) return { ok: false };
+
+  const result = (response as { result?: unknown }).result;
+  if (!result || typeof result !== 'object' || !('agent' in result)) return { ok: false };
+
+  const agent = (result as { agent?: unknown }).agent;
+  if (!agent || typeof agent !== 'object') return { ok: false };
+
+  const name = (agent as { name?: unknown }).name;
+  if (typeof name !== 'string') return { ok: true };
+
+  const trimmed = name.trim();
+  return trimmed ? { ok: true, name: trimmed } : { ok: true };
+}
+
+async function maybeRenameHerdrAgent(
+  socketPath: string,
+  paneId: string,
+  name: string,
+): Promise<void> {
+  const key = `${socketPath}:${paneId}`;
+  if (herdrAgentRenameInFlight.has(key)) return;
+
+  herdrAgentRenameInFlight.add(key);
+  try {
+    const current = await sendHerdrPaneRequest(socketPath, {
+      id: `${HERDR_TITLE_SOURCE}:agent-get:${nextHerdrTitleSeq()}`,
+      method: 'agent.get',
+      params: { target: paneId },
+    });
+
+    const lookup = getHerdrAgentLookup(current);
+    if (!lookup.ok || lookup.name) return;
+
+    await sendHerdrPaneRequest(socketPath, {
+      id: `${HERDR_TITLE_SOURCE}:agent-rename:${nextHerdrTitleSeq()}`,
+      method: 'agent.rename',
+      params: {
+        target: paneId,
+        name,
+      },
+    });
+  } catch {
+    // Herdr naming is best-effort and should never disrupt the Pi session.
+  } finally {
+    herdrAgentRenameInFlight.delete(key);
+  }
+}
+
+function reportHerdrPanePresentation(options: {
+  title: string;
+  displayAgent: string;
+  agentName?: string | null;
+}): void {
   const target = herdrPaneTitleTarget();
   if (!target) return;
 
+  const agentName = options.agentName?.trim();
+  if (agentName) {
+    void maybeRenameHerdrAgent(target.socketPath, target.paneId, agentName).catch(() => {});
+  }
+
   const seq = nextHerdrTitleSeq();
-  void sendHerdrPaneTitle(target.socketPath, {
+  void sendHerdrPaneRequest(target.socketPath, {
     id: `${HERDR_TITLE_SOURCE}:${seq}`,
     method: 'pane.report_metadata',
     params: {
       pane_id: target.paneId,
       source: HERDR_TITLE_SOURCE,
       applies_to_source: HERDR_PI_SOURCE,
-      title,
+      title: options.title,
+      display_agent: options.displayAgent,
       seq,
     },
   });
 }
 
-async function applyWindowName(pi: ExtensionAPI, name: string): Promise<void> {
-  reportHerdrPaneTitle(name);
+async function applyWindowName(
+  pi: ExtensionAPI,
+  name: string,
+  herdr?: { title?: string; displayAgent?: string; agentName?: string | null },
+): Promise<void> {
+  reportHerdrPanePresentation({
+    title: herdr?.title ?? name,
+    displayAgent: herdr?.displayAgent ?? name,
+    agentName: herdr?.agentName,
+  });
   if (await renameTmuxWindow(pi, name)) return;
   if (await renameZellijTab(pi, name)) return;
   renameTerminalTitle(name);
@@ -816,7 +897,11 @@ export default function smartSessionsExtension(pi: ExtensionAPI) {
     if (getStoredWindowName(ctx.sessionManager.getBranch()) !== summary.shortTitle) {
       pi.appendEntry(ENTRY_TYPE_WINDOW, { windowName: summary.shortTitle });
     }
-    await applyWindowName(pi, summary.shortTitle);
+    await applyWindowName(pi, summary.shortTitle, {
+      title: summary.longTitle,
+      displayAgent: summary.shortTitle,
+      agentName: ctx.sessionManager.getLeafId(),
+    });
     writeResumeHint(ctx, summary.longTitle);
   }
 
@@ -844,7 +929,11 @@ export default function smartSessionsExtension(pi: ExtensionAPI) {
       pi.setSessionName(longTitle);
     }
     if (shortTitle) {
-      await applyWindowName(pi, shortTitle);
+      await applyWindowName(pi, shortTitle, {
+        title: longTitle ?? shortTitle,
+        displayAgent: shortTitle,
+        agentName: ctx.sessionManager.getLeafId(),
+      });
     }
     writeResumeHint(ctx, longTitle);
   }
