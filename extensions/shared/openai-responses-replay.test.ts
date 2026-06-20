@@ -72,6 +72,27 @@ describe('shared OpenAI Responses replay helpers', () => {
 
     expect(responsesTextSignatureItemId(signature)).toBe('msg_1');
     expect(responsesTextSignaturePhase(signature)).toBe('commentary');
-    expect(responsesTextSignatureItemId('legacy_msg')).toBe('legacy_msg');
+  });
+
+  test('ignores non-Responses legacy text signatures', () => {
+    const legacySignature = 'AY89a19o'.repeat(54);
+
+    expect(responsesTextSignatureItemId(legacySignature)).toBeUndefined();
+    expect(responsesTextSignatureItemId('legacy_msg')).toBeUndefined();
+  });
+
+  test('maps long dependent message and function-call item ids to stable short ids', () => {
+    const state = createResponsesReplayState();
+    const longMessageId = `msg_${'x'.repeat(100)}`;
+    const longFunctionItemId = `fc_${'y'.repeat(100)}`;
+
+    expect(responsesDependentItemId(state, longMessageId)).toMatch(/^msg_pi_sig_[a-f0-9]{32}$/);
+    expect(
+      responsesFunctionCallInput({
+        id: `call_1|${longFunctionItemId}`,
+        name: 'read',
+        arguments: { path: 'README.md' },
+      }),
+    ).toMatchObject({ id: expect.stringMatching(/^fc_pi_sig_[a-f0-9]{32}$/), call_id: 'call_1' });
   });
 });

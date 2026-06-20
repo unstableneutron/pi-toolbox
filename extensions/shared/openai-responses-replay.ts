@@ -1,4 +1,13 @@
+import { createHash } from 'node:crypto';
+
 type ResponsesInputItem = Record<string, any>;
+
+const OPENAI_RESPONSES_ITEM_ID_MAX_LENGTH = 64;
+
+function stableShortResponsesItemId(id: string, prefix: string): string {
+  if (Array.from(id).length <= OPENAI_RESPONSES_ITEM_ID_MAX_LENGTH) return id;
+  return `${prefix}_${createHash('sha256').update(id).digest('hex').slice(0, 32)}`;
+}
 
 interface ResponsesReplayState {
   hasUnreplayableReasoningBeforeItem: boolean;
@@ -72,7 +81,9 @@ export function responsesDependentItemId(
   state: Pick<ResponsesReplayState, 'hasUnreplayableReasoningBeforeItem'>,
   id: string | undefined,
 ): string | undefined {
-  return state.hasUnreplayableReasoningBeforeItem ? undefined : id;
+  return state.hasUnreplayableReasoningBeforeItem || !id
+    ? undefined
+    : stableShortResponsesItemId(id, 'msg_pi_sig');
 }
 
 export function splitResponsesToolCallId(id: string): { callId: string; itemId?: string } {
@@ -87,7 +98,9 @@ export function responsesFunctionCallInput(
   const { callId, itemId } = splitResponsesToolCallId(block.id);
   return {
     type: 'function_call',
-    ...(options.includeItemId === false ? {} : { id: itemId }),
+    ...(options.includeItemId === false || !itemId
+      ? {}
+      : { id: stableShortResponsesItemId(itemId, 'fc_pi_sig') }),
     call_id: callId,
     name: block.name,
     arguments: JSON.stringify(block.arguments),
@@ -106,15 +119,14 @@ function parseResponsesTextSignature(
     try {
       const parsed = JSON.parse(signature) as { v?: number; id?: unknown; phase?: unknown };
       if (parsed.v === 1 && typeof parsed.id === 'string') {
-        return typeof parsed.phase === 'string'
-          ? { id: parsed.id, phase: parsed.phase }
-          : { id: parsed.id };
+        const id = stableShortResponsesItemId(parsed.id, 'msg_pi_sig');
+        return typeof parsed.phase === 'string' ? { id, phase: parsed.phase } : { id };
       }
     } catch {
-      // Fall through to legacy plain-id signatures.
+      return undefined;
     }
   }
-  return { id: signature };
+  return undefined;
 }
 
 export function responsesTextSignatureItemId(signature: string | undefined): string | undefined {

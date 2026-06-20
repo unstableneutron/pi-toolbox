@@ -80,6 +80,41 @@ describe('shared provider error classification', () => {
     expect(isNonRetryableAssistantProviderError(message)).toBe(true);
   });
 
+  test('classifies malformed Responses input item ids as terminal request errors', () => {
+    const errorMessage = JSON.stringify({
+      type: 'error',
+      error: {
+        type: 'invalid_request_error',
+        message:
+          "[ApiIdParam] [input[33].id] [string_above_max_length] Invalid 'input[33].id': string too long. Expected a string with maximum length 64, but got a string with length 428 instead.",
+      },
+      status: 400,
+    });
+    const message = {
+      role: 'assistant',
+      stopReason: 'error',
+      errorMessage,
+      diagnostics: [
+        {
+          type: 'openai_websocket_transport',
+          details: {
+            finalTransport: 'websocket',
+            outcome: 'transport_error',
+            replayUnsafeEventSeen: false,
+          },
+        },
+      ],
+    };
+
+    expect(classifyOpenAIResponsesFailure({ message: errorMessage })).toMatchObject({
+      reason: 'invalidRequest',
+      retryable: false,
+      category: 'terminal_config_error',
+    });
+    expect(classifyRetryableAssistantProviderError(message)).toBeUndefined();
+    expect(isNonRetryableAssistantProviderError(message)).toBe(true);
+  });
+
   test('classifies retryable provider error strings with stable reasons', () => {
     expect(
       classifyRetryableProviderError(

@@ -10,6 +10,7 @@ export type ProviderFailureReason =
   | RetryableProviderErrorReason
   | 'deploymentMissing'
   | 'invalidModel'
+  | 'invalidRequest'
   | 'authError'
   | 'rateLimited';
 
@@ -110,6 +111,15 @@ export function classifyOpenAIResponsesFailure(
 
   if (text.includes('invalid model name passed') || text.includes('model_not_found')) {
     return terminal('invalidModel', 'terminal_config_error');
+  }
+
+  if (
+    text.includes('invalid_request_error') &&
+    text.includes('string_above_max_length') &&
+    text.includes('input[') &&
+    text.includes('].id')
+  ) {
+    return terminal('invalidRequest', 'terminal_config_error');
   }
 
   if (status === 401 || status === 403) return terminal('authError', 'terminal_auth_error');

@@ -778,6 +778,29 @@ describe('body and continuation helpers', () => {
     expect(body.input).toEqual([expect.objectContaining({ role: 'user' })]);
   });
 
+  it('ignores long non-Responses text signatures and uses fallback input item ids', () => {
+    const legacyGeminiTextSignature = 'AY89a19o'.repeat(54);
+    const body = buildResponsesBody(makeModel(), {
+      messages: [
+        {
+          role: 'assistant',
+          content: [
+            {
+              type: 'text',
+              text: 'Previous answer from another provider.',
+              textSignature: legacyGeminiTextSignature,
+            },
+          ],
+          timestamp: 1,
+          stopReason: 'stop',
+        } as any,
+      ],
+    });
+
+    expect(body.input).toHaveLength(1);
+    expect((body.input[0] as any).id).toBe('msg_pi_0_0');
+  });
+
   it('omits max_output_tokens unless a caller explicitly requests a cap', () => {
     const body = buildResponsesBody(
       makeModel({ maxTokens: 123 }),
