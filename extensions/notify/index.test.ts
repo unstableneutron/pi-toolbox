@@ -315,6 +315,43 @@ describe('notify extension', () => {
     expect(writeSpy).not.toHaveBeenCalled();
   });
 
+  test('cancels a pending notification on session shutdown before the old ctx becomes stale', async () => {
+    vi.useFakeTimers();
+    delete process.env.KITTY_WINDOW_ID;
+
+    const harness = createHarness();
+    const writeSpy = installWriteSpy();
+    let stale = false;
+    const ctx = {
+      signal: harness.ctx.signal,
+      hasUI: true,
+      get sessionManager() {
+        if (stale) {
+          throw new Error('This extension ctx is stale after session replacement or reload');
+        }
+        return harness.ctx.sessionManager;
+      },
+    };
+
+    await harness.handlers.get('turn_start')?.({ type: 'turn_start', timestamp: 1 }, ctx);
+    await harness.handlers.get('agent_end')?.(
+      {
+        type: 'agent_end',
+        messages: [{ role: 'assistant', content: [{ type: 'text', text: 'Done' }] }],
+      },
+      ctx,
+    );
+
+    await harness.handlers.get('session_shutdown')?.(
+      { type: 'session_shutdown', reason: 'resume' },
+      ctx,
+    );
+    stale = true;
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(writeSpy).not.toHaveBeenCalled();
+  });
+
   test('strips markdown punctuation and OSC hyperlink escapes before notifying', async () => {
     vi.useFakeTimers();
     delete process.env.KITTY_WINDOW_ID;

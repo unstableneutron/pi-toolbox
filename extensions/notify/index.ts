@@ -389,6 +389,12 @@ export default function (pi: ExtensionAPI) {
     clearSentNotification(ctx);
   });
 
+  pi.on('session_shutdown', async () => {
+    lastTurnStart = undefined;
+    interactionEpoch += 1;
+    clearPendingNotification();
+  });
+
   pi.on('turn_start', async (event: TurnStartEventLike, ctx) => {
     if (!isUIContext(ctx)) return;
     lastTurnStart = typeof event.timestamp === 'number' ? event.timestamp : Date.now();
