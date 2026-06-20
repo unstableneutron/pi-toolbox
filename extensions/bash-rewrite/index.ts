@@ -20,6 +20,8 @@ export const BASH_REWRITE_API_VERSION = 1;
 
 const BUILTIN_TOOL_TIMEOUT_MS = 10_000;
 const PASS_THROUGH_EXPENSIVE_TIMEOUT_MS = 60_000;
+const BUILTIN_READ_PROVIDER_ID = 'bash-rewrite.builtin-read';
+const BUILTIN_LS_PROVIDER_ID = 'bash-rewrite.builtin-ls';
 const EXPENSIVE_BASH_TOKENS: ReadonlySet<string> = new Set([
   'grep',
   'rg',
@@ -38,6 +40,8 @@ const EXPENSIVE_BASH_TOKEN_PATTERN = new RegExp(
 
 type ToolContentEntry = { type: 'text'; text: string } | { type: string; [key: string]: unknown };
 type BashTool = ReturnType<typeof createBashToolDefinition>;
+type ReadTool = ReturnType<typeof createReadToolDefinition>;
+type LsTool = ReturnType<typeof createLsToolDefinition>;
 type BashExecuteParams = Parameters<BashTool['execute']>;
 type BashExecuteResult = Awaited<ReturnType<BashTool['execute']>>;
 
@@ -83,6 +87,16 @@ export interface BashRewriteProvider {
 interface ProviderCollectorPayload {
   apiVersion: number;
   register(provider: BashRewriteProvider): void;
+}
+
+interface CachedTool<TTool> {
+  cwd: string;
+  tool: TTool;
+}
+
+interface BuiltinResultRenderCache {
+  read?: CachedTool<ReadTool>;
+  ls?: CachedTool<LsTool>;
 }
 
 function withBuiltinToolTimeout(
@@ -183,7 +197,7 @@ function createBuiltinProviders(activeTools: Set<string> | null): BashRewritePro
   const providers: BashRewriteProvider[] = [];
   if (isToolActive(activeTools, 'read')) {
     providers.push({
-      id: 'bash-rewrite.builtin-read',
+      id: BUILTIN_READ_PROVIDER_ID,
       priority: 0,
       tools: ['read'],
       async execute(decision, runtime) {
@@ -215,7 +229,7 @@ function createBuiltinProviders(activeTools: Set<string> | null): BashRewritePro
   }
   if (isToolActive(activeTools, 'ls')) {
     providers.push({
-      id: 'bash-rewrite.builtin-ls',
+      id: BUILTIN_LS_PROVIDER_ID,
       priority: 0,
       tools: ['ls'],
       async execute(decision, runtime) {
@@ -300,6 +314,64 @@ function renderGenericPreview(
   return new Text(`${title}${tool}(${renderParamsForSignature(decision.params)})`, 0, 0);
 }
 
+function getRenderCwd(context: unknown): string {
+  const cwd = (context as { cwd?: unknown } | undefined)?.cwd;
+  return typeof cwd === 'string' ? cwd : process.cwd();
+}
+
+function getCachedReadRenderTool(cache: BuiltinResultRenderCache, cwd: string): ReadTool {
+  if (!cache.read || cache.read.cwd !== cwd) {
+    cache.read = { cwd, tool: createReadToolDefinition(cwd) };
+  }
+  return cache.read.tool;
+}
+
+function getCachedLsRenderTool(cache: BuiltinResultRenderCache, cwd: string): LsTool {
+  if (!cache.ls || cache.ls.cwd !== cwd) {
+    cache.ls = { cwd, tool: createLsToolDefinition(cwd) };
+  }
+  return cache.ls.tool;
+}
+
+function renderBuiltinRewriteResult(
+  pi: ExtensionAPI,
+  details: Record<string, unknown>,
+  result: unknown,
+  options: unknown,
+  theme: { fg: (...args: any[]) => string; bold?: (text: string) => string },
+  context: Record<string, unknown>,
+  cache: BuiltinResultRenderCache,
+): Component | null | undefined {
+  const providerId = details.rewriteProviderId;
+  let tool: 'read' | 'ls' | null = null;
+  if (providerId === BUILTIN_READ_PROVIDER_ID) tool = 'read';
+  else if (providerId === BUILTIN_LS_PROVIDER_ID) tool = 'ls';
+  else return undefined;
+
+  const activeTools = getActiveToolSet(pi);
+  if (!isToolActive(activeTools, tool)) return null;
+
+  const cwd = getRenderCwd(context);
+  if (tool === 'read') {
+    return (
+      getCachedReadRenderTool(cache, cwd).renderResult?.(
+        result as never,
+        options as never,
+        theme as never,
+        context as never,
+      ) ?? null
+    );
+  }
+  return (
+    getCachedLsRenderTool(cache, cwd).renderResult?.(
+      result as never,
+      options as never,
+      theme as never,
+      context as never,
+    ) ?? null
+  );
+}
+
 function routeDetails(args: {
   decision: RewriteDecision;
   provider: BashRewriteProvider;
@@ -351,6 +423,7 @@ function renderBashRewriteResult(
   options: unknown,
   theme: { fg: (...args: any[]) => string; bold?: (text: string) => string },
   context: unknown,
+  builtinResultRenderCache: BuiltinResultRenderCache,
 ): Component | null {
   if (!result || typeof result !== 'object') return null;
   const details = (result as { details?: unknown }).details;
@@ -358,11 +431,6 @@ function renderBashRewriteResult(
   const providerId = (details as { rewriteProviderId?: unknown }).rewriteProviderId;
   const routedVia = (details as { routedVia?: unknown }).routedVia;
   if (typeof providerId !== 'string' && typeof routedVia !== 'string') return null;
-  const providers = getProviders(pi);
-  const provider =
-    typeof providerId === 'string'
-      ? providers.find((candidate) => candidate.id === providerId)
-      : providers.find((candidate) => routedVia === `bash-to-${candidate.tools[0]}`);
   const rewriteCwd = (details as { rewriteCwd?: unknown }).rewriteCwd;
   const rewriteToParams = (details as { rewriteToParams?: unknown }).rewriteToParams;
   const renderContext = {
@@ -372,11 +440,28 @@ function renderBashRewriteResult(
       ? { args: rewriteToParams }
       : {}),
   };
+  const builtinResult = renderBuiltinRewriteResult(
+    pi,
+    details as Record<string, unknown>,
+    result,
+    options,
+    theme,
+    renderContext,
+    builtinResultRenderCache,
+  );
+  if (builtinResult !== undefined) return builtinResult;
+
+  const providers = getProviders(pi);
+  const provider =
+    typeof providerId === 'string'
+      ? providers.find((candidate) => candidate.id === providerId)
+      : providers.find((candidate) => routedVia === `bash-to-${candidate.tools[0]}`);
   return provider?.renderResult?.(result, options, theme, renderContext) ?? null;
 }
 
 export default function bashRewriteExtension(pi: ExtensionAPI) {
   const bashTemplate = createBashToolDefinition(process.cwd());
+  const builtinResultRenderCache: BuiltinResultRenderCache = {};
 
   pi.registerTool({
     ...bashTemplate,
@@ -388,7 +473,7 @@ export default function bashRewriteExtension(pi: ExtensionAPI) {
     },
     renderResult(result, options, theme, context) {
       return (
-        renderBashRewriteResult(pi, result, options, theme, context) ??
+        renderBashRewriteResult(pi, result, options, theme, context, builtinResultRenderCache) ??
         bashTemplate.renderResult!(result as never, options, theme, context)
       );
     },

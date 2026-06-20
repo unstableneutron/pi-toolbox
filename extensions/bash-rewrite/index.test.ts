@@ -130,6 +130,33 @@ describe('bash-rewrite orchestrator', () => {
     );
   });
 
+  test('renders builtin read rewrite results without collecting external providers', () => {
+    const { tools, pi } = createHarness();
+    let collectCount = 0;
+    pi.events.on('bash-rewrite:collect-providers', () => {
+      collectCount += 1;
+    });
+
+    const result = {
+      content: [{ type: 'text' as const, text: 'large output that should stay collapsed' }],
+      details: {
+        routedVia: 'bash-to-read',
+        rewriteProviderId: 'bash-rewrite.builtin-read',
+        rewriteToParams: { path: 'package.json' },
+      },
+    };
+
+    const rendered = tools[0].renderResult(
+      result,
+      { expanded: false, isPartial: false },
+      { fg: (_color: string, text: string) => text, bold: (text: string) => text },
+      { cwd: '/repo', showImages: false, isError: false, state: {} },
+    );
+
+    expect(rendered.render(80)).toEqual([]);
+    expect(collectCount).toBe(0);
+  });
+
   test('passes through rewriteable commands when no provider for the target tool is loaded', async () => {
     const { tools } = createHarness(['bash', 'read', 'ls']);
 

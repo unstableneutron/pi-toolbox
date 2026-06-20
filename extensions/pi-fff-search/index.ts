@@ -11,24 +11,6 @@ import {
   defineTool,
   type ExtensionAPI,
 } from '@earendil-works/pi-coding-agent';
-import {
-  PUBLIC_TOOL_DEFINITIONS,
-  callPublicToolOverHttp as defaultCallPublicToolOverHttp,
-  ensureDaemonRunning as defaultEnsureDaemonRunning,
-  ENABLE_SEARCH_TERMS,
-  findFilesInputSchema,
-  grepInputSchema,
-  normalizePublicToolInput,
-  resolveWithinFromCaller,
-  type PublicCompactFindFilesResult,
-  type PublicCompactGrepResult,
-  type PublicCompactSearchTermsResult,
-  type PublicToolDefinition,
-  type PublicToolName,
-  type PublicToolRequest,
-  type PublicToolResult,
-  type SearchCoordinatorResult,
-} from 'fff-router';
 import { clampMatchText } from './match-heuristics';
 import { DEFAULT_EXPAND_HINT_SUFFIXES, chooseOptionalSuffix } from '../shared/tui-width';
 import { TOOL_REWRITE_ARROW } from '../shared/rewrite-label';
@@ -46,6 +28,105 @@ import {
   shortenDisplayPath,
 } from './rendering';
 
+type PublicToolName = 'fff_find_files' | 'fff_search_terms' | 'fff_grep';
+
+type PublicToolDefinition<Schema extends TSchema> = {
+  name: PublicToolName;
+  description: string;
+  snippet: string;
+  inputSchema: Schema;
+};
+
+type PublicFindFilesRequest = {
+  tool: 'fff_find_files';
+  query: string;
+  within?: string[];
+  glob?: string;
+  extensions: string[];
+  excludePaths: string[];
+  limit: number;
+  cursor: null;
+  outputMode: 'compact' | 'json';
+};
+
+type PublicSearchTermsRequest = {
+  tool: 'fff_search_terms';
+  terms: string[];
+  within?: string[];
+  glob?: string;
+  extensions: string[];
+  excludePaths: string[];
+  contextLines: number;
+  limit: number;
+  cursor: null;
+  outputMode: 'compact' | 'json';
+};
+
+type PublicGrepRequest = {
+  tool: 'fff_grep';
+  patterns: string[];
+  literal: boolean;
+  within?: string[];
+  glob?: string;
+  caseSensitive: boolean;
+  extensions: string[];
+  excludePaths: string[];
+  contextLines: number;
+  limit: number;
+  cursor: null;
+  outputMode: 'compact' | 'json';
+};
+
+type PublicToolRequest = PublicFindFilesRequest | PublicSearchTermsRequest | PublicGrepRequest;
+
+type PublicCompactFindFilesResult = {
+  mode: 'compact';
+  base_path: string;
+  items: Array<{ path: string }>;
+};
+
+type PublicCompactSearchTermsResult = {
+  mode: 'compact';
+  base_path: string;
+  items: Array<{ path: string; line: number; text: string }>;
+};
+
+type PublicRenderedTextResult = {
+  mode: 'compact';
+  base_path: string;
+  text: string;
+};
+
+type PublicJsonResult = {
+  mode: 'json';
+  [key: string]: unknown;
+};
+
+type PublicToolResult =
+  | PublicCompactFindFilesResult
+  | PublicCompactSearchTermsResult
+  | PublicRenderedTextResult
+  | PublicJsonResult;
+
+type PublicError = { code: string; message: string };
+
+type Result<Value> = { ok: true; value: Value } | { ok: false; error: PublicError };
+
+type SearchCoordinatorResult = Result<PublicToolResult>;
+
+type FffRouterRuntime = {
+  ensureDaemonRunning: () => Promise<void>;
+  callPublicToolOverHttp: (request: PublicToolRequest) => Promise<SearchCoordinatorResult>;
+  normalizePublicToolInput: (
+    toolName: PublicToolName,
+    input: Record<string, unknown>,
+  ) => Result<PublicToolRequest>;
+  resolveWithinFromCaller: (args: {
+    callerCwd: string;
+    within?: string | null;
+  }) => Promise<Result<{ resolvedWithin: string }>>;
+};
+
 const SEARCH_TOOL_PROMPT = `For repository search, prefer \`fff_*\` tools first:
 
 - \`fff_find_files\` — fuzzy file/path search; keep queries short and let \`glob\`, \`extensions\`, and \`exclude_paths\` do the narrowing
@@ -61,6 +142,7 @@ These tools return compact text with a \`base_path:\` header. \`fff_find_files\`
 
 Fall back to builtin or shell tools only when \`fff_*\` is unavailable, failing, awkward for the query, or outside the active workspace or scope. Briefly say why when falling back.`;
 
+const ENABLE_SEARCH_TERMS = false;
 const HIDE_SEARCH_TERMS = !ENABLE_SEARCH_TERMS;
 const GLOB_META_PATTERN = /[*?[\]{}!]/;
 const GLOB_META_SEQUENCE_PATTERN = /[*?[\]{}!]+/g;
@@ -100,6 +182,101 @@ const COMPACT_READ_RESOURCE_FILE_NAMES = new Set([
   'CLAUDE.md',
   'CLAUDE.MD',
 ]);
+
+const nonEmptyStringSchema = { type: 'string', minLength: 1 } as TSchema;
+const nonNegativeIntegerSchema = { type: 'integer', minimum: 0 } as TSchema;
+const stringListSchema = {
+  type: 'array',
+  items: nonEmptyStringSchema,
+} as TSchema;
+const withinSchema = {
+  anyOf: [nonEmptyStringSchema, { type: 'array', items: nonEmptyStringSchema, minItems: 1 }],
+} as TSchema;
+const outputModeSchema = {
+  anyOf: [
+    { type: 'string', const: 'compact' },
+    { type: 'string', const: 'json' },
+  ],
+} as TSchema;
+const cursorSchema = { type: 'null' } as TSchema;
+
+const findFilesInputSchema = {
+  type: 'object',
+  required: ['query'],
+  properties: {
+    query: nonEmptyStringSchema,
+    within: withinSchema,
+    glob: nonEmptyStringSchema,
+    extensions: stringListSchema,
+    exclude_paths: stringListSchema,
+    limit: nonNegativeIntegerSchema,
+    cursor: cursorSchema,
+    output_mode: outputModeSchema,
+  },
+  additionalProperties: false,
+} as TSchema;
+
+const grepInputSchema = {
+  type: 'object',
+  required: ['patterns', 'literal'],
+  properties: {
+    patterns: { type: 'array', items: nonEmptyStringSchema, minItems: 1 },
+    literal: {
+      type: 'boolean',
+      description:
+        'Required. If true, patterns are matched as literal text (safe for code, quotes, whitespace, and regex metacharacters). If false, patterns are regex. This tool does not guess; set it explicitly.',
+    },
+    within: withinSchema,
+    glob: nonEmptyStringSchema,
+    case_sensitive: { type: 'boolean' },
+    extensions: stringListSchema,
+    exclude_paths: stringListSchema,
+    context_lines: nonNegativeIntegerSchema,
+    limit: nonNegativeIntegerSchema,
+    cursor: cursorSchema,
+    output_mode: outputModeSchema,
+  },
+  additionalProperties: false,
+} as TSchema;
+
+const PUBLIC_TOOL_DEFINITIONS: Array<PublicToolDefinition<TSchema>> = [
+  {
+    name: 'fff_find_files',
+    description:
+      'Fuzzy file search by name/path under an already-resolved within scope. Use it when you are exploring a topic or looking for files, not when you already have a specific code identifier. `within` accepts a single absolute path or an array of absolute paths (multi-path unions the results — same semantics as passing multiple roots to `fd`). Keep queries short and let glob, extensions, and exclude_paths do the path narrowing.',
+    snippet:
+      '{"query":"openssl header","within":"/opt/homebrew/lib","glob":"**/*.h","exclude_paths":["pkgconfig"]}',
+    inputSchema: findFilesInputSchema,
+  },
+  {
+    name: 'fff_grep',
+    description:
+      'Search file contents under an already-resolved within scope. `literal` is REQUIRED: set literal=true for identifier searches, code fragments, or any string containing whitespace, quotes, or punctuation where regex interpretation is unwanted; set literal=false only when you need regex features (anchors, character classes, quantifiers, alternation). This tool does not guess. Use `patterns` for one or more terms; multiple entries use OR semantics. `within` accepts a single absolute path or an array of absolute paths — use the array form to replace shell patterns like `grep PAT file1 file2 dirA dirB` in one call (all entries must share a routing target). Use `glob` / `extensions` / `exclude_paths` to prefilter files aggressively.',
+    snippet:
+      '{"patterns":["ActorAuth","actor_auth","PopulatedActorAuth"],"literal":true,"within":["crates/portl-cli/Cargo.toml","Cargo.toml"]}',
+    inputSchema: grepInputSchema,
+  },
+];
+
+let fffRouterRuntimePromise: Promise<FffRouterRuntime> | null = null;
+const FFF_ROUTER_MODULE_NAME: string = 'fff-router';
+
+function getFffRouterRuntime(): Promise<FffRouterRuntime> {
+  fffRouterRuntimePromise ??= import(FFF_ROUTER_MODULE_NAME) as Promise<FffRouterRuntime>;
+  return fffRouterRuntimePromise;
+}
+
+async function defaultEnsureDaemonRunning(): Promise<void> {
+  const { ensureDaemonRunning } = await getFffRouterRuntime();
+  await ensureDaemonRunning();
+}
+
+async function defaultCallPublicToolOverHttp(
+  request: PublicToolRequest,
+): Promise<SearchCoordinatorResult> {
+  const { callPublicToolOverHttp } = await getFffRouterRuntime();
+  return callPublicToolOverHttp(request);
+}
 
 function stripSchemaFields(schema: TSchema, hiddenFields: string[]): TSchema {
   const hidden = new Set(hiddenFields);
@@ -249,9 +426,7 @@ function parseRenderedTextMatches(text: string): RenderedTextMatch[] {
   return matches;
 }
 
-function formatTextMatchResult(
-  result: PublicCompactSearchTermsResult | PublicCompactGrepResult,
-): string {
+function formatTextMatchResult(result: PublicCompactSearchTermsResult): string {
   const body =
     result.items.length > 0
       ? result.items
@@ -286,7 +461,7 @@ function formatToolText(toolName: PublicToolName, result: PublicToolResult): str
     case 'fff_grep':
       return isRenderedTextResult(result)
         ? formatRenderedTextMatchResult(result)
-        : formatTextMatchResult(result as PublicCompactSearchTermsResult | PublicCompactGrepResult);
+        : formatTextMatchResult(result as PublicCompactSearchTermsResult);
   }
 }
 
@@ -1994,17 +2169,18 @@ export function createPiFffSearchExtension(options: CreatePiFffSearchExtensionOp
   const createBuiltInLs = options.createBuiltInLsTool ?? createLsToolDefinition;
   const findGitRootForReadFallback =
     options.findGitRootForReadFallback ?? defaultFindGitRootForReadFallback;
-  const builtInTemplates =
-    overrideBuiltinRead || overrideBuiltinGrep || overrideBuiltinFind
-      ? {
-          read: createBuiltInRead(process.cwd()),
-          grep: createBuiltInGrep(process.cwd()),
-          find: createBuiltInFind(process.cwd()),
-          ls: createBuiltInLs(process.cwd()),
-        }
-      : null;
 
   return function piFffSearchExtension(pi: ExtensionAPI) {
+    const builtInTemplates =
+      overrideBuiltinRead || overrideBuiltinGrep || overrideBuiltinFind
+        ? {
+            read: createBuiltInRead(process.cwd()),
+            grep: createBuiltInGrep(process.cwd()),
+            find: createBuiltInFind(process.cwd()),
+            ls: createBuiltInLs(process.cwd()),
+          }
+        : null;
+
     const unregisterBashRewriteProvider =
       pi.events?.on?.('bash-rewrite:collect-providers', (payload: unknown) => {
         if (!payload || typeof payload !== 'object') return;
@@ -2610,6 +2786,7 @@ export async function forwardToolCall(args: {
     publicRequest: PublicToolRequest;
   }) => Promise<RunLocalFallbackResult>;
 }): Promise<{ text: string; details: Record<string, unknown> }> {
+  const { normalizePublicToolInput, resolveWithinFromCaller } = await getFffRouterRuntime();
   const repairedParams = normalizeFffToolParams(args.toolName, args.params);
   const resolvedWithin = await resolveWithinFromCaller({
     callerCwd: args.cwd,
