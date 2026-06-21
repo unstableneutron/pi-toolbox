@@ -68,6 +68,7 @@ interface SessionManagerLike {
   getLeafId?: () => string | undefined;
   branch?: (entryId: string) => void;
   appendCustomEntry?: (customType: string, data: Record<string, unknown>) => void;
+  rewriteEntries?: () => void | Promise<void>;
   _buildIndex?: () => void;
   _rewriteFile?: () => void;
 }
@@ -106,6 +107,18 @@ export interface PendingRecovery {
   expectedLeafId?: string;
   details?: RetryRecoveryMessageDetails;
 }
+
+export interface ReviewModelAuth {
+  ok: boolean;
+  apiKey?: string;
+  headers?: { [key: string]: string };
+  error?: string;
+}
+
+export type ResolveReviewModelAuth = (
+  ctx: ExtensionContext,
+  model: Model<any>,
+) => Promise<ReviewModelAuth>;
 
 interface RetryableTerminalLeaf {
   kind: PendingRecovery['kind'];
@@ -706,6 +719,41 @@ function appendDebugEntry(_session: PatchedSessionLike, _data: { [key: string]: 
   // Session-persisted debug logging intentionally disabled.
 }
 
+function persistInPlaceSessionMutations(sessionManager: SessionManagerLike | undefined): void {
+  sessionManager?._buildIndex?.();
+  if (sessionManager?._rewriteFile) {
+    sessionManager._rewriteFile();
+    return;
+  }
+  void sessionManager?.rewriteEntries?.();
+}
+
+async function resolveReviewModelAuth(
+  ctx: ExtensionContext,
+  model: Model<any>,
+): Promise<ReviewModelAuth> {
+  const registry = ctx.modelRegistry as unknown as {
+    getApiKeyAndHeaders?: (model: Model<any>) => Promise<ReviewModelAuth>;
+    getApiKey?: (model: Model<any>, sessionId?: string) => Promise<string | undefined>;
+  };
+
+  if (typeof registry.getApiKeyAndHeaders === 'function') {
+    return registry.getApiKeyAndHeaders(model);
+  }
+
+  if (typeof registry.getApiKey !== 'function') {
+    return { ok: false, error: 'Model registry cannot resolve API keys' };
+  }
+
+  try {
+    const apiKey = await registry.getApiKey(model, ctx.sessionManager.getSessionId());
+    if (!apiKey || apiKey === 'N/A') return { ok: false, error: 'Missing API key' };
+    return { ok: true, apiKey, headers: model.headers };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 export function sanitizeEncryptedReasoningOnCurrentBranch(session: PatchedSessionLike): {
   sanitizedMessages: number;
   sanitizedBlocks: number;
@@ -763,8 +811,7 @@ export function sanitizeEncryptedReasoningOnCurrentBranch(session: PatchedSessio
   }
 
   if (0 < sanitizedBlocks) {
-    sessionManager?._buildIndex?.();
-    sessionManager?._rewriteFile?.();
+    persistInPlaceSessionMutations(sessionManager);
   }
 
   return { sanitizedMessages, sanitizedBlocks };
@@ -862,8 +909,7 @@ function sanitizeNativeCompactionReplayMetadataOnCurrentBranch(session: PatchedS
   }
 
   if (0 < sanitizedItems) {
-    sessionManager?._buildIndex?.();
-    sessionManager?._rewriteFile?.();
+    persistInPlaceSessionMutations(sessionManager);
   }
 
   return { sanitizedCompactions, sanitizedItems };
@@ -1254,6 +1300,7 @@ export async function handleRefusalRecovery(input: {
     transcriptText: string;
     signal?: AbortSignal;
   }) => Promise<{ reason: string; rewrite: string } | undefined>;
+  resolveReviewModelAuth?: ResolveReviewModelAuth;
   sendUserMessage: (content: string, details?: RetryRecoveryMessageDetails) => void | Promise<void>;
   dispatchMode?: 'pending' | 'immediate';
 }): Promise<void> {
@@ -1533,7 +1580,10 @@ export async function handleRefusalRecovery(input: {
     });
     applyActiveRecoveryStatus(sessionId, ui);
 
-    const auth = await input.ctx.modelRegistry.getApiKeyAndHeaders(reviewModel);
+    const auth = await (input.resolveReviewModelAuth ?? resolveReviewModelAuth)(
+      input.ctx,
+      reviewModel,
+    );
     if (!auth.ok) {
       appendRefusalReviewFailure(input.patchedSession, {
         attempt: nextRewriteAttempt,

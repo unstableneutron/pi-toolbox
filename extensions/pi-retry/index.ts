@@ -1105,11 +1105,43 @@ export function getAbortListenerBindingCount(): number {
   return abortListenerBySessionId.size;
 }
 
+export interface CreatePiRetryExtensionOptions {
+  loadAgentSessionModule?: LoadAgentSessionModule;
+  installAgentSessionPatch?: boolean;
+  shouldPromptOnSessionStart?: (event: Record<string, unknown>) => boolean;
+}
+
+function normalizeCreateOptions(
+  input: LoadAgentSessionModule | CreatePiRetryExtensionOptions = {},
+): Required<Pick<CreatePiRetryExtensionOptions, 'installAgentSessionPatch'>> &
+  Omit<CreatePiRetryExtensionOptions, 'installAgentSessionPatch'> {
+  if ('function' === typeof input) {
+    return { loadAgentSessionModule: input, installAgentSessionPatch: true };
+  }
+  return {
+    ...input,
+    installAgentSessionPatch: input.installAgentSessionPatch ?? true,
+  };
+}
+
+function shouldPromptOnPiSessionStart(event: Record<string, unknown>): boolean {
+  return event.reason === 'startup' || event.reason === 'resume' || event.reason === 'reload';
+}
+
 export function createPiRetryExtension(
-  loadAgentSessionModule: LoadAgentSessionModule = defaultLoadAgentSessionModule,
+  optionsOrLoadAgentSessionModule: LoadAgentSessionModule | CreatePiRetryExtensionOptions = {},
 ) {
+  const options = normalizeCreateOptions(optionsOrLoadAgentSessionModule);
+  const loadAgentSessionModule = options.loadAgentSessionModule ?? defaultLoadAgentSessionModule;
+  const shouldPromptOnSessionStart =
+    options.shouldPromptOnSessionStart ?? shouldPromptOnPiSessionStart;
+
   return async function piRetry(pi: ExtensionAPI): Promise<void> {
-    await installAgentSessionPatch(loadAgentSessionModule);
+    if (options.installAgentSessionPatch) {
+      await installAgentSessionPatch(loadAgentSessionModule);
+    } else {
+      patchFailureReason = undefined;
+    }
 
     const promptAndRecoverCurrentLeaf = async (
       ctx: ExtensionContext,
@@ -1390,7 +1422,7 @@ export function createPiRetryExtension(
       stashSessionReference(ctx);
       maybeWarnAboutPatchFailure(ctx);
 
-      if ('startup' !== event.reason && 'resume' !== event.reason && 'reload' !== event.reason) {
+      if (!shouldPromptOnSessionStart(event as unknown as Record<string, unknown>)) {
         return;
       }
 

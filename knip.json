@@ -26,6 +26,14 @@
       "entry": ["index.ts"],
       "project": ["**/*.ts"]
     },
+    "extensions/openai-websocket-responses": {
+      "entry": ["index.ts", "omp.ts"],
+      "project": ["**/*.ts"]
+    },
+    "extensions/pi-retry": {
+      "entry": ["index.ts", "omp.ts"],
+      "project": ["**/*.ts"]
+    },
     "extensions/pi-codex-app-server-use": {
       "entry": ["index.ts", "src/extension.ts"],
       "project": ["**/*.ts"]

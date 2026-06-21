@@ -1,13 +1,13 @@
-import {
-  createAssistantMessageEventStream,
-  type Api,
-  type AssistantMessage,
-  type AssistantMessageDiagnostic,
-  type AssistantMessageEventStream,
-  type Context,
-  type Model,
-  type SimpleStreamOptions,
-  type Usage,
+import * as piAi from '@earendil-works/pi-ai';
+import type {
+  Api,
+  AssistantMessage,
+  AssistantMessageDiagnostic,
+  AssistantMessageEventStream,
+  Context,
+  Model,
+  SimpleStreamOptions,
+  Usage,
 } from '@earendil-works/pi-ai';
 
 import { buildResponsesBody } from './body.ts';
@@ -116,6 +116,24 @@ function createOutput(model: Model<Api>): AssistantMessage {
   };
 }
 
+function createEventStream(): AssistantMessageEventStream {
+  const factory = (
+    piAi as unknown as {
+      createAssistantMessageEventStream?: () => AssistantMessageEventStream;
+    }
+  ).createAssistantMessageEventStream;
+  if (typeof factory === 'function') return factory();
+
+  const StreamCtor = (
+    piAi as unknown as {
+      AssistantMessageEventStream?: new () => AssistantMessageEventStream;
+    }
+  ).AssistantMessageEventStream;
+  if (typeof StreamCtor === 'function') return new StreamCtor();
+
+  throw new Error('No AssistantMessageEventStream implementation is available');
+}
+
 function formatProviderError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   if (/^(?:WebSocket|Retrieve recovery|Response .* was not found)/i.test(message)) {
@@ -192,7 +210,7 @@ export function createOpenAIWebSocketResponsesStream(
   options?: SimpleStreamOptions,
 ) => AssistantMessageEventStream {
   return (model, context, options) => {
-    const stream = createAssistantMessageEventStream();
+    const stream = createEventStream();
     void (async () => {
       const output = createOutput(model);
       let cacheKey: string | undefined;

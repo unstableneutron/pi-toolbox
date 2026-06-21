@@ -26,6 +26,22 @@ Temporary for the current run:
 pi -e /absolute/path/to/extensions/pi-retry
 ```
 
+## Host support
+
+`pi-retry` is supported in both Pi and OMP.
+
+The package exposes separate host entrypoints in `package.json`:
+
+- Pi loads `./index.ts` from the `pi.extensions` manifest field.
+- OMP loads `./omp.ts` from the `omp.extensions` manifest field.
+
+The OMP entrypoint uses public extension APIs only. It supports terminal-leaf
+detection, hidden continuation dispatch, context filtering, status updates,
+manual `/retry`, startup retry prompts, and refusal rewrites. Pi additionally
+enables a private AgentSession patch layer for deeper retry/compaction
+integration; OMP intentionally skips that layer because OMP keeps the relevant
+AgentSession helpers private.
+
 ## What it does
 
 ### Live recovery
@@ -183,8 +199,12 @@ This package uses the Pi package manifest in `package.json`:
   "keywords": ["pi-package"],
   "pi": {
     "extensions": ["./index.ts"]
+  },
+  "omp": {
+    "extensions": ["./omp.ts"]
   }
 }
 ```
 
-That lets Pi discover it as a package instead of relying only on `index.ts` fallback loading.
+That lets Pi and OMP discover their host-specific entrypoints instead of relying
+only on `index.ts` fallback loading.

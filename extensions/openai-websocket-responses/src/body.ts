@@ -1,5 +1,4 @@
 import {
-  clampThinkingLevel,
   type Api,
   type Context,
   type Model,
@@ -16,13 +15,23 @@ import { resolveRequestProfile, type ResolvedRequestProfile } from './profile.ts
 const OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH = 64;
 const VALID_TEXT_VERBOSITIES = new Set(['low', 'medium', 'high']);
 const VALID_REASONING_SUMMARIES = new Set(['auto', 'concise', 'detailed']);
+const THINKING_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh'] as const;
 
 type TextVerbosity = 'low' | 'medium' | 'high';
 type ReasoningSummary = 'auto' | 'concise' | 'detailed';
+type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 type OpenAIWebSocketResponsesStreamOptions = SimpleStreamOptions & {
   textVerbosity?: TextVerbosity;
   reasoningSummary?: ReasoningSummary;
   serviceTier?: string;
+};
+
+type ThinkingCompatModel = Model<Api> & {
+  thinkingLevelMap?: Partial<Record<ThinkingLevel | 'off', string | null>>;
+  thinking?: {
+    efforts?: readonly string[];
+    effortMap?: Partial<Record<ThinkingLevel | 'off', string>>;
+  };
 };
 
 export interface RequestStoreSettings {
@@ -116,6 +125,44 @@ function resolveStore(
   return storeOverrideForProviderModel(providerModel, storeSettings) ?? model.provider !== 'openai';
 }
 
+function isThinkingLevel(value: unknown): value is ThinkingLevel {
+  return typeof value === 'string' && THINKING_LEVELS.includes(value as ThinkingLevel);
+}
+
+function clampThinkingLevelCompat(
+  model: ThinkingCompatModel,
+  requested: unknown,
+): ThinkingLevel | undefined {
+  if (!isThinkingLevel(requested) || !model.reasoning) return undefined;
+
+  const legacyMap = model.thinkingLevelMap;
+  if (legacyMap && requested in legacyMap) {
+    return legacyMap[requested] === null ? undefined : requested;
+  }
+
+  const supportedEfforts = model.thinking?.efforts;
+  if (supportedEfforts && supportedEfforts.length > 0) {
+    if (supportedEfforts.includes(requested)) return requested;
+    const requestedIndex = THINKING_LEVELS.indexOf(requested);
+    const supported = THINKING_LEVELS.filter((level) => supportedEfforts.includes(level));
+    if (supported.length === 0) return undefined;
+    return supported.reduce((best, level) =>
+      Math.abs(THINKING_LEVELS.indexOf(level) - requestedIndex) <
+      Math.abs(THINKING_LEVELS.indexOf(best) - requestedIndex)
+        ? level
+        : best,
+    );
+  }
+
+  return requested;
+}
+
+function mapThinkingEffort(model: ThinkingCompatModel, effort: ThinkingLevel): string | undefined {
+  const legacyMapped = model.thinkingLevelMap?.[effort];
+  if (legacyMapped !== undefined) return legacyMapped ?? undefined;
+  return model.thinking?.effortMap?.[effort] ?? effort;
+}
+
 export function buildResponsesBody(
   model: Model<Api>,
   context: Context,
@@ -123,13 +170,9 @@ export function buildResponsesBody(
   profile: ResolvedRequestProfile = resolveRequestProfile(model),
   storeSettings?: RequestStoreSettings,
 ): ResponsesBody {
-  const clampedReasoning = options?.reasoning
-    ? clampThinkingLevel(model, options.reasoning)
-    : undefined;
-  const effort =
-    clampedReasoning && clampedReasoning !== 'off'
-      ? (model.thinkingLevelMap?.[clampedReasoning] ?? clampedReasoning)
-      : undefined;
+  const compatModel = model as ThinkingCompatModel;
+  const clampedReasoning = clampThinkingLevelCompat(compatModel, options?.reasoning);
+  const effort = clampedReasoning ? mapThinkingEffort(compatModel, clampedReasoning) : undefined;
   const tools = buildResponsesTools(context.tools);
   const promptCacheKey =
     options?.cacheRetention === 'none' && shouldHonorCacheDisabled(profile)

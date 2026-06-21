@@ -1,6 +1,6 @@
 {
   "name": "openai-websocket-responses",
-  "version": "0.3.15",
+  "version": "0.3.16",
   "description": "Pi package for OpenAI Responses API over WebSocket, including LLM Fusion Hub Azure routes",
   "keywords": [
     "azure-openai",
@@ -43,6 +43,11 @@
   },
   "engines": {
     "node": ">=22.19.0"
+  },
+  "omp": {
+    "extensions": [
+      "./omp.ts"
+    ]
   },
   "pi": {
     "extensions": [
