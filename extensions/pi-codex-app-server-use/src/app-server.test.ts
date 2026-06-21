@@ -5,7 +5,7 @@ import path from 'node:path';
 
 import { afterEach, describe, expect, test } from 'vitest';
 
-import { CodexAppServerClient, CodexAppServerWebSocketClient } from './app-server';
+import { CodexAppServerWebSocketClient } from './app-server';
 
 const OPENAI_EXTENSION_ORIGIN = 'chrome-extension://hehggadaopoacecdllhhajmbjkdcmajg';
 
@@ -41,37 +41,6 @@ function decodeClientFrame(buffer: Buffer): { value: any; rest: Buffer } | undef
   };
 }
 
-function writeFakeCodexExecutable(): { directory: string; executable: string; logFile: string } {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-codex-app-server-test-'));
-  const executable = path.join(directory, 'fake-codex.mjs');
-  const logFile = path.join(directory, 'messages.jsonl');
-  fs.writeFileSync(
-    executable,
-    `#!/usr/bin/env node
-import fs from 'node:fs';
-import path from 'node:path';
-let buffer = '';
-const logFile = path.join(process.env.CODEX_HOME, 'messages.jsonl');
-process.stdin.setEncoding('utf8');
-process.stdin.on('data', (chunk) => {
-  buffer += chunk;
-  const lines = buffer.split('\\n');
-  buffer = lines.pop() ?? '';
-  for (const line of lines) {
-    if (!line.trim()) continue;
-    const message = JSON.parse(line);
-    fs.appendFileSync(logFile, JSON.stringify(message) + '\\n');
-    if (message.method === 'initialize') {
-      process.stdout.write(JSON.stringify({ id: message.id, result: { ok: true } }) + '\\n');
-    }
-  }
-});
-`,
-  );
-  fs.chmodSync(executable, 0o755);
-  return { directory, executable, logFile };
-}
-
 async function waitFor(condition: () => boolean): Promise<void> {
   for (let attempt = 0; attempt < 20; attempt++) {
     if (condition()) return;
@@ -82,118 +51,6 @@ async function waitFor(condition: () => boolean): Promise<void> {
 async function waitForImmediate(): Promise<void> {
   await new Promise((resolve) => setImmediate(resolve));
 }
-
-describe('CodexAppServerClient', () => {
-  test('aborts pending stdio MCP tool requests without waiting for timeout', async () => {
-    const { directory, executable, logFile } = writeFakeCodexExecutable();
-    const client = new CodexAppServerClient({
-      codexExecutable: executable,
-      codexHome: directory,
-      clientName: 'test-client',
-    });
-    const controller = new AbortController();
-
-    try {
-      await client.init();
-      const pending = client.callMcpTool({
-        threadId: 'thread-1',
-        server: 'computer-use',
-        tool: 'get_app_state',
-        arguments: { app: 'Finder' },
-        timeoutMs: 50,
-        signal: controller.signal,
-      });
-      await waitFor(() =>
-        fs
-          .readFileSync(logFile, 'utf8')
-          .split('\n')
-          .filter(Boolean)
-          .some((line) => JSON.parse(line).method === 'mcpServer/tool/call'),
-      );
-      controller.abort();
-
-      await expect(pending).rejects.toThrow('Operation aborted');
-      await waitFor(() =>
-        fs
-          .readFileSync(logFile, 'utf8')
-          .split('\n')
-          .filter(Boolean)
-          .some((line) => JSON.parse(line).method === 'notifications/cancelled'),
-      );
-      const messages = fs
-        .readFileSync(logFile, 'utf8')
-        .split('\n')
-        .filter(Boolean)
-        .map((line) => JSON.parse(line));
-      expect(messages).toContainEqual({
-        method: 'notifications/cancelled',
-        params: { requestId: 2, reason: 'Operation aborted' },
-      });
-    } finally {
-      client.close();
-      fs.rmSync(directory, { recursive: true, force: true });
-    }
-  });
-
-  test('waits for stdio cancellation notification flush before rejecting aborts', async () => {
-    const { directory, executable, logFile } = writeFakeCodexExecutable();
-    const client = new CodexAppServerClient({
-      codexExecutable: executable,
-      codexHome: directory,
-      clientName: 'test-client',
-    });
-    const controller = new AbortController();
-    let rejectObserved = false;
-    let cancelWriteDone: (() => void) | undefined;
-
-    try {
-      await client.init();
-      const pending = client.callMcpTool({
-        threadId: 'thread-1',
-        server: 'computer-use',
-        tool: 'get_app_state',
-        arguments: { app: 'Finder' },
-        timeoutMs: 5_000,
-        signal: controller.signal,
-      });
-      pending.catch(() => {
-        rejectObserved = true;
-      });
-      await waitFor(() =>
-        fs
-          .readFileSync(logFile, 'utf8')
-          .split('\n')
-          .filter(Boolean)
-          .some((line) => JSON.parse(line).method === 'mcpServer/tool/call'),
-      );
-
-      const stdin = (client as any).process.stdin as NodeJS.WritableStream;
-      const originalWrite = stdin.write.bind(stdin);
-      stdin.write = ((chunk: any, encodingOrCallback?: any, callback?: any) => {
-        const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
-        const writeDone = typeof encodingOrCallback === 'function' ? encodingOrCallback : callback;
-        if (text.includes('notifications/cancelled')) {
-          cancelWriteDone = writeDone;
-          return true;
-        }
-        return originalWrite(chunk, encodingOrCallback, callback);
-      }) as typeof stdin.write;
-
-      controller.abort();
-      await waitForImmediate();
-
-      expect(cancelWriteDone).toBeTypeOf('function');
-      expect(rejectObserved).toBe(false);
-
-      cancelWriteDone?.();
-      await expect(pending).rejects.toThrow('Operation aborted');
-      expect(rejectObserved).toBe(true);
-    } finally {
-      client.close();
-      fs.rmSync(directory, { recursive: true, force: true });
-    }
-  });
-});
 
 describe('CodexAppServerWebSocketClient', () => {
   const servers: net.Server[] = [];

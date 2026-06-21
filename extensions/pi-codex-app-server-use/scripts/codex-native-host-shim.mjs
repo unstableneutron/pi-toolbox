@@ -11,7 +11,7 @@ const DEFAULT_REAL_HOST_PATH = path.join(
 );
 const DEFAULT_CONFIG_PATH = path.join(
   os.homedir(),
-  '.codex/pi-codex-computer-use/native-host-shim-config.json',
+  '.codex/pi-codex-app-server-use/native-host-shim-config.json',
 );
 const DEFAULT_MAX_PAYLOAD_CHARS = 50_000;
 const DEFAULT_FAKE_GET_INFO_VERSION = '1.1.5';
@@ -58,7 +58,7 @@ function readBoolean(value, fallback = false) {
 function defaultLogPath() {
   return path.join(
     os.homedir(),
-    '.codex/pi-codex-computer-use',
+    '.codex/pi-codex-app-server-use',
     `native-host-shim-${timestampSlug()}-${process.pid}.jsonl`,
   );
 }

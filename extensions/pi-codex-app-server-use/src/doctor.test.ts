@@ -150,7 +150,7 @@ describe('buildCodexComputerUseDoctorReport', () => {
     });
 
     expect(report.text).toContain('Extension:');
-    expect(report.text).toContain('✗ pi-codex-computer-use disabled (default)');
+    expect(report.text).toContain('✗ pi-codex-app-server-use computerUse disabled (default)');
     expect(report.text).toContain('Tools and plugin skills are not injected while disabled.');
   });
 

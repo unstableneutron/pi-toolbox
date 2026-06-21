@@ -60,11 +60,9 @@ Return JSON-serializable values from `codex_browser_eval` for structured output.
 Use `nodeRepl.emitImage(...)` for screenshots and `nodeRepl.write(...)` for exact
 text output.
 
-Run `/codex-computer-use-status` when browser or Computer Use calls fail, or when
+Run `/codex-app-server-doctor` when browser or Computer Use calls fail, or when
 you need to inspect resolved Codex paths, app-server/thread state, and summarized
-MCP server/tool status. Use `/codex-computer-use-status verbose` when you need
-raw diagnostic JSON; it writes the JSON to a temporary file and prints the path
-instead of dumping full MCP schemas into the status output.
+MCP server/tool status.
 
 Example: open Slickdeals in the in-app browser and inspect it:
 

@@ -4,11 +4,8 @@ import path from 'node:path';
 
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 
-import { CodexAppServerClient, CodexAppServerWebSocketClient } from './app-server';
-import {
-  ensureChromeExtensionAppServer,
-  getConfiguredChromeAppServerOrigin,
-} from './chrome-extension-host';
+import { CodexAppServerWebSocketClient } from './app-server';
+import { CODEX_APP_SERVER_ORIGIN, getCodexAppServerControlSocketPath } from './app-server-control';
 import { getCodexComputerUsePaths } from './codex-paths';
 import { answerComputerUseElicitation } from './elicitation';
 
@@ -16,11 +13,7 @@ const COMPUTER_USE_SERVER = 'computer-use';
 const NODE_REPL_SERVER = 'node_repl';
 const RETRYABLE_OBSERVATION_TOOLS = new Set(['list_apps', 'get_app_state']);
 const TRANSIENT_PROCESS_ERROR = /NSOSStatusErrorDomain Code=-600|procNotFound/;
-const USE_DESKTOP_APP_SERVER_ENV = 'PI_CODEX_USE_DESKTOP_APP_SERVER';
-const DESKTOP_APP_SERVER_SOCKET_ENV = 'PI_CODEX_DESKTOP_APP_SERVER_SOCKET';
-const DESKTOP_APP_SERVER_ORIGIN_ENV = 'PI_CODEX_DESKTOP_APP_SERVER_ORIGIN';
-
-type CodexAppServerBridgeClient = CodexAppServerClient | CodexAppServerWebSocketClient;
+type CodexAppServerBridgeClient = CodexAppServerWebSocketClient;
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) return Promise.reject(new Error('Operation aborted'));
@@ -67,26 +60,6 @@ function isRetryableMcpError(server: string, codexTool: string, message: string)
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function readBooleanEnv(name: string): boolean {
-  const value = process.env[name]?.trim().toLowerCase();
-  return value === '1' || value === 'true' || value === 'yes' || value === 'on';
-}
-
-function getConfiguredDesktopAppServerSocket(): string | undefined {
-  if (!readBooleanEnv(USE_DESKTOP_APP_SERVER_ENV)) return undefined;
-  const socketPath = process.env[DESKTOP_APP_SERVER_SOCKET_ENV]?.trim();
-  if (!socketPath) {
-    throw new Error(
-      `${USE_DESKTOP_APP_SERVER_ENV}=1 requires ${DESKTOP_APP_SERVER_SOCKET_ENV} to point at the Codex.app wrapper socket.`,
-    );
-  }
-  return socketPath;
-}
-
-function getConfiguredDesktopAppServerOrigin(): string {
-  return process.env[DESKTOP_APP_SERVER_ORIGIN_ENV]?.trim() || 'app://codex';
 }
 
 function isUnknownMcpServerError(error: unknown): boolean {
@@ -192,7 +165,7 @@ function formatMcpSummary(mcpStatus: unknown): string[] {
 }
 
 function writeVerboseDiagnosticJson(value: unknown): string {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-codex-computer-use-'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-codex-app-server-use-'));
   const filePath = path.join(directory, 'diagnostics.json');
   fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
   return filePath;
@@ -207,18 +180,13 @@ interface CodexMcpToolCall {
 
 type BrowserBackend = 'iab' | 'chrome';
 
-interface ChromeBrowserBridgeOptions {
-  debugBaseUrl?: string;
-  extensionId?: string;
-}
-
 function buildNodeReplRequestMeta(threadId: string, turnNumber: number): Record<string, unknown> {
   return {
     'x-codex-turn-metadata': {
       session_id: threadId,
       thread_id: threadId,
-      thread_source: 'pi-codex-computer-use',
-      turn_id: `pi-codex-computer-use-turn-${turnNumber}`,
+      thread_source: 'pi-codex-app-server-use',
+      turn_id: `pi-codex-app-server-use-turn-${turnNumber}`,
     },
   };
 }
@@ -229,9 +197,6 @@ export interface CodexDiagnosticStatusOptions {
 
 export class ComputerUseSession {
   private client?: CodexAppServerBridgeClient;
-  private chromeClient?: CodexAppServerWebSocketClient;
-  private chromeClientKey?: string;
-  private chromeThreadId?: string;
   private threadId?: string;
   private nextNodeReplTurnNumber = 1;
 
@@ -246,7 +211,7 @@ export class ComputerUseSession {
     const paths = getCodexComputerUsePaths();
     const cwd = ctx.cwd ?? process.cwd();
     const lines = [
-      'pi-codex-computer-use diagnostics',
+      'pi-codex-app-server-use diagnostics',
       '',
       'Codex paths:',
       formatPathStatus('  Codex app', paths.codexApp),
@@ -373,46 +338,10 @@ export class ComputerUseSession {
     backend: BrowserBackend,
     input: CodexMcpToolCall,
     signal?: AbortSignal,
-    options: ChromeBrowserBridgeOptions = {},
+    _options: unknown = {},
   ): Promise<{ threadId: string; rawResult: any }> {
-    if (backend !== 'chrome') {
-      return await this.callMcpTool(ctx, input, signal);
-    }
-
-    if (getConfiguredDesktopAppServerSocket()) {
-      return await this.callMcpTool(ctx, input, signal);
-    }
-
-    const client = await this.getChromeClient(options, signal);
-    const threadId = await this.getChromeThreadId(ctx, client, signal);
-    const restore = client.setElicitationHandler((params) =>
-      answerComputerUseElicitation(params, ctx),
-    );
-    try {
-      const rawResult = await client.callMcpTool({
-        server: input.server,
-        threadId,
-        tool: input.tool,
-        arguments: input.arguments,
-        timeoutMs: input.timeoutMs ?? 120_000,
-        signal,
-        ...(input.server === NODE_REPL_SERVER
-          ? { _meta: buildNodeReplRequestMeta(threadId, this.nextNodeReplTurnNumber++) }
-          : {}),
-      });
-      const errorMessage = getMcpErrorMessage(rawResult);
-      if (errorMessage) {
-        throw new Error(`Codex MCP ${input.server}.${input.tool} failed: ${errorMessage}`);
-      }
-      return { threadId, rawResult };
-    } catch (error) {
-      if (shouldResetBridgeAfterError(error) || isUnknownMcpServerError(error)) {
-        this.resetChromeBridge();
-      }
-      throw isUnknownMcpServerError(error) ? makeUnknownMcpServerError(error) : error;
-    } finally {
-      restore();
-    }
+    void backend;
+    return await this.callMcpTool(ctx, input, signal);
   }
 
   async getMcpServerAvailability(ctx: ExtensionContext): Promise<{
@@ -434,7 +363,6 @@ export class ComputerUseSession {
 
   close(): void {
     this.resetDefaultBridge();
-    this.resetChromeBridge();
   }
 
   private resetDefaultBridge(): void {
@@ -443,29 +371,13 @@ export class ComputerUseSession {
     this.threadId = undefined;
   }
 
-  private resetChromeBridge(): void {
-    this.chromeClient?.close();
-    this.chromeClient = undefined;
-    this.chromeClientKey = undefined;
-    this.chromeThreadId = undefined;
-  }
-
   private async getClient(signal?: AbortSignal): Promise<CodexAppServerBridgeClient> {
     if (!this.client) {
-      const desktopSocket = getConfiguredDesktopAppServerSocket();
-      if (desktopSocket) {
-        this.client = new CodexAppServerWebSocketClient({
-          clientName: 'pi-codex-computer-use-desktop',
-          origin: getConfiguredDesktopAppServerOrigin(),
-          url: `unix://${desktopSocket}`,
-        });
-      } else {
-        const paths = getCodexComputerUsePaths();
-        this.client = new CodexAppServerClient({
-          codexExecutable: paths.codexExecutable,
-          codexHome: paths.codexHome,
-        });
-      }
+      this.client = new CodexAppServerWebSocketClient({
+        clientName: 'pi-codex-app-server-use-daemon',
+        origin: CODEX_APP_SERVER_ORIGIN,
+        url: `unix://${getCodexAppServerControlSocketPath()}`,
+      });
       await this.client.init(signal);
     }
     return this.client;
@@ -484,51 +396,5 @@ export class ComputerUseSession {
       });
     }
     return this.threadId;
-  }
-
-  private async getChromeClient(
-    options: ChromeBrowserBridgeOptions = {},
-    signal?: AbortSignal,
-  ): Promise<CodexAppServerWebSocketClient> {
-    const origin = getConfiguredChromeAppServerOrigin();
-    const key = JSON.stringify({
-      debugBaseUrl: options.debugBaseUrl ?? null,
-      extensionId: options.extensionId ?? null,
-      origin,
-    });
-    if (this.chromeClient && this.chromeClientKey === undefined) {
-      this.chromeClientKey = key;
-    } else if (this.chromeClient && this.chromeClientKey !== key) {
-      this.resetChromeBridge();
-    }
-    if (!this.chromeClient) {
-      const appServer = await ensureChromeExtensionAppServer({
-        debugBaseUrl: options.debugBaseUrl,
-        extensionId: options.extensionId,
-        signal,
-      });
-      this.chromeClient = new CodexAppServerWebSocketClient({
-        origin,
-        url: appServer.localAppServerUrl,
-      });
-      await this.chromeClient.init(signal);
-      this.chromeClientKey = key;
-    }
-    return this.chromeClient;
-  }
-
-  private async getChromeThreadId(
-    ctx: ExtensionContext,
-    client: CodexAppServerWebSocketClient,
-    signal?: AbortSignal,
-  ): Promise<string> {
-    if (!this.chromeThreadId) {
-      this.chromeThreadId = await client.startThread({
-        cwd: ctx.cwd ?? process.cwd(),
-        name: 'Pi Chrome Browser',
-        signal,
-      });
-    }
-    return this.chromeThreadId;
   }
 }

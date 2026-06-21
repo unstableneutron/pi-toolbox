@@ -14,7 +14,7 @@ import { sendBridgeCommand } from './codex-browser-bridge.mjs';
 import {
   CodexControlClient,
   getMcpText,
-} from '../../pi-codex-computer-use/scripts/codex-control.mjs';
+} from '../../pi-codex-app-server-use/scripts/codex-control.mjs';
 
 const COMMANDS = new Set([
   'doctor',

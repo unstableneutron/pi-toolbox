@@ -1,4 +1,3 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import crypto from 'node:crypto';
 import net from 'node:net';
 
@@ -17,12 +16,7 @@ interface PendingRequest {
   reject: (error: Error) => void;
 }
 
-interface CodexAppServerClientOptions {
-  codexExecutable: string;
-  codexHome: string;
-  clientName?: string;
-  onElicitation?: (params: McpElicitationRequestParams) => Promise<McpElicitationResponse>;
-}
+type JsonRpcNotificationHandler = (message: JsonRpcMessage) => void;
 
 interface CodexThreadStartOptions {
   cwd: string;
@@ -56,10 +50,6 @@ function buildCancellationNotification(requestId: number | string, reason: strin
   };
 }
 
-function sendJsonLine(stream: NodeJS.WritableStream, value: unknown): void {
-  stream.write(`${JSON.stringify(value)}\n`);
-}
-
 function waitForGracefulWrite(
   write: (callback: (error?: Error | null) => void) => void,
 ): Promise<void> {
@@ -77,12 +67,6 @@ function waitForGracefulWrite(
     } catch {
       finish();
     }
-  });
-}
-
-function sendJsonLineAndWaitForFlush(stream: NodeJS.WritableStream, value: unknown): Promise<void> {
-  return waitForGracefulWrite((callback) => {
-    stream.write(`${JSON.stringify(value)}\n`, callback);
   });
 }
 
@@ -210,264 +194,10 @@ function getUnixSocketPath(url: URL): string {
   return socketPath;
 }
 
-export class CodexAppServerClient {
-  private readonly process: ChildProcessWithoutNullStreams;
-  private readonly pending = new Map<number | string, PendingRequest>();
-  private readonly codexHome: string;
-  private readonly clientName: string;
-  private buffer = '';
-  private nextId = 1;
-  private initialized?: Promise<void>;
-  private readonly stderrLines: string[] = [];
-  private onElicitation?: (params: McpElicitationRequestParams) => Promise<McpElicitationResponse>;
-
-  constructor(options: CodexAppServerClientOptions) {
-    this.codexHome = options.codexHome;
-    this.clientName = options.clientName ?? 'pi-codex-computer-use';
-    this.onElicitation = options.onElicitation;
-    this.process = spawn(options.codexExecutable, ['app-server', '--listen', 'stdio://'], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, CODEX_HOME: options.codexHome },
-    });
-    this.process.stdout.setEncoding('utf8');
-    this.process.stdout.on('data', (chunk) => this.handleStdout(chunk));
-    this.process.stderr.setEncoding('utf8');
-    this.process.stderr.on('data', (chunk) => this.recordStderr(chunk));
-    this.process.on('exit', (code, signal) => {
-      const error = new Error(`Codex app-server exited (${code ?? signal ?? 'unknown'})`);
-      for (const pending of this.pending.values()) {
-        pending.reject(error);
-      }
-      this.pending.clear();
-    });
-  }
-
-  setElicitationHandler(
-    handler: ((params: McpElicitationRequestParams) => Promise<McpElicitationResponse>) | undefined,
-  ): () => void {
-    const previous = this.onElicitation;
-    this.onElicitation = handler;
-    return () => {
-      this.onElicitation = previous;
-    };
-  }
-
-  async init(signal?: AbortSignal): Promise<void> {
-    this.initialized ??= this.initialize(signal).catch((error: unknown) => {
-      this.initialized = undefined;
-      throw error;
-    });
-    await this.initialized;
-  }
-
-  async startThread(options: CodexThreadStartOptions): Promise<string> {
-    await this.init(options.signal);
-    const response = await this.request(
-      'thread/start',
-      {
-        cwd: options.cwd,
-        ephemeral: true,
-        approvalPolicy: 'on-request',
-        baseInstructions:
-          'Pi-created Codex native tool bridge thread. Only execute Computer Use and browser Node REPL MCP calls requested by Pi.',
-      },
-      THREAD_START_TIMEOUT_MS,
-      options.signal,
-    );
-    const threadId = response?.thread?.id;
-    if ('string' !== typeof threadId || threadId.length === 0) {
-      throw new Error('Codex app-server did not return a thread id');
-    }
-    if (options.name) {
-      await this.request('thread/name/set', { threadId, name: options.name }, 10_000).catch(() => {
-        // Naming is cosmetic; keep the bridge usable if this fails.
-      });
-    }
-    return threadId;
-  }
-
-  async callMcpTool(input: {
-    threadId: string;
-    server: string;
-    tool: string;
-    arguments?: unknown;
-    timeoutMs?: number;
-    signal?: AbortSignal;
-    _meta?: Record<string, unknown>;
-  }): Promise<any> {
-    await this.init(input.signal);
-    return await this.request(
-      'mcpServer/tool/call',
-      {
-        server: input.server,
-        threadId: input.threadId,
-        tool: input.tool,
-        arguments: input.arguments ?? {},
-        ...(input._meta ? { _meta: input._meta } : {}),
-      },
-      input.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
-      input.signal,
-    );
-  }
-
-  async listMcpServers(threadId?: string): Promise<any> {
-    await this.init();
-    return await this.request('mcpServerStatus/list', {
-      detail: 'toolsAndAuthOnly',
-      limit: 50,
-      cursor: null,
-      threadId: threadId ?? null,
-    });
-  }
-
-  getProcessInfo(): CodexAppServerProcessInfo {
-    return {
-      pid: this.process.pid,
-      killed: this.process.killed,
-      exitCode: this.process.exitCode,
-      signalCode: this.process.signalCode,
-      lastStderr: [...this.stderrLines],
-    };
-  }
-
-  close(): void {
-    this.process.kill();
-  }
-
-  private recordStderr(chunk: string): void {
-    for (const line of chunk.split('\n')) {
-      const trimmed = line.trim();
-      if (trimmed.length === 0) continue;
-      this.stderrLines.push(trimmed);
-    }
-    if (this.stderrLines.length > 40) {
-      this.stderrLines.splice(0, this.stderrLines.length - 40);
-    }
-  }
-
-  private async initialize(signal?: AbortSignal): Promise<void> {
-    await this.request(
-      'initialize',
-      {
-        clientInfo: { name: this.clientName, title: null, version: '0' },
-        capabilities: null,
-      },
-      DEFAULT_REQUEST_TIMEOUT_MS,
-      signal,
-    );
-    sendJsonLine(this.process.stdin, { method: 'initialized' });
-  }
-
-  private request(
-    method: string,
-    params?: unknown,
-    timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
-    signal?: AbortSignal,
-  ): Promise<any> {
-    if (signal?.aborted) {
-      return Promise.reject(createOperationAbortedError());
-    }
-
-    const id = this.nextId++;
-    sendJsonLine(this.process.stdin, { id, method, params });
-    return new Promise((resolve, reject) => {
-      let settled = false;
-      const cleanup = () => {
-        clearTimeout(timer);
-        signal?.removeEventListener('abort', onAbort);
-      };
-      const beginSettle = () => {
-        if (settled) return false;
-        settled = true;
-        this.pending.delete(id);
-        cleanup();
-        return true;
-      };
-      const settle = (run: () => void) => {
-        if (!beginSettle()) return;
-        run();
-      };
-      const sendCancellation = (reason: string): Promise<void> => {
-        if (method === 'initialize' || this.process.killed || this.process.stdin.destroyed) {
-          return Promise.resolve();
-        }
-        return sendJsonLineAndWaitForFlush(
-          this.process.stdin,
-          buildCancellationNotification(id, reason),
-        );
-      };
-      const fail = (error: Error, cancelReason?: string) => {
-        if (!cancelReason) {
-          settle(() => reject(error));
-          return;
-        }
-        if (!beginSettle()) return;
-        void sendCancellation(cancelReason).then(() => reject(error));
-      };
-      const onAbort = () => fail(createOperationAbortedError(), 'Operation aborted');
-      const timer = setTimeout(() => {
-        const message = `${method} timed out after ${timeoutMs}ms`;
-        fail(new Error(message), message);
-      }, timeoutMs);
-
-      signal?.addEventListener('abort', onAbort, { once: true });
-      this.pending.set(id, {
-        resolve: (value) => settle(() => resolve(value)),
-        reject: (error) => fail(error),
-      });
-    });
-  }
-
-  private handleStdout(chunk: string): void {
-    this.buffer += chunk;
-    const lines = this.buffer.split('\n');
-    this.buffer = lines.pop() ?? '';
-    for (const line of lines) {
-      if (line.trim().length === 0) continue;
-      this.handleMessage(JSON.parse(line) as JsonRpcMessage).catch((error) => {
-        if (error instanceof Error) {
-          // Server-request errors are reflected to app-server in handleServerRequest.
-          return;
-        }
-      });
-    }
-  }
-
-  private async handleMessage(message: JsonRpcMessage): Promise<void> {
-    if (message.id !== undefined && message.method) {
-      await this.handleServerRequest(message);
-      return;
-    }
-
-    if (message.id !== undefined && this.pending.has(message.id)) {
-      const pending = this.pending.get(message.id)!;
-      if (message.error) {
-        pending.reject(new Error(message.error.message ?? JSON.stringify(message.error)));
-      } else {
-        pending.resolve(message.result);
-      }
-    }
-  }
-
-  private async handleServerRequest(message: JsonRpcMessage): Promise<void> {
-    if (message.method !== 'mcpServer/elicitation/request') {
-      sendJsonLine(this.process.stdin, {
-        id: message.id,
-        error: { code: -32601, message: `Unsupported app-server request: ${message.method}` },
-      });
-      return;
-    }
-
-    const answer = this.onElicitation
-      ? await this.onElicitation(message.params as McpElicitationRequestParams)
-      : { action: 'decline', content: null, _meta: null };
-    sendJsonLine(this.process.stdin, { id: message.id, result: answer });
-  }
-}
-
 export class CodexAppServerWebSocketClient {
   private socket?: net.Socket;
   private readonly pending = new Map<number | string, PendingRequest>();
+  private readonly notificationHandlers = new Set<JsonRpcNotificationHandler>();
   private readonly clientName: string;
   private readonly origin: string;
   private readonly url: URL;
@@ -483,7 +213,7 @@ export class CodexAppServerWebSocketClient {
     origin: string;
     url: string;
   }) {
-    this.clientName = options.clientName ?? 'pi-codex-computer-use-chrome';
+    this.clientName = options.clientName ?? 'pi-codex-app-server-use-chrome';
     this.onElicitation = options.onElicitation;
     this.origin = options.origin;
     this.url = new URL(options.url);
@@ -497,6 +227,23 @@ export class CodexAppServerWebSocketClient {
     return () => {
       this.onElicitation = previous;
     };
+  }
+
+  onNotification(handler: JsonRpcNotificationHandler): () => void {
+    this.notificationHandlers.add(handler);
+    return () => {
+      this.notificationHandlers.delete(handler);
+    };
+  }
+
+  async callRpc(
+    method: string,
+    params?: unknown,
+    timeoutMs?: number,
+    signal?: AbortSignal,
+  ): Promise<any> {
+    await this.init(signal);
+    return await this.request(method, params, timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS, signal);
   }
 
   async init(signal?: AbortSignal): Promise<void> {
@@ -796,6 +543,12 @@ export class CodexAppServerWebSocketClient {
         pending.reject(new Error(message.error.message ?? JSON.stringify(message.error)));
       } else {
         pending.resolve(message.result);
+      }
+    }
+
+    if (message.method) {
+      for (const handler of this.notificationHandlers) {
+        handler(message);
       }
     }
   }

@@ -15,9 +15,9 @@ import {
 } from './chrome-extension-host';
 import { getCodexComputerUsePaths } from './codex-paths';
 import {
-  formatCodexComputerUseEnablementStatus,
-  type CodexComputerUseEnablementStatus,
-} from './enablement';
+  formatCodexAppServerComputerUseStatus,
+  type CodexAppServerUseConfigStatus,
+} from './config';
 import { DoctorReportView, type DoctorViewAction } from './doctor-ui';
 
 const execFileAsync = promisify(execFile);
@@ -140,7 +140,7 @@ export interface CodexComputerUseDoctorDeps {
 
 export interface CodexComputerUseDoctorOptions {
   deps?: CodexComputerUseDoctorDeps;
-  extensionEnablement?: Pick<CodexComputerUseEnablementStatus, 'enabled' | 'source'>;
+  extensionEnablement?: { enabled: boolean; source: CodexAppServerUseConfigStatus['source'] };
   paths?: CodexComputerUsePathsForDoctor;
 }
 
@@ -747,7 +747,7 @@ export async function buildCodexComputerUseDoctorReport(
   if (options.extensionEnablement) {
     lines.push('Extension:');
     lines.push(
-      `${boolMark(options.extensionEnablement.enabled)} pi-codex-computer-use ${formatCodexComputerUseEnablementStatus(options.extensionEnablement)}`,
+      `${boolMark(options.extensionEnablement.enabled)} pi-codex-app-server-use computerUse ${formatCodexAppServerComputerUseStatus(options.extensionEnablement)}`,
     );
     if (!options.extensionEnablement.enabled) {
       lines.push('  Tools and plugin skills are not injected while disabled.');

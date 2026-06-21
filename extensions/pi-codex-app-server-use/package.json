@@ -1,8 +1,9 @@
 {
-  "name": "pi-codex-computer-use",
+  "name": "pi-codex-app-server-use",
   "version": "0.4.0",
-  "description": "Pi extension that exposes Codex.app's native Computer Use and browser MCP surfaces",
+  "description": "Pi extension that exposes Codex AppServer exec, Computer Use, and browser surfaces",
   "keywords": [
+    "app-server",
     "codex",
     "computer-use",
     "mcp",
@@ -43,7 +44,7 @@
   },
   "pi": {
     "extensions": [
-      "./extensions/codex-computer-use/index.ts"
+      "./index.ts"
     ]
   }
 }

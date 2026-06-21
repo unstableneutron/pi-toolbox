@@ -88,8 +88,8 @@ describe('ComputerUseSession.callMcpTool', () => {
           'x-codex-turn-metadata': {
             session_id: 'thread-1',
             thread_id: 'thread-1',
-            thread_source: 'pi-codex-computer-use',
-            turn_id: 'pi-codex-computer-use-turn-1',
+            thread_source: 'pi-codex-app-server-use',
+            turn_id: 'pi-codex-app-server-use-turn-1',
           },
         },
       },
@@ -216,105 +216,12 @@ describe('ComputerUseSession.callMcpTool', () => {
     expect((session as any).threadId).toBeUndefined();
   });
 
-  test('resets the Chrome app-server bridge when a Chrome backend MCP tool call aborts', async () => {
-    const session = new ComputerUseSession();
-    const close = vi.fn();
-    (session as any).chromeClient = {
-      close,
-      setElicitationHandler() {
-        return () => {};
-      },
-      async callMcpTool() {
-        throw new Error('Operation aborted');
-      },
-    };
-    (session as any).chromeThreadId = 'chrome-thread-1';
-
-    await expect(
-      session.callBrowserMcpTool(
-        { cwd: '/tmp', hasUI: false } as any,
-        'chrome',
-        { server: 'node_repl', tool: 'js', timeoutMs: 5000 },
-        new AbortController().signal,
-      ),
-    ).rejects.toThrow('Operation aborted');
-
-    expect(close).toHaveBeenCalledTimes(1);
-    expect((session as any).chromeClient).toBeUndefined();
-    expect((session as any).chromeThreadId).toBeUndefined();
-  });
-
-  test('passes Chrome bridge options into getChromeClient for per-call debug configuration', async () => {
-    const session = new ComputerUseSession();
-    const rawNodeResult = { content: [{ type: 'text', text: 'hello from chrome node' }] };
-    const client = {
-      setElicitationHandler() {
-        return () => {};
-      },
-      async callMcpTool() {
-        return rawNodeResult;
-      },
-    };
-    (session as any).getChromeClient = vi.fn(async () => client);
-    (session as any).getChromeThreadId = vi.fn(async () => 'chrome-thread-1');
-
-    await session.callBrowserMcpTool(
-      { cwd: '/tmp', hasUI: false } as any,
-      'chrome',
-      { server: 'node_repl', tool: 'js', timeoutMs: 5000 },
-      undefined,
-      {
-        debugBaseUrl: 'http://127.0.0.1:9333',
-        extensionId: 'custom-extension-id',
-      },
-    );
-
-    expect((session as any).getChromeClient).toHaveBeenCalledWith(
-      {
-        debugBaseUrl: 'http://127.0.0.1:9333',
-        extensionId: 'custom-extension-id',
-      },
-      undefined,
-    );
-  });
-
-  test('passes AbortSignal into Chrome bridge setup before native browser MCP calls', async () => {
-    const session = new ComputerUseSession();
-    const controller = new AbortController();
-    const rawNodeResult = { content: [{ type: 'text', text: 'hello from chrome node' }] };
-    const client = {
-      setElicitationHandler() {
-        return () => {};
-      },
-      async callMcpTool() {
-        return rawNodeResult;
-      },
-    };
-    (session as any).getChromeClient = vi.fn(async () => client);
-    (session as any).getChromeThreadId = vi.fn(async () => 'chrome-thread-1');
-
-    await session.callBrowserMcpTool(
-      { cwd: '/tmp', hasUI: false } as any,
-      'chrome',
-      { server: 'node_repl', tool: 'js', timeoutMs: 5000 },
-      controller.signal,
-      { debugBaseUrl: 'http://127.0.0.1:9333' },
-    );
-
-    expect((session as any).getChromeClient).toHaveBeenCalledWith(
-      { debugBaseUrl: 'http://127.0.0.1:9333' },
-      controller.signal,
-    );
-  });
-
-  test('routes Chrome browser calls through the shared Desktop app-server when opted in', async () => {
-    process.env.PI_CODEX_USE_DESKTOP_APP_SERVER = '1';
-    process.env.PI_CODEX_DESKTOP_APP_SERVER_SOCKET = '/tmp/codex-desktop.sock';
-    const rawNodeResult = { content: [{ type: 'text', text: 'hello from shared desktop' }] };
+  test('routes Chrome browser calls through the shared global app-server daemon', async () => {
+    const rawNodeResult = { content: [{ type: 'text', text: 'hello from shared daemon' }] };
     const { session, calls } = makeSessionWithClient([rawNodeResult]);
     (session as any).getChromeClient = vi.fn(async () => {
       throw new Error(
-        'Chrome extension-host bridge should not be used when Desktop app-server is selected',
+        'Chrome extension-host bridge should not be used when the global daemon is selected',
       );
     });
 
@@ -384,7 +291,7 @@ describe('ComputerUseSession.getDiagnosticStatus', () => {
 
     const status = await session.getDiagnosticStatus({ cwd: '/tmp/example', hasUI: true } as any);
 
-    expect(status).toContain('pi-codex-computer-use diagnostics');
+    expect(status).toContain('pi-codex-app-server-use diagnostics');
     expect(status).toContain('Expected bridge servers:');
     expect(status).toContain('✓ computer-use auth: unsupported tools: 2');
     expect(status).toContain('- list_apps — List apps visible to Codex Computer Use.');

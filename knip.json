@@ -26,8 +26,8 @@
       "entry": ["index.ts"],
       "project": ["**/*.ts"]
     },
-    "extensions/pi-codex-computer-use": {
-      "entry": ["src/extension.ts", "extensions/codex-computer-use/index.ts"],
+    "extensions/pi-codex-app-server-use": {
+      "entry": ["index.ts", "src/extension.ts"],
       "project": ["**/*.ts"]
     },
     "extensions/pi-fff-search": {
