@@ -6,6 +6,8 @@ import path from 'node:path';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 
+import { renderViewImageCall, renderViewImageResult } from './rendering';
+
 export const VIEW_IMAGE_TOOL_NAME = 'view_image';
 
 const VIEW_IMAGE_UNSUPPORTED_MESSAGE =
@@ -250,6 +252,8 @@ export function registerViewImageTool(
     promptSnippet: 'View image.',
     parameters: VIEW_IMAGE_PARAMETERS,
     prepareArguments: prepareViewImageArguments as (args: unknown) => ViewImageParams,
+    renderCall: renderViewImageCall,
+    renderResult: renderViewImageResult,
     async execute(
       _toolCallId: string,
       params: unknown,

@@ -1,3 +1,5 @@
+import { visibleWidth } from '@earendil-works/pi-tui';
+
 /**
  * Produce the shortest human-readable rendering of `inputPath`.
  *
@@ -59,6 +61,92 @@ export function shortenDisplayPath(inputPath: string | undefined, cwd?: string):
   }
 
   return candidates.sort((a, b) => a.length - b.length || a.localeCompare(b))[0]!;
+}
+
+export function truncateDisplayPath(
+  inputPath: string | undefined,
+  maxWidth: number,
+  cwd?: string,
+): string {
+  return truncatePathLikeToWidth(shortenDisplayPath(inputPath, cwd), maxWidth);
+}
+
+export function truncatePathLikeToWidth(text: string, maxWidth: number): string {
+  if (maxWidth <= 0) return '';
+  if (visibleWidth(text) <= maxWidth) return text;
+  const pathCollapsed = truncatePathSegmentsToWidth(text, maxWidth);
+  return pathCollapsed ?? truncateMiddleToWidth(text, maxWidth);
+}
+
+export function truncateMiddleToWidth(text: string, maxWidth: number): string {
+  if (maxWidth <= 0) return '';
+  if (visibleWidth(text) <= maxWidth) return text;
+  if (maxWidth <= 3) return '.'.repeat(maxWidth);
+
+  const ellipsis = '...';
+  const remainingWidth = maxWidth - visibleWidth(ellipsis);
+  const suffixWidth = Math.max(1, Math.floor(remainingWidth / 2));
+  const prefixWidth = Math.max(1, remainingWidth - suffixWidth);
+  let prefix = takePrefixToWidth(text, prefixWidth);
+  let suffix = takeSuffixToWidth(text, suffixWidth);
+
+  while (visibleWidth(`${prefix}${ellipsis}${suffix}`) > maxWidth && suffix.length > 0) {
+    suffix = takeSuffixToWidth(suffix, Math.max(0, visibleWidth(suffix) - 1));
+  }
+  while (visibleWidth(`${prefix}${ellipsis}${suffix}`) > maxWidth && prefix.length > 0) {
+    prefix = takePrefixToWidth(prefix, Math.max(0, visibleWidth(prefix) - 1));
+  }
+
+  return `${prefix}${ellipsis}${suffix}`;
+}
+
+function truncatePathSegmentsToWidth(text: string, maxWidth: number): string | null {
+  const separator = text.includes('/') ? '/' : text.includes('\\') ? '\\' : null;
+  if (separator === null) return null;
+
+  const parts = text.split(separator);
+  if (parts.length < 3) return null;
+
+  const last = parts.at(-1) ?? '';
+  if (!last) return null;
+
+  const first = parts[0] ?? '';
+  const prefix = first === '' ? separator : `${first}${separator}`;
+  const withFirst = `${prefix}...${separator}${last}`;
+  if (visibleWidth(withFirst) <= maxWidth) return withFirst;
+
+  const suffixOnly = `...${separator}${last}`;
+  if (visibleWidth(suffixOnly) <= maxWidth) return suffixOnly;
+
+  return null;
+}
+
+function takeSuffixToWidth(text: string, maxWidth: number): string {
+  if (maxWidth <= 0) return '';
+  if (visibleWidth(text) <= maxWidth) return text;
+
+  const chars = Array.from(text);
+  let suffix = '';
+  for (let index = chars.length - 1; index >= 0; index--) {
+    const next = `${chars[index]}${suffix}`;
+    if (visibleWidth(next) > maxWidth) break;
+    suffix = next;
+  }
+  return suffix;
+}
+
+function takePrefixToWidth(text: string, maxWidth: number): string {
+  if (maxWidth <= 0) return '';
+  if (visibleWidth(text) <= maxWidth) return text;
+
+  const chars = Array.from(text);
+  let prefix = '';
+  for (const char of chars) {
+    const next = `${prefix}${char}`;
+    if (visibleWidth(next) > maxWidth) break;
+    prefix = next;
+  }
+  return prefix;
 }
 
 function cwdRelativeCandidate(inputPath: string, cwd: string | undefined): string | null {

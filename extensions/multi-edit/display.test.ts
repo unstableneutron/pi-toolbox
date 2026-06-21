@@ -1,7 +1,7 @@
 import { describe, expect, test, vi } from 'vitest';
 
 import multiEditExtension from './index';
-import { renderApplyPatchRows, renderApplyPatchSummary } from './display/apply-patch-summary';
+import { renderApplyPatchRows, renderApplyPatchSummary } from '../shared/apply-patch-summary';
 
 function createTheme() {
   return {

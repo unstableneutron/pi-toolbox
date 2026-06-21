@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from 'vitest';
 
-import { shortenDisplayPath } from './paths';
+import { shortenDisplayPath, truncatePathLikeToWidth } from './paths';
 
 describe('shared path rendering', () => {
   afterEach(() => {
@@ -87,5 +87,11 @@ describe('shared path rendering', () => {
   test('returns empty string for empty input', () => {
     expect(shortenDisplayPath(undefined)).toBe('');
     expect(shortenDisplayPath('')).toBe('');
+  });
+
+  test('truncates long paths in the middle while preserving the filename suffix', () => {
+    expect(
+      truncatePathLikeToWidth('extensions/pi-codex-app-server-use/src/file.txt:1-12', 29),
+    ).toBe('extensions/.../file.txt:1-12');
   });
 });

@@ -9,7 +9,7 @@ import {
   shouldUseAppServerExecTools,
 } from './exec-tools';
 
-function createPendingClient() {
+function createPendingClient(options: { allowWrite?: boolean } = {}) {
   let notificationHandler: ((message: { method?: string; params?: unknown }) => void) | undefined;
   const calls: Array<{ method: string; params: unknown }> = [];
   return {
@@ -28,7 +28,10 @@ function createPendingClient() {
       },
       callRpc(method: string, params: unknown) {
         calls.push({ method, params });
-        if (method === 'command/exec/write') throw new Error('write RPC should not be called');
+        if (method === 'command/exec/write') {
+          if (!options.allowWrite) throw new Error('write RPC should not be called');
+          return Promise.resolve({});
+        }
         return new Promise(() => undefined);
       },
     },
@@ -114,6 +117,32 @@ describe('AppServer exec tool helpers', () => {
         'Output:',
         'hello\n',
       ].join('\n'),
+    );
+  });
+
+  test('formats exec truncation metadata as a model-visible continuation notice', () => {
+    expect(
+      formatUnifiedExecResult({
+        chunk_id: 'abc123',
+        wall_time_seconds: 1.25,
+        output: 'line 106\nline 107',
+        exit_code: 0,
+        truncation: {
+          content: 'line 106\nline 107',
+          truncated: true,
+          truncatedBy: 'lines',
+          totalLines: 2105,
+          outputLines: 2000,
+          totalBytes: 25_000,
+          outputBytes: 20_000,
+          lastLinePartial: false,
+          firstLineExceedsLimit: false,
+          maxLines: 2000,
+          maxBytes: 40_000,
+        },
+      }),
+    ).toContain(
+      '[Output truncated: showing last 2000 of 2105 lines. Rerun with a narrower command or line range to inspect more.]',
     );
   });
 
@@ -211,7 +240,59 @@ describe('AppServer exec tool helpers', () => {
       },
     ]);
     expect(result).toMatchObject({ content: [{ type: 'text', text: 'Success\n' }] });
+    expect(result).toMatchObject({ details: { original_token_count: 2 } });
     sessions.close();
+  });
+
+  test('exec_command rejects non-zero exits as tool errors with output preserved', async () => {
+    const fake = createResolvingClient({ exitCode: 2, stdout: 'bad output\n', stderr: '' });
+    const sessions = new CodexAppServerExecSessionManager({
+      clientFactory: () => fake.client as any,
+    });
+    const registeredTools: Array<{ name: string; execute?: (...args: any[]) => Promise<any> }> = [];
+    registerAppServerExecTools(
+      {
+        registerTool(tool: { name: string; execute?: (...args: any[]) => Promise<any> }) {
+          registeredTools.push(tool);
+        },
+      } as any,
+      sessions,
+    );
+
+    const tool = registeredTools.find((registeredTool) => registeredTool.name === 'exec_command')!;
+    await expect(
+      tool.execute?.('call-1', { cmd: 'exit 2', yield_time_ms: 250 }, undefined, undefined, {
+        cwd: '/repo',
+      }),
+    ).rejects.toThrow(/bad output\n\nExec #1 exited 2 · Took \d+\.\d+s/);
+    sessions.close();
+  });
+
+  test('write_stdin rejects non-zero exits as tool errors with output preserved', async () => {
+    const registeredTools: Array<{ name: string; execute?: (...args: any[]) => Promise<any> }> = [];
+    registerAppServerExecTools(
+      {
+        registerTool(tool: { name: string; execute?: (...args: any[]) => Promise<any> }) {
+          registeredTools.push(tool);
+        },
+      } as any,
+      {
+        getSessionCommand: () => 'npm test',
+        write: async () => ({
+          chunk_id: 'abc123',
+          wall_time_seconds: 0.5,
+          exec_session_id: 15,
+          output: 'failed tests\n',
+          original_token_count: 2_345,
+          exit_code: 1,
+        }),
+      } as any,
+    );
+
+    const tool = registeredTools.find((registeredTool) => registeredTool.name === 'write_stdin')!;
+    await expect(
+      tool.execute?.('call-2', { session_id: 15, yield_time_ms: 250 }, undefined, undefined),
+    ).rejects.toThrow(/failed tests\n\nExec #15 exited 1 · Took 0\.5s · 2\.3k tokens/);
   });
 
   test('control socket health check reports missing sockets without throwing', async () => {
@@ -271,5 +352,171 @@ describe('AppServer exec tool helpers', () => {
     expect(fake.calls.map((call) => call.method)).not.toContain('command/exec/write');
     sessions.close();
     vi.useRealTimers();
+  });
+
+  test('exec_command streams partial updates with session id and output', async () => {
+    vi.useFakeTimers();
+    const fake = createPendingClient();
+    const sessions = new CodexAppServerExecSessionManager({
+      clientFactory: () => fake.client as any,
+    });
+    const registeredTools: Array<{ name: string; execute?: (...args: any[]) => Promise<any> }> = [];
+    registerAppServerExecTools(
+      {
+        registerTool(tool: { name: string; execute?: (...args: any[]) => Promise<any> }) {
+          registeredTools.push(tool);
+        },
+      } as any,
+      sessions,
+    );
+    const updates: any[] = [];
+    const tool = registeredTools.find((registeredTool) => registeredTool.name === 'exec_command')!;
+
+    const pending = tool.execute?.(
+      'call-1',
+      { cmd: 'sleep 10', yield_time_ms: 6_000 },
+      undefined,
+      (update: unknown) => updates.push(update),
+      { cwd: '/repo' },
+    );
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(updates.at(-1)?.details).toMatchObject({
+      exec_session_id: 1,
+      session_id: 1,
+      command: 'sleep 10',
+    });
+    const execCall = fake.calls.find((call) => call.method === 'command/exec')!;
+    const processId = (execCall.params as { processId: string }).processId;
+    fake.emit({
+      method: 'command/exec/outputDelta',
+      params: { processId, deltaBase64: Buffer.from('ready\n').toString('base64') },
+    });
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(updates.some((update) => update.details?.output?.includes('ready'))).toBe(true);
+    await vi.advanceTimersByTimeAsync(5_750);
+    await expect(pending).resolves.toMatchObject({
+      details: { exec_session_id: 1, session_id: 1, command: 'sleep 10' },
+    });
+    sessions.close();
+    vi.useRealTimers();
+  });
+
+  test('write_stdin streams partial updates for new output since the poll baseline', async () => {
+    vi.useFakeTimers();
+    const fake = createPendingClient({ allowWrite: true });
+    const sessions = new CodexAppServerExecSessionManager({
+      clientFactory: () => fake.client as any,
+    });
+    const registeredTools: Array<{ name: string; execute?: (...args: any[]) => Promise<any> }> = [];
+    registerAppServerExecTools(
+      {
+        registerTool(tool: { name: string; execute?: (...args: any[]) => Promise<any> }) {
+          registeredTools.push(tool);
+        },
+      } as any,
+      sessions,
+    );
+
+    const startedPromise = sessions.exec({ cmd: 'cat', tty: true, yield_time_ms: 250 }, '/repo');
+    await vi.advanceTimersByTimeAsync(250);
+    const started = await startedPromise;
+    const writeTool = registeredTools.find(
+      (registeredTool) => registeredTool.name === 'write_stdin',
+    )!;
+    const updates: any[] = [];
+    const pending = writeTool.execute?.(
+      'call-2',
+      { session_id: started.session_id, chars: 'x', yield_time_ms: 500 },
+      undefined,
+      (update: unknown) => updates.push(update),
+    );
+    await Promise.resolve();
+    const execCall = fake.calls.find((call) => call.method === 'command/exec')!;
+    const processId = (execCall.params as { processId: string }).processId;
+    fake.emit({
+      method: 'command/exec/outputDelta',
+      params: { processId, deltaBase64: Buffer.from('response\n').toString('base64') },
+    });
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(updates.some((update) => update.details?.output?.includes('response'))).toBe(true);
+    await vi.advanceTimersByTimeAsync(250);
+    await expect(pending).resolves.toMatchObject({
+      details: { exec_session_id: 1, session_id: 1, command: 'cat' },
+    });
+    sessions.close();
+    vi.useRealTimers();
+  });
+
+  test('lists running exec sessions for /ps-style status', async () => {
+    const pending = createPendingClient();
+    const manager = new CodexAppServerExecSessionManager({
+      clientFactory: () => pending.client as any,
+    });
+
+    const first = await manager.exec({ cmd: 'sleep 10', yield_time_ms: 250 }, '/tmp');
+
+    expect(first.session_id).toBe(1);
+    expect(manager.listSessions()).toEqual([
+      expect.objectContaining({ session_id: 1, command: 'sleep 10', running: true }),
+    ]);
+  });
+
+  test('truncates exec output by line count before returning it to the model', async () => {
+    const stdout = Array.from({ length: 2105 }, (_unused, index) => `line ${index + 1}`).join('\n');
+    const fake = createResolvingClient({ exitCode: 0, stdout, stderr: '' });
+    const sessions = new CodexAppServerExecSessionManager({
+      clientFactory: () => fake.client as any,
+    });
+
+    const result = await sessions.exec({ cmd: 'seq 1 2105', yield_time_ms: 250 }, '/repo');
+
+    expect(result.output.startsWith('line 106\n')).toBe(true);
+    expect(result.output).toContain('line 2105');
+    expect(result.truncation).toMatchObject({
+      truncated: true,
+      truncatedBy: 'lines',
+      totalLines: 2105,
+      outputLines: 2000,
+      maxLines: 2000,
+    });
+    sessions.close();
+  });
+
+  test('strips binary/control bytes from non-tty exec output before returning it', async () => {
+    const fake = createResolvingClient({
+      exitCode: 0,
+      stdout: 'ok\u0000\u001b[31mred\u001b[0m\ufffd\u0085done\n',
+      stderr: '',
+    });
+    const sessions = new CodexAppServerExecSessionManager({
+      clientFactory: () => fake.client as any,
+    });
+
+    const result = await sessions.exec({ cmd: 'binary-ish', yield_time_ms: 250 }, '/repo');
+
+    expect(result.output).toBe('okreddone\n');
+    sessions.close();
+  });
+
+  test('strips binary/control bytes from tty exec output before returning it', async () => {
+    const fake = createResolvingClient({
+      exitCode: 0,
+      stdout: 'ok\u0000\u001b[31mred\u001b[0m\ufffd\u0085done\n',
+      stderr: '',
+    });
+    const sessions = new CodexAppServerExecSessionManager({
+      clientFactory: () => fake.client as any,
+    });
+
+    const result = await sessions.exec(
+      { cmd: 'binary-ish', tty: true, yield_time_ms: 250 },
+      '/repo',
+    );
+
+    expect(result.output).toBe('okreddone\n');
+    sessions.close();
   });
 });

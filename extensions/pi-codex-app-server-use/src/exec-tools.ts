@@ -1,9 +1,21 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
 
-import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
+import {
+  DEFAULT_MAX_LINES,
+  formatSize,
+  truncateTail,
+  type ExtensionAPI,
+  type ExtensionContext,
+  type TruncationResult,
+} from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 
+import {
+  isRenderableCodePoint,
+  sanitizeBinaryOutput,
+  stripTerminalControlSequences,
+} from '../../shared/tui-width';
 import { CodexAppServerWebSocketClient } from './app-server';
 import {
   checkCodexAppServerControlSocket,
@@ -11,20 +23,27 @@ import {
   getCodexAppServerControlSocketPath,
 } from './app-server-control';
 import type { CodexAppServerExecModels } from './config';
+import {
+  renderApplyPatchCall,
+  renderApplyPatchResult,
+  renderExecCommandCall,
+  renderExecCommandResult,
+  renderWriteStdinCall,
+} from './rendering';
+import {
+  DEFAULT_EXEC_YIELD_TIME_MS,
+  DEFAULT_EMPTY_WRITE_YIELD_TIME_MS,
+  DEFAULT_WRITE_YIELD_TIME_MS,
+  clampExecYieldTime,
+  clampWriteYieldTime,
+} from './yield-time';
 
 export { checkCodexAppServerControlSocket } from './app-server-control';
 
 const DEFAULT_CLIENT_NAME = 'pi-codex-app-server-use';
-const DEFAULT_EXEC_YIELD_TIME_MS = 10_000;
-const DEFAULT_WRITE_YIELD_TIME_MS = 250;
-const DEFAULT_EMPTY_WRITE_YIELD_TIME_MS = 5_000;
-const MIN_YIELD_TIME_MS = 250;
-const MIN_NON_INTERACTIVE_EXEC_YIELD_TIME_MS = 5_000;
-const MIN_EMPTY_WRITE_YIELD_TIME_MS = 5_000;
-const MAX_YIELD_TIME_MS = 30_000;
-const DEFAULT_MAX_EMPTY_WRITE_YIELD_TIME_MS = 300_000;
 const LONG_RUNNING_RPC_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 10_000;
+const EXEC_PROGRESS_UPDATE_INTERVAL_MS = 250;
 
 export const APP_SERVER_EXEC_CONTROL_TOOL_NAMES = ['exec_command', 'write_stdin'];
 export const APP_SERVER_EXEC_TOOL_NAMES = [...APP_SERVER_EXEC_CONTROL_TOOL_NAMES, 'apply_patch'];
@@ -97,9 +116,24 @@ export interface UnifiedExecResult {
   chunk_id: string;
   wall_time_seconds: number;
   output: string;
+  exec_session_id?: number | undefined;
+  command?: string | undefined;
   exit_code?: number | undefined;
   session_id?: number | undefined;
   original_token_count?: number | undefined;
+  truncation?: TruncationResult | undefined;
+}
+
+type ExecProgressCallback = (result: UnifiedExecResult) => void;
+
+export interface ExecSessionSummary {
+  session_id: number;
+  command: string;
+  running: boolean;
+  tty: boolean;
+  started_at: number;
+  buffered_chars: number;
+  exit_code?: number | undefined;
 }
 
 interface ExecSession {
@@ -163,31 +197,6 @@ function getShellArgs(shell: string, command: string, login: boolean): string[] 
   return login ? ['-lc', command] : ['-c', command];
 }
 
-function clampYieldTime(value: number | undefined, fallback: number): number {
-  return Math.min(MAX_YIELD_TIME_MS, Math.max(MIN_YIELD_TIME_MS, value ?? fallback));
-}
-
-function clampExecYieldTime(
-  value: number | undefined,
-  fallback: number,
-  isInteractive: boolean,
-): number {
-  const clamped = clampYieldTime(value, fallback);
-  return isInteractive ? clamped : Math.max(MIN_NON_INTERACTIVE_EXEC_YIELD_TIME_MS, clamped);
-}
-
-function clampWriteYieldTime(
-  value: number | undefined,
-  fallback: number,
-  isEmptyPoll: boolean,
-): number {
-  if (!isEmptyPoll) return clampYieldTime(value, fallback);
-  return Math.min(
-    DEFAULT_MAX_EMPTY_WRITE_YIELD_TIME_MS,
-    Math.max(MIN_EMPTY_WRITE_YIELD_TIME_MS, value ?? fallback),
-  );
-}
-
 function maxCharsForTokens(maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS): number {
   return Math.max(256, maxOutputTokens * 4);
 }
@@ -202,82 +211,19 @@ function truncateOutput(
 ): {
   output: string;
   original_token_count?: number | undefined;
+  truncation?: TruncationResult | undefined;
 } {
   if (text.length === 0) return { output: '' };
-  const maxChars = maxCharsForTokens(maxOutputTokens);
   const originalTokenCount = Math.ceil(text.length / 4);
-  if (text.length <= maxChars) return { output: text, original_token_count: originalTokenCount };
-  return { output: text.slice(-maxChars), original_token_count: originalTokenCount };
-}
-
-function stripTerminalControlSequences(text: string, preserveCsi = false): string {
-  const escape = String.fromCharCode(27);
-  const bell = String.fromCharCode(7);
-  let output = '';
-
-  for (let index = 0; index < text.length; index += 1) {
-    const char = text[index]!;
-    if (char !== escape) {
-      output += char;
-      continue;
-    }
-
-    const next = text[index + 1];
-    if (next === ']') {
-      index += 2;
-      while (index < text.length) {
-        if (text[index] === bell) break;
-        if (text[index] === escape && text[index + 1] === '\\') {
-          index += 1;
-          break;
-        }
-        index += 1;
-      }
-      continue;
-    }
-
-    if (next && 'P_X^'.includes(next)) {
-      index += 2;
-      while (index < text.length) {
-        if (text[index] === escape && text[index + 1] === '\\') {
-          index += 1;
-          break;
-        }
-        index += 1;
-      }
-      continue;
-    }
-
-    if (next === '[') {
-      const sequenceStart = index;
-      index += 2;
-      while (index < text.length) {
-        const code = text.charCodeAt(index);
-        if (code >= 0x40 && code <= 0x7e) break;
-        index += 1;
-      }
-      if (preserveCsi) output += text.slice(sequenceStart, Math.min(index + 1, text.length));
-      continue;
-    }
-
-    if (next) index += 1;
-  }
-
-  return output;
-}
-
-function sanitizeBinaryOutput(text: string, preserveBackspace = false): string {
-  return Array.from(text)
-    .filter((char) => {
-      const code = char.codePointAt(0);
-      if (code === undefined) return false;
-      if (code === 0x09 || code === 0x0a || code === 0x0d) return true;
-      if (preserveBackspace && code === 0x08) return true;
-      if (code <= 0x1f) return false;
-      if (code >= 0xfff9 && code <= 0xfffb) return false;
-      return true;
-    })
-    .join('');
+  const truncation = truncateTail(text, {
+    maxLines: DEFAULT_MAX_LINES,
+    maxBytes: maxCharsForTokens(maxOutputTokens),
+  });
+  return {
+    output: truncation.content,
+    original_token_count: originalTokenCount,
+    ...(truncation.truncated ? { truncation } : {}),
+  };
 }
 
 function normalizePipeOutput(text: string): string {
@@ -340,15 +286,7 @@ function applyTerminalOutput(session: ExecSession, text: string): string {
     }
 
     const code = char.codePointAt(0);
-    if (
-      code !== undefined &&
-      code <= 0x1f &&
-      char !== '\t' &&
-      char !== '\n' &&
-      char !== '\r' &&
-      char !== '\b'
-    )
-      continue;
+    if (!isRenderableCodePoint(code, true)) continue;
 
     switch (char) {
       case '\r':
@@ -391,6 +329,7 @@ function consumeOutput(
 ): {
   output: string;
   original_token_count?: number | undefined;
+  truncation?: TruncationResult | undefined;
 } {
   const text = session.tty
     ? computePtyDelta(session.emittedBuffer, session.buffer)
@@ -406,6 +345,7 @@ function peekOutputSince(
 ): {
   output: string;
   original_token_count?: number | undefined;
+  truncation?: TruncationResult | undefined;
 } {
   const text = session.tty
     ? computePtyDelta(baseline, session.buffer)
@@ -416,15 +356,21 @@ function peekOutputSince(
 function resultFromSnapshot(
   session: ExecSession,
   waitMs: number,
-  snapshot: { output: string; original_token_count?: number | undefined },
+  snapshot: {
+    output: string;
+    original_token_count?: number | undefined;
+    truncation?: TruncationResult | undefined;
+  },
 ): UnifiedExecResult {
   const result: UnifiedExecResult = {
     chunk_id: generateChunkId(),
     wall_time_seconds: waitMs / 1000,
     output: snapshot.output,
+    exec_session_id: session.id,
   };
   if (snapshot.original_token_count !== undefined)
     result.original_token_count = snapshot.original_token_count;
+  if (snapshot.truncation !== undefined) result.truncation = snapshot.truncation;
   if (session.exitCode === undefined) result.session_id = session.id;
   else result.exit_code = session.exitCode;
   return result;
@@ -453,9 +399,21 @@ async function waitForExitOrTimeout(
   session: ExecSession,
   waitMs: number,
   signal?: AbortSignal,
+  onProgress?: (elapsedMs: number) => void,
 ): Promise<number> {
   const start = Date.now();
+  let lastProgressMs = -Infinity;
+  const emitProgress = () => {
+    if (!onProgress || session.exitCode !== undefined) return;
+    const elapsedMs = Date.now() - start;
+    onProgress(elapsedMs);
+    lastProgressMs = elapsedMs;
+  };
+  emitProgress();
   while (session.exitCode === undefined && Date.now() - start < waitMs) {
+    if (Date.now() - start - lastProgressMs >= EXEC_PROGRESS_UPDATE_INTERVAL_MS) {
+      emitProgress();
+    }
     await sleep(Math.min(50, waitMs - (Date.now() - start)), signal);
   }
   return Date.now() - start;
@@ -603,8 +561,38 @@ export function formatUnifiedExecResult(result: UnifiedExecResult, command?: str
   if (result.original_token_count !== undefined) {
     sections.push(`Original token count: ${result.original_token_count}`);
   }
+  if (result.truncation?.truncated) {
+    sections.push(formatExecTruncationNotice(result.truncation));
+  }
   sections.push('Output:', result.output);
   return sections.join('\n');
+}
+
+function formatExecTruncationNotice(truncation: TruncationResult): string {
+  if (truncation.truncatedBy === 'lines') {
+    return `[Output truncated: showing last ${truncation.outputLines} of ${truncation.totalLines} lines. Rerun with a narrower command or line range to inspect more.]`;
+  }
+  return `[Output truncated: showing ${truncation.outputLines} lines from the end (${formatSize(truncation.maxBytes ?? maxCharsForTokens())} limit). Rerun with a narrower command or line range to inspect more.]`;
+}
+
+function throwIfExecFailed(result: UnifiedExecResult): void {
+  if (result.exit_code === undefined || result.exit_code === 0) return;
+  const output = result.output.trimEnd();
+  const duration = `${result.wall_time_seconds.toFixed(1)}s`;
+  const id = result.exec_session_id ?? result.session_id;
+  const tokens = formatExecTokenCount(result.original_token_count);
+  const tokenSuffix = tokens ? ` · ${tokens}` : '';
+  const status =
+    id !== undefined
+      ? `Exec #${id} exited ${result.exit_code} · Took ${duration}${tokenSuffix}`
+      : `Command exited with code ${result.exit_code}`;
+  throw new Error(output ? `${output}\n\n${status}` : status);
+}
+
+function formatExecTokenCount(tokens: number | undefined): string | undefined {
+  if (typeof tokens !== 'number' || !Number.isFinite(tokens) || tokens < 0) return undefined;
+  if (tokens < 1000) return `${tokens} token${tokens === 1 ? '' : 's'}`;
+  return `${(tokens / 1000).toFixed(1)}k tokens`;
 }
 
 export function shouldUseAppServerExecTools(
@@ -645,6 +633,7 @@ export class CodexAppServerExecSessionManager {
     input: ExecCommandParams,
     cwd: string,
     signal?: AbortSignal,
+    onProgress?: ExecProgressCallback,
   ): Promise<UnifiedExecResult> {
     const client = await this.getClient(signal);
     const session = this.createSession(input);
@@ -668,6 +657,15 @@ export class CodexAppServerExecSessionManager {
       session,
       clampExecYieldTime(input.yield_time_ms, DEFAULT_EXEC_YIELD_TIME_MS, session.tty),
       signal,
+      (elapsedMs) => {
+        onProgress?.(
+          resultFromSnapshot(
+            session,
+            elapsedMs,
+            peekOutputSince(session, session.emittedBuffer, input.max_output_tokens),
+          ),
+        );
+      },
     );
     const result = resultFromSnapshot(
       session,
@@ -680,7 +678,11 @@ export class CodexAppServerExecSessionManager {
     return result;
   }
 
-  async write(input: WriteStdinParams, signal?: AbortSignal): Promise<UnifiedExecResult> {
+  async write(
+    input: WriteStdinParams,
+    signal?: AbortSignal,
+    onProgress?: ExecProgressCallback,
+  ): Promise<UnifiedExecResult> {
     const session = this.sessions.get(input.session_id);
     if (!session) throw new Error(`Unknown process id ${input.session_id}`);
     const baseline = session.buffer;
@@ -712,6 +714,15 @@ export class CodexAppServerExecSessionManager {
         !input.chars || input.chars.length === 0,
       ),
       signal,
+      (elapsedMs) => {
+        onProgress?.(
+          resultFromSnapshot(
+            session,
+            elapsedMs,
+            peekOutputSince(session, baseline, input.max_output_tokens),
+          ),
+        );
+      },
     );
     const result = resultFromSnapshot(
       session,
@@ -747,6 +758,18 @@ export class CodexAppServerExecSessionManager {
 
   getSessionCommand(sessionId: number): string | undefined {
     return this.sessions.get(sessionId)?.command;
+  }
+
+  listSessions(): ExecSessionSummary[] {
+    return [...this.sessions.values()].map((session) => ({
+      session_id: session.id,
+      command: session.command,
+      running: session.exitCode === undefined,
+      tty: session.tty,
+      started_at: session.startedAt,
+      buffered_chars: session.buffer.length,
+      ...(session.exitCode === undefined ? {} : { exit_code: session.exitCode }),
+    }));
   }
 
   close(): void {
@@ -820,12 +843,21 @@ export function registerAppServerExecTools(
     promptSnippet: 'Run command.',
     parameters: EXEC_COMMAND_PARAMETERS,
     prepareArguments: prepareExecCommandArguments as (args: unknown) => ExecCommandParams,
-    async execute(_toolCallId, params, signal, _onUpdate, ctx: ExtensionContext) {
+    renderCall: renderExecCommandCall,
+    renderResult: renderExecCommandResult,
+    async execute(_toolCallId, params, signal, onUpdate, ctx: ExtensionContext) {
       const typedParams = parseExecCommandParams(params);
-      const result = await sessions.exec(typedParams, ctx.cwd, signal);
+      const emitUpdate = (partial: UnifiedExecResult) => {
+        onUpdate?.({
+          content: [{ type: 'text', text: formatUnifiedExecResult(partial, typedParams.cmd) }],
+          details: { ...partial, command: typedParams.cmd },
+        });
+      };
+      const result = await sessions.exec(typedParams, ctx.cwd, signal, emitUpdate);
+      throwIfExecFailed(result);
       return {
         content: [{ type: 'text', text: formatUnifiedExecResult(result, typedParams.cmd) }],
-        details: result,
+        details: { ...result, command: typedParams.cmd },
       };
     },
   });
@@ -836,13 +868,22 @@ export function registerAppServerExecTools(
     description: 'Write/poll exec session.',
     promptSnippet: 'Write to exec session.',
     parameters: WRITE_STDIN_PARAMETERS,
-    async execute(_toolCallId, params, signal) {
+    renderCall: renderWriteStdinCall,
+    renderResult: renderExecCommandResult,
+    async execute(_toolCallId, params, signal, onUpdate) {
       const typedParams = parseWriteStdinParams(params);
       const command = sessions.getSessionCommand(typedParams.session_id);
-      const result = await sessions.write(typedParams, signal);
+      const emitUpdate = (partial: UnifiedExecResult) => {
+        onUpdate?.({
+          content: [{ type: 'text', text: formatUnifiedExecResult(partial, command) }],
+          details: command ? { ...partial, command } : partial,
+        });
+      };
+      const result = await sessions.write(typedParams, signal, emitUpdate);
+      throwIfExecFailed(result);
       return {
         content: [{ type: 'text', text: formatUnifiedExecResult(result, command) }],
-        details: result,
+        details: command ? { ...result, command } : result,
       };
     },
   });
@@ -854,12 +895,19 @@ export function registerAppServerExecTools(
     promptSnippet: 'Edit files with patch.',
     parameters: APPLY_PATCH_PARAMETERS,
     prepareArguments: prepareApplyPatchArguments as (args: unknown) => ApplyPatchParams,
+    renderCall: renderApplyPatchCall,
+    renderResult: renderApplyPatchResult,
     async execute(_toolCallId, params, signal, _onUpdate, ctx: ExtensionContext) {
       const typedParams = parseApplyPatchParams(params);
       const result = await sessions.applyPatch(typedParams, ctx.cwd, signal);
+      const originalTokenCount =
+        result.output.length > 0 ? Math.ceil(result.output.length / 4) : undefined;
       return {
         content: [{ type: 'text', text: result.output }],
-        details: result.response,
+        details: {
+          ...result.response,
+          ...(originalTokenCount !== undefined ? { original_token_count: originalTokenCount } : {}),
+        },
       };
     },
   });

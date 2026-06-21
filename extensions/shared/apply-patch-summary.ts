@@ -1,8 +1,51 @@
 import type { Component } from '@earendil-works/pi-tui';
 import { truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
 
-import type { PatchPreviewRow } from '../patch';
-import { shortenDisplayPath } from '../render-utils';
+import { shortenDisplayPath, truncateDisplayPath, truncateMiddleToWidth } from './paths';
+
+export type PatchSummaryRow =
+  | {
+      id?: string;
+      kind: 'edit' | 'create';
+      path: string;
+      addedLines: number;
+      removedLines: number;
+      modifiedBytes: number;
+      renameOnly: false;
+      state: PatchSummaryRowState;
+    }
+  | {
+      id?: string;
+      kind: 'move';
+      path: string;
+      targetPath: string;
+      addedLines: number;
+      removedLines: number;
+      modifiedBytes: number;
+      renameOnly: boolean;
+      state: PatchSummaryRowState;
+    }
+  | {
+      id?: string;
+      kind: 'delete';
+      path: string;
+      state: PatchSummaryRowState;
+      contentKind?: 'text' | 'binary';
+      byteLength?: number;
+      lineCount?: number;
+    };
+
+export type PatchSummaryRowState =
+  | 'streaming'
+  | 'streamed'
+  | 'staging'
+  | 'staged'
+  | 'invalidated'
+  | 'committing'
+  | 'applying'
+  | 'applied'
+  | 'failed'
+  | 'skipped';
 
 interface SummaryTheme {
   fg(color: string, text: string): string;
@@ -10,17 +53,13 @@ interface SummaryTheme {
 }
 
 function formatCompactBytes(value: number): string {
-  if (value < 1024) {
-    return `${value}B`;
-  }
-  if (value < 1024 * 1024) {
-    return `${Math.round(value / 1024)}K`;
-  }
+  if (value < 1024) return `${value}B`;
+  if (value < 1024 * 1024) return `${Math.round(value / 1024)}K`;
   const megabytes = (value / (1024 * 1024)).toFixed(1);
   return `${megabytes.replace(/\.0$/, '')}M`;
 }
 
-function formatStateIcon(row: PatchPreviewRow, theme: SummaryTheme): string {
+function formatStateIcon(row: PatchSummaryRow, theme: SummaryTheme): string {
   if (row.state === 'applied') return theme.fg('success', '✓');
   if (row.state === 'staging') return theme.fg('warning', '◌');
   if (row.state === 'staged') return theme.fg('success', '◆');
@@ -32,17 +71,13 @@ function formatStateIcon(row: PatchPreviewRow, theme: SummaryTheme): string {
   return theme.fg('muted', '○');
 }
 
-function formatStateSuffix(row: PatchPreviewRow, theme: SummaryTheme): string {
-  if (row.state === 'invalidated') {
-    return theme.fg('muted', 'restaging');
-  }
-  if (row.state === 'skipped') {
-    return theme.fg('muted', 'skipped');
-  }
+function formatStateSuffix(row: PatchSummaryRow, theme: SummaryTheme): string {
+  if (row.state === 'invalidated') return theme.fg('muted', 'restaging');
+  if (row.state === 'skipped') return theme.fg('muted', 'skipped');
   return '';
 }
 
-function formatAction(row: PatchPreviewRow): string {
+function formatAction(row: PatchSummaryRow): string {
   switch (row.kind) {
     case 'create':
       return 'create';
@@ -55,12 +90,9 @@ function formatAction(row: PatchPreviewRow): string {
   }
 }
 
-// Shown while a streaming op row exists but the path hasn't been
-// typed yet. Keeps the row anchored so the user sees structure even
-// before the model commits to a filename.
 const STREAMING_PATH_PLACEHOLDER = '…';
 
-function formatPath(row: PatchPreviewRow, cwd?: string): string {
+function formatPath(row: PatchSummaryRow, cwd?: string): string {
   if (row.kind === 'move') {
     const source = shortenDisplayPath(row.path, cwd) || STREAMING_PATH_PLACEHOLDER;
     const target = shortenDisplayPath(row.targetPath, cwd) || STREAMING_PATH_PLACEHOLDER;
@@ -69,75 +101,7 @@ function formatPath(row: PatchPreviewRow, cwd?: string): string {
   return shortenDisplayPath(row.path, cwd) || STREAMING_PATH_PLACEHOLDER;
 }
 
-function takeSuffixToWidth(text: string, maxWidth: number): string {
-  if (maxWidth <= 0) {
-    return '';
-  }
-  if (visibleWidth(text) <= maxWidth) {
-    return text;
-  }
-
-  const chars = Array.from(text);
-  let suffix = '';
-  for (let index = chars.length - 1; index >= 0; index--) {
-    const next = `${chars[index]}${suffix}`;
-    if (visibleWidth(next) > maxWidth) {
-      break;
-    }
-    suffix = next;
-  }
-  return suffix;
-}
-
-function takePrefixToWidth(text: string, maxWidth: number): string {
-  if (maxWidth <= 0) {
-    return '';
-  }
-  if (visibleWidth(text) <= maxWidth) {
-    return text;
-  }
-
-  const chars = Array.from(text);
-  let prefix = '';
-  for (const char of chars) {
-    const next = `${prefix}${char}`;
-    if (visibleWidth(next) > maxWidth) {
-      break;
-    }
-    prefix = next;
-  }
-  return prefix;
-}
-
-function truncateMiddleToWidth(text: string, maxWidth: number): string {
-  if (maxWidth <= 0) {
-    return '';
-  }
-  if (visibleWidth(text) <= maxWidth) {
-    return text;
-  }
-  if (maxWidth <= 3) {
-    return '.'.repeat(maxWidth);
-  }
-
-  const ellipsis = '...';
-  const remainingWidth = maxWidth - visibleWidth(ellipsis);
-  const suffixWidth = Math.max(1, Math.floor(remainingWidth / 2));
-  const prefixWidth = Math.max(1, remainingWidth - suffixWidth);
-  let prefix = takePrefixToWidth(text, prefixWidth);
-  let suffix = takeSuffixToWidth(text, suffixWidth);
-
-  while (visibleWidth(`${prefix}${ellipsis}${suffix}`) > maxWidth && suffix.length > 0) {
-    suffix = takeSuffixToWidth(suffix, Math.max(0, visibleWidth(suffix) - 1));
-  }
-  while (visibleWidth(`${prefix}${ellipsis}${suffix}`) > maxWidth && prefix.length > 0) {
-    prefix = takePrefixToWidth(prefix, Math.max(0, visibleWidth(prefix) - 1));
-  }
-
-  return `${prefix}${ellipsis}${suffix}`;
-}
-
-function formatRowMetric(row: PatchPreviewRow): string {
+function formatRowMetric(row: PatchSummaryRow): string {
   if (row.kind === 'delete') {
     if (row.contentKind === 'binary' && row.byteLength !== undefined) {
       return `binary · ${formatCompactBytes(row.byteLength)}`;
@@ -148,19 +112,21 @@ function formatRowMetric(row: PatchPreviewRow): string {
     return 'meta';
   }
 
-  if (row.kind === 'move' && row.renameOnly) {
-    return 'rename';
-  }
-
-  if (row.removedLines === 0) {
+  if (row.kind === 'move' && row.renameOnly) return 'rename';
+  if (row.removedLines === 0)
     return `+${row.addedLines}L · ${formatCompactBytes(row.modifiedBytes)}`;
-  }
-
   return `+${row.addedLines}/-${row.removedLines}L · ${formatCompactBytes(row.modifiedBytes)}`;
 }
 
+function formatPathToWidth(row: PatchSummaryRow, width: number, cwd?: string): string {
+  if (row.kind === 'move') return truncateMiddleToWidth(formatPath(row, cwd), width);
+  const path = formatPath(row, cwd);
+  if (path === STREAMING_PATH_PLACEHOLDER) return path;
+  return truncateDisplayPath(row.path, width, cwd);
+}
+
 function renderOperationRow(
-  row: PatchPreviewRow,
+  row: PatchSummaryRow,
   theme: SummaryTheme,
   width: number,
   rowsOnly: boolean,
@@ -179,11 +145,9 @@ function renderOperationRow(
     1,
     width - visibleWidth(actionPrefix) - visibleWidth(renderedSuffix) - 2,
   );
-  const path = theme.fg('accent', truncateMiddleToWidth(formatPath(row, cwd), availablePathWidth));
+  const path = theme.fg('accent', formatPathToWidth(row, availablePathWidth, cwd));
   const combined = `${actionPrefix}${path}  ${renderedSuffix}`;
-  if (width <= 0 || visibleWidth(combined) <= width) {
-    return [combined];
-  }
+  if (width <= 0 || visibleWidth(combined) <= width) return [combined];
   return [
     truncateToWidth(`${actionPrefix}${theme.fg('accent', formatPath(row, cwd))}`, width, '…'),
     truncateToWidth(renderedSuffix, width, '…'),
@@ -191,7 +155,7 @@ function renderOperationRow(
 }
 
 function renderRows(
-  rows: PatchPreviewRow[],
+  rows: PatchSummaryRow[],
   theme: SummaryTheme,
   width: number,
   includeHeader: boolean,
@@ -211,10 +175,7 @@ function renderRows(
     const metric = statusSuffix ? `${metricBase} · ${statusSuffix}` : metricBase;
     const prefix = `${icon} ${theme.fg('text', action)} `;
     const availablePathWidth = Math.max(1, width - visibleWidth(prefix) - visibleWidth(metric) - 2);
-    const path = theme.fg(
-      'accent',
-      truncateMiddleToWidth(formatPath(row, cwd), availablePathWidth),
-    );
+    const path = theme.fg('accent', formatPathToWidth(row, availablePathWidth, cwd));
     const line = `${prefix}${path}  ${metric}`;
 
     lines.push(
@@ -227,7 +188,7 @@ function renderRows(
 
 class ApplyPatchSummaryComponent implements Component {
   constructor(
-    private rows: PatchPreviewRow[],
+    private rows: PatchSummaryRow[],
     private theme: SummaryTheme,
     private includeHeader: boolean,
     private cwd: string | undefined,
@@ -244,7 +205,7 @@ class ApplyPatchSummaryComponent implements Component {
 }
 
 export function renderApplyPatchSummary(
-  rows: PatchPreviewRow[],
+  rows: PatchSummaryRow[],
   theme: SummaryTheme,
   cwd?: string,
 ): Component {
@@ -252,7 +213,7 @@ export function renderApplyPatchSummary(
 }
 
 export function renderApplyPatchRows(
-  rows: PatchPreviewRow[],
+  rows: PatchSummaryRow[],
   theme: SummaryTheme,
   cwd?: string,
 ): Component {

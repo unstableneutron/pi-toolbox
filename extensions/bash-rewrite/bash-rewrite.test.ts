@@ -1,10 +1,14 @@
 import { describe, expect, test } from 'vitest';
-import { tryRewriteBash } from './bash-rewrite';
+import { tryRewriteBash, tryRewriteBashReadOperations } from './bash-rewrite';
 
 const CWD = '/repo';
 
 function rewrite(cmd: string) {
   return tryRewriteBash(cmd, CWD);
+}
+
+function readOperations(cmd: string) {
+  return tryRewriteBashReadOperations(cmd, CWD);
 }
 
 describe('tryRewriteBash — single-command rewrites', () => {
@@ -910,6 +914,124 @@ describe('tryRewriteBash — sed line-range → read', () => {
 
   test('rejects reverse range N > M', () => {
     expect(rewrite("sed -n '50,10p' f.ts")).toBeNull();
+  });
+});
+
+describe('tryRewriteBashReadOperations — sed line-range chains', () => {
+  test('extracts multiple sed reads joined by && with printf section headers', () => {
+    const r = readOperations(
+      "sed -n '520,620p' extensions/a.ts && printf '\\n--- b ---\\n' && sed -n '1,220p' extensions/b.ts",
+    );
+
+    expect(r?.operations).toEqual([
+      {
+        path: 'extensions/a.ts',
+        offset: 520,
+        limit: 101,
+        recognizer: 'sed-range-print',
+      },
+      {
+        path: 'extensions/b.ts',
+        offset: 1,
+        limit: 220,
+        recognizer: 'sed-range-print',
+      },
+    ]);
+  });
+
+  test('extracts newline-separated sed reads with section headers', () => {
+    const r = readOperations(`sed -n '1,260p' src/config.rs
+printf '\n--- default config git insertion area ---\n'
+sed -n '104,174p' src/main.rs
+printf '\n--- workspace open ---\n'
+sed -n '596,680p' src/workspace.rs
+printf '\n--- discovery ---\n'
+sed -n '1,160p' src/workspace/git/discovery.rs`);
+
+    expect(r?.operations).toEqual([
+      { path: 'src/config.rs', offset: 1, limit: 260, recognizer: 'sed-range-print' },
+      { path: 'src/main.rs', offset: 104, limit: 71, recognizer: 'sed-range-print' },
+      { path: 'src/workspace.rs', offset: 596, limit: 85, recognizer: 'sed-range-print' },
+      {
+        path: 'src/workspace/git/discovery.rs',
+        offset: 1,
+        limit: 160,
+        recognizer: 'sed-range-print',
+      },
+    ]);
+  });
+
+  test('rejects redirected printf typo and redirected reads', () => {
+    expect(
+      readOperations(
+        "sed -n '1,260p' src/config.rs\nprintf '\\n--- header ---\\n' > sed -n '104,174p' src/main.rs",
+      ),
+    ).toBeNull();
+    expect(readOperations("printf 'x' > sed.txt && sed -n '1,5p' src/main.rs")).toBeNull();
+    expect(readOperations("sed -n '1,5p' src/main.rs > out.txt")).toBeNull();
+  });
+
+  test('rejects malformed multiline read batches', () => {
+    expect(readOperations("sed -n '1,5p src/main.rs\nsed -n '10,12p' src/lib.rs")).toBeNull();
+    expect(readOperations("sed -n '1,5p' src/main.rs &&\nsed -n '10,12p' src/lib.rs")).toBeNull();
+    expect(
+      readOperations("sed -n '1,5p' src/main.rs\n# comment\nsed -n '10,12p' src/lib.rs"),
+    ).toBeNull();
+  });
+
+  test('extracts three sed reads from recent exec_command header pattern', () => {
+    const r = readOperations(
+      "sed -n '520,620p' extensions/pi-codex-app-server-use/index.test.ts && printf '\\n--- plugin-skills.ts ---\\n' && sed -n '1,220p' extensions/pi-codex-app-server-use/src/plugin-skills.ts && printf '\\n--- plugin-skills.test.ts ---\\n' && sed -n '1,260p' extensions/pi-codex-app-server-use/src/plugin-skills.test.ts",
+    );
+
+    expect(r?.operations).toEqual([
+      {
+        path: 'extensions/pi-codex-app-server-use/index.test.ts',
+        offset: 520,
+        limit: 101,
+        recognizer: 'sed-range-print',
+      },
+      {
+        path: 'extensions/pi-codex-app-server-use/src/plugin-skills.ts',
+        offset: 1,
+        limit: 220,
+        recognizer: 'sed-range-print',
+      },
+      {
+        path: 'extensions/pi-codex-app-server-use/src/plugin-skills.test.ts',
+        offset: 1,
+        limit: 260,
+        recognizer: 'sed-range-print',
+      },
+    ]);
+  });
+
+  test('preserves effective cwd from a leading cd prefix', () => {
+    const r = readOperations("cd /tmp/repo && sed -n '5,8p' a.ts && sed -n '10p' b.ts");
+
+    expect(r?.cwd).toBe('/tmp/repo');
+    expect(r?.operations).toEqual([
+      { path: 'a.ts', offset: 5, limit: 4, recognizer: 'sed-range-print' },
+      { path: 'b.ts', offset: 10, limit: 1, recognizer: 'sed-range-print' },
+    ]);
+  });
+
+  test('preserves effective cwd from a leading newline-separated cd prefix', () => {
+    const r = readOperations("cd /tmp/repo\nsed -n '5,8p' a.ts\nsed -n '10p' b.ts");
+
+    expect(r?.cwd).toBe('/tmp/repo');
+    expect(r?.operations).toEqual([
+      { path: 'a.ts', offset: 5, limit: 4, recognizer: 'sed-range-print' },
+      { path: 'b.ts', offset: 10, limit: 1, recognizer: 'sed-range-print' },
+    ]);
+  });
+
+  test('rejects unsafe or non-read chain segments', () => {
+    expect(readOperations("sed -n '1,2p' a.ts || sed -n '3,4p' b.ts")).toBeNull();
+    expect(readOperations("sed -n '1,2p' a.ts && rm -rf b")).toBeNull();
+    expect(
+      readOperations("sed -n '1,2p' a.ts && printf '%s\\n' not-a-header && sed -n '3,4p' b.ts"),
+    ).toBeNull();
   });
 });
 

@@ -44,6 +44,19 @@ export interface RewriteResult {
   cwd?: string;
 }
 
+export interface BashReadOperation {
+  path: string;
+  offset?: number | undefined;
+  limit?: number | undefined;
+  recognizer: string;
+}
+
+export interface BashReadOperationsResult {
+  operations: BashReadOperation[];
+  /** Effective cwd after a safe leading `cd <path> &&`/`;`/newline prefix. */
+  cwd?: string | undefined;
+}
+
 interface RewriteOptions {
   enabledTools?: Iterable<string> | ((toolName: RewriteTool) => boolean);
 }
@@ -477,6 +490,25 @@ function splitChainSegments(tokens: Token[]): Token[][] {
   return segments;
 }
 
+/** Split a token stream on top-level `&&` only. Reject `||` / `;` chains. */
+function splitAndChainSegments(tokens: Token[]): Token[][] | null {
+  const segments: Token[][] = [];
+  let current: Token[] = [];
+  for (const t of tokens) {
+    if (isOp(t, '&&')) {
+      if (current.length === 0) return null;
+      segments.push(current);
+      current = [];
+      continue;
+    }
+    if (isOp(t, '||') || isOp(t, ';')) return null;
+    current.push(t);
+  }
+  if (current.length === 0) return null;
+  segments.push(current);
+  return segments;
+}
+
 /**
  * Accept chain segments that look like `cd <path>` (navigation-only) and return
  * the single remaining work segment. Returns null if we see anything non-trivial
@@ -598,6 +630,17 @@ function splitPipeStages(tokens: Token[]): Token[][] | null {
   if (current.length === 0) return null;
   stages.push(current);
   return stages;
+}
+
+function hasUnsupportedRedirectOperator(tokens: Token[]): boolean {
+  for (const t of tokens) {
+    if (!isOp(t)) continue;
+    const op = (t as { op: string }).op;
+    if (op === '>' || op === '>>' || op === '<' || op === '>&' || op === '<<' || op === '<<<') {
+      return true;
+    }
+  }
+  return false;
 }
 
 // --- Single-stage classifiers -----------------------------------------------
@@ -1443,6 +1486,187 @@ function tryFindXargsCatIdiom(stages: Token[][]): RewriteDecision | null {
   };
 }
 
+function looksLikeReadOperationsCandidate(cmd: string): boolean {
+  if (cmd.length === 0 || cmd.length > MAX_REWRITE_CANDIDATE_LENGTH) return false;
+  return cmd.includes('sed') && cmd.includes('-n');
+}
+
+function isPrintfSectionHeader(tokens: Token[]): boolean {
+  const strs = asStrings(normalizeStageFirstToken(stripTrivialTrailingRedirects(tokens)));
+  if (!strs || strs[0] !== 'printf') return false;
+  const args = strs.slice(1);
+  if (args[0] === '--') args.shift();
+  if (args.length !== 1) return false;
+  const format = args[0]!;
+  if (format.length === 0 || format.length > 200) return false;
+  return !/(^|[^%])%(?!%)/.test(format);
+}
+
+function readOperationFromDecision(decision: RewriteDecision): BashReadOperation | null {
+  if (decision.tool !== 'read') return null;
+  if (!decision.recognizer.startsWith('sed-range-print')) return null;
+  if (typeof decision.params.path !== 'string') return null;
+
+  const operation: BashReadOperation = {
+    path: decision.params.path,
+    recognizer: decision.recognizer,
+  };
+  if (typeof decision.params.offset === 'number') operation.offset = decision.params.offset;
+  if (typeof decision.params.limit === 'number') operation.limit = decision.params.limit;
+  return operation;
+}
+
+function classifyReadOperationSegment(tokens: Token[]): BashReadOperation | null {
+  const stripped = stripTrivialTrailingRedirects(tokens);
+  if (stripped.length === 0) return null;
+
+  const pipeStages = splitPipeStages(stripped);
+  if (!pipeStages) return null;
+
+  const strippedStages = pipeStages
+    .map(stripTrivialTrailingRedirects)
+    .map(normalizeStageFirstToken);
+
+  if (strippedStages.some(hasUnsupportedRedirectOperator)) return null;
+
+  if (strippedStages.length === 1) {
+    const decision = classifySingleStage(strippedStages[0]!);
+    return decision ? readOperationFromDecision(decision) : null;
+  }
+
+  if (strippedStages.length !== 2) return null;
+
+  const sedRange = extractSedRangeFilter(strippedStages[1]!);
+  if (sedRange) {
+    const catDecision = classifyCat(strippedStages[0]!);
+    if (catDecision && catDecision.recognizer === 'cat-file') {
+      return {
+        path: catDecision.params.path as string,
+        offset: sedRange.offset,
+        limit: sedRange.limit,
+        recognizer: 'cat-sed-range',
+      };
+    }
+  }
+
+  const limit = extractHeadLimit(strippedStages[1]!);
+  if (limit === null) return null;
+  const decision = classifySingleStage(strippedStages[0]!);
+  if (!decision) return null;
+  return readOperationFromDecision({
+    ...decision,
+    params: { ...decision.params, limit },
+    recognizer: `${decision.recognizer}+head`,
+  });
+}
+
+function appendReadOperationSegments(target: Token[][], tokens: Token[]): boolean {
+  if (tokens.length === 0) return true;
+  if (hasUnsafeTokens(tokens)) return false;
+  const chainSegments = splitAndChainSegments(tokens);
+  if (!chainSegments) return false;
+  target.push(...chainSegments);
+  return true;
+}
+
+function splitShellCommandLines(input: string): string[] | null {
+  const lines: string[] = [];
+  let start = 0;
+  let quote: 'single' | 'double' | null = null;
+  let escaped = false;
+
+  for (let i = 0; i < input.length; i += 1) {
+    const ch = input[i]!;
+    if (quote === 'single') {
+      if (ch === "'") quote = null;
+      continue;
+    }
+    if (quote === 'double') {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (ch === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (ch === '"') quote = null;
+      continue;
+    }
+    if (ch === '\\') {
+      i += 1;
+      continue;
+    }
+    if (ch === "'") {
+      quote = 'single';
+      continue;
+    }
+    if (ch === '"') {
+      quote = 'double';
+      continue;
+    }
+    if (ch === '\n') {
+      lines.push(input.slice(start, i));
+      start = i + 1;
+    }
+  }
+
+  if (quote !== null) return null;
+  lines.push(input.slice(start));
+  return lines;
+}
+
+function splitReadOperationSegments(command: string): Token[][] | null {
+  const segments: Token[][] = [];
+  if (command.includes('\n')) {
+    const commandLines = splitShellCommandLines(command.replace(/\r\n/g, '\n'));
+    if (!commandLines) return null;
+    for (const line of commandLines) {
+      if (!line.trim()) continue;
+      let tokens: Token[];
+      try {
+        tokens = shellParse(line);
+      } catch {
+        return null;
+      }
+      if (!appendReadOperationSegments(segments, tokens)) return null;
+    }
+    return segments.length > 0 ? segments : null;
+  }
+
+  let tokens: Token[];
+  try {
+    tokens = shellParse(command);
+  } catch {
+    return null;
+  }
+  if (!appendReadOperationSegments(segments, tokens)) return null;
+  return segments.length > 0 ? segments : null;
+}
+
+export function tryRewriteBashReadOperations(
+  cmd: string,
+  cwd: string,
+): BashReadOperationsResult | null {
+  const normalized = normalizeRewriteCommand(cmd, cwd);
+  const rewriteCommand = normalized.command;
+  if (!looksLikeReadOperationsCandidate(rewriteCommand)) return null;
+
+  const chainSegments = splitReadOperationSegments(rewriteCommand);
+  if (!chainSegments) return null;
+
+  const operations: BashReadOperation[] = [];
+  for (const segment of chainSegments) {
+    if (isPrintfSectionHeader(segment)) continue;
+    const operation = classifyReadOperationSegment(segment);
+    if (!operation) return null;
+    operations.push(operation);
+  }
+  if (operations.length === 0) return null;
+
+  return normalized.explicitCwd ? { operations, cwd: normalized.cwd } : { operations };
+}
+
 // --- Public entry point -----------------------------------------------------
 
 /**
@@ -1541,16 +1765,7 @@ export function tryRewriteBashWithOptions(
 
   // Reject any stage that still contains a redirect operator after stripping —
   // those are real redirects we don't understand, not noise.
-  for (const stage of strippedStages) {
-    for (const t of stage) {
-      if (isOp(t)) {
-        const op = (t as { op: string }).op;
-        if (op === '>' || op === '>>' || op === '<' || op === '>&' || op === '<<' || op === '<<<') {
-          return null;
-        }
-      }
-    }
-  }
+  if (strippedStages.some(hasUnsupportedRedirectOperator)) return null;
 
   // Special multi-stage idiom first.
   const idiom = tryFindXargsCatIdiom(strippedStages);

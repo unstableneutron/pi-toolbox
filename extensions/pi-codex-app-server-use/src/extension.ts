@@ -50,6 +50,8 @@ const COMPUTER_USE_TOOL_NAMES = [
 ];
 
 const CODEX_EXEC_TOOL_NAMES = [...APP_SERVER_EXEC_TOOL_NAMES, VIEW_IMAGE_TOOL_NAME];
+const STATUS_KEY = 'codex-app-server-use';
+const STATUS_FLASH_MS = 5_000;
 
 function withoutTools(toolNames: string[], removed: readonly string[]): string[] {
   return toolNames.filter((name) => !removed.includes(name));
@@ -141,6 +143,22 @@ function buildCodexExecSystemPrompt(basePrompt: string): string {
   return injectShell(injectGuidelines(basePrompt));
 }
 
+function formatExecSessionList(
+  sessions: ReturnType<CodexAppServerExecSessionManager['listSessions']>,
+): string {
+  if (sessions.length === 0) return 'No AppServer exec sessions are running.';
+  return [
+    'AppServer exec sessions:',
+    ...sessions.map((session) => {
+      const status = session.running ? 'running' : `exit ${session.exit_code}`;
+      const tty = session.tty ? 'tty' : 'pipe';
+      return `#${session.session_id} ${status} ${tty} ${session.buffered_chars} chars — ${session.command}`;
+    }),
+    '',
+    'Poll or interact with a session by calling write_stdin with its session_id.',
+  ].join('\n');
+}
+
 export interface CodexAppServerUseExtensionDeps {
   checkAppServerControlSocket?: typeof checkCodexAppServerControlSocket;
 }
@@ -157,6 +175,7 @@ export default function piCodexAppServerUseExtension(
   let execWasActive = false;
   let previousToolNames: string[] | undefined;
   let lastUnavailableWarningKey: string | undefined;
+  let statusFlashTimer: ReturnType<typeof setTimeout> | undefined;
 
   function ensureComputerUseToolsRegistered(): void {
     if (computerUseToolsRegistered) return;
@@ -181,6 +200,31 @@ export default function piCodexAppServerUseExtension(
     if (lastUnavailableWarningKey === key) return;
     lastUnavailableWarningKey = key;
     ctx.ui.notify(formatUnavailableWarning(health), 'warning');
+  }
+
+  function clearPendingStatusFlash(): void {
+    if (!statusFlashTimer) return;
+    clearTimeout(statusFlashTimer);
+    statusFlashTimer = undefined;
+  }
+
+  function unrefTimer(timer: ReturnType<typeof setTimeout>): void {
+    const unref = (timer as { unref?: () => void }).unref;
+    if (typeof unref === 'function') unref.call(timer);
+  }
+
+  function setTemporaryStatus(ctx: ExtensionContext, text: string | undefined): void {
+    if (!ctx.hasUI) return;
+
+    clearPendingStatusFlash();
+    ctx.ui.setStatus(STATUS_KEY, text);
+    if (!text) return;
+
+    statusFlashTimer = setTimeout(() => {
+      statusFlashTimer = undefined;
+      ctx.ui.setStatus(STATUS_KEY, undefined);
+    }, STATUS_FLASH_MS);
+    unrefTimer(statusFlashTimer);
   }
 
   async function isAppServerAvailableForEnabledCapabilities(
@@ -231,14 +275,12 @@ export default function piCodexAppServerUseExtension(
     }
 
     pi.setActiveTools(activeTools);
-    if (ctx.hasUI) {
-      ctx.ui.setStatus(
-        'codex-app-server-use',
-        config.ui.statusLine
-          ? `Codex AppServer exec:${config.exec.enabled ? (config.exec.replaceLocalTools ? 'replace' : 'on') : 'off'} computer:${config.computerUse.enabled ? 'on' : 'off'}`
-          : undefined,
-      );
-    }
+    setTemporaryStatus(
+      ctx,
+      config.ui.statusLine
+        ? `Codex AppServer exec:${config.exec.enabled ? (config.exec.replaceLocalTools ? 'replace' : 'on') : 'off'} computer:${config.computerUse.enabled ? 'on' : 'off'}`
+        : undefined,
+    );
   }
 
   pi.on('session_start', async (_event, ctx) => {
@@ -268,6 +310,13 @@ export default function piCodexAppServerUseExtension(
     handler: async (args, ctx) => runCodexAppServerUseSettingsCommand(args, ctx),
   });
 
+  pi.registerCommand('ps', {
+    description: 'List active Codex AppServer exec sessions.',
+    handler: async (_args, ctx) => {
+      ctx.ui.notify(formatExecSessionList(execSessions.listSessions()), 'info');
+    },
+  });
+
   pi.registerCommand('codex-app-server-doctor', {
     description:
       'Diagnose Codex AppServer, native Computer Use setup, permissions, and helper process health; prompts before guided fixes.',
@@ -292,6 +341,7 @@ export default function piCodexAppServerUseExtension(
   });
 
   pi.on('session_shutdown', async () => {
+    clearPendingStatusFlash();
     computerUseSession.close();
     execSessions.close();
   });

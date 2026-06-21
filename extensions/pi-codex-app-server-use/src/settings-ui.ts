@@ -1,6 +1,13 @@
 import type { Component, SettingItem, SettingsListTheme } from '@earendil-works/pi-tui';
-import { SettingsList } from '@earendil-works/pi-tui';
+import {
+  SettingsList,
+  truncateToWidth,
+  visibleWidth,
+  wrapTextWithAnsi,
+} from '@earendil-works/pi-tui';
 import type { Theme } from '@earendil-works/pi-coding-agent';
+
+import { clampRenderedLinesToWidth, normalizeWidth } from '../../shared/tui-width';
 
 import type { CodexAppServerUseConfigPatch } from './config';
 
@@ -35,6 +42,15 @@ function enabledValue(value: boolean | undefined): string {
 
 function normalizeValue(value: string): string {
   return value.endsWith(' *') ? value.slice(0, -2) : value;
+}
+
+function wrapLineToWidth(line: string, width: number): string[] {
+  if (line === '') return [''];
+
+  const safeWidth = normalizeWidth(width);
+  if (safeWidth === 0) return [''];
+
+  return wrapTextWithAnsi(line, safeWidth);
 }
 
 export class CodexAppServerUseSettingsView implements Component {
@@ -219,13 +235,24 @@ export class CodexAppServerUseSettingsView implements Component {
   }
 
   render(width: number): string[] {
-    return [
-      'Codex AppServer Use',
+    const lines = [
+      ...wrapLineToWidth('Codex AppServer Use', width),
       '',
-      'Tabs: Computer Use controls native CUA/browser MCP tools. Exec Tools controls AppServer-backed exec_command/write_stdin.',
-      'Precedence is session → project → user → defaults. Defaults keep all optional capabilities off.',
+      ...wrapLineToWidth(
+        'Tabs: Computer Use controls native CUA/browser MCP tools. Exec Tools controls AppServer-backed exec_command/write_stdin.',
+        width,
+      ),
+      ...wrapLineToWidth(
+        'Precedence is session → project → user → defaults. Defaults keep all optional capabilities off.',
+        width,
+      ),
       '',
       ...this.settingsList.render(width),
     ];
+
+    return clampRenderedLinesToWidth(lines, width, {
+      measure: visibleWidth,
+      truncate: (text, maxWidth) => truncateToWidth(text, maxWidth),
+    });
   }
 }

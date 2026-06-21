@@ -33,6 +33,7 @@ describe('pi-codex-app-server-use extension commands and activation', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
     fs.rmSync(root, { force: true, recursive: true });
@@ -53,9 +54,35 @@ describe('pi-codex-app-server-use extension commands and activation', () => {
 
     expect(commands.has('codex-app-server')).toBe(true);
     expect(commands.has('codex-app-server-doctor')).toBe(true);
+    expect(commands.has('ps')).toBe(true);
     expect(commands.has('codex-computer-use-enable')).toBe(false);
     expect(commands.has('codex-computer-use-disable')).toBe(false);
     expect(commands.has('computer-use')).toBe(false);
+  });
+
+  test('/ps reports when no AppServer exec sessions are running', async () => {
+    const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>();
+    const notifications: Array<[string, string]> = [];
+    const pi = {
+      getActiveTools: () => [],
+      registerTool() {},
+      registerCommand(
+        name: string,
+        command: { handler: (args: string, ctx: any) => Promise<void> },
+      ) {
+        commands.set(name, command);
+      },
+      on() {},
+      setActiveTools() {},
+    };
+
+    registerExtensionWithHealthyAppServer(pi as any);
+    await commands.get('ps')?.handler('', {
+      hasUI: true,
+      ui: { notify: (message: string, level: string) => notifications.push([message, level]) },
+    });
+
+    expect(notifications).toEqual([['No AppServer exec sessions are running.', 'info']]);
   });
 
   test('keeps all optional tools inactive by default', async () => {
@@ -377,6 +404,54 @@ describe('pi-codex-app-server-use extension commands and activation', () => {
     expect(checkAppServerControlSocket).not.toHaveBeenCalled();
     expect(notifications).toEqual([]);
     expect(activeTools).toEqual(['read', 'bash']);
+  });
+
+  test('flashes Codex AppServer status briefly instead of leaving it pinned', async () => {
+    vi.useFakeTimers();
+    let activeTools = ['read', 'bash'];
+    let sessionStart: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
+    const projectSettings = path.join(root, 'project/.pi/settings.json');
+    fs.mkdirSync(path.dirname(projectSettings), { recursive: true });
+    fs.writeFileSync(
+      projectSettings,
+      JSON.stringify({ codexAppServerUse: { exec: { enabled: true, models: 'all' } } }),
+    );
+    const statusCalls: Array<[string, string | undefined]> = [];
+    const pi = {
+      getActiveTools: () => activeTools,
+      registerTool() {},
+      registerCommand() {},
+      on(event: string, handler: (event: unknown, ctx: unknown) => Promise<void>) {
+        if (event === 'session_start') sessionStart = handler;
+      },
+      setActiveTools(nextActiveTools: string[]) {
+        activeTools = nextActiveTools;
+      },
+    };
+
+    registerExtensionWithHealthyAppServer(pi as any);
+    await sessionStart?.(
+      { type: 'session_start' },
+      {
+        ...makeSessionContext(root),
+        hasUI: true,
+        model: { provider: 'openai', api: 'openai-responses', id: 'gpt-5.5' },
+        ui: {
+          setStatus: (key: string, text: string | undefined) => statusCalls.push([key, text]),
+        },
+      },
+    );
+
+    expect(statusCalls).toEqual([['codex-app-server-use', 'Codex AppServer exec:on computer:off']]);
+
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(statusCalls).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(statusCalls).toEqual([
+      ['codex-app-server-use', 'Codex AppServer exec:on computer:off'],
+      ['codex-app-server-use', undefined],
+    ]);
   });
 
   test('warns and suppresses exec tools when AppServer health check fails', async () => {

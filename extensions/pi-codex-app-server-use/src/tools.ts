@@ -2,6 +2,7 @@ import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { StringEnum } from '@earendil-works/pi-ai';
 import { Type } from 'typebox';
 
+import { renderComputerToolCall, renderComputerToolResult } from './rendering';
 import type { ComputerUseSession } from './session';
 
 const AppParam = Type.String({
@@ -241,6 +242,8 @@ export function registerComputerUseTools(
       promptGuidelines: [...COMMON_COMPUTER_USE_GUIDELINES, ...(spec.promptGuidelines ?? [])],
       executionMode: 'sequential',
       parameters: spec.parameters,
+      renderCall: (args: unknown, theme: any) => renderComputerToolCall(spec.piName, args, theme),
+      renderResult: renderComputerToolResult,
       async execute(
         _toolCallId: string,
         params: any,

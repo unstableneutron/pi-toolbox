@@ -108,6 +108,7 @@ Sandbox policy is intentionally not exposed yet. AppServer exec currently sends
 Direct commands:
 
 ```text
+/ps
 /codex-app-server status
 /codex-app-server computer-use enabled project
 /codex-app-server computer-use off user
@@ -118,6 +119,9 @@ Direct commands:
 /codex-app-server exec models auto project
 /codex-app-server exec models all project
 ```
+
+`/ps` lists active AppServer exec sessions. Poll or interact with a running
+session by calling `write_stdin` with the displayed `session_id`.
 
 ## Tools
 
@@ -160,6 +164,10 @@ Supported image types are PNG, JPEG, GIF, and WebP. Unlike the exec tools,
 native `view_image` tool handler for turns, but it does not expose a dedicated
 client RPC for calling it directly; AppServer can run an installed `view_image`
 CLI through generic `command/exec` shell/PATH execution.
+
+Exec, patch, image, and Computer Use tools include compact TUI renderers for
+collapsed calls/results. Expanded tool results retain the full text/image/MCP
+details when Pi renders them.
 
 The tool result details follow Codex unified exec output:
 

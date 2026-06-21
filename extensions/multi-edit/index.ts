@@ -44,7 +44,7 @@ import {
   commitMutationPlan,
   type MutationPlan,
 } from './mutation-plan';
-import { renderApplyPatchRows } from './display/apply-patch-summary';
+import { renderApplyPatchRows } from '../shared/apply-patch-summary';
 import { TOOL_REWRITE_ARROW } from '../shared/rewrite-label';
 import type { Workspace } from './workspace';
 
