@@ -37,7 +37,14 @@ import {
 const COMPUTER_USE_TOOL_NAMES = [
   'computer_list_apps',
   'computer_get_app_state',
-  'computer_action',
+  'computer_click',
+  'computer_drag',
+  'computer_press_key',
+  'computer_type_text',
+  'computer_scroll',
+  'computer_select_text',
+  'computer_set_value',
+  'computer_perform_secondary_action',
   'codex_browser_list',
   'codex_browser_eval',
 ];

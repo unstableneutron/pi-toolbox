@@ -1,6 +1,6 @@
 {
   "name": "pi-codex-app-server-use",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Pi extension that exposes Codex AppServer exec, Computer Use, and browser surfaces",
   "keywords": [
     "app-server",

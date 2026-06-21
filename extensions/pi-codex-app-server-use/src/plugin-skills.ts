@@ -16,10 +16,8 @@ interface CodexComputerUseSkillPathOptions extends CodexComputerUsePathOptions {
   extensionRoot?: string;
 }
 
-const CODEX_PLUGIN_SKILLS: CodexPluginSkill[] = [
+const CODEX_COMPUTER_USE_PLUGIN_SKILLS: CodexPluginSkill[] = [
   { plugin: 'computer-use', skill: 'computer-use' },
-  { plugin: 'browser', skill: 'control-in-app-browser' },
-  { plugin: 'chrome', skill: 'control-chrome' },
 ];
 
 function defaultExtensionRoot(): string {
@@ -33,7 +31,7 @@ export function getCodexComputerUseSkillPaths(
   const extensionRoot = options.extensionRoot ?? defaultExtensionRoot();
   const skillPaths = [path.join(extensionRoot, 'skills/codex-computer-use')];
 
-  for (const { plugin, skill } of CODEX_PLUGIN_SKILLS) {
+  for (const { plugin, skill } of CODEX_COMPUTER_USE_PLUGIN_SKILLS) {
     const pluginSkillPath = resolveCodexPluginPath({
       codexApp: paths.codexApp,
       codexHome: paths.codexHome,

@@ -123,7 +123,14 @@ describe('pi-codex-app-server-use extension commands and activation', () => {
     expect(tools).toEqual([
       'computer_list_apps',
       'computer_get_app_state',
-      'computer_action',
+      'computer_click',
+      'computer_drag',
+      'computer_press_key',
+      'computer_type_text',
+      'computer_scroll',
+      'computer_select_text',
+      'computer_set_value',
+      'computer_perform_secondary_action',
       'codex_browser_list',
       'codex_browser_eval',
     ]);
@@ -502,6 +509,36 @@ describe('pi-codex-app-server-use extension commands and activation', () => {
         socketPath: '/tmp/missing.sock',
         error: 'connect ENOENT /tmp/missing.sock',
       }),
+    });
+    const result = await resourcesDiscover?.(
+      { cwd: path.join(root, 'project') },
+      {
+        ...makeSessionContext(root),
+        hasUI: false,
+      },
+    );
+
+    expect(result).toEqual({ skillPaths: [] });
+  });
+
+  test('suppresses Computer Use skills when Computer Use is disabled', async () => {
+    let resourcesDiscover:
+      | ((event: unknown, ctx: unknown) => Promise<{ skillPaths: string[] } | undefined>)
+      | undefined;
+    const pi = {
+      getActiveTools: () => [],
+      registerTool() {},
+      registerCommand() {},
+      on(event: string, handler: typeof resourcesDiscover) {
+        if (event === 'resources_discover') resourcesDiscover = handler;
+      },
+      setActiveTools() {},
+    };
+
+    piCodexAppServerUseExtension(pi as any, {
+      checkAppServerControlSocket: async () => {
+        throw new Error('health check should not run when Computer Use is disabled');
+      },
     });
     const result = await resourcesDiscover?.(
       { cwd: path.join(root, 'project') },

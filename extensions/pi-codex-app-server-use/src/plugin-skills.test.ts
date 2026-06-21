@@ -7,7 +7,7 @@ import { describe, expect, test } from 'vitest';
 import { getCodexComputerUseSkillPaths } from './plugin-skills';
 
 describe('getCodexComputerUseSkillPaths', () => {
-  test('exposes the overlay skill and installed Codex plugin skills', () => {
+  test('exposes the overlay skill and installed Codex Computer Use skill only', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-plugin-skills-'));
     const codexHome = path.join(root, 'codex-home');
     const extensionRoot = path.join(root, 'extension');
@@ -34,15 +34,10 @@ describe('getCodexComputerUseSkillPaths', () => {
     ).toEqual([
       path.join(extensionRoot, 'skills/codex-computer-use'),
       path.join(codexHome, 'plugins/cache/openai-bundled/computer-use/1.0.799/skills/computer-use'),
-      path.join(
-        codexHome,
-        'plugins/cache/openai-bundled/browser/26.527.31326/skills/control-in-app-browser',
-      ),
-      path.join(codexHome, 'plugins/cache/openai-bundled/chrome/5.0.0/skills/control-chrome'),
     ]);
   });
 
-  test('falls back to Codex.app bundled plugin skills when cache is absent', () => {
+  test('falls back to the Codex.app bundled Computer Use skill when cache is absent', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-bundled-skills-'));
     const codexApp = path.join(root, 'Codex.app');
     const extensionRoot = path.join(root, 'extension');

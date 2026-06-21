@@ -178,13 +178,20 @@ The tool result details follow Codex unified exec output:
 
 Computer Use remains default-off. When enabled it exposes:
 
-| Pi tool                  | Purpose                                   |
-| ------------------------ | ----------------------------------------- |
-| `computer_list_apps`     | List local apps visible to Codex CUA      |
-| `computer_get_app_state` | Read screenshot + accessibility tree      |
-| `computer_action`        | Dispatch native click/scroll/type actions |
-| `codex_browser_list`     | List browser tabs for a Codex backend     |
-| `codex_browser_eval`     | Evaluate browser-client JavaScript        |
+| Pi tool                             | Purpose                                   |
+| ----------------------------------- | ----------------------------------------- |
+| `computer_list_apps`                | List local apps visible to Codex CUA      |
+| `computer_get_app_state`            | Read screenshot + accessibility tree      |
+| `computer_click`                    | Click an element or screenshot coordinate |
+| `computer_drag`                     | Drag between screenshot coordinates       |
+| `computer_press_key`                | Press a key or keyboard shortcut          |
+| `computer_type_text`                | Type literal text                         |
+| `computer_scroll`                   | Scroll an element                         |
+| `computer_select_text`              | Select text or place a text cursor        |
+| `computer_set_value`                | Set a settable accessibility value        |
+| `computer_perform_secondary_action` | Invoke a secondary accessibility action   |
+| `codex_browser_list`                | List browser tabs for a Codex backend     |
+| `codex_browser_eval`                | Evaluate browser-client JavaScript        |
 
 Use `/codex-app-server-doctor` for setup checks.
 
