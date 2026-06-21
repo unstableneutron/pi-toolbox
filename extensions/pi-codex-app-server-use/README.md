@@ -7,9 +7,13 @@ until enabled in `/codex-app-server`.
 
 ## Capabilities
 
-- AppServer-backed `exec_command` and `write_stdin` tools via
+- AppServer-backed `exec_command`, `write_stdin`, and `apply_patch` tools via
   `command/exec` and `command/exec/write` on the running Codex AppServer
   control socket.
+- Codex-compatible `view_image` for reading workspace image files into Pi image
+  content when the selected model supports image input. If a `view_image` CLI is
+  available on `PATH` or in `~/.local/bin`, the extension uses it first and
+  falls back to its local JS reader on failure.
 - Codex native Computer Use tools through Codex AppServer MCP calls.
 - Codex browser automation through the existing `node_repl` browser-client path
   and the local Chromium DevTools fallback.
@@ -47,7 +51,8 @@ Open settings with:
 The settings UI has separate areas for:
 
 - **Computer Use** — enables native CUA and browser MCP tools.
-- **Exec Tools** — controls AppServer-backed `exec_command` and `write_stdin`.
+- **Exec Tools** — controls AppServer-backed `exec_command`, `write_stdin`, and
+  `apply_patch`, plus local `view_image`.
 
 Settings use the `codexAppServerUse` key and follow normal precedence:
 
@@ -85,7 +90,8 @@ for a project:
 ### Exec settings
 
 - `enabled: false` — do not expose AppServer exec tools.
-- `enabled: true` — add `exec_command` and `write_stdin` while active.
+- `enabled: true` — add `exec_command`, `write_stdin`, `apply_patch`, and
+  `view_image` while active.
 - `replaceLocalTools: true` — while active, remove Pi's local `read`, `bash`,
   `edit`, and `write` tools. Unrelated tools remain available.
 
@@ -136,6 +142,24 @@ Compatibility aliases are accepted: `command` → `cmd`, and `cwd` or
 - `chars`
 - `yield_time_ms`
 - `max_output_tokens`
+
+`apply_patch` accepts:
+
+- `input` — full patch text using `*** Begin Patch` / `*** End Patch`
+
+Compatibility aliases are accepted: `patch` or `patchText` → `input`.
+
+`view_image` accepts:
+
+- `path` — local image path, relative to the current Pi cwd unless absolute
+- `detail` — optional; only `original` is supported
+
+Compatibility aliases are accepted: `file_path` or `image_path` → `path`.
+Supported image types are PNG, JPEG, GIF, and WebP. Unlike the exec tools,
+`view_image` is exposed as a Pi-side tool. The Codex AppServer protocol has a
+native `view_image` tool handler for turns, but it does not expose a dedicated
+client RPC for calling it directly; AppServer can run an installed `view_image`
+CLI through generic `command/exec` shell/PATH execution.
 
 The tool result details follow Codex unified exec output:
 

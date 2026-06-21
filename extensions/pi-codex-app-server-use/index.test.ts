@@ -159,13 +159,20 @@ describe('pi-codex-app-server-use extension commands and activation', () => {
       { type: 'session_start' },
       {
         ...makeSessionContext(root),
-        model: { provider: 'openai', api: 'openai-responses', id: 'gpt-5.5' },
+        model: { provider: 'openai', api: 'openai-responses', id: 'gpt-5.5', input: ['image'] },
       },
     );
 
     expect(tools).toContain('exec_command');
     expect(tools).toContain('write_stdin');
-    expect(activeTools).toEqual(['read', 'bash', 'apply_patch', 'exec_command', 'write_stdin']);
+    expect(activeTools).toEqual([
+      'read',
+      'bash',
+      'apply_patch',
+      'exec_command',
+      'write_stdin',
+      'view_image',
+    ]);
   });
 
   test('replaces Pi local shell and edit tools when replacement is enabled', async () => {
@@ -196,11 +203,56 @@ describe('pi-codex-app-server-use extension commands and activation', () => {
       { type: 'session_start' },
       {
         ...makeSessionContext(root),
-        model: { provider: 'openai-codex', api: 'openai-codex-responses', id: 'gpt-5.5' },
+        model: {
+          provider: 'openai-codex',
+          api: 'openai-codex-responses',
+          id: 'gpt-5.5',
+          input: ['image'],
+        },
       },
     );
 
-    expect(activeTools).toEqual(['exec_command', 'write_stdin', 'grep', 'find', 'apply_patch']);
+    expect(activeTools).toEqual([
+      'exec_command',
+      'write_stdin',
+      'apply_patch',
+      'view_image',
+      'grep',
+      'find',
+    ]);
+  });
+
+  test('does not add view_image for text-only models', async () => {
+    let activeTools = ['read', 'bash'];
+    let sessionStart: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
+    const projectSettings = path.join(root, 'project/.pi/settings.json');
+    fs.mkdirSync(path.dirname(projectSettings), { recursive: true });
+    fs.writeFileSync(
+      projectSettings,
+      JSON.stringify({ codexAppServerUse: { exec: { enabled: true, models: 'all' } } }),
+    );
+    const pi = {
+      getActiveTools: () => activeTools,
+      registerTool() {},
+      registerCommand() {},
+      on(event: string, handler: (event: unknown, ctx: unknown) => Promise<void>) {
+        if (event === 'session_start') sessionStart = handler;
+      },
+      setActiveTools(nextActiveTools: string[]) {
+        activeTools = nextActiveTools;
+      },
+    };
+
+    registerExtensionWithHealthyAppServer(pi as any);
+    await sessionStart?.(
+      { type: 'session_start' },
+      {
+        ...makeSessionContext(root),
+        model: { provider: 'openai', api: 'openai-responses', id: 'gpt-5.5', input: ['text'] },
+      },
+    );
+
+    expect(activeTools).toEqual(['read', 'bash', 'exec_command', 'write_stdin', 'apply_patch']);
   });
 
   test('keeps replacement inactive for non-Codex-like models in auto model mode', async () => {

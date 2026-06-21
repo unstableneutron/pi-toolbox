@@ -874,6 +874,49 @@ describe('body and continuation helpers', () => {
     expect(body.prompt_cache_retention).toBeUndefined();
   });
 
+  it('serializes tool-result images into function_call_output parts', () => {
+    const body = buildResponsesBody(makeModel(), {
+      messages: [
+        {
+          role: 'assistant',
+          content: [
+            {
+              type: 'toolCall',
+              id: 'call_img|fc_img',
+              name: 'view_image',
+              arguments: { path: 'scene.png' },
+            },
+          ],
+          timestamp: 1,
+          stopReason: 'toolUse',
+          provider: 'facade',
+          model: 'gpt-5.5-nomoderation',
+          api: 'openai-websocket-responses',
+        } as any,
+        {
+          role: 'toolResult',
+          toolCallId: 'call_img|fc_img',
+          toolName: 'view_image',
+          content: [
+            { type: 'text', text: 'Read image file [image/png]' },
+            { type: 'image', mimeType: 'image/png', data: 'abc123' },
+          ],
+          isError: false,
+          timestamp: 2,
+        },
+      ],
+    });
+
+    expect(body.input).toContainEqual({
+      type: 'function_call_output',
+      call_id: 'call_img',
+      output: [
+        { type: 'input_text', text: 'Read image file [image/png]' },
+        { type: 'input_image', detail: 'auto', image_url: 'data:image/png;base64,abc123' },
+      ],
+    });
+  });
+
   it('uses previous_response_id and delta input only when the request prefix matches', () => {
     const previous = buildResponsesBody(makeModel(), {
       messages: [{ role: 'user', content: 'first', timestamp: 1 }],

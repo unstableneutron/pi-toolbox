@@ -18,6 +18,7 @@ import {
 } from './doctor';
 import {
   APP_SERVER_EXEC_TOOL_NAMES,
+  APP_SERVER_EXEC_CONTROL_TOOL_NAMES,
   CodexAppServerExecSessionManager,
   getDefaultCodexRuntimeShell,
   registerAppServerExecTools,
@@ -27,6 +28,11 @@ import {
 import { getCodexComputerUseSkillPaths } from './plugin-skills';
 import { ComputerUseSession } from './session';
 import { registerComputerUseTools } from './tools';
+import {
+  registerViewImageTool,
+  supportsViewImageInputs,
+  VIEW_IMAGE_TOOL_NAME,
+} from './view-image-tool';
 
 const COMPUTER_USE_TOOL_NAMES = [
   'computer_list_apps',
@@ -35,6 +41,8 @@ const COMPUTER_USE_TOOL_NAMES = [
   'codex_browser_list',
   'codex_browser_eval',
 ];
+
+const CODEX_EXEC_TOOL_NAMES = [...APP_SERVER_EXEC_TOOL_NAMES, VIEW_IMAGE_TOOL_NAME];
 
 function withoutTools(toolNames: string[], removed: readonly string[]): string[] {
   return toolNames.filter((name) => !removed.includes(name));
@@ -53,6 +61,10 @@ function shouldUseAnyAppServerCapability(
   config: CodexAppServerUseConfig,
 ): boolean {
   return config.computerUse.enabled || isAppServerExecActive(ctx, config);
+}
+
+function getCodexExecToolNames(ctx: ExtensionContext): string[] {
+  return supportsViewImageInputs(ctx.model) ? CODEX_EXEC_TOOL_NAMES : APP_SERVER_EXEC_TOOL_NAMES;
 }
 
 function formatUnavailableWarning(
@@ -149,6 +161,7 @@ export default function piCodexAppServerUseExtension(
   function ensureExecToolsRegistered(): void {
     if (execToolsRegistered) return;
     registerAppServerExecTools(pi, execSessions);
+    registerViewImageTool(pi);
     execToolsRegistered = true;
   }
 
@@ -181,24 +194,28 @@ export default function piCodexAppServerUseExtension(
     let activeTools = withoutTools(pi.getActiveTools(), COMPUTER_USE_TOOL_NAMES);
 
     if (execActive) {
+      const codexExecToolNames = getCodexExecToolNames(ctx);
       ensureExecToolsRegistered();
       if (!execWasActive) {
-        previousToolNames = withoutTools(activeTools, APP_SERVER_EXEC_TOOL_NAMES);
+        previousToolNames = withoutTools(activeTools, APP_SERVER_EXEC_CONTROL_TOOL_NAMES);
       }
-      const baseTools = withoutTools(previousToolNames ?? activeTools, APP_SERVER_EXEC_TOOL_NAMES);
+      const baseTools = withoutTools(
+        previousToolNames ?? activeTools,
+        APP_SERVER_EXEC_CONTROL_TOOL_NAMES,
+      );
       activeTools = config.exec.replaceLocalTools
-        ? mergeToolNames(
-            APP_SERVER_EXEC_TOOL_NAMES,
-            withoutTools(baseTools, REPLACED_PI_LOCAL_TOOL_NAMES),
-          )
-        : mergeToolNames(baseTools, APP_SERVER_EXEC_TOOL_NAMES);
+        ? mergeToolNames(codexExecToolNames, withoutTools(baseTools, REPLACED_PI_LOCAL_TOOL_NAMES))
+        : mergeToolNames(baseTools, codexExecToolNames);
       execWasActive = true;
     } else if (execWasActive) {
-      activeTools = withoutTools(previousToolNames ?? activeTools, APP_SERVER_EXEC_TOOL_NAMES);
+      activeTools = withoutTools(
+        previousToolNames ?? activeTools,
+        APP_SERVER_EXEC_CONTROL_TOOL_NAMES,
+      );
       previousToolNames = undefined;
       execWasActive = false;
     } else {
-      activeTools = withoutTools(activeTools, APP_SERVER_EXEC_TOOL_NAMES);
+      activeTools = withoutTools(activeTools, APP_SERVER_EXEC_CONTROL_TOOL_NAMES);
     }
 
     if (appServerAvailable && config.computerUse.enabled) {

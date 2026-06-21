@@ -35,6 +35,36 @@ function createPendingClient() {
   };
 }
 
+function createResolvingClient(response: unknown) {
+  let notificationHandler: ((message: { method?: string; params?: unknown }) => void) | undefined;
+  const calls: Array<{
+    method: string;
+    params: unknown;
+    timeoutMs?: number;
+    signal?: AbortSignal;
+  }> = [];
+  return {
+    calls,
+    emit(message: { method?: string; params?: unknown }) {
+      notificationHandler?.(message);
+    },
+    client: {
+      init: async () => undefined,
+      close: () => undefined,
+      onNotification(handler: (message: { method?: string; params?: unknown }) => void) {
+        notificationHandler = handler;
+        return () => {
+          notificationHandler = undefined;
+        };
+      },
+      async callRpc(method: string, params: unknown, timeoutMs?: number, signal?: AbortSignal) {
+        calls.push({ method, params, timeoutMs, signal });
+        return response;
+      },
+    },
+  };
+}
+
 describe('AppServer exec tool helpers', () => {
   test('builds danger-full-access command/exec requests from exec_command params', () => {
     expect(
@@ -100,6 +130,18 @@ describe('AppServer exec tool helpers', () => {
         'auto',
       ),
     ).toBe(false);
+    expect(
+      shouldUseAppServerExecTools(
+        { provider: 'proxy', api: 'openai-websocket-responses', id: 'gpt-5.5-nomoderation' },
+        'auto',
+      ),
+    ).toBe(true);
+    expect(
+      shouldUseAppServerExecTools(
+        { provider: 'proxy', api: 'openai-websocket-responses', id: 'not-gpt-5' },
+        'auto',
+      ),
+    ).toBe(false);
     expect(shouldUseAppServerExecTools(undefined, 'all')).toBe(true);
   });
 
@@ -126,7 +168,50 @@ describe('AppServer exec tool helpers', () => {
         description: 'Write/poll exec session.',
         promptSnippet: 'Write to exec session.',
       },
+      {
+        name: 'apply_patch',
+        description: 'Patch files.',
+        promptSnippet: 'Edit files with patch.',
+      },
     ]);
+  });
+
+  test('apply_patch executes patch text through AppServer command/exec argv', async () => {
+    const patch = '*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch';
+    const fake = createResolvingClient({ exitCode: 0, stdout: 'Success\n', stderr: '' });
+    const sessions = new CodexAppServerExecSessionManager({
+      clientFactory: () => fake.client as any,
+    });
+    const registeredTools: Array<{ name: string; execute?: (...args: any[]) => Promise<any> }> = [];
+    registerAppServerExecTools(
+      {
+        registerTool(tool: { name: string; execute?: (...args: any[]) => Promise<any> }) {
+          registeredTools.push(tool);
+        },
+      } as any,
+      sessions,
+    );
+
+    const tool = registeredTools.find((registeredTool) => registeredTool.name === 'apply_patch');
+    expect(tool).toBeDefined();
+    const result = await tool!.execute?.('call-1', { input: patch }, undefined, undefined, {
+      cwd: '/repo',
+    });
+
+    expect(fake.calls).toMatchObject([
+      {
+        method: 'command/exec',
+        params: {
+          command: ['apply_patch', patch],
+          cwd: '/repo',
+          disableOutputCap: true,
+          disableTimeout: true,
+          sandboxPolicy: { type: 'dangerFullAccess' },
+        },
+      },
+    ]);
+    expect(result).toMatchObject({ content: [{ type: 'text', text: 'Success\n' }] });
+    sessions.close();
   });
 
   test('control socket health check reports missing sockets without throwing', async () => {

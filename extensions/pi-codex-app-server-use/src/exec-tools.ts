@@ -26,8 +26,16 @@ const DEFAULT_MAX_EMPTY_WRITE_YIELD_TIME_MS = 300_000;
 const LONG_RUNNING_RPC_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 10_000;
 
-export const APP_SERVER_EXEC_TOOL_NAMES = ['exec_command', 'write_stdin'];
+export const APP_SERVER_EXEC_CONTROL_TOOL_NAMES = ['exec_command', 'write_stdin'];
+export const APP_SERVER_EXEC_TOOL_NAMES = [...APP_SERVER_EXEC_CONTROL_TOOL_NAMES, 'apply_patch'];
 export const REPLACED_PI_LOCAL_TOOL_NAMES = ['read', 'bash', 'edit', 'write'];
+
+const APPLY_PATCH_PARAMETERS = Type.Object({
+  input: Type.String({
+    description:
+      'Full patch text. Use *** Begin Patch / *** End Patch with Add/Update/Delete File sections.',
+  }),
+});
 
 const EXEC_COMMAND_PARAMETERS = Type.Object({
   cmd: Type.String({ description: 'Shell command to execute.' }),
@@ -79,6 +87,10 @@ interface WriteStdinParams {
   chars?: string | undefined;
   yield_time_ms?: number | undefined;
   max_output_tokens?: number | undefined;
+}
+
+interface ApplyPatchParams {
+  input: string;
 }
 
 export interface UnifiedExecResult {
@@ -506,6 +518,27 @@ function parseWriteStdinParams(params: unknown): WriteStdinParams {
   };
 }
 
+function parseApplyPatchParams(params: unknown): ApplyPatchParams {
+  if (
+    !params ||
+    typeof params !== 'object' ||
+    !('input' in params) ||
+    typeof params.input !== 'string'
+  ) {
+    throw new Error("apply_patch requires a string 'input' parameter");
+  }
+  return { input: params.input };
+}
+
+function prepareApplyPatchArguments(args: unknown): ApplyPatchParams {
+  if (args && typeof args === 'object') {
+    if ('input' in args && typeof args.input === 'string') return { input: args.input };
+    if ('patchText' in args && typeof args.patchText === 'string') return { input: args.patchText };
+    if ('patch' in args && typeof args.patch === 'string') return { input: args.patch };
+  }
+  return args as ApplyPatchParams;
+}
+
 function prepareExecCommandArguments(args: unknown): ExecCommandParams {
   if (!args || typeof args !== 'object') return args as ExecCommandParams;
   const record = args as Record<string, unknown>;
@@ -539,6 +572,25 @@ export function buildCommandExecRequest(
   };
 }
 
+function buildApplyPatchCommandExecRequest(
+  params: ApplyPatchParams,
+  cwd: string,
+): Record<string, unknown> {
+  return {
+    command: ['apply_patch', params.input],
+    cwd,
+    disableOutputCap: true,
+    disableTimeout: true,
+    sandboxPolicy: { type: 'dangerFullAccess' },
+  };
+}
+
+function formatApplyPatchOutput(response: CommandExecResponse): string {
+  const stdout = typeof response.stdout === 'string' ? response.stdout : '';
+  const stderr = typeof response.stderr === 'string' ? response.stderr : '';
+  return stdout || stderr || 'apply_patch completed with no output';
+}
+
 export function formatUnifiedExecResult(result: UnifiedExecResult, command?: string): string {
   const sections: string[] = [];
   if (command) sections.push(`Command: ${command}`);
@@ -568,12 +620,15 @@ export function shouldUseAppServerExecTools(
   const id = (model.id ?? '').toLowerCase();
   const isCopilotGpt =
     (provider.includes('copilot') || api.includes('copilot')) && id.includes('gpt');
+  const isOpenAIResponsesApi = /^openai(?:-[a-z0-9]+)*-responses$/.test(api);
+  const isGpt5ModelId = /(?:^|[/:.])gpt-5(?:$|[.-])/.test(id);
   return (
     provider.includes('codex') ||
     api.includes('codex') ||
     id.includes('codex') ||
     (provider.includes('openai') && id.includes('gpt')) ||
-    isCopilotGpt
+    isCopilotGpt ||
+    (isOpenAIResponsesApi && isGpt5ModelId)
   );
 }
 
@@ -668,6 +723,26 @@ export class CodexAppServerExecSessionManager {
       this.deleteSession(session);
     }
     return result;
+  }
+
+  async applyPatch(
+    input: ApplyPatchParams,
+    cwd: string,
+    signal?: AbortSignal,
+  ): Promise<{ output: string; response: CommandExecResponse }> {
+    const client = await this.getClient(signal);
+    const response = (await client.callRpc(
+      'command/exec',
+      buildApplyPatchCommandExecRequest(input, cwd),
+      LONG_RUNNING_RPC_TIMEOUT_MS,
+      signal,
+    )) as CommandExecResponse;
+    const exitCode = normalizeExitCode(response);
+    const output = formatApplyPatchOutput(response);
+    if (exitCode !== 0) {
+      throw new Error(`apply_patch failed: ${output.trim()}`);
+    }
+    return { output, response };
   }
 
   getSessionCommand(sessionId: number): string | undefined {
@@ -768,6 +843,23 @@ export function registerAppServerExecTools(
       return {
         content: [{ type: 'text', text: formatUnifiedExecResult(result, command) }],
         details: result,
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: 'apply_patch',
+    label: 'apply_patch',
+    description: 'Patch files.',
+    promptSnippet: 'Edit files with patch.',
+    parameters: APPLY_PATCH_PARAMETERS,
+    prepareArguments: prepareApplyPatchArguments as (args: unknown) => ApplyPatchParams,
+    async execute(_toolCallId, params, signal, _onUpdate, ctx: ExtensionContext) {
+      const typedParams = parseApplyPatchParams(params);
+      const result = await sessions.applyPatch(typedParams, ctx.cwd, signal);
+      return {
+        content: [{ type: 'text', text: result.output }],
+        details: result.response,
       };
     },
   });

@@ -109,6 +109,24 @@ function textFromContent(content: string | (TextContent | ImageContent)[]): stri
     .join('\n');
 }
 
+function inputPartsFromContent(
+  content: string | (TextContent | ImageContent)[],
+): string | ResponsesInputItem[] {
+  if (typeof content === 'string') return sanitizeResponsesText(content);
+  const hasImages = content.some((item) => item.type === 'image');
+  if (!hasImages) return sanitizeResponsesText(textFromContent(content));
+
+  return content.map((item) =>
+    item.type === 'text'
+      ? { type: 'input_text', text: sanitizeResponsesText(item.text) }
+      : {
+          type: 'input_image',
+          detail: 'auto',
+          image_url: `data:${item.mimeType};base64,${item.data}`,
+        },
+  );
+}
+
 function isHiddenResponseItemBlock(
   block: InternalAssistantContent,
 ): block is HiddenResponseItemBlock {
@@ -133,12 +151,11 @@ export function isFinalizedTextBlock(block: TextContent): boolean {
 }
 
 function toolResultInput(message: Extract<Message, { role: 'toolResult' }>): ResponsesInputItem {
-  const outputText = textFromContent(message.content);
   const { callId } = splitResponsesToolCallId(message.toolCallId);
   return {
     type: 'function_call_output',
     call_id: callId,
-    output: sanitizeResponsesText(outputText),
+    output: inputPartsFromContent(message.content),
   };
 }
 
