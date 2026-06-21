@@ -16,6 +16,7 @@ import {
 } from './index';
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -106,6 +107,12 @@ function getSessionStartHandler(on: ReturnType<typeof vi.fn>) {
   return call[1] as (event: unknown, ctx: any) => void;
 }
 
+function getHandler(on: ReturnType<typeof vi.fn>, eventName: string) {
+  const call = on.mock.calls.find(([candidate]) => candidate === eventName);
+  if (!call) throw new Error(`Missing ${eventName} handler`);
+  return call[1] as (event: unknown, ctx: any) => void;
+}
+
 describe('createRenderGate', () => {
   test('skips renders while inactive and flushes one dirty render when reactivated', () => {
     const requestRender = vi.fn();
@@ -133,6 +140,25 @@ describe('createRenderGate', () => {
     tui.requestRender(true);
 
     expect(requestRender).toHaveBeenCalledWith(true);
+  });
+
+  test('flushes one forced render while inactive without reopening the gate', () => {
+    const requestRender = vi.fn();
+    const tui = { requestRender } as any;
+    const gate = createRenderGate(tui);
+
+    gate.setActive(false);
+    tui.requestRender();
+
+    gate.flushOnce();
+
+    expect(requestRender).toHaveBeenCalledTimes(1);
+    expect(requestRender).toHaveBeenCalledWith(true);
+    expect(gate.isActive()).toBe(false);
+
+    gate.setActive(true);
+
+    expect(requestRender).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -397,5 +423,124 @@ describe('extension registration', () => {
       placement: 'belowEditor',
     });
     expect(createHerdrClient).toHaveBeenCalledTimes(1);
+  });
+
+  test('coarse lifecycle events schedule one forced render while hidden', async () => {
+    vi.useFakeTimers();
+    const on = vi.fn();
+    const requestRender = vi.fn();
+    const client = new MemoryHerdrClient([
+      response('pi-render-gate:workspace', {
+        type: 'workspace_info',
+        workspace: { focused: true, active_tab_id: 'w2:t2' },
+      }),
+    ]);
+    const createHerdrClient = vi.fn(() => client);
+    const pi = { on } as any;
+
+    createPiRenderGateExtension(
+      pi,
+      {
+        HERDR_ENV: '1',
+        HERDR_SOCKET_PATH: '/tmp/herdr.sock',
+        HERDR_WORKSPACE_ID: 'w2',
+        HERDR_TAB_ID: 'w2:t1',
+        HERDR_PANE_ID: 'w2:p1',
+      } as any,
+      { createHerdrClient },
+    );
+
+    const ctx = {
+      mode: 'tui',
+      hasUI: true,
+      ui: {
+        setStatus: vi.fn(),
+        setWidget: vi.fn((_key, content) => {
+          if (typeof content === 'function') {
+            content({ requestRender }, {});
+          }
+        }),
+      },
+    };
+
+    getSessionStartHandler(on)({}, ctx);
+    await flushPromises();
+    expect(requestRender).not.toHaveBeenCalled();
+
+    getHandler(on, 'agent_start')({}, ctx);
+    await vi.advanceTimersByTimeAsync(150);
+
+    expect(requestRender).toHaveBeenCalledTimes(1);
+    expect(requestRender).toHaveBeenLastCalledWith(true);
+
+    for (const eventName of [
+      'agent_end',
+      'message_end',
+      'tool_execution_end',
+      'turn_end',
+      'user_bash',
+    ]) {
+      getHandler(on, eventName)({}, ctx);
+    }
+    await vi.advanceTimersByTimeAsync(150);
+
+    expect(requestRender).toHaveBeenCalledTimes(2);
+    expect(requestRender).toHaveBeenLastCalledWith(true);
+  });
+
+  test('coarse lifecycle events do not force renders while visible', async () => {
+    vi.useFakeTimers();
+    const on = vi.fn();
+    const requestRender = vi.fn();
+    const client = new MemoryHerdrClient([
+      response('pi-render-gate:workspace', {
+        type: 'workspace_info',
+        workspace: { focused: true, active_tab_id: 'w2:t1' },
+      }),
+    ]);
+    const createHerdrClient = vi.fn(() => client);
+    const pi = { on } as any;
+
+    createPiRenderGateExtension(
+      pi,
+      {
+        HERDR_ENV: '1',
+        HERDR_SOCKET_PATH: '/tmp/herdr.sock',
+        HERDR_WORKSPACE_ID: 'w2',
+        HERDR_TAB_ID: 'w2:t1',
+        HERDR_PANE_ID: 'w2:p1',
+      } as any,
+      { createHerdrClient },
+    );
+
+    const ctx = {
+      mode: 'tui',
+      hasUI: true,
+      ui: {
+        setStatus: vi.fn(),
+        setWidget: vi.fn((_key, content) => {
+          if (typeof content === 'function') {
+            content({ requestRender }, {});
+          }
+        }),
+      },
+    };
+
+    getSessionStartHandler(on)({}, ctx);
+    await flushPromises();
+
+    for (const eventName of [
+      'agent_start',
+      'agent_end',
+      'message_end',
+      'tool_execution_end',
+      'turn_end',
+      'user_bash',
+    ]) {
+      getHandler(on, eventName)({}, ctx);
+    }
+    await vi.advanceTimersByTimeAsync(150);
+
+    expect(requestRender).not.toHaveBeenCalled();
   });
 });

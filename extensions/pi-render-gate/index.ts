@@ -10,10 +10,12 @@ const WIDGET_KEY = 'pi-render-gate:capture';
 const WORKSPACE_REQUEST_ID = 'pi-render-gate:workspace';
 const SUBSCRIBE_REQUEST_ID = 'pi-render-gate:subscribe';
 const DEFAULT_SOCKET_TIMEOUT_MS = 5000;
+const DEFAULT_HIDDEN_FLUSH_DELAY_MS = 100;
 
 type RequestRender = (force?: boolean) => void;
 
 export interface RenderGate {
+  flushOnce(): void;
   isActive(): boolean;
   restore(): void;
   setActive(active: boolean): void;
@@ -269,6 +271,12 @@ export function createRenderGate(tui: PatchableTui): RenderGate {
   tui.requestRender = patchedRequestRender;
 
   const gate: RenderGate = {
+    flushOnce() {
+      if (restored) return;
+      dirty = false;
+      forceDirty = false;
+      originalRequestRender(true);
+    },
     isActive: () => active,
     restore() {
       if (restored) return;
@@ -408,6 +416,7 @@ function installForSession(
   ids: HerdrIds,
   client: HerdrClient,
   onError?: (error: Error) => void,
+  onGate?: (gate: RenderGate | undefined) => void,
 ): () => void {
   let gate: RenderGate | undefined;
 
@@ -421,8 +430,10 @@ function installForSession(
   );
 
   if (!gate) {
+    onGate?.(undefined);
     return () => {};
   }
+  onGate?.(gate);
 
   const unsubscribe = subscribeToHerdrVisibility({
     client,
@@ -444,6 +455,7 @@ function installForSession(
     ctx.ui.setStatus(STATUS_KEY, undefined);
     ctx.ui.setWidget(WIDGET_KEY, undefined, { placement: 'belowEditor' });
     gate?.restore();
+    onGate?.(undefined);
   };
 }
 
@@ -463,19 +475,67 @@ export function createPiRenderGateExtension(
     return;
 
   let cleanup: (() => void) | undefined;
+  let currentGate: RenderGate | undefined;
+  let hiddenFlushTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const clearHiddenFlushTimer = (): void => {
+    if (!hiddenFlushTimer) return;
+    clearTimeout(hiddenFlushTimer);
+    hiddenFlushTimer = undefined;
+  };
+
+  const scheduleHiddenFlush = (ctx: ExtensionContext): void => {
+    if (!hasTui(ctx) || !currentGate || currentGate.isActive()) return;
+    clearHiddenFlushTimer();
+    hiddenFlushTimer = setTimeout(() => {
+      hiddenFlushTimer = undefined;
+      if (!currentGate?.isActive()) currentGate?.flushOnce();
+    }, DEFAULT_HIDDEN_FLUSH_DELAY_MS);
+    hiddenFlushTimer.unref?.();
+  };
 
   pi.on('session_start', (_event, ctx) => {
+    clearHiddenFlushTimer();
     cleanup?.();
     cleanup = undefined;
+    currentGate = undefined;
     if (!hasTui(ctx)) return;
 
     const createClient = options.createHerdrClient ?? createHerdrClient;
-    cleanup = installForSession(ctx, ids, createClient(socketPath), options.onError);
+    cleanup = installForSession(ctx, ids, createClient(socketPath), options.onError, (gate) => {
+      currentGate = gate;
+    });
+  });
+
+  pi.on('agent_start', (_event, ctx) => {
+    scheduleHiddenFlush(ctx);
+  });
+
+  pi.on('agent_end', (_event, ctx) => {
+    scheduleHiddenFlush(ctx);
+  });
+
+  pi.on('message_end', (_event, ctx) => {
+    scheduleHiddenFlush(ctx);
+  });
+
+  pi.on('tool_execution_end', (_event, ctx) => {
+    scheduleHiddenFlush(ctx);
+  });
+
+  pi.on('turn_end', (_event, ctx) => {
+    scheduleHiddenFlush(ctx);
+  });
+
+  pi.on('user_bash', (_event, ctx) => {
+    scheduleHiddenFlush(ctx);
   });
 
   pi.on('session_shutdown', () => {
+    clearHiddenFlushTimer();
     cleanup?.();
     cleanup = undefined;
+    currentGate = undefined;
   });
 }
 
