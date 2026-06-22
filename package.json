@@ -7,6 +7,10 @@
   "bin": {
     "roundtable-review": "./packages/roundtable-review/bin/roundtable-review.js"
   },
+  "workspaces": [
+    "extensions/*",
+    "packages/*"
+  ],
   "type": "module",
   "scripts": {
     "check": "oxlint -c .oxlintrc.json --type-aware --type-check --fix --fix-suggestions --fix-dangerously --deny-warnings . && oxfmt -c .oxfmtrc.json . && knip",
@@ -16,14 +20,6 @@
     "knip": "knip",
     "knip:fix": "knip --fix && oxfmt -c .oxfmtrc.json .",
     "knip:fix:files": "knip --fix --allow-remove-files && oxfmt -c .oxfmtrc.json ."
-  },
-  "dependencies": {
-    "diff": ">=8.0.0",
-    "fff-router": "github:unstableneutron/fff-router#v0.8.2",
-    "parallel-web": "^0.3.2",
-    "picomatch": "^4.0.3",
-    "shell-quote": "^1.8.3",
-    "ws": "^8.18.3"
   },
   "devDependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1027.0",

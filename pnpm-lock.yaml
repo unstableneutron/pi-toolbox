@@ -12,25 +12,6 @@ overrides:
 importers:
 
   .:
-    dependencies:
-      diff:
-        specifier: '>=8.0.0'
-        version: 8.0.4
-      fff-router:
-        specifier: github:unstableneutron/fff-router#v0.8.2
-        version: https://codeload.github.com/unstableneutron/fff-router/tar.gz/599ee0409d113573c003d419c3702ffc3b0d3a1f
-      parallel-web:
-        specifier: ^0.3.2
-        version: 0.3.2
-      picomatch:
-        specifier: ^4.0.3
-        version: 4.0.4
-      shell-quote:
-        specifier: ^1.8.3
-        version: 1.8.4
-      ws:
-        specifier: ^8.18.3
-        version: 8.20.0
     devDependencies:
       '@aws-sdk/client-bedrock-runtime':
         specifier: ^3.1027.0
@@ -102,6 +83,31 @@ importers:
       oxlint-tsgolint:
         specifier: ^0.20.0
         version: 0.20.0
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.4(@types/node@24.12.2)
+
+  extensions/multi-edit:
+    dependencies:
+      diff:
+        specifier: '>=8.0.0'
+        version: 8.0.4
+    devDependencies:
+      '@earendil-works/pi-coding-agent':
+        specifier: ^0.79.0
+        version: 0.79.10(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
+      '@earendil-works/pi-tui':
+        specifier: ^0.79.0
+        version: 0.79.10
+      '@types/node':
+        specifier: ^24.3.0
+        version: 24.12.2
+      typebox:
+        specifier: ^1.1.24
+        version: 1.1.31
       typescript:
         specifier: ^5.7.3
         version: 5.9.3
@@ -311,6 +317,31 @@ importers:
       oxlint-tsgolint:
         specifier: ^0.20.0
         version: 0.20.0
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.4(@types/node@24.12.2)
+
+  extensions/web-search:
+    dependencies:
+      parallel-web:
+        specifier: ^0.3.2
+        version: 0.3.2
+    devDependencies:
+      '@earendil-works/pi-coding-agent':
+        specifier: ^0.79.0
+        version: 0.79.10(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
+      '@earendil-works/pi-tui':
+        specifier: ^0.79.0
+        version: 0.79.10
+      '@types/node':
+        specifier: ^24.3.0
+        version: 24.12.2
+      typebox:
+        specifier: ^1.1.24
+        version: 1.1.31
       typescript:
         specifier: ^5.7.3
         version: 5.9.3

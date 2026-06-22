@@ -5,12 +5,8 @@
   "ignoreDependencies": [
     "@earendil-works/pi-agent-core",
     "@aws-sdk/client-bedrock-runtime",
-    "fff-router",
     "partial-json",
-    "picomatch",
-    "shell-quote",
-    "tsx",
-    "ws"
+    "tsx"
   ],
   "ignoreFiles": ["extensions/pi-fff-search/fff-router.d.ts"],
   "ignoreExportsUsedInFile": {
@@ -19,15 +15,8 @@
   },
   "workspaces": {
     ".": {
-      "entry": ["bin/*.js", "extensions/**/index.ts", "scripts/*.js", "scripts/*.ts"],
-      "project": [
-        "bin/*.js",
-        "extensions/**/*.ts",
-        "packages/**/*.js",
-        "scripts/**/*.js",
-        "scripts/**/*.ts",
-        "tests/**/*.ts"
-      ]
+      "entry": ["extensions/**/index.ts", "scripts/*.js", "scripts/*.ts"],
+      "project": ["extensions/**/*.ts", "scripts/**/*.js", "scripts/**/*.ts", "tests/**/*.ts"]
     },
     "extensions/*": {
       "entry": ["index.ts"],
