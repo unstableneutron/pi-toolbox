@@ -2,21 +2,15 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 
 import {
-  DEFAULT_MAX_LINES,
   formatSize,
   getAgentDir,
-  truncateTail,
   type ExtensionAPI,
   type ExtensionContext,
   type TruncationResult,
 } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 
-import {
-  isRenderableCodePoint,
-  sanitizeBinaryOutput,
-  stripTerminalControlSequences,
-} from '../../shared/tui-width';
+import { sanitizeBinaryOutput, stripTerminalControlSequences } from '../../shared/tui-width';
 import { CodexAppServerWebSocketClient } from './app-server';
 import {
   checkCodexAppServerControlSocket,
@@ -24,6 +18,11 @@ import {
   getCodexAppServerControlSocketPath,
 } from './app-server-control';
 import type { CodexAppServerExecModels } from './config';
+import {
+  ExecOutputAccumulator,
+  maxBytesForOutputTokens,
+  type ExecOutputSnapshot,
+} from './exec-output-accumulator';
 import {
   renderApplyPatchCall,
   renderApplyPatchResult,
@@ -43,7 +42,6 @@ export { checkCodexAppServerControlSocket } from './app-server-control';
 
 const DEFAULT_CLIENT_NAME = 'pi-codex-app-server-use';
 const LONG_RUNNING_RPC_TIMEOUT_MS = 24 * 60 * 60 * 1000;
-const DEFAULT_MAX_OUTPUT_TOKENS = 10_000;
 const EXEC_PROGRESS_UPDATE_INTERVAL_MS = 250;
 
 const SHELL_ENVIRONMENT_ALLOWLIST = ['PATH', 'HERDR*', 'TMUX*', 'ZELLIJ*'];
@@ -125,6 +123,7 @@ export interface UnifiedExecResult {
   session_id?: number | undefined;
   original_token_count?: number | undefined;
   truncation?: TruncationResult | undefined;
+  full_output_path?: string | undefined;
 }
 
 type ExecProgressCallback = (result: UnifiedExecResult) => void;
@@ -143,14 +142,11 @@ interface ExecSession {
   id: number;
   processId: string;
   command: string;
-  buffer: string;
-  emittedBuffer: string;
+  output: ExecOutputAccumulator;
+  emittedCursor: number;
   exitCode: number | undefined;
   startedAt: number;
   tty: boolean;
-  terminalCommitted: string;
-  terminalLine: string[];
-  terminalCursor: number;
 }
 
 interface CommandExecResponse {
@@ -201,33 +197,8 @@ function getShellArgs(shell: string, command: string, login: boolean): string[] 
   return login ? ['-lc', command] : ['-c', command];
 }
 
-function maxCharsForTokens(maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS): number {
-  return Math.max(256, maxOutputTokens * 4);
-}
-
 function generateChunkId(): string {
   return crypto.randomBytes(3).toString('hex');
-}
-
-function truncateOutput(
-  text: string,
-  maxOutputTokens?: number,
-): {
-  output: string;
-  original_token_count?: number | undefined;
-  truncation?: TruncationResult | undefined;
-} {
-  if (text.length === 0) return { output: '' };
-  const originalTokenCount = Math.ceil(text.length / 4);
-  const truncation = truncateTail(text, {
-    maxLines: DEFAULT_MAX_LINES,
-    maxBytes: maxCharsForTokens(maxOutputTokens),
-  });
-  return {
-    output: truncation.content,
-    original_token_count: originalTokenCount,
-    ...(truncation.truncated ? { truncation } : {}),
-  };
 }
 
 function normalizePipeOutput(text: string): string {
@@ -236,125 +207,23 @@ function normalizePipeOutput(text: string): string {
     .replace(/\r/g, '\n');
 }
 
-function writeTerminalChar(session: ExecSession, char: string): void {
-  if (session.terminalCursor > session.terminalLine.length) {
-    session.terminalLine.push(
-      ...Array.from({ length: session.terminalCursor - session.terminalLine.length }, () => ' '),
-    );
-  }
-  session.terminalLine[session.terminalCursor] = char;
-  session.terminalCursor += 1;
-}
-
-function applyTerminalOutput(session: ExecSession, text: string): string {
-  const sanitized = stripTerminalControlSequences(text, true);
-  if (sanitized.length === 0) return session.terminalCommitted + session.terminalLine.join('');
-
-  for (let index = 0; index < sanitized.length; index += 1) {
-    const char = sanitized[index]!;
-    if (char === '\u001b') {
-      if (sanitized[index + 1] === '[') {
-        let sequenceEnd = index + 2;
-        while (sequenceEnd < sanitized.length) {
-          const code = sanitized.charCodeAt(sequenceEnd);
-          if (code >= 0x40 && code <= 0x7e) break;
-          sequenceEnd += 1;
-        }
-        if (sequenceEnd >= sanitized.length) break;
-        const params = sanitized.slice(index + 2, sequenceEnd);
-        const finalByte = sanitized[sequenceEnd]!;
-        if (finalByte === 'K') {
-          const mode = Number(params || '0');
-          if (mode === 0)
-            session.terminalLine = session.terminalLine.slice(0, session.terminalCursor);
-          else if (mode === 1) {
-            session.terminalLine = [
-              ...Array.from(
-                { length: Math.min(session.terminalCursor, session.terminalLine.length) },
-                () => ' ',
-              ),
-              ...session.terminalLine.slice(session.terminalCursor),
-            ];
-          } else if (mode === 2) session.terminalLine = [];
-        }
-        index = sequenceEnd;
-        continue;
-      }
-      const next = sanitized[index + 1]!;
-      if (next && /[()*+,\-./]/.test(next) && index + 2 < sanitized.length) {
-        index += 2;
-        continue;
-      }
-      if (next) index += 1;
-      continue;
-    }
-
-    const code = char.codePointAt(0);
-    if (!isRenderableCodePoint(code, true)) continue;
-
-    switch (char) {
-      case '\r':
-        session.terminalCursor = 0;
-        break;
-      case '\n':
-        session.terminalCommitted += `${session.terminalLine.join('')}\n`;
-        session.terminalLine = [];
-        session.terminalCursor = 0;
-        break;
-      case '\b':
-        session.terminalCursor = Math.max(0, session.terminalCursor - 1);
-        break;
-      default:
-        writeTerminalChar(session, char);
-        break;
-    }
-  }
-  return session.terminalCommitted + session.terminalLine.join('');
-}
-
-function computePtyDelta(previous: string, current: string): string {
-  if (current.startsWith(previous)) return current.slice(previous.length);
-  const lineStart = previous.lastIndexOf('\n') + 1;
-  const stablePrefix = previous.slice(0, lineStart);
-  if (current.startsWith(stablePrefix)) return `\r${current.slice(lineStart)}`;
-  return current;
-}
-
 function appendOutput(session: ExecSession, text: string): void {
   if (!text) return;
-  session.buffer = session.tty
-    ? applyTerminalOutput(session, text)
-    : `${session.buffer}${normalizePipeOutput(text)}`;
+  session.output.append(normalizePipeOutput(text));
 }
 
-function consumeOutput(
-  session: ExecSession,
-  maxOutputTokens?: number,
-): {
-  output: string;
-  original_token_count?: number | undefined;
-  truncation?: TruncationResult | undefined;
-} {
-  const text = session.tty
-    ? computePtyDelta(session.emittedBuffer, session.buffer)
-    : session.buffer.slice(session.emittedBuffer.length);
-  session.emittedBuffer = session.buffer;
-  return truncateOutput(text, maxOutputTokens);
+function consumeOutput(session: ExecSession, maxOutputTokens?: number): ExecOutputSnapshot {
+  const snapshot = session.output.snapshotSince(session.emittedCursor, maxOutputTokens);
+  session.emittedCursor = session.output.cursor();
+  return snapshot;
 }
 
 function peekOutputSince(
   session: ExecSession,
-  baseline: string,
+  baseline: number,
   maxOutputTokens?: number,
-): {
-  output: string;
-  original_token_count?: number | undefined;
-  truncation?: TruncationResult | undefined;
-} {
-  const text = session.tty
-    ? computePtyDelta(baseline, session.buffer)
-    : session.buffer.slice(baseline.length);
-  return truncateOutput(text, maxOutputTokens);
+): ExecOutputSnapshot {
+  return session.output.snapshotSince(baseline, maxOutputTokens);
 }
 
 function resultFromSnapshot(
@@ -364,6 +233,7 @@ function resultFromSnapshot(
     output: string;
     original_token_count?: number | undefined;
     truncation?: TruncationResult | undefined;
+    full_output_path?: string | undefined;
   },
 ): UnifiedExecResult {
   const result: UnifiedExecResult = {
@@ -375,6 +245,7 @@ function resultFromSnapshot(
   if (snapshot.original_token_count !== undefined)
     result.original_token_count = snapshot.original_token_count;
   if (snapshot.truncation !== undefined) result.truncation = snapshot.truncation;
+  if (snapshot.full_output_path !== undefined) result.full_output_path = snapshot.full_output_path;
   if (session.exitCode === undefined) result.session_id = session.id;
   else result.exit_code = session.exitCode;
   return result;
@@ -623,17 +494,21 @@ export function formatUnifiedExecResult(result: UnifiedExecResult, command?: str
     sections.push(`Original token count: ${result.original_token_count}`);
   }
   if (result.truncation?.truncated) {
-    sections.push(formatExecTruncationNotice(result.truncation));
+    sections.push(formatExecTruncationNotice(result.truncation, result.full_output_path));
   }
   sections.push('Output:', result.output);
   return sections.join('\n');
 }
 
-function formatExecTruncationNotice(truncation: TruncationResult): string {
+function formatExecTruncationNotice(
+  truncation: TruncationResult,
+  fullOutputPath: string | undefined,
+): string {
+  const fullOutputHint = fullOutputPath ? ` Full output: ${fullOutputPath}.` : '';
   if (truncation.truncatedBy === 'lines') {
-    return `[Output truncated: showing last ${truncation.outputLines} of ${truncation.totalLines} lines. Rerun with a narrower command or line range to inspect more.]`;
+    return `[Output truncated: showing last ${truncation.outputLines} of ${truncation.totalLines} lines.${fullOutputHint} Rerun with a narrower command or line range to inspect more.]`;
   }
-  return `[Output truncated: showing ${truncation.outputLines} lines from the end (${formatSize(truncation.maxBytes ?? maxCharsForTokens())} limit). Rerun with a narrower command or line range to inspect more.]`;
+  return `[Output truncated: showing ${truncation.outputLines} lines from the end (${formatSize(truncation.maxBytes ?? maxBytesForOutputTokens())} limit).${fullOutputHint} Rerun with a narrower command or line range to inspect more.]`;
 }
 
 function throwIfExecFailed(result: UnifiedExecResult): void {
@@ -731,7 +606,7 @@ export class CodexAppServerExecSessionManager {
           resultFromSnapshot(
             session,
             elapsedMs,
-            peekOutputSince(session, session.emittedBuffer, input.max_output_tokens),
+            peekOutputSince(session, session.emittedCursor, input.max_output_tokens),
           ),
         );
       },
@@ -741,8 +616,8 @@ export class CodexAppServerExecSessionManager {
       waitedMs,
       consumeOutput(session, input.max_output_tokens),
     );
-    if (session.exitCode !== undefined && session.emittedBuffer === session.buffer) {
-      this.deleteSession(session);
+    if (session.exitCode !== undefined && session.emittedCursor === session.output.cursor()) {
+      await this.deleteSession(session);
     }
     return result;
   }
@@ -754,7 +629,7 @@ export class CodexAppServerExecSessionManager {
   ): Promise<UnifiedExecResult> {
     const session = this.sessions.get(input.session_id);
     if (!session) throw new Error(`Unknown process id ${input.session_id}`);
-    const baseline = session.buffer;
+    const baseline = session.output.cursor();
     if (input.chars && input.chars.length > 0) {
       if (!session.tty) {
         throw new Error(
@@ -798,9 +673,9 @@ export class CodexAppServerExecSessionManager {
       waitedMs,
       peekOutputSince(session, baseline, input.max_output_tokens),
     );
-    session.emittedBuffer = session.buffer;
-    if (session.exitCode !== undefined && session.emittedBuffer === session.buffer) {
-      this.deleteSession(session);
+    session.emittedCursor = session.output.cursor();
+    if (session.exitCode !== undefined && session.emittedCursor === session.output.cursor()) {
+      await this.deleteSession(session);
     }
     return result;
   }
@@ -836,7 +711,7 @@ export class CodexAppServerExecSessionManager {
       running: session.exitCode === undefined,
       tty: session.tty,
       started_at: session.startedAt,
-      buffered_chars: session.buffer.length,
+      buffered_chars: session.output.bufferedChars(),
       ...(session.exitCode === undefined ? {} : { exit_code: session.exitCode }),
     }));
   }
@@ -846,6 +721,7 @@ export class CodexAppServerExecSessionManager {
     this.cleanupNotifications = undefined;
     this.client?.close();
     this.client = undefined;
+    for (const session of this.sessions.values()) session.output.dispose();
     this.sessions.clear();
     this.sessionsByProcessId.clear();
   }
@@ -856,14 +732,11 @@ export class CodexAppServerExecSessionManager {
       id,
       processId: `pi-app-server-${process.pid}-${Date.now()}-${id}`,
       command: input.cmd,
-      buffer: '',
-      emittedBuffer: '',
+      output: new ExecOutputAccumulator(),
+      emittedCursor: 0,
       exitCode: undefined,
       startedAt: Date.now(),
       tty: Boolean(input.tty),
-      terminalCommitted: '',
-      terminalLine: [],
-      terminalCursor: 0,
     };
   }
 
@@ -895,9 +768,10 @@ export class CodexAppServerExecSessionManager {
     appendOutput(session, decodeBase64Text(deltaBase64));
   }
 
-  private deleteSession(session: ExecSession): void {
+  private async deleteSession(session: ExecSession): Promise<void> {
     this.sessions.delete(session.id);
     this.sessionsByProcessId.delete(session.processId);
+    await session.output.closeTempFile();
   }
 }
 

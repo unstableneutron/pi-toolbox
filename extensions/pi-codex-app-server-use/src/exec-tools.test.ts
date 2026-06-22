@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
@@ -568,6 +569,22 @@ describe('AppServer exec tool helpers', () => {
       outputLines: 2000,
       maxLines: 2000,
     });
+    sessions.close();
+  });
+
+  test('spills full exec output to a temp file when truncated by bytes', async () => {
+    const stdout = 'x'.repeat(45_000);
+    const fake = createResolvingClient({ exitCode: 0, stdout, stderr: '' });
+    const sessions = new CodexAppServerExecSessionManager({
+      clientFactory: () => fake.client as any,
+    });
+
+    const result = await sessions.exec({ cmd: 'big-output', yield_time_ms: 250 }, '/repo');
+
+    expect(result.output.length).toBeLessThan(stdout.length);
+    expect(result.truncation).toMatchObject({ truncated: true, truncatedBy: 'bytes' });
+    expect(result.full_output_path).toMatch(/pi-app-server-exec-[a-f0-9]+\.log$/);
+    expect(readFileSync(result.full_output_path!, 'utf8')).toBe(stdout);
     sessions.close();
   });
 
