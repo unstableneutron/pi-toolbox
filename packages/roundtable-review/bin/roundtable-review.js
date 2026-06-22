@@ -70,6 +70,8 @@ Options:
   --synthesis-timeout-ms <ms> Synthesis timeout (default: 600000)
   --max-diff-bytes <bytes>    Max bytes per collected diff section (default: 180000)
   --approve                   Trust project-local resources for this SDK run
+  --no-extensions             Disable Pi extension loading (enabled by default)
+  --no-skills                 Disable Pi skill loading (enabled by default)
   --verbose                   Print progress to stderr
   -h, --help                  Show this help
 
@@ -98,6 +100,8 @@ function parseArgs(argv) {
     synthesisTimeoutMs: 10 * 60 * 1000,
     maxDiffBytes: 180_000,
     approve: false,
+    loadExtensions: true,
+    loadSkills: true,
     verbose: false,
     requestParts: [],
   };
@@ -171,6 +175,18 @@ function parseArgs(argv) {
         break;
       case '--approve':
         options.approve = true;
+        break;
+      case '--extensions':
+        options.loadExtensions = true;
+        break;
+      case '--no-extensions':
+        options.loadExtensions = false;
+        break;
+      case '--skills':
+        options.loadSkills = true;
+        break;
+      case '--no-skills':
+        options.loadSkills = false;
         break;
       case '--verbose':
         options.verbose = true;
@@ -435,7 +451,16 @@ ${failed.length === 0 ? '(none)' : failed.map((result) => `- ${result.modelSpec}
 `;
 }
 
-async function createSessionRunner({ cwd, modelSpec, tools, approve, noTools = undefined }) {
+async function createSessionRunner({
+  cwd,
+  modelSpec,
+  tools,
+  approve,
+  loadExtensions,
+  loadSkills,
+  noTools = undefined,
+  verbose = false,
+}) {
   const {
     AuthStorage,
     DefaultResourceLoader,
@@ -455,12 +480,29 @@ async function createSessionRunner({ cwd, modelSpec, tools, approve, noTools = u
     cwd,
     agentDir,
     settingsManager,
-    noExtensions: true,
-    noSkills: true,
+    noExtensions: !loadExtensions,
+    noSkills: !loadSkills,
     noPromptTemplates: true,
     noThemes: true,
   });
   await resourceLoader.reload({ resolveProjectTrust: async () => approve });
+
+  if (verbose) {
+    const extensionsResult = resourceLoader.getExtensions();
+    const skillsResult = resourceLoader.getSkills();
+    console.error(
+      `[roundtable-review] resources for ${resolved.spec}: extensions=${extensionsResult.extensions.length}, skills=${skillsResult.skills.length}`,
+    );
+    for (const { path, error } of extensionsResult.errors) {
+      console.error(`[roundtable-review] extension load error: ${path}: ${error}`);
+    }
+    for (const diagnostic of skillsResult.diagnostics) {
+      if (diagnostic.type === 'error') {
+        const path = diagnostic.path ? `${diagnostic.path}: ` : '';
+        console.error(`[roundtable-review] skill load error: ${path}${diagnostic.message}`);
+      }
+    }
+  }
 
   const { session } = await createAgentSession({
     cwd,
@@ -539,7 +581,16 @@ function resolveModel(modelRegistry, modelSpec) {
   return { ...normalized, model };
 }
 
-async function runReviewer({ cwd, modelSpec, sharedBrief, timeoutMs, approve, verbose }) {
+async function runReviewer({
+  cwd,
+  modelSpec,
+  sharedBrief,
+  timeoutMs,
+  approve,
+  loadExtensions,
+  loadSkills,
+  verbose,
+}) {
   const startedAt = Date.now();
   let session;
   try {
@@ -549,6 +600,9 @@ async function runReviewer({ cwd, modelSpec, sharedBrief, timeoutMs, approve, ve
       modelSpec,
       tools: READ_ONLY_TOOLS,
       approve,
+      loadExtensions,
+      loadSkills,
+      verbose,
     });
     session = runner.session;
     await promptWithTimeout(
@@ -587,6 +641,8 @@ async function runSynthesis({
   reviewerResults,
   timeoutMs,
   approve,
+  loadExtensions,
+  loadSkills,
   verbose,
 }) {
   let session;
@@ -597,7 +653,10 @@ async function runSynthesis({
       modelSpec: synthModel,
       tools: [],
       approve,
+      loadExtensions,
+      loadSkills,
       noTools: 'all',
+      verbose,
     });
     session = runner.session;
     await promptWithTimeout(
@@ -696,6 +755,9 @@ async function main(argv) {
   if (options.verbose) {
     console.error(`[roundtable-review] cwd: ${options.cwd}`);
     console.error(`[roundtable-review] reviewers: ${options.models.join(', ')}`);
+    console.error(
+      `[roundtable-review] pi resources: extensions=${options.loadExtensions ? 'enabled' : 'disabled'}, skills=${options.loadSkills ? 'enabled' : 'disabled'}, project-local=${options.approve ? 'trusted' : 'untrusted'}`,
+    );
   }
 
   const reviewerResults = await Promise.all(
@@ -706,6 +768,8 @@ async function main(argv) {
         sharedBrief,
         timeoutMs: options.reviewerTimeoutMs,
         approve: options.approve,
+        loadExtensions: options.loadExtensions,
+        loadSkills: options.loadSkills,
         verbose: options.verbose,
       }),
     ),
@@ -723,6 +787,8 @@ async function main(argv) {
       reviewerResults,
       timeoutMs: options.synthesisTimeoutMs,
       approve: options.approve,
+      loadExtensions: options.loadExtensions,
+      loadSkills: options.loadSkills,
       verbose: options.verbose,
     });
   }

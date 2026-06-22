@@ -34,6 +34,11 @@ Pi's `xhigh` is the CLI's extra-high/max reasoning setting. The reviewer CLI
 also accepts `:max`, `:extra-high`, `:extra_high`, and `:extrahigh` as aliases
 for `:xhigh` in model specs.
 
+The CLI loads enabled Pi extensions and skills by default through Pi's normal
+resolver, so user/global packages such as `pi-retry` participate when installed.
+Project-local resources remain gated unless you pass `--approve`. Use
+`--no-extensions` or `--no-skills` only for troubleshooting or isolation.
+
 ```bash
 # From this checkout
 aube run roundtable-review -- "Review the current diff"
