@@ -573,9 +573,10 @@ export class CodexAppServerExecSessionManager {
     cwd: string,
     signal?: AbortSignal,
     onProgress?: ExecProgressCallback,
+    toolCallId?: string,
   ): Promise<UnifiedExecResult> {
     const client = await this.getClient(signal);
-    const session = this.createSession(input);
+    const session = this.createSession(input, toolCallId);
     const request = buildCommandExecRequestWithEnvironment(
       input,
       cwd,
@@ -726,13 +727,15 @@ export class CodexAppServerExecSessionManager {
     this.sessionsByProcessId.clear();
   }
 
-  private createSession(input: ExecCommandParams): ExecSession {
+  private createSession(input: ExecCommandParams, toolCallId: string | undefined): ExecSession {
     const id = this.nextSessionId++;
     return {
       id,
       processId: `pi-app-server-${process.pid}-${Date.now()}-${id}`,
       command: input.cmd,
-      output: new ExecOutputAccumulator(),
+      output: new ExecOutputAccumulator({
+        fileStem: toolCallId ? `exec_${toolCallId}` : `exec_session-${id}`,
+      }),
       emittedCursor: 0,
       exitCode: undefined,
       startedAt: Date.now(),
@@ -788,7 +791,7 @@ export function registerAppServerExecTools(
     prepareArguments: prepareExecCommandArguments as (args: unknown) => ExecCommandParams,
     renderCall: renderExecCommandCall,
     renderResult: renderExecCommandResult,
-    async execute(_toolCallId, params, signal, onUpdate, ctx: ExtensionContext) {
+    async execute(toolCallId, params, signal, onUpdate, ctx: ExtensionContext) {
       const typedParams = parseExecCommandParams(params);
       const emitUpdate = (partial: UnifiedExecResult) => {
         onUpdate?.({
@@ -796,7 +799,7 @@ export function registerAppServerExecTools(
           details: { ...partial, command: typedParams.cmd },
         });
       };
-      const result = await sessions.exec(typedParams, ctx.cwd, signal, emitUpdate);
+      const result = await sessions.exec(typedParams, ctx.cwd, signal, emitUpdate, toolCallId);
       throwIfExecFailed(result);
       return {
         content: [{ type: 'text', text: formatUnifiedExecResult(result, typedParams.cmd) }],

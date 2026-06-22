@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { createWriteStream, existsSync, realpathSync, type WriteStream } from 'node:fs';
+import { chmodSync, createWriteStream, existsSync, mkdirSync, type WriteStream } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -18,6 +18,10 @@ export interface ExecOutputSnapshot {
   full_output_path?: string | undefined;
 }
 
+export interface ExecOutputAccumulatorOptions {
+  fileStem?: string | undefined;
+}
+
 function byteLength(text: string): number {
   return Buffer.byteLength(text, 'utf8');
 }
@@ -26,22 +30,36 @@ export function maxBytesForOutputTokens(maxOutputTokens = DEFAULT_MAX_OUTPUT_TOK
   return Math.max(256, maxOutputTokens * 4);
 }
 
-function defaultTempFilePath(): string {
-  return path.join(friendlyTempDir(), `pi-app-server-exec-${randomBytes(8).toString('hex')}.log`);
+function sanitizeFileStem(value: string | undefined): string {
+  const sanitized = (value ?? 'output')
+    .replace(/[^A-Za-z0-9_.-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 120);
+  return sanitized || 'output';
+}
+
+function defaultTempFilePath(fileStem: string | undefined): string {
+  return path.join(
+    friendlyTempDir(),
+    `${sanitizeFileStem(fileStem)}-${randomBytes(4).toString('hex')}.log`,
+  );
 }
 
 function friendlyTempDir(): string {
-  const nativeTmpDir = tmpdir();
-  if (process.platform === 'win32' || !existsSync('/tmp')) return nativeTmpDir;
+  const baseDir = process.platform === 'darwin' && existsSync('/tmp') ? '/tmp' : tmpdir();
+  const dir = path.join(baseDir, 'pi-codex-app-server-use');
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
   try {
-    return realpathSync(nativeTmpDir) === realpathSync('/tmp') ? '/tmp' : nativeTmpDir;
+    chmodSync(dir, 0o700);
   } catch {
-    return nativeTmpDir;
+    // Best effort: an existing directory may not be chmod-able on every platform.
   }
+  return dir;
 }
 
 export class ExecOutputAccumulator {
   private readonly maxRollingBytes = Math.max(maxBytesForOutputTokens() * 2, 1);
+  private readonly fileStem: string | undefined;
   private rawChunks: string[] = [];
   private tailText = '';
   private tailBytes = 0;
@@ -52,6 +70,10 @@ export class ExecOutputAccumulator {
   private hasOpenLine = false;
   private tempFilePath: string | undefined;
   private tempFileStream: WriteStream | undefined;
+
+  constructor(options: ExecOutputAccumulatorOptions = {}) {
+    this.fileStem = options.fileStem;
+  }
 
   append(text: string): void {
     if (!text) return;
@@ -152,8 +174,8 @@ export class ExecOutputAccumulator {
 
   private ensureTempFile(): void {
     if (this.tempFilePath) return;
-    this.tempFilePath = defaultTempFilePath();
-    this.tempFileStream = createWriteStream(this.tempFilePath);
+    this.tempFilePath = defaultTempFilePath(this.fileStem);
+    this.tempFileStream = createWriteStream(this.tempFilePath, { flags: 'wx', mode: 0o600 });
     for (const chunk of this.rawChunks) this.tempFileStream.write(chunk);
     this.rawChunks = [];
   }

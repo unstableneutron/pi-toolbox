@@ -579,11 +579,20 @@ describe('AppServer exec tool helpers', () => {
       clientFactory: () => fake.client as any,
     });
 
-    const result = await sessions.exec({ cmd: 'big-output', yield_time_ms: 250 }, '/repo');
+    const result = await sessions.exec(
+      { cmd: 'big-output', yield_time_ms: 250 },
+      '/repo',
+      undefined,
+      undefined,
+      'call/foo:bar',
+    );
 
     expect(result.output.length).toBeLessThan(stdout.length);
     expect(result.truncation).toMatchObject({ truncated: true, truncatedBy: 'bytes' });
-    expect(result.full_output_path).toMatch(/pi-app-server-exec-[a-f0-9]+\.log$/);
+    expect(path.basename(result.full_output_path!)).toMatch(/^exec_call_foo_bar-[a-f0-9]{8}\.log$/);
+    expect(result.full_output_path).toContain(`${path.sep}pi-codex-app-server-use${path.sep}`);
+    if (process.platform === 'darwin')
+      expect(result.full_output_path).toMatch(/^\/tmp\/pi-codex-app-server-use\//);
     expect(readFileSync(result.full_output_path!, 'utf8')).toBe(stdout);
     sessions.close();
   });
