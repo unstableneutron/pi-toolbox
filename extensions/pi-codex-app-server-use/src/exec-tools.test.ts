@@ -1,3 +1,6 @@
+import path from 'node:path';
+
+import { getAgentDir } from '@earendil-works/pi-coding-agent';
 import { describe, expect, test, vi } from 'vitest';
 
 import {
@@ -81,8 +84,9 @@ describe('AppServer exec tool helpers', () => {
         },
         '/repo',
         'pi-1',
+        { PATH: '/usr/bin' },
       ),
-    ).toEqual({
+    ).toMatchObject({
       command: ['/bin/zsh', '-c', 'printf hello'],
       processId: 'pi-1',
       cwd: '/repo/subdir',
@@ -93,6 +97,88 @@ describe('AppServer exec tool helpers', () => {
       disableTimeout: true,
       sandboxPolicy: { type: 'dangerFullAccess' },
     });
+  });
+
+  test('forwards allowlisted shell env overrides into command/exec requests', () => {
+    const request = buildCommandExecRequest({ cmd: 'env' }, '/repo', 'pi-1', {
+      HERDR: '1',
+      HERDR_ENV: '1',
+      HERDR_SOCKET_PATH: '/tmp/herdr.sock',
+      HERDR_PANE_ID: 'w1:p1',
+      HERDR_PI_IDLE_DEBOUNCE_MS: '10000',
+      PATH: '/usr/bin',
+      TMUX: '/tmp/tmux-501/default,123,0',
+      TMUX_PANE: '%1',
+      ZELLIJ: '0',
+      ZELLIJ_SOCKET_DIR: '/tmp/zellij',
+      KITTY_PUBLIC_KEY: 'drop-me',
+      LANG: 'drop-me',
+      OPENAI_API_KEY: 'drop-me',
+      PIP_INDEX_URL: 'drop-me',
+      SHELL: 'drop-me',
+      TERM: 'drop-me',
+      UNRELATED: 'drop-me',
+    });
+
+    const env = request.env as Record<string, string>;
+    expect(env).toMatchObject({
+      HERDR: '1',
+      HERDR_ENV: '1',
+      HERDR_SOCKET_PATH: '/tmp/herdr.sock',
+      HERDR_PANE_ID: 'w1:p1',
+      HERDR_PI_IDLE_DEBOUNCE_MS: '10000',
+      TMUX: '/tmp/tmux-501/default,123,0',
+      TMUX_PANE: '%1',
+      ZELLIJ: '0',
+      ZELLIJ_SOCKET_DIR: '/tmp/zellij',
+    });
+    expect(env).not.toHaveProperty('KITTY_PUBLIC_KEY');
+    expect(env).not.toHaveProperty('LANG');
+    expect(env).not.toHaveProperty('OPENAI_API_KEY');
+    expect(env).not.toHaveProperty('PIP_INDEX_URL');
+    expect(env).not.toHaveProperty('SHELL');
+    expect(env).not.toHaveProperty('TERM');
+    expect(env).not.toHaveProperty('UNRELATED');
+    expect(env.CLICOLOR).toBe('0');
+    expect(env.FORCE_COLOR).toBe('0');
+    expect(env.NO_COLOR).toBe('1');
+    expect(env.PATH.split(path.delimiter)).toEqual([path.join(getAgentDir(), 'bin'), '/usr/bin']);
+  });
+
+  test('does not duplicate the Pi agent bin dir when it is already on PATH', () => {
+    const binDir = path.join(getAgentDir(), 'bin');
+    const request = buildCommandExecRequest({ cmd: 'env' }, '/repo', 'pi-1', {
+      PATH: ['/usr/bin', binDir, '/usr/bin', '/bin', binDir].join(path.delimiter),
+    });
+
+    expect((request.env as Record<string, string>).PATH.split(path.delimiter)).toEqual([
+      binDir,
+      '/usr/bin',
+      '/bin',
+    ]);
+  });
+
+  test('snapshots manager shell environment at construction', async () => {
+    const fake = createResolvingClient({ exitCode: 0, stdout: 'Success\n', stderr: '' });
+    const env: NodeJS.ProcessEnv = { HERDR_PANE_ID: 'before', PATH: '/before' };
+    const sessions = new CodexAppServerExecSessionManager({
+      clientFactory: () => fake.client as any,
+      env,
+    });
+    env.PATH = '/after';
+    env.HERDR_PANE_ID = 'after';
+
+    await sessions.applyPatch({ input: '*** Begin Patch\n*** End Patch' }, '/repo');
+
+    const params = fake.calls.find((call) => call.method === 'command/exec')!.params as {
+      env: Record<string, string>;
+    };
+    expect(params.env.HERDR_PANE_ID).toBe('before');
+    expect(params.env.PATH.split(path.delimiter)).toEqual([
+      path.join(getAgentDir(), 'bin'),
+      '/before',
+    ]);
+    sessions.close();
   });
 
   test('formats unified exec output in Codex-compatible transcript form', () => {

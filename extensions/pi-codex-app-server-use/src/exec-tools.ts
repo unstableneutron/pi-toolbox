@@ -4,6 +4,7 @@ import path from 'node:path';
 import {
   DEFAULT_MAX_LINES,
   formatSize,
+  getAgentDir,
   truncateTail,
   type ExtensionAPI,
   type ExtensionContext,
@@ -44,6 +45,8 @@ const DEFAULT_CLIENT_NAME = 'pi-codex-app-server-use';
 const LONG_RUNNING_RPC_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 10_000;
 const EXEC_PROGRESS_UPDATE_INTERVAL_MS = 250;
+
+const SHELL_ENVIRONMENT_ALLOWLIST = ['PATH', 'HERDR*', 'TMUX*', 'ZELLIJ*'];
 
 export const APP_SERVER_EXEC_CONTROL_TOOL_NAMES = ['exec_command', 'write_stdin'];
 export const APP_SERVER_EXEC_TOOL_NAMES = [...APP_SERVER_EXEC_CONTROL_TOOL_NAMES, 'apply_patch'];
@@ -170,6 +173,7 @@ export interface AppServerExecSessionManagerOptions {
   socketPath?: string | undefined;
   origin?: string | undefined;
   clientName?: string | undefined;
+  env?: NodeJS.ProcessEnv | undefined;
 }
 
 function isFishShell(shell: string | undefined): boolean {
@@ -513,6 +517,17 @@ export function buildCommandExecRequest(
   params: ExecCommandParams,
   cwd: string,
   processId: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Record<string, unknown> {
+  const environment = createShellEnvironment(env);
+  return buildCommandExecRequestWithEnvironment(params, cwd, processId, environment);
+}
+
+function buildCommandExecRequestWithEnvironment(
+  params: ExecCommandParams,
+  cwd: string,
+  processId: string,
+  environment: Record<string, string>,
 ): Record<string, unknown> {
   const shell = params.shell || getDefaultCodexRuntimeShell();
   const login = params.login ?? true;
@@ -526,21 +541,67 @@ export function buildCommandExecRequest(
     streamStdoutStderr: true,
     disableOutputCap: true,
     disableTimeout: true,
+    env: environment,
     sandboxPolicy: { type: 'dangerFullAccess' },
   };
 }
 
-function buildApplyPatchCommandExecRequest(
+function buildApplyPatchCommandExecRequestWithEnvironment(
   params: ApplyPatchParams,
   cwd: string,
+  environment: Record<string, string>,
 ): Record<string, unknown> {
   return {
     command: ['apply_patch', params.input],
     cwd,
     disableOutputCap: true,
     disableTimeout: true,
+    env: environment,
     sandboxPolicy: { type: 'dangerFullAccess' },
   };
+}
+
+function createShellEnvironment(env: NodeJS.ProcessEnv): Record<string, string> {
+  const shellEnv = Object.fromEntries(
+    Object.entries(env).filter(
+      (entry): entry is [string, string] =>
+        typeof entry[1] === 'string' && shouldForwardShellEnvironmentVariable(entry[0]),
+    ),
+  );
+  const binDir = path.join(getAgentDir(), 'bin');
+  const pathKey = Object.keys(shellEnv).find((key) => key.toLowerCase() === 'path') ?? 'PATH';
+  shellEnv[pathKey] = dedupePathEntries([
+    binDir,
+    ...(shellEnv[pathKey] ?? '').split(path.delimiter),
+  ]);
+  shellEnv.CLICOLOR = '0';
+  shellEnv.FORCE_COLOR = '0';
+  shellEnv.NO_COLOR = '1';
+  return shellEnv;
+}
+
+function shouldForwardShellEnvironmentVariable(name: string): boolean {
+  const normalized = name.toUpperCase();
+  return SHELL_ENVIRONMENT_ALLOWLIST.some((pattern) =>
+    matchesShellEnvironmentPattern(normalized, pattern),
+  );
+}
+
+function matchesShellEnvironmentPattern(normalizedName: string, pattern: string): boolean {
+  const normalizedPattern = pattern.toUpperCase();
+  if (!normalizedPattern.endsWith('*')) return normalizedName === normalizedPattern;
+  return normalizedName.startsWith(normalizedPattern.slice(0, -1));
+}
+
+function dedupePathEntries(entries: string[]): string {
+  const seen = new Set<string>();
+  const deduped: string[] = [];
+  for (const entry of entries) {
+    if (!entry || seen.has(entry)) continue;
+    seen.add(entry);
+    deduped.push(entry);
+  }
+  return deduped.join(path.delimiter);
 }
 
 function formatApplyPatchOutput(response: CommandExecResponse): string {
@@ -624,10 +685,13 @@ export class CodexAppServerExecSessionManager {
   private client?: CodexAppServerWebSocketClient;
   private cleanupNotifications?: () => void;
   private nextSessionId = 1;
+  private readonly shellEnvironment: Record<string, string>;
   private readonly sessions = new Map<number, ExecSession>();
   private readonly sessionsByProcessId = new Map<string, ExecSession>();
 
-  constructor(private readonly options: AppServerExecSessionManagerOptions = {}) {}
+  constructor(private readonly options: AppServerExecSessionManagerOptions = {}) {
+    this.shellEnvironment = createShellEnvironment(options.env ?? process.env);
+  }
 
   async exec(
     input: ExecCommandParams,
@@ -637,7 +701,12 @@ export class CodexAppServerExecSessionManager {
   ): Promise<UnifiedExecResult> {
     const client = await this.getClient(signal);
     const session = this.createSession(input);
-    const request = buildCommandExecRequest(input, cwd, session.processId);
+    const request = buildCommandExecRequestWithEnvironment(
+      input,
+      cwd,
+      session.processId,
+      this.shellEnvironment,
+    );
     this.sessions.set(session.id, session);
     this.sessionsByProcessId.set(session.processId, session);
 
@@ -744,7 +813,7 @@ export class CodexAppServerExecSessionManager {
     const client = await this.getClient(signal);
     const response = (await client.callRpc(
       'command/exec',
-      buildApplyPatchCommandExecRequest(input, cwd),
+      buildApplyPatchCommandExecRequestWithEnvironment(input, cwd, this.shellEnvironment),
       LONG_RUNNING_RPC_TIMEOUT_MS,
       signal,
     )) as CommandExecResponse;
