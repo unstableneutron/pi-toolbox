@@ -2348,6 +2348,80 @@ describe('WebSocket transport', () => {
     });
   });
 
+  it('does not retry context-length-exceeded websocket error frames', async () => {
+    const instances: any[] = [];
+    class FakeWebSocket {
+      readyState = 1;
+      listeners = new Map<string, Set<(event: any) => void>>();
+
+      constructor() {
+        instances.push(this);
+        queueMicrotask(() => this.emit('open', {}));
+      }
+
+      send() {
+        queueMicrotask(() => {
+          this.emit('message', {
+            data: JSON.stringify({
+              type: 'error',
+              error: {
+                type: 'invalid_request_error',
+                code: 'context_length_exceeded',
+                message: 'This model\'s maximum context length was exceeded. Please reduce your input.',
+                param: 'input',
+              },
+            }),
+          });
+        });
+      }
+
+      close() {
+        this.readyState = 3;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void) {
+        const listeners = this.listeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      removeEventListener(type: string, listener: (event: any) => void) {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      emit(type: string, event: any) {
+        for (const listener of this.listeners.get(type) ?? []) listener(event);
+      }
+    }
+
+    const diagnostics = createTransportDiagnostics(
+      { configuredTransport: 'auto', url: 'wss://example.test/responses' },
+      () => 1000,
+    );
+
+    await expect(
+      runWebSocketResponse(
+        {
+          url: 'wss://example.test/responses',
+          headers: new Headers(),
+          body: { model: 'gpt', input: [] },
+          settings: normalizeSettings({ websocket: { retries: 2, firstEventTimeoutMs: 0 } }),
+          WebSocketCtor: FakeWebSocket as any,
+          diagnostics,
+        },
+        () => undefined,
+      ),
+    ).rejects.toThrow('maximum context length was exceeded');
+
+    expect(instances).toHaveLength(1);
+    expect(diagnostics.hasEvent('ws_retry')).toBe(false);
+    expect(diagnostics.getFields()).toMatchObject({
+      failureReason: 'invalidRequest',
+      failureCategory: 'terminal_config_error',
+      retryable: false,
+    });
+  });
+
   it.each([
     ['response.incomplete', { status: 'incomplete' }],
     ['response.failed', { status: 'failed' }],

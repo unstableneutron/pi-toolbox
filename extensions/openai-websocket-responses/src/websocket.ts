@@ -135,6 +135,25 @@ class RetryableResponseError extends Error {
   }
 }
 
+class TerminalResponseErrorFrame extends Error {
+  readonly failureReason?: string;
+  readonly failureCategory?: string;
+  readonly retryable?: boolean;
+
+  constructor(
+    message: string,
+    readonly event: Record<string, any>,
+  ) {
+    super(message);
+    this.name = 'TerminalResponseErrorFrame';
+    const status = typeof event.status === 'number' ? event.status : event.error?.status;
+    const classification = classifyOpenAIResponsesFailure({ status, event });
+    this.failureReason = classification?.reason;
+    this.failureCategory = classification?.category;
+    this.retryable = classification?.retryable;
+  }
+}
+
 function formatUpgradeFailureMessage(
   input: { status?: number; bodyText?: string; bodyJson?: unknown },
   classification: ProviderFailureClassification | undefined,
@@ -1193,6 +1212,13 @@ export async function runWebSocketResponse(
           }
           if (!options.partial && responseId && isRetryableResponsesErrorFrame(parsed)) {
             throw new RetryableResponseError(responsesErrorFrameMessage(parsed));
+          }
+          if (!options.partial && parsed.type === 'error') {
+            const status = typeof parsed.status === 'number' ? parsed.status : parsed.error?.status;
+            const classification = classifyOpenAIResponsesFailure({ status, event: parsed });
+            if (classification?.retryable === false) {
+              throw new TerminalResponseErrorFrame(responsesErrorFrameMessage(parsed), parsed);
+            }
           }
           const replayUnsafeEvent = isReplayUnsafeResponsesEvent(parsed);
           if (replayUnsafeEvent && !replayUnsafeEventSeen) {

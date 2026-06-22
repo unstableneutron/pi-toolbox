@@ -115,6 +115,49 @@ describe('shared provider error classification', () => {
     expect(isNonRetryableAssistantProviderError(message)).toBe(true);
   });
 
+  test('classifies context length exceeded as a terminal request error', () => {
+    const event = {
+      type: 'error',
+      error: {
+        type: 'invalid_request_error',
+        code: 'context_length_exceeded',
+        message: 'This model\'s maximum context length was exceeded. Please reduce your input.',
+        param: 'input',
+      },
+    };
+    const errorMessage = JSON.stringify(event);
+    const message = {
+      role: 'assistant',
+      stopReason: 'error',
+      errorMessage,
+      diagnostics: [
+        {
+          type: 'openai_websocket_transport',
+          details: {
+            finalTransport: 'websocket',
+            outcome: 'transport_error',
+            failureReason: 'invalidRequest',
+            failureCategory: 'terminal_config_error',
+            retryable: false,
+          },
+        },
+      ],
+    };
+
+    expect(classifyOpenAIResponsesFailure({ event })).toMatchObject({
+      reason: 'invalidRequest',
+      retryable: false,
+      category: 'terminal_config_error',
+    });
+    expect(classifyOpenAIResponsesFailure({ message: errorMessage })).toMatchObject({
+      reason: 'invalidRequest',
+      retryable: false,
+      category: 'terminal_config_error',
+    });
+    expect(classifyRetryableAssistantProviderError(message)).toBeUndefined();
+    expect(isNonRetryableAssistantProviderError(message)).toBe(true);
+  });
+
   test('classifies retryable provider error strings with stable reasons', () => {
     expect(
       classifyRetryableProviderError(

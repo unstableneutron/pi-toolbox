@@ -122,6 +122,14 @@ export function classifyOpenAIResponsesFailure(
     return terminal('invalidRequest', 'terminal_config_error');
   }
 
+  if (
+    text.includes('invalid_request_error') &&
+    text.includes('context_length_exceeded') &&
+    text.includes('input')
+  ) {
+    return terminal('invalidRequest', 'terminal_config_error');
+  }
+
   if (status === 401 || status === 403) return terminal('authError', 'terminal_auth_error');
 
   if (status === 429 || text.includes('rate limit') || text.includes('too many requests')) {
