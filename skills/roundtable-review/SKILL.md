@@ -15,9 +15,9 @@ Use this for model diversity. If the user wants different review *angles* such a
 
 Default reviewer lineup:
 
-1. `openai/gpt-5.5:high`
-2. `anthropic/claude-opus-4-7:high`
-3. `google/gemini-3.1-pro-preview:high`
+1. `openai/gpt-5.5:xhigh`
+2. `anthropic/claude-opus-4-7:xhigh`
+3. `google/gemini-3.1-pro-preview:xhigh`
 
 Accept an optional `reviewer-models:` block or comma-separated inline list. Preserve order, resolve user model aliases when instructed by the system, remove duplicates, require at least one reviewer, and cap at six reviewers. If parsing fails, explain briefly and use the default lineup unless the user explicitly requires exact models.
 

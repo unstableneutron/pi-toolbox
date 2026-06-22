@@ -10,13 +10,25 @@ const execFileAsync = promisify(execFile);
 
 let piCodingAgentSdkPromise;
 
-const VALID_THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh']);
+const THINKING_LEVEL_ALIASES = new Map([
+  ['off', 'off'],
+  ['none', 'off'],
+  ['minimal', 'minimal'],
+  ['low', 'low'],
+  ['medium', 'medium'],
+  ['high', 'high'],
+  ['xhigh', 'xhigh'],
+  ['extra-high', 'xhigh'],
+  ['extra_high', 'xhigh'],
+  ['extrahigh', 'xhigh'],
+  ['max', 'xhigh'],
+]);
 const DEFAULT_REVIEWER_MODELS = [
-  'openai/gpt-5.5:high',
-  'anthropic/claude-opus-4-7:high',
-  'google/gemini-3.1-pro-preview:high',
+  'openai/gpt-5.5:xhigh',
+  'anthropic/claude-opus-4-7:xhigh',
+  'google/gemini-3.1-pro-preview:xhigh',
 ];
-const DEFAULT_SYNTHESIS_MODEL = 'openai/gpt-5.5:high';
+const DEFAULT_SYNTHESIS_MODEL = 'openai/gpt-5.5:xhigh';
 const READ_ONLY_TOOLS = ['read', 'grep', 'find', 'ls'];
 
 const MODEL_ALIASES = new Map([
@@ -62,7 +74,12 @@ Options:
   -h, --help                  Show this help
 
 Model specs use provider/model[:thinking], for example:
-  openai/gpt-5.5:high, anthropic/claude-opus-4-7:high, gemini:high
+  openai/gpt-5.5:xhigh, anthropic/claude-opus-4-7:max, gemini:extra-high
+
+Thinking aliases: max, extra-high, extra_high, and extrahigh all map to Pi's xhigh.
+
+Default reviewer models:
+${DEFAULT_REVIEWER_MODELS.map((model) => `  - ${model}`).join('\n')}
 `;
 }
 
@@ -225,9 +242,10 @@ function normalizeModelSpec(input) {
 function splitThinkingLevel(spec) {
   const colonIndex = spec.lastIndexOf(':');
   if (colonIndex === -1) return { base: spec, thinkingLevel: undefined };
-  const possibleLevel = spec.slice(colonIndex + 1);
-  if (!VALID_THINKING_LEVELS.has(possibleLevel)) return { base: spec, thinkingLevel: undefined };
-  return { base: spec.slice(0, colonIndex), thinkingLevel: possibleLevel };
+  const possibleLevel = spec.slice(colonIndex + 1).toLowerCase();
+  const normalizedLevel = THINKING_LEVEL_ALIASES.get(possibleLevel);
+  if (!normalizedLevel) return { base: spec, thinkingLevel: undefined };
+  return { base: spec.slice(0, colonIndex), thinkingLevel: normalizedLevel };
 }
 
 async function collectEvidence(options) {

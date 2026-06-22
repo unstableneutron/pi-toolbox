@@ -22,6 +22,18 @@ The repo is itself a pi package (see the `pi` field in `package.json`), so the w
 read-only reviewer sessions in parallel, then asks a synthesis session to return
 the final analysis.
 
+Default reviewer lineup:
+
+- `openai/gpt-5.5:xhigh`
+- `anthropic/claude-opus-4-7:xhigh`
+- `google/gemini-3.1-pro-preview:xhigh`
+
+Default synthesis model: `openai/gpt-5.5:xhigh`.
+
+Pi's `xhigh` is the CLI's extra-high/max reasoning setting. The reviewer CLI
+also accepts `:max`, `:extra-high`, `:extra_high`, and `:extrahigh` as aliases
+for `:xhigh` in model specs.
+
 ```bash
 # From this checkout
 aube run roundtable-review -- "Review the current diff"
