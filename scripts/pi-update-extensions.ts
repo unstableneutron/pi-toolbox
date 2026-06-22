@@ -9,7 +9,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -441,6 +441,11 @@ export function findGlobalPackagePath(
   } = {},
 ): string | undefined {
   const cwd = options.cwd ?? process.cwd();
+  // Global package-manager commands should not inherit the project cwd. pnpm,
+  // for example, warns when package.json contains npm-style `workspaces`, even
+  // for `pnpm root -g` / `pnpm list -g`. Run these global lookups from a neutral
+  // cwd while still using the project cwd above for command availability checks.
+  const globalCommandCwd = tmpdir();
   const packageManagers = options.packageManagerCommand
     ? [options.packageManagerCommand]
     : getPackageManagerCommandCandidates(options);
@@ -451,7 +456,7 @@ export function findGlobalPackagePath(
         packageManager.command,
         [...packageManager.args, 'root', '-g'],
         {
-          cwd,
+          cwd: globalCommandCwd,
           encoding: 'utf8',
         },
       ).trim();
@@ -463,7 +468,11 @@ export function findGlobalPackagePath(
       // Try the global list fallback below.
     }
 
-    const listedPackagePath = findPackagePathFromGlobalList(packageName, packageManager, cwd);
+    const listedPackagePath = findPackagePathFromGlobalList(
+      packageName,
+      packageManager,
+      globalCommandCwd,
+    );
     if (listedPackagePath) return listedPackagePath;
   }
 
