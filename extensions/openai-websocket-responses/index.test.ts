@@ -78,7 +78,12 @@ import {
   extractResponseOutputText,
   processResponsesEvents,
 } from './src/responses-adapter.ts';
-import { normalizeSettings, readOpenAIWebSocketResponsesSettings } from './src/settings.ts';
+import {
+  defaultOpenAIWebSocketResponsesOmpConfigPaths,
+  normalizeSettings,
+  readOpenAIWebSocketResponsesOmpSettings,
+  readOpenAIWebSocketResponsesSettings,
+} from './src/settings.ts';
 import { resolveRetrieveResponseUrl, resolveWebSocketResponsesUrl } from './src/urls.ts';
 import {
   closeAllCachedWebSockets,
@@ -471,6 +476,98 @@ describe('settings and patch matching', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('reads the openaiWebsocketResponses key from OMP config YAML', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'openai-websocket-omp-config-'));
+    const path = join(dir, 'config.yaml');
+    try {
+      writeFileSync(
+        path,
+        `openaiWebsocketResponses:
+  patch:
+    enabled: true
+    providers:
+      - facade
+  request:
+    queryParams:
+      api-version: preview
+    storeByProviderModel:
+      facade/productivity/gpt-5*: false
+  websocket:
+    retries: 4
+`,
+      );
+
+      expect(readOpenAIWebSocketResponsesOmpSettings(path)).toMatchObject({
+        patch: { enabled: true, providers: ['facade'] },
+        request: {
+          queryParams: { 'api-version': 'preview' },
+          storeByProviderModel: { 'facade/productivity/gpt-5*': false },
+        },
+        websocket: { retries: 4 },
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('continues from config.yml to config.yaml when the first OMP config has no extension block', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'openai-websocket-omp-config-'));
+    const ymlPath = join(dir, 'config.yml');
+    const yamlPath = join(dir, 'config.yaml');
+    try {
+      writeFileSync(ymlPath, 'theme:\n  dark: graphite\n');
+      writeFileSync(
+        yamlPath,
+        `openaiWebsocketResponses:
+  websocket:
+    retries: 6
+`,
+      );
+
+      expect(readOpenAIWebSocketResponsesOmpSettings([ymlPath, yamlPath])).toMatchObject({
+        websocket: { retries: 6 },
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves default OMP config paths from profile and custom agent dir env', () => {
+    expect(
+      defaultOpenAIWebSocketResponsesOmpConfigPaths('/home/example', {
+        OMP_PROFILE: 'work',
+      }),
+    ).toEqual([
+      '/home/example/.omp/profiles/work/agent/config.yml',
+      '/home/example/.omp/profiles/work/agent/config.yaml',
+    ]);
+
+    expect(
+      defaultOpenAIWebSocketResponsesOmpConfigPaths('/home/example', {
+        PI_CODING_AGENT_DIR: '/tmp/agent',
+        OMP_PROFILE: 'work',
+      }),
+    ).toEqual(['/tmp/agent/config.yml', '/tmp/agent/config.yaml']);
+
+    expect(
+      defaultOpenAIWebSocketResponsesOmpConfigPaths('/home/example', {}, [
+        'omp',
+        '--profile',
+        'cli',
+      ]),
+    ).toEqual([
+      '/home/example/.omp/profiles/cli/agent/config.yml',
+      '/home/example/.omp/profiles/cli/agent/config.yaml',
+    ]);
+
+    expect(
+      defaultOpenAIWebSocketResponsesOmpConfigPaths('/home/example', {}, ['omp', '--profile=eq']),
+    ).toEqual([
+      '/home/example/.omp/profiles/eq/agent/config.yml',
+      '/home/example/.omp/profiles/eq/agent/config.yaml',
+    ]);
   });
 
   it('normalizes request profile and detects Azure vs Codex endpoints', () => {

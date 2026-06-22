@@ -1,9 +1,28 @@
-import {
-  type AssistantMessage,
-  type Model,
-  type UserMessage,
-  completeSimple,
-} from '@earendil-works/pi-ai';
+import type { AssistantMessage, Model, UserMessage } from '@earendil-works/pi-ai';
+
+type CompleteSimple = (
+  model: Model<any>,
+  context: { systemPrompt: string; messages: UserMessage[] },
+  options: {
+    apiKey: string;
+    headers?: { [key: string]: string };
+    reasoning: 'high';
+    maxTokens: number;
+    signal?: AbortSignal;
+  },
+) => Promise<AssistantMessage>;
+
+let completeSimplePromise: Promise<CompleteSimple | undefined> | undefined;
+
+async function loadCompleteSimple(): Promise<CompleteSimple | undefined> {
+  completeSimplePromise ??= import('@earendil-works/pi-ai')
+    .then((mod) => {
+      const candidate = (mod as { completeSimple?: unknown }).completeSimple;
+      return typeof candidate === 'function' ? (candidate as CompleteSimple) : undefined;
+    })
+    .catch(() => undefined);
+  return completeSimplePromise;
+}
 
 type ModelFamily = 'openai' | 'claude' | 'gemini' | 'other';
 
@@ -195,6 +214,9 @@ export async function requestRefusalRewrite(
     content: [{ type: 'text', text: input.transcriptText }],
     timestamp: Date.now(),
   };
+
+  const completeSimple = await loadCompleteSimple();
+  if (!completeSimple) return undefined;
 
   const response = await completeSimple(
     input.model,

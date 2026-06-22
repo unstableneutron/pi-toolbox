@@ -1,9 +1,5 @@
 import type { Model } from '@earendil-works/pi-ai';
-import {
-  getAgentDir,
-  SettingsManager,
-  type ExtensionContext,
-} from '@earendil-works/pi-coding-agent';
+import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 
 import {
   buildRefusalStatus,
@@ -15,6 +11,7 @@ import {
 import { hasUserVisibleAssistantOutput } from '../shared/assistant-message-state';
 import { isEncryptedResponsesReasoningSignature } from '../shared/openai-responses-replay';
 import { classifyRetryableAssistantProviderError } from '../shared/provider-errors';
+import { readCoreRetrySettings } from './settings';
 
 const DEFAULT_REFUSAL_CONTINUE_ATTEMPTS = 5;
 const DEFAULT_REFUSAL_REWRITE_ATTEMPTS = 2;
@@ -210,8 +207,7 @@ function getConfiguredRetryableErrorContinueAttempts(cwd: string | undefined): n
   }
 
   try {
-    return SettingsManager.create(cwd ?? process.cwd(), getAgentDir()).getRetrySettings()
-      .maxRetries;
+    return readCoreRetrySettings(cwd).maxRetries;
   } catch {
     return DEFAULT_CORE_RETRY_MAX_RETRIES;
   }

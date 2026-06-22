@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-a
 
 import { clearAllContinuations } from './src/continuation-cache.ts';
 import { API, createOpenAIWebSocketResponsesStream } from './src/provider.ts';
-import { readOpenAIWebSocketResponsesSettings } from './src/settings.ts';
+import { readOpenAIWebSocketResponsesOmpSettings } from './src/settings.ts';
 import {
   closeAllCachedWebSockets,
   type WebSocketCacheStatus,
@@ -45,7 +45,7 @@ export default function openAIWebSocketResponsesOmp(pi: ExtensionAPI): void {
   };
 
   const streamWebSocket = createOpenAIWebSocketResponsesStream(
-    () => readOpenAIWebSocketResponsesSettings(),
+    () => readOpenAIWebSocketResponsesOmpSettings(),
     (event) => {
       const status = formatWebSocketStatus(event);
       if (status && currentCtx?.hasUI) {

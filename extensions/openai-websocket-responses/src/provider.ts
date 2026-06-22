@@ -1,8 +1,8 @@
-import * as piAi from '@earendil-works/pi-ai';
 import type {
   Api,
   AssistantMessage,
   AssistantMessageDiagnostic,
+  AssistantMessageEvent,
   AssistantMessageEventStream,
   Context,
   Model,
@@ -116,22 +116,93 @@ function createOutput(model: Model<Api>): AssistantMessage {
   };
 }
 
+class LocalAssistantMessageEventStream implements AsyncIterable<AssistantMessageEvent> {
+  private queue: AssistantMessageEvent[] = [];
+  private waiting: Array<{
+    resolve: (value: IteratorResult<AssistantMessageEvent>) => void;
+    reject: (error: unknown) => void;
+  }> = [];
+  private done = false;
+  private failed = false;
+  private error: unknown;
+  private resultSettled = false;
+  private readonly finalResultPromise: Promise<AssistantMessage>;
+  private resolveFinalResult!: (message: AssistantMessage) => void;
+  private rejectFinalResult!: (error: unknown) => void;
+
+  constructor() {
+    this.finalResultPromise = new Promise((resolve, reject) => {
+      this.resolveFinalResult = resolve;
+      this.rejectFinalResult = reject;
+    });
+    this.finalResultPromise.catch(() => {});
+  }
+
+  push(event: AssistantMessageEvent): void {
+    if (this.done) return;
+    if (event.type === 'done' || event.type === 'error') {
+      this.done = true;
+      this.resultSettled = true;
+      this.resolveFinalResult(event.type === 'done' ? event.message : event.error);
+    }
+    this.deliver(event);
+  }
+
+  deliver(event: AssistantMessageEvent): void {
+    const waiter = this.waiting.shift();
+    if (waiter) waiter.resolve({ value: event, done: false });
+    else this.queue.push(event);
+  }
+
+  end(result?: AssistantMessage): void {
+    this.done = true;
+    if (result !== undefined) {
+      this.resultSettled = true;
+      this.resolveFinalResult(result);
+    } else if (!this.resultSettled) {
+      this.resultSettled = true;
+      this.rejectFinalResult(new Error('Stream ended without a final result'));
+    }
+    while (this.waiting.length > 0) {
+      this.waiting.shift()!.resolve({ value: undefined as any, done: true });
+    }
+  }
+
+  fail(error: unknown): void {
+    if (this.done) return;
+    this.done = true;
+    this.failed = true;
+    this.error = error;
+    this.resultSettled = true;
+    this.rejectFinalResult(error);
+    while (this.waiting.length > 0) this.waiting.shift()!.reject(error);
+  }
+
+  async *[Symbol.asyncIterator](): AsyncIterator<AssistantMessageEvent> {
+    while (true) {
+      if (this.queue.length > 0) {
+        yield this.queue.shift()!;
+      } else if (this.failed) {
+        throw this.error;
+      } else if (this.done) {
+        return;
+      } else {
+        const result = await new Promise<IteratorResult<AssistantMessageEvent>>((resolve, reject) =>
+          this.waiting.push({ resolve, reject }),
+        );
+        if (result.done) return;
+        yield result.value;
+      }
+    }
+  }
+
+  result(): Promise<AssistantMessage> {
+    return this.finalResultPromise;
+  }
+}
+
 function createEventStream(): AssistantMessageEventStream {
-  const factory = (
-    piAi as unknown as {
-      createAssistantMessageEventStream?: () => AssistantMessageEventStream;
-    }
-  ).createAssistantMessageEventStream;
-  if (typeof factory === 'function') return factory();
-
-  const StreamCtor = (
-    piAi as unknown as {
-      AssistantMessageEventStream?: new () => AssistantMessageEventStream;
-    }
-  ).AssistantMessageEventStream;
-  if (typeof StreamCtor === 'function') return new StreamCtor();
-
-  throw new Error('No AssistantMessageEventStream implementation is available');
+  return new LocalAssistantMessageEventStream() as unknown as AssistantMessageEventStream;
 }
 
 function formatProviderError(error: unknown): string {

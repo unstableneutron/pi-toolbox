@@ -15,19 +15,33 @@
  *   and synthetic missing tool results.
  */
 
-import {
-  calculateCost,
-  type Api,
-  type AssistantMessage,
-  type AssistantMessageEventStream,
-  type Context,
-  type ImageContent,
-  type Model,
-  type TextContent,
-  type Tool,
-  type ToolCall,
+import type {
+  Api,
+  AssistantMessage,
+  AssistantMessageEventStream,
+  Context,
+  ImageContent,
+  Model,
+  TextContent,
+  Tool,
+  ToolCall,
 } from '@earendil-works/pi-ai';
 import { parse as partialParse } from 'partial-json';
+
+type Usage = AssistantMessage['usage'];
+
+function calculateCost<TApi extends Api>(model: Model<TApi>, usage: Usage): Usage['cost'] {
+  const longWrite = usage.cacheWrite1h ?? 0;
+  const shortWrite = usage.cacheWrite - longWrite;
+  usage.cost.input = (model.cost.input / 1_000_000) * usage.input;
+  usage.cost.output = (model.cost.output / 1_000_000) * usage.output;
+  usage.cost.cacheRead = (model.cost.cacheRead / 1_000_000) * usage.cacheRead;
+  usage.cost.cacheWrite =
+    (model.cost.cacheWrite * shortWrite + model.cost.input * 2 * longWrite) / 1_000_000;
+  usage.cost.total =
+    usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
+  return usage.cost;
+}
 
 import {
   TerminalResponseError,

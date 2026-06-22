@@ -1,9 +1,7 @@
-import {
-  getAgentDir,
-  SettingsManager,
-  type ExtensionAPI,
-  type ExtensionContext,
-  type ExtensionUIContext,
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+  ExtensionUIContext,
 } from '@earendil-works/pi-coding-agent';
 
 import {
@@ -55,6 +53,7 @@ export { classifyRetryableProviderError };
 export { isSkippableEmptyFailedAssistantArtifact };
 
 import { requestRefusalRewrite } from './refusal-review';
+import { readCoreRetrySettings, type CoreRetrySettingsLike } from './settings';
 
 const STATUS_KEY = 'pi-retry';
 const PATCHED = Symbol.for('pi-retry.agent-session.patched');
@@ -242,16 +241,9 @@ function isRetryableCompactionFailure(event: CompactionEndEventLike | undefined)
   );
 }
 
-type CoreRetrySettingsLike = { enabled?: boolean; baseDelayMs: number; maxRetries: number };
-
 function getCoreRetrySettings(cwd: string | undefined): CoreRetrySettingsLike {
   try {
-    const settings = SettingsManager.create(cwd ?? process.cwd(), getAgentDir()).getRetrySettings();
-    return {
-      enabled: settings.enabled,
-      baseDelayMs: settings.baseDelayMs,
-      maxRetries: settings.maxRetries,
-    };
+    return readCoreRetrySettings(cwd);
   } catch {
     return {
       baseDelayMs: DEFAULT_CORE_RETRY_BASE_DELAY_MS,

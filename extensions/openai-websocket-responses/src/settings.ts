@@ -163,6 +163,103 @@ function stripJsonComments(source: string): string {
   return result;
 }
 
+function readSettingsKey(root: Record<string, unknown>): unknown {
+  return root.openaiWebsocketResponses ?? root.openaiWebSocketResponses;
+}
+
+function parseSettingsJson(source: string): Record<string, unknown> | undefined {
+  const parsed = JSON.parse(stripJsonComments(source)) as unknown;
+  return isRecord(parsed) ? parsed : undefined;
+}
+
+function parseSettingsYaml(source: string): Record<string, unknown> | undefined {
+  const parsed = parseSimpleYamlObject(source);
+  return isRecord(parsed) ? parsed : undefined;
+}
+
+function parseScalarYamlValue(raw: string): unknown {
+  const value = raw.trim();
+  if (!value) return {};
+  if ('true' === value) return true;
+  if ('false' === value) return false;
+  if ('null' === value || '~' === value) return null;
+  if (/^-?\d+(?:\.\d+)?$/.test(value)) return Number(value);
+  const quoted = value.match(/^(['"])(.*)\1$/);
+  return quoted?.[2] ?? value;
+}
+
+function parseSimpleYamlObject(source: string): Record<string, unknown> {
+  const root: Record<string, unknown> = {};
+  const stack: Array<{ indent: number; value: Record<string, unknown> }> = [
+    { indent: -1, value: root },
+  ];
+  const pendingArrayByIndent = new Map<number, { parent: Record<string, unknown>; key: string }>();
+
+  for (const rawLine of source.replace(/\r\n?/g, '\n').split('\n')) {
+    const withoutComment = rawLine.replace(/\s+#.*$/, '');
+    if (!withoutComment.trim() || withoutComment.trim() === '---') continue;
+    const indent = withoutComment.match(/^ */)?.[0].length ?? 0;
+    const line = withoutComment.trim();
+
+    while (stack.length > 1 && indent <= stack[stack.length - 1]!.indent) stack.pop();
+    const parent = stack[stack.length - 1]!.value;
+
+    if (line.startsWith('- ')) {
+      const pending = pendingArrayByIndent.get(indent);
+      if (!pending) continue;
+      const existing = pending.parent[pending.key];
+      const array = Array.isArray(existing) ? existing : [];
+      array.push(parseScalarYamlValue(line.slice(2)));
+      pending.parent[pending.key] = array;
+      continue;
+    }
+
+    const separatorIndex = line.indexOf(':');
+    if (separatorIndex <= 0) continue;
+    const key = line.slice(0, separatorIndex).trim();
+    const rest = line.slice(separatorIndex + 1).trim();
+    if (!rest) {
+      const value: Record<string, unknown> = {};
+      parent[key] = value;
+      pendingArrayByIndent.set(indent + 2, { parent, key });
+      stack.push({ indent, value });
+      continue;
+    }
+    parent[key] = parseScalarYamlValue(rest);
+  }
+
+  return root;
+}
+
+function ompProfileFromArgv(argv: readonly string[]): string | undefined {
+  for (let index = 0; index < argv.length; index++) {
+    const arg = argv[index];
+    if (arg === '--profile') return argv[index + 1];
+    if (arg?.startsWith('--profile=')) return arg.slice('--profile='.length);
+  }
+  return undefined;
+}
+
+function ompAgentDir(
+  home = homedir(),
+  env: NodeJS.ProcessEnv = process.env,
+  argv: readonly string[] = process.argv,
+): string {
+  if (env.PI_CODING_AGENT_DIR) return env.PI_CODING_AGENT_DIR;
+  const profile = env.OMP_PROFILE ?? ompProfileFromArgv(argv);
+  if (profile) return join(home, '.omp', 'profiles', profile, 'agent');
+  return join(home, '.omp', 'agent');
+}
+
+export function defaultOpenAIWebSocketResponsesOmpConfigPaths(
+  home = homedir(),
+  env: NodeJS.ProcessEnv = process.env,
+  argv: readonly string[] = process.argv,
+): string[] {
+  const agentDir = ompAgentDir(home, env, argv);
+  return [join(agentDir, 'config.yml'), join(agentDir, 'config.yaml')];
+}
+
 function requestProfile(value: unknown): RequestProfile {
   return value === 'azure' || value === 'codex' || value === 'generic' ? value : 'auto';
 }
@@ -286,12 +383,27 @@ export function readOpenAIWebSocketResponsesSettings(
 ): OpenAIWebSocketResponsesSettings {
   if (!existsSync(settingsPath)) return normalizeSettings(undefined);
   try {
-    const parsed = JSON.parse(stripJsonComments(readFileSync(settingsPath, 'utf8'))) as Record<
-      string,
-      unknown
-    >;
-    return normalizeSettings(parsed.openaiWebsocketResponses ?? parsed.openaiWebSocketResponses);
+    const parsed = parseSettingsJson(readFileSync(settingsPath, 'utf8'));
+    return normalizeSettings(parsed ? readSettingsKey(parsed) : undefined);
   } catch {
     return normalizeSettings(undefined);
   }
+}
+
+export function readOpenAIWebSocketResponsesOmpSettings(
+  configPaths: string | string[] = defaultOpenAIWebSocketResponsesOmpConfigPaths(),
+): OpenAIWebSocketResponsesSettings {
+  const paths = Array.isArray(configPaths) ? configPaths : [configPaths];
+  for (const configPath of paths) {
+    if (!existsSync(configPath)) continue;
+    try {
+      const parsed = parseSettingsYaml(readFileSync(configPath, 'utf8'));
+      if (!parsed) continue;
+      const settings = readSettingsKey(parsed);
+      if (settings !== undefined) return normalizeSettings(settings);
+    } catch {
+      return normalizeSettings(undefined);
+    }
+  }
+  return normalizeSettings(undefined);
 }

@@ -1,4 +1,7 @@
 import { createPiRetryExtension } from './index';
+import { setRetrySettingsSource } from './settings';
+
+setRetrySettingsSource('omp');
 
 export default createPiRetryExtension({
   // OMP's AgentSession retry/compaction helpers are private class methods, so the

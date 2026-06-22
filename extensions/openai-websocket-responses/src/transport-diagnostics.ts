@@ -1,9 +1,4 @@
-import {
-  appendAssistantMessageDiagnostic,
-  extractDiagnosticError,
-  type AssistantMessage,
-  type AssistantMessageDiagnostic,
-} from '@earendil-works/pi-ai';
+import type { AssistantMessage, AssistantMessageDiagnostic } from '@earendil-works/pi-ai';
 
 import { shortHash } from './debug.ts';
 import type { ContinuationDecision } from './continuation-cache.ts';
@@ -29,6 +24,30 @@ const SIGNIFICANT_EVENT_TYPES = new Set([
   'ws_retry',
   'ws_send_error',
 ]);
+
+function formatThrownValue(value: unknown): string {
+  if (value instanceof Error) return value.message || value.name;
+  if (typeof value === 'string') return value;
+  return String(value);
+}
+
+function extractDiagnosticError(error: unknown): NonNullable<AssistantMessageDiagnostic['error']> {
+  if (!(error instanceof Error)) return { name: 'ThrownValue', message: formatThrownValue(error) };
+  const code = (error as Error & { code?: unknown }).code;
+  return {
+    name: error.name || undefined,
+    message: error.message || error.name,
+    stack: error.stack,
+    code: typeof code === 'string' || typeof code === 'number' ? code : undefined,
+  };
+}
+
+function appendAssistantMessageDiagnostic(
+  message: AssistantMessage,
+  diagnostic: AssistantMessageDiagnostic,
+): void {
+  message.diagnostics = [...(message.diagnostics ?? []), diagnostic];
+}
 
 let nextRequestId = 0;
 
