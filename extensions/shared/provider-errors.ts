@@ -94,6 +94,19 @@ function terminal(
   return { reason, category, retryable: false };
 }
 
+function isContextOverflowFailureText(text: string): boolean {
+  return (
+    text.includes('context_length_exceeded') ||
+    text.includes('model_context_window_exceeded') ||
+    text.includes('context_window_exceeded') ||
+    text.includes('context window exceeded') ||
+    text.includes('context length exceeded') ||
+    text.includes('maximum context length') ||
+    text.includes('max context length') ||
+    text.includes('prompt too long')
+  );
+}
+
 export function classifyOpenAIResponsesFailure(
   input: OpenAIResponsesFailureInput,
 ): ProviderFailureClassification | undefined {
@@ -113,19 +126,15 @@ export function classifyOpenAIResponsesFailure(
     return terminal('invalidModel', 'terminal_config_error');
   }
 
-  if (
-    text.includes('invalid_request_error') &&
-    text.includes('string_above_max_length') &&
-    text.includes('input[') &&
-    text.includes('].id')
-  ) {
+  if (isContextOverflowFailureText(text)) {
     return terminal('invalidRequest', 'terminal_config_error');
   }
 
   if (
     text.includes('invalid_request_error') &&
-    text.includes('context_length_exceeded') &&
-    text.includes('input')
+    text.includes('string_above_max_length') &&
+    text.includes('input[') &&
+    text.includes('].id')
   ) {
     return terminal('invalidRequest', 'terminal_config_error');
   }

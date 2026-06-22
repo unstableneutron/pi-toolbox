@@ -158,6 +158,28 @@ describe('shared provider error classification', () => {
     expect(isNonRetryableAssistantProviderError(message)).toBe(true);
   });
 
+  test.each([
+    'model_context_window_exceeded: the request is too large for the model context window.',
+    'prompt too long; exceeded max context length 131072 tokens.',
+    'This model\'s maximum context length was exceeded. Please reduce your input.',
+    'context window exceeded while preparing the request.',
+  ])('classifies context-overflow alias as terminal request error: %s', (errorMessage) => {
+    const message = {
+      role: 'assistant',
+      stopReason: 'error',
+      errorMessage,
+    };
+
+    expect(classifyOpenAIResponsesFailure({ message: errorMessage })).toMatchObject({
+      reason: 'invalidRequest',
+      retryable: false,
+      category: 'terminal_config_error',
+    });
+    expect(classifyRetryableProviderError(errorMessage)).toBeUndefined();
+    expect(classifyRetryableAssistantProviderError(message)).toBeUndefined();
+    expect(isNonRetryableAssistantProviderError(message)).toBe(true);
+  });
+
   test('classifies retryable provider error strings with stable reasons', () => {
     expect(
       classifyRetryableProviderError(

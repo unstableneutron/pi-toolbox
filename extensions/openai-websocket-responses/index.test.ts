@@ -2348,7 +2348,20 @@ describe('WebSocket transport', () => {
     });
   });
 
-  it('does not retry context-length-exceeded websocket error frames', async () => {
+  it.each([
+    [
+      'context_length_exceeded',
+      'context_length_exceeded',
+      'This model\'s maximum context length was exceeded. Please reduce your input.',
+      'maximum context length was exceeded',
+    ],
+    [
+      'model_context_window_exceeded',
+      'model_context_window_exceeded',
+      'prompt too long; exceeded max context length 131072 tokens.',
+      'exceeded max context length',
+    ],
+  ])('does not retry %s websocket error frames', async (_label, code, message, expectedError) => {
     const instances: any[] = [];
     class FakeWebSocket {
       readyState = 1;
@@ -2366,8 +2379,8 @@ describe('WebSocket transport', () => {
               type: 'error',
               error: {
                 type: 'invalid_request_error',
-                code: 'context_length_exceeded',
-                message: 'This model\'s maximum context length was exceeded. Please reduce your input.',
+                code,
+                message,
                 param: 'input',
               },
             }),
@@ -2411,7 +2424,7 @@ describe('WebSocket transport', () => {
         },
         () => undefined,
       ),
-    ).rejects.toThrow('maximum context length was exceeded');
+    ).rejects.toThrow(expectedError);
 
     expect(instances).toHaveLength(1);
     expect(diagnostics.hasEvent('ws_retry')).toBe(false);

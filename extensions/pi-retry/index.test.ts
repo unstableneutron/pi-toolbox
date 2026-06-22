@@ -148,6 +148,15 @@ describe('pi-retry extra provider classification', () => {
     expect(classifyRetryableProviderError('400 Invalid request payload')).toBeUndefined();
   });
 
+  test.each([
+    'model_context_window_exceeded: the request is too large for the model context window.',
+    'prompt too long; exceeded max context length 131072 tokens.',
+    'context window exceeded while preparing the request.',
+  ])('does not classify context-overflow aliases as retryable', (errorMessage) => {
+    expect(classifyRetryableProviderError(errorMessage)).toBeUndefined();
+    expect(isExtraRetryableAssistantError(makeAssistantErrorMessage(errorMessage))).toBe(false);
+  });
+
   test('requires final assistant error shape before allowing retry', () => {
     expect(
       isExtraRetryableAssistantError(
