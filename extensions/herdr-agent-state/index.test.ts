@@ -339,4 +339,19 @@ describe('herdr agent state extension', () => {
       }),
     );
   });
+
+  test('does not release the agent on extension reload shutdown', async () => {
+    const pi = await loadHarness();
+
+    await pi.emit('session_start');
+    await flushSocketWork();
+    recording.requests = [];
+
+    await pi.emit('session_shutdown', { reason: 'reload' });
+    await flushSocketWork();
+
+    expect(recording.requests).not.toContainEqual(
+      expect.objectContaining({ method: 'pane.release_agent' }),
+    );
+  });
 });

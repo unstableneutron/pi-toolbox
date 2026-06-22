@@ -45,6 +45,10 @@ type BlockedEventLike = {
   label?: string;
 };
 
+type SessionShutdownEventLike = {
+  reason?: unknown;
+};
+
 const idleDebounceMs = parseDurationEnv('HERDR_PI_IDLE_DEBOUNCE_MS', 250);
 const retryGraceMs = parseDurationEnv('HERDR_PI_RETRY_GRACE_MS', 2500);
 // Herdr reports are best-effort over a short-lived socket; reassert active
@@ -527,7 +531,7 @@ export default function herdrAgentState(pi: ExtensionAPI): void {
     publishOrScheduleIdleAfterActivity();
   });
 
-  pi.on('session_shutdown', async () => {
+  pi.on('session_shutdown', async (event) => {
     if (!stateReportingActive) {
       return;
     }
@@ -535,6 +539,15 @@ export default function herdrAgentState(pi: ExtensionAPI): void {
     stateReportingActive = false;
     activeToolCalls.clear();
     clearPendingTimers();
+
+    // Pi reloads tear down and recreate extension runtimes while keeping the
+    // same process and session file. Releasing Herdr authority here causes
+    // Herdr's graceful-exit suppression to ignore subsequent same-session
+    // reports, leaving the pane stuck on screen-detection Idle/Done.
+    if ((event as SessionShutdownEventLike | undefined)?.reason === 'reload') {
+      return;
+    }
+
     await releaseAgent();
   });
 }
