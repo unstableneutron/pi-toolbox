@@ -19,8 +19,15 @@
   },
   "workspaces": {
     ".": {
-      "entry": ["extensions/**/index.ts", "scripts/*.ts"],
-      "project": ["extensions/**/*.ts", "scripts/**/*.ts", "tests/**/*.ts"]
+      "entry": ["bin/*.js", "extensions/**/index.ts", "scripts/*.js", "scripts/*.ts"],
+      "project": [
+        "bin/*.js",
+        "extensions/**/*.ts",
+        "packages/**/*.js",
+        "scripts/**/*.js",
+        "scripts/**/*.ts",
+        "tests/**/*.ts"
+      ]
     },
     "extensions/*": {
       "entry": ["index.ts"],
@@ -49,6 +56,10 @@
     "extensions/bash-rewrite": {
       "entry": ["scripts/*.ts"],
       "project": ["**/*.ts"]
+    },
+    "packages/roundtable-review": {
+      "entry": ["bin/*.js"],
+      "project": ["**/*.js"]
     }
   }
 }
