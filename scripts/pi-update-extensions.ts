@@ -42,6 +42,7 @@ const GITCHAMBER_MANUAL_OVERRIDES: Record<string, string> = {
 export type UpdateCliArgs = {
   directory?: string;
   dryRun: boolean;
+  approve: boolean;
   skipUpdate: boolean;
   skipDepsSync: boolean;
   skipPatch: boolean;
@@ -76,6 +77,19 @@ export type PackageManagerCommand = {
   command: string;
   args: string[];
   source: 'settings' | 'aube' | 'pnpm';
+};
+
+export type PiInstallPackageManager = 'aube' | 'pnpm' | 'npm' | 'yarn' | 'bun' | 'unknown';
+
+export type PiSelfUpdateCommand = {
+  packageManager: PiInstallPackageManager;
+  command: string;
+  args: string[];
+};
+
+export type PiApproveBuildsCommand = {
+  command: string;
+  args: string[];
 };
 
 export type InstalledPackage = {
@@ -281,6 +295,91 @@ export function formatPackageManagerCommand(
   args: readonly string[] = [],
 ): string {
   return [packageManager.command, ...packageManager.args, ...args].map(formatCommandPart).join(' ');
+}
+
+export function formatCommand(command: string, args: readonly string[] = []): string {
+  return [command, ...args].map(formatCommandPart).join(' ');
+}
+
+function normalizePathForDetection(path: string): string {
+  return path.toLowerCase().replace(/\\/g, '/');
+}
+
+export function detectPiInstallPackageManagerFromPath(path: string): PiInstallPackageManager {
+  const normalized = normalizePathForDetection(path);
+  if (
+    normalized.includes('/global-aube/') ||
+    normalized.includes('/.cache/aube/') ||
+    normalized.includes('/.aube/')
+  ) {
+    return 'aube';
+  }
+  if (normalized.includes('/.pnpm/') || normalized.includes('/pnpm/')) return 'pnpm';
+  if (normalized.includes('/.yarn/') || normalized.includes('/yarn/')) return 'yarn';
+  if (normalized.includes('/.bun/') || normalized.includes('/install/global/node_modules/'))
+    return 'bun';
+  if (normalized.includes('/node_modules/') || normalized.includes('/npm/')) return 'npm';
+  return 'unknown';
+}
+
+export function detectPiInstallPackageManager(
+  options: { piPath?: string } = {},
+): PiInstallPackageManager {
+  let piPath = options.piPath;
+  if (!piPath) {
+    try {
+      const piPaths = execFileSync('which', ['-a', 'pi'], { encoding: 'utf8' })
+        .split(/\r?\n/)
+        .map((entry) => entry.trim())
+        .filter(Boolean);
+      piPath =
+        piPaths.find((entry) => !entry.startsWith(join(REPO_ROOT, 'node_modules', '.bin'))) ??
+        piPaths[0];
+    } catch {
+      return 'unknown';
+    }
+  }
+  if (!piPath) return 'unknown';
+
+  const candidates = [piPath];
+  try {
+    candidates.push(realpathSync(piPath));
+  } catch {
+    // The direct path is still useful for non-symlink installs.
+  }
+
+  for (const candidate of candidates) {
+    const packageManager = detectPiInstallPackageManagerFromPath(candidate);
+    if (packageManager !== 'unknown') return packageManager;
+  }
+  return 'unknown';
+}
+
+export function buildPiSelfUpdateCommand(
+  packageManager: PiInstallPackageManager,
+  packageName = PI_CODING_AGENT_PACKAGE_NAME,
+): PiSelfUpdateCommand | undefined {
+  switch (packageManager) {
+    case 'aube':
+      return { packageManager, command: 'aube', args: ['update', '-g', packageName, '--latest'] };
+    case 'pnpm':
+      return { packageManager, command: 'pnpm', args: ['update', '-g', '--latest', packageName] };
+    case 'npm':
+      return { packageManager, command: 'npm', args: ['update', '-g', packageName] };
+    case 'yarn':
+      return { packageManager, command: 'yarn', args: ['global', 'add', `${packageName}@latest`] };
+    case 'bun':
+      return { packageManager, command: 'bun', args: ['update', '-g', packageName] };
+    case 'unknown':
+      return undefined;
+  }
+}
+
+export function buildPiApproveBuildsCommand(
+  packageManager: PiInstallPackageManager,
+): PiApproveBuildsCommand | undefined {
+  if (packageManager !== 'aube') return undefined;
+  return { command: 'aube', args: ['approve-builds', '-g', '--all'] };
 }
 
 function readPackageName(packageRoot: string): string | undefined {
@@ -2043,12 +2142,56 @@ export async function updateGitchamberSources(
   return results;
 }
 
-export async function runPiUpdate(options: { dryRun?: boolean } = {}): Promise<void> {
+export async function runPiUpdate(
+  options: {
+    dryRun?: boolean;
+    approve?: boolean;
+    piPath?: string;
+    execFile?: typeof execFileSync;
+    log?: (message: string) => void;
+  } = {},
+): Promise<void> {
+  const execFile = options.execFile ?? execFileSync;
+  const log = options.log ?? console.log;
+  const packageManager = detectPiInstallPackageManager({ piPath: options.piPath });
+  const selfUpdateCommand = buildPiSelfUpdateCommand(packageManager);
+  const approveBuildsCommand = options.approve
+    ? buildPiApproveBuildsCommand(packageManager)
+    : undefined;
+
+  if (selfUpdateCommand) {
+    const display = formatCommand(selfUpdateCommand.command, selfUpdateCommand.args);
+    if (options.dryRun) {
+      log(`Would run: ${display}`);
+    } else {
+      execFile(selfUpdateCommand.command, selfUpdateCommand.args, { stdio: 'inherit' });
+      log(`Ran: ${display}`);
+    }
+  } else {
+    log('Skipping pi self-update: could not detect a supported package manager for `pi`.');
+  }
+
+  if (options.approve) {
+    if (approveBuildsCommand) {
+      const display = formatCommand(approveBuildsCommand.command, approveBuildsCommand.args);
+      if (options.dryRun) {
+        log(`Would run: ${display}`);
+      } else {
+        execFile(approveBuildsCommand.command, approveBuildsCommand.args, { stdio: 'inherit' });
+        log(`Ran: ${display}`);
+      }
+    } else {
+      log(`Skipping approve-builds: ${packageManager} installs do not use Aube approve-builds.`);
+    }
+  }
+
   if (options.dryRun) {
+    log('Would run: pi update --extensions');
     return;
   }
 
-  execFileSync('pi', ['update', '--extensions'], { stdio: 'inherit' });
+  execFile('pi', ['update', '--extensions'], { stdio: 'inherit' });
+  log('Ran: pi update --extensions');
 }
 
 // ---------------------------------------------------------------------------
@@ -2188,6 +2331,7 @@ export async function syncDevDependenciesWithGlobalPi(
 export function parseCliArgs(argv: string[]): UpdateCliArgs {
   let dryRun = false;
   let directory: string | undefined;
+  let approve = false;
   let skipUpdate = false;
   let skipDepsSync = false;
   let skipPatch = false;
@@ -2196,6 +2340,10 @@ export function parseCliArgs(argv: string[]): UpdateCliArgs {
   for (const arg of argv) {
     if (arg === '--dry-run' || arg === '-n') {
       dryRun = true;
+      continue;
+    }
+    if (arg === '--approve') {
+      approve = true;
       continue;
     }
     if (arg === '--skip-update') {
@@ -2229,6 +2377,7 @@ export function parseCliArgs(argv: string[]): UpdateCliArgs {
   return {
     directory,
     dryRun,
+    approve,
     skipUpdate,
     skipDepsSync,
     skipPatch,
@@ -2237,11 +2386,11 @@ export function parseCliArgs(argv: string[]): UpdateCliArgs {
 }
 
 export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
-  const { dryRun, skipUpdate, skipDepsSync, skipPatch, skipGitchamber } = parseCliArgs(argv);
+  const { dryRun, approve, skipUpdate, skipDepsSync, skipPatch, skipGitchamber } =
+    parseCliArgs(argv);
 
   if (!skipUpdate) {
-    await runPiUpdate({ dryRun });
-    console.log(dryRun ? 'Would run: pi update' : 'Ran: pi update');
+    await runPiUpdate({ dryRun, approve });
   }
 
   if (!skipDepsSync) {

@@ -19,7 +19,10 @@ import {
   buildPiAiOpenAICodexHeaderReplacement,
   buildPiHerdrPromptGuidanceReplacement,
   buildPiCodingAgentResolverReplacement,
+  buildPiApproveBuildsCommand,
+  buildPiSelfUpdateCommand,
   compareVersions,
+  detectPiInstallPackageManagerFromPath,
   findInstalledNpmPackagePath,
   formatPackageManagerCommand,
   getPackageManagerCommandCandidates,
@@ -34,8 +37,10 @@ import {
   isPiSubagentsApplyPatchToolPatchApplied,
   isPiSubagentsIntercomDetachPatchApplied,
   parsePiListOutput,
+  parseCliArgs,
   readConfiguredNpmCommand,
   resolvePackageManagerCommand,
+  runPiUpdate,
 } from '../scripts/pi-update-extensions.ts';
 
 const tempDirs: string[] = [];
@@ -172,6 +177,86 @@ describe('package manager command resolution', () => {
         ['install', '@scope/pkg name'],
       ),
     ).toBe('mise exec node@22 -- npm install "@scope/pkg name"');
+  });
+});
+
+describe('pi self-update package manager detection', () => {
+  it('detects aube-installed pi from the virtual store path', () => {
+    expect(
+      detectPiInstallPackageManagerFromPath(
+        '/Users/me/.cache/aube/virtual-store/@earendil-works+pi-coding-agent@0.79.10-hash/node_modules/@earendil-works/pi-coding-agent/dist/cli.js',
+      ),
+    ).toBe('aube');
+  });
+
+  it('builds an aube global update command for pi', () => {
+    expect(buildPiSelfUpdateCommand('aube')).toEqual({
+      packageManager: 'aube',
+      command: 'aube',
+      args: ['update', '-g', '@earendil-works/pi-coding-agent', '--latest'],
+    });
+  });
+
+  it('maps --approve to aube global approve-builds', () => {
+    expect(parseCliArgs(['--approve']).approve).toBe(true);
+    expect(buildPiApproveBuildsCommand('aube')).toEqual({
+      command: 'aube',
+      args: ['approve-builds', '-g', '--all'],
+    });
+    expect(buildPiApproveBuildsCommand('npm')).toBeUndefined();
+  });
+
+  it('runs package-manager self-update before pi extension update', async () => {
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const logs: string[] = [];
+
+    await runPiUpdate({
+      piPath:
+        '/Users/me/.cache/aube/virtual-store/@earendil-works+pi-coding-agent@0.79.10-hash/node_modules/@earendil-works/pi-coding-agent/dist/cli.js',
+      execFile: ((command: string, args: string[]) => {
+        calls.push({ command, args });
+        return '';
+      }) as typeof import('node:child_process').execFileSync,
+      log: (message) => logs.push(message),
+    });
+
+    expect(calls).toEqual([
+      {
+        command: 'aube',
+        args: ['update', '-g', '@earendil-works/pi-coding-agent', '--latest'],
+      },
+      { command: 'pi', args: ['update', '--extensions'] },
+    ]);
+    expect(logs).toEqual([
+      'Ran: aube update -g @earendil-works/pi-coding-agent --latest',
+      'Ran: pi update --extensions',
+    ]);
+  });
+
+  it('runs aube approve-builds when --approve is requested', async () => {
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const logs: string[] = [];
+
+    await runPiUpdate({
+      approve: true,
+      piPath:
+        '/Users/me/.cache/aube/virtual-store/@earendil-works+pi-coding-agent@0.79.10-hash/node_modules/@earendil-works/pi-coding-agent/dist/cli.js',
+      execFile: ((command: string, args: string[]) => {
+        calls.push({ command, args });
+        return '';
+      }) as typeof import('node:child_process').execFileSync,
+      log: (message) => logs.push(message),
+    });
+
+    expect(calls).toEqual([
+      {
+        command: 'aube',
+        args: ['update', '-g', '@earendil-works/pi-coding-agent', '--latest'],
+      },
+      { command: 'aube', args: ['approve-builds', '-g', '--all'] },
+      { command: 'pi', args: ['update', '--extensions'] },
+    ]);
+    expect(logs).toContain('Ran: aube approve-builds -g --all');
   });
 });
 
