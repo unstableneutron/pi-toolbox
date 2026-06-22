@@ -26,7 +26,8 @@ import type {
   Tool,
   ToolCall,
 } from '@earendil-works/pi-ai';
-import { parse as partialParse } from 'partial-json';
+
+import { parsePartialJson } from '../../partial-json.ts';
 
 type Usage = AssistantMessage['usage'];
 
@@ -102,7 +103,7 @@ function parseResponsesJsonObject(value: string | undefined): Record<string, any
     return parsedObject(JSON.parse(value) as unknown);
   } catch {
     try {
-      return parsedObject(partialParse(value) as unknown);
+      return parsedObject(parsePartialJson(value));
     } catch {
       return {};
     }

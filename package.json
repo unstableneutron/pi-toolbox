@@ -16,7 +16,6 @@
     "diff": ">=8.0.0",
     "fff-router": "github:unstableneutron/fff-router#v0.8.2",
     "parallel-web": "^0.3.2",
-    "partial-json": "^0.1.7",
     "picomatch": "^4.0.3",
     "shell-quote": "^1.8.3",
     "ws": "^8.18.3"

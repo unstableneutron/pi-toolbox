@@ -1,6 +1,5 @@
-import { parse as partialParse } from 'partial-json';
-
 import { shortHash, writeDebugLog } from './debug.ts';
+import { parsePartialJson } from './partial-json.ts';
 import type { OpenAIWebSocketResponsesSettings } from './settings.ts';
 import type { TransportDiagnosticsCollector } from './transport-diagnostics.ts';
 import { cloneHeadersWithTraceparent, type TraceContext } from './trace-context.ts';
@@ -697,7 +696,7 @@ function decodeImmediateData(data: unknown): string | undefined {
 
 function parsePartialWebSocketEvent(text: string): Record<string, any> | undefined {
   try {
-    const parsed = partialParse(text);
+    const parsed = parsePartialJson(text);
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
       ? (parsed as Record<string, any>)
       : undefined;
