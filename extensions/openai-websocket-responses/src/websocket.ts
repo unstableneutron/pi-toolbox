@@ -394,6 +394,24 @@ export type WebSocketLifecycleEvent =
       responseId?: string;
     }
   | {
+      type: 'transport_fallback';
+      reason: 'websocket_failed_before_stream_start';
+      from: 'websocket';
+      to: 'sse';
+      message?: string;
+    }
+  | {
+      type: 'transport_fallback_completed';
+      from: 'websocket';
+      to: 'sse';
+    }
+  | {
+      type: 'transport_fallback_failed';
+      from: 'websocket';
+      to: 'sse';
+      message?: string;
+    }
+  | {
       type: 'failed';
       reason: 'recovery_failed';
       urlHash: string;

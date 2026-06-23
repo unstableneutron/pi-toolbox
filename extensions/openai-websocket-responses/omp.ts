@@ -28,7 +28,11 @@ function formatWebSocketStatus(event: WebSocketLifecycleEvent): string | undefin
   if (event.type === 'fallback') return 'Responses WS: replaying full context...';
   if (event.type === 'recovering') return 'Responses WS: recovering interrupted response...';
   if (event.type === 'recovered') return 'Responses WS: recovered interrupted response';
-  if (event.type === 'failed') return 'Responses WS recovery failed';
+  if (event.type === 'transport_fallback') return 'Responses WS: using SSE fallback';
+  if (event.type === 'transport_fallback_completed')
+    return 'Responses WS: continued via SSE fallback';
+  if (event.type === 'transport_fallback_failed') return 'Responses WS: SSE fallback failed';
+  if (event.type === 'failed') return 'Responses WS unavailable';
   return undefined;
 }
 

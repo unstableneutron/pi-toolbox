@@ -2352,7 +2352,7 @@ describe('WebSocket transport', () => {
     [
       'context_length_exceeded',
       'context_length_exceeded',
-      'This model\'s maximum context length was exceeded. Please reduce your input.',
+      "This model's maximum context length was exceeded. Please reduce your input.",
       'maximum context length was exceeded',
     ],
     [
@@ -4283,9 +4283,42 @@ describe('WebSocket transport', () => {
         message: 'websocket: close 1006 (abnormal closure): unexpected EOF',
       }),
     ).toBe('↻ WS retrieving snapshot · stream interrupted');
+    expect(
+      formatWebSocketStatus({
+        type: 'failed',
+        reason: 'recovery_failed',
+        urlHash: 'abc123',
+        responseId: 'resp_0091b44445adddfa006a21cb8aac448194b4aee1903076f4c2',
+        message: 'Retrieve recovery failed: response not found',
+      }),
+    ).toBe('⚠ WS unavailable');
+    expect(
+      formatWebSocketStatus({
+        type: 'transport_fallback',
+        reason: 'websocket_failed_before_stream_start',
+        from: 'websocket',
+        to: 'sse',
+        message: 'Unexpected server response: 500 (providerServerError)',
+      }),
+    ).toBe('↻ Continuing via SSE fallback · WS unavailable');
+    expect(
+      formatWebSocketStatus({
+        type: 'transport_fallback_completed',
+        from: 'websocket',
+        to: 'sse',
+      }),
+    ).toBe('✓ Continued via SSE fallback');
+    expect(
+      formatWebSocketStatus({
+        type: 'transport_fallback_failed',
+        from: 'websocket',
+        to: 'sse',
+        message: 'SSE failed',
+      }),
+    ).toBe('⚠ SSE fallback failed');
   });
 
-  it('formats unrecovered websocket failures as error notifications', () => {
+  it('keeps unrecovered websocket failures out of error notifications', () => {
     expect(
       formatWebSocketFailureNotification({
         type: 'failed',
@@ -4294,7 +4327,7 @@ describe('WebSocket transport', () => {
         responseId: 'resp_0091b44445adddfa006a21cb8aac448194b4aee1903076f4c2',
         message: 'Retrieve recovery failed: response not found',
       }),
-    ).toBe('WS recovery failed · stream interrupted: Retrieve recovery failed: response not found');
+    ).toBeUndefined();
   });
 
   it('removes an idle cached socket when the server closes it', async () => {
@@ -5614,6 +5647,7 @@ describe('transparent provider patching', () => {
         { type: 'done', reason: 'stop', message: originalMessage },
       ),
     );
+    const lifecycle: WebSocketLifecycleEvent[] = [];
     const provider = wrapProviderForWebSocketResponses(
       {
         api: 'openai-responses',
@@ -5622,6 +5656,7 @@ describe('transparent provider patching', () => {
       },
       () => settings,
       websocketStream as any,
+      (event) => lifecycle.push(event),
     );
 
     const events = await collectStreamEvents(
@@ -5655,6 +5690,20 @@ describe('transparent provider patching', () => {
     expect(extractTransportDiagnostics(events[1]?.message)[0]?.details?.timeline).toContainEqual(
       expect.objectContaining({ type: 'sse_fallback' }),
     );
+    expect(lifecycle).toEqual([
+      expect.objectContaining({
+        type: 'transport_fallback',
+        reason: 'websocket_failed_before_stream_start',
+        from: 'websocket',
+        to: 'sse',
+        message: 'Connection error: WebSocket closed 1006',
+      }),
+      expect.objectContaining({
+        type: 'transport_fallback_completed',
+        from: 'websocket',
+        to: 'sse',
+      }),
+    ]);
   });
 
   it('preserves websocket diagnostics when auto WebSocket throws before start', async () => {

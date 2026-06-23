@@ -1,4 +1,4 @@
-function tryParseJson(source: string): unknown | undefined {
+function tryParseJson(source: string): unknown {
   try {
     return JSON.parse(source) as unknown;
   } catch {

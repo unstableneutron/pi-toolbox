@@ -15,6 +15,7 @@ import { shouldPatchModel } from './match.ts';
 import type { OpenAIWebSocketResponsesSettings } from './settings.ts';
 import { extractTransportDiagnostics, mergeTransportDiagnostics } from './transport-diagnostics.ts';
 import { createTraceContextForTraceId, type TraceContext } from './trace-context.ts';
+import type { WebSocketLifecycleObserver } from './websocket.ts';
 
 type StreamSimple = (
   model: Model<Api>,
@@ -29,6 +30,29 @@ type WrappedFunction = Function & { [WRAPPED]?: boolean };
 type StreamForOptions<TOptions extends StreamOptions> = (
   options?: TOptions,
 ) => AssistantMessageEventStream;
+
+type PipeResult = 'done' | 'error' | undefined;
+
+function emitLifecycle(
+  onLifecycleEvent: WebSocketLifecycleObserver | undefined,
+  event: Parameters<WebSocketLifecycleObserver>[0],
+): void {
+  try {
+    onLifecycleEvent?.(event);
+  } catch {
+    // Lifecycle observers are UI/diagnostic-only and must not affect fallback transport.
+  }
+}
+
+function errorMessage(error: unknown): string | undefined {
+  if (error instanceof Error) return error.message;
+  if (error && typeof error === 'object') {
+    const candidate = error as Record<string, unknown>;
+    if (typeof candidate.errorMessage === 'string') return candidate.errorMessage;
+    if (typeof candidate.message === 'string') return candidate.message;
+  }
+  return typeof error === 'string' ? error : undefined;
+}
 
 function isSseTransport(options: StreamOptions | undefined): boolean {
   return options?.transport === 'sse';
@@ -78,10 +102,12 @@ async function pipeStream(
   target: AssistantMessageEventStream,
   fallbackDiagnostics = [] as ReturnType<typeof extractTransportDiagnostics>,
   fallbackTrace?: TraceContext,
-): Promise<void> {
+): Promise<PipeResult> {
+  let result: PipeResult;
   try {
     for await (const event of source) {
       if (fallbackDiagnostics.length > 0 && event.type === 'done') {
+        result = 'done';
         mergeTransportDiagnostics(event.message, fallbackDiagnostics, {
           fallbackTransport: 'sse',
           finalResponseId: event.message.responseId,
@@ -96,6 +122,7 @@ async function pipeStream(
         });
       }
       if (fallbackDiagnostics.length > 0 && event.type === 'error') {
+        result = 'error';
         mergeTransportDiagnostics(event.error, fallbackDiagnostics, {
           fallbackTransport: 'sse',
           finalResponseId: event.error.responseId,
@@ -111,8 +138,58 @@ async function pipeStream(
       }
       target.push(event);
     }
+    return result;
   } finally {
     target.end();
+  }
+}
+
+async function pipeSseFallback<TOptions extends StreamOptions>(input: {
+  options: TOptions | undefined;
+  originalStream: StreamForOptions<TOptions>;
+  proxy: AssistantMessageEventStream;
+  fallbackDiagnostics: ReturnType<typeof extractTransportDiagnostics>;
+  fallbackTrace?: TraceContext;
+  onLifecycleEvent?: WebSocketLifecycleObserver;
+  message?: string;
+}): Promise<void> {
+  emitLifecycle(input.onLifecycleEvent, {
+    type: 'transport_fallback',
+    reason: 'websocket_failed_before_stream_start',
+    from: 'websocket',
+    to: 'sse',
+    message: input.message,
+  });
+  try {
+    const result = await pipeStream(
+      input.originalStream(sseOptions(input.options, input.fallbackTrace)),
+      input.proxy,
+      input.fallbackDiagnostics,
+      input.fallbackTrace,
+    );
+    if (result === 'done') {
+      emitLifecycle(input.onLifecycleEvent, {
+        type: 'transport_fallback_completed',
+        from: 'websocket',
+        to: 'sse',
+      });
+      return;
+    }
+    if (result === 'error') {
+      emitLifecycle(input.onLifecycleEvent, {
+        type: 'transport_fallback_failed',
+        from: 'websocket',
+        to: 'sse',
+      });
+    }
+  } catch (error) {
+    emitLifecycle(input.onLifecycleEvent, {
+      type: 'transport_fallback_failed',
+      from: 'websocket',
+      to: 'sse',
+      message: errorMessage(error),
+    });
+    throw error;
   }
 }
 
@@ -120,6 +197,7 @@ function streamWithAutoSseFallback<TOptions extends StreamOptions>(
   options: TOptions | undefined,
   websocketStream: StreamForOptions<TOptions>,
   originalStream: StreamForOptions<TOptions>,
+  onLifecycleEvent?: WebSocketLifecycleObserver,
 ): AssistantMessageEventStream {
   if (isSseTransport(options)) return originalStream(sseOptions(options, undefined));
   if (!canFallbackToSse(options)) return websocketStream(options);
@@ -133,12 +211,15 @@ function streamWithAutoSseFallback<TOptions extends StreamOptions>(
         if (!started && event.type === 'error') {
           const fallbackDiagnostics = extractTransportDiagnostics(event.error);
           const fallbackTrace = traceFromDiagnostics(fallbackDiagnostics);
-          await pipeStream(
-            originalStream(sseOptions(options, fallbackTrace)),
+          await pipeSseFallback({
+            options,
+            originalStream,
             proxy,
             fallbackDiagnostics,
             fallbackTrace,
-          );
+            onLifecycleEvent,
+            message: errorMessage(event.error),
+          });
           return;
         }
         started = true;
@@ -148,12 +229,15 @@ function streamWithAutoSseFallback<TOptions extends StreamOptions>(
       if (!started) {
         const fallbackDiagnostics = extractTransportDiagnostics(error as { diagnostics?: any[] });
         const fallbackTrace = traceFromDiagnostics(fallbackDiagnostics);
-        await pipeStream(
-          originalStream(sseOptions(options, fallbackTrace)),
+        await pipeSseFallback({
+          options,
+          originalStream,
           proxy,
           fallbackDiagnostics,
           fallbackTrace,
-        );
+          onLifecycleEvent,
+          message: errorMessage(error),
+        });
         return;
       }
       throw error;
@@ -168,6 +252,7 @@ export function wrapProviderForWebSocketResponses<TProvider extends ApiProvider<
   provider: TProvider,
   settingsProvider: () => OpenAIWebSocketResponsesSettings,
   websocketStream: StreamSimple,
+  onLifecycleEvent?: WebSocketLifecycleObserver,
 ): TProvider {
   const originalStreamSimple = provider.streamSimple as StreamSimple & WrappedFunction;
   if (originalStreamSimple[WRAPPED]) return provider;
@@ -183,6 +268,7 @@ export function wrapProviderForWebSocketResponses<TProvider extends ApiProvider<
         options,
         (nextOptions) => websocketStream(model, context, nextOptions),
         (nextOptions) => originalStreamSimple.call(provider, model, context, nextOptions),
+        onLifecycleEvent,
       );
     }
     return originalStreamSimple.call(provider, model, context, options);
@@ -201,6 +287,7 @@ export function wrapProviderForWebSocketResponses<TProvider extends ApiProvider<
         options,
         (nextOptions) => websocketStream(model, context, nextOptions as SimpleStreamOptions),
         (nextOptions) => originalStream.call(provider, model, context, nextOptions),
+        onLifecycleEvent,
       );
     }
     return originalStream.call(provider, model, context, options);
@@ -217,6 +304,7 @@ export function wrapProviderForWebSocketResponses<TProvider extends ApiProvider<
 export function installOpenAIWebSocketResponsesPatch(
   settingsProvider: () => OpenAIWebSocketResponsesSettings,
   websocketStream: StreamSimple,
+  onLifecycleEvent?: WebSocketLifecycleObserver,
 ): void {
   for (const provider of getApiProviders()) {
     const settings = settingsProvider();
@@ -226,6 +314,7 @@ export function installOpenAIWebSocketResponsesPatch(
         provider as ApiProvider<any>,
         settingsProvider,
         websocketStream,
+        onLifecycleEvent,
       ),
     );
   }

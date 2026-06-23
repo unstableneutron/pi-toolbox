@@ -131,6 +131,18 @@ export function formatWebSocketStatus(event: WebSocketLifecycleEvent): string | 
   if (event.type === 'recovered') {
     return `✓ WS recovered · ${recoveryModeLabel(event.mode)}`;
   }
+  if (event.type === 'transport_fallback') {
+    return '↻ Continuing via SSE fallback · WS unavailable';
+  }
+  if (event.type === 'transport_fallback_completed') {
+    return '✓ Continued via SSE fallback';
+  }
+  if (event.type === 'transport_fallback_failed') {
+    return '⚠ SSE fallback failed';
+  }
+  if (event.type === 'failed') {
+    return '⚠ WS unavailable';
+  }
   return undefined;
 }
 
@@ -198,9 +210,7 @@ export function formatWebSocketFailureNotification(
   event: WebSocketLifecycleEvent,
 ): string | undefined {
   if (event.type !== 'failed') return undefined;
-  return event.message
-    ? `WS recovery failed · stream interrupted: ${event.message}`
-    : 'WS recovery failed · stream interrupted';
+  return undefined;
 }
 
 export function createMissingCodexAccountIdNotifier(
@@ -287,9 +297,6 @@ export default function (pi: ExtensionAPI) {
   };
   const onLifecycleEvent = (event: WebSocketLifecycleEvent) => {
     pi.events.emit(WEBSOCKET_LIFECYCLE_EVENT, event);
-    const failureNotification = formatWebSocketFailureNotification(event);
-    if (failureNotification && currentCtx?.hasUI)
-      currentCtx.ui.notify(failureNotification, 'error');
     const status = formatWebSocketStatus(event);
     if (!status || !currentCtx?.hasUI) return;
     currentCtx.ui.setStatus(WEBSOCKET_STATUS_KEY, status);
@@ -308,7 +315,7 @@ export default function (pi: ExtensionAPI) {
     notifyMissingCodexAccountId,
   );
   const installTransparentPatch = () => {
-    installOpenAIWebSocketResponsesPatch(settingsProvider, streamWebSocket);
+    installOpenAIWebSocketResponsesPatch(settingsProvider, streamWebSocket, onLifecycleEvent);
   };
   const installApiPatches = () => {
     installOpenAIWebSocketResponsesApiPatches(
