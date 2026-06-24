@@ -877,12 +877,13 @@ exit 0
 });
 
 describe('split commands', () => {
-  test('split-fork launches Kitty through the user shell and shared wrapper script', async () => {
+  test('split-fork launches Kitty through an in-tab split and shared wrapper script', async () => {
     const harness = createCommandHarness({ code: 0, stdout: '', stderr: '' });
 
     await registerPiNativeSplit(harness.pi, {
       TERM_PROGRAM: 'kitty',
       KITTY_WINDOW_ID: '1',
+      COLUMNS: '120',
       SHELL: '/bin/zsh',
     } as NodeJS.ProcessEnv);
 
@@ -891,19 +892,22 @@ describe('split commands', () => {
 
     expect(harness.custom).toHaveBeenCalledTimes(1);
 
-    expect(harness.exec).toHaveBeenCalledWith(
-      'kitten',
-      expect.arrayContaining([
-        '@',
-        'new-window',
-        '--window-type',
-        'os',
-        '--cwd',
-        harness.ctx.cwd,
-        '/bin/zsh',
-        '-ilc',
-      ]),
-    );
+    const kittyArgs = harness.exec.mock.calls[0][1];
+    expect(harness.exec).toHaveBeenCalledWith('kitten', [
+      '@',
+      'launch',
+      '--type',
+      'window',
+      '--location',
+      'vsplit',
+      '--cwd',
+      harness.ctx.cwd,
+      '/bin/zsh',
+      '-ilc',
+      expect.any(String),
+    ]);
+    expect(kittyArgs).not.toContain('new-window');
+    expect(kittyArgs).not.toContain('os-window');
 
     const wrapperCommand = String(harness.exec.mock.calls[0][1].at(-1));
     expect(wrapperCommand).toContain(getLauncherScriptPath());
@@ -930,6 +934,7 @@ describe('split commands', () => {
         native: expect.objectContaining({
           terminal: 'kitty',
           parent: expect.objectContaining({ window: '1' }),
+          child: expect.objectContaining({ target: 'pane' }),
         }),
       }),
     );
@@ -939,6 +944,49 @@ describe('split commands', () => {
         id: childMarker.data.id,
         side: 'parent',
         child: expect.objectContaining({ file: childSessionFile }),
+      }),
+    );
+  });
+
+  test('split-fork launches Kitty in a new tab at Herdr mobile width', async () => {
+    const harness = createCommandHarness({ code: 0, stdout: '', stderr: '' });
+
+    await registerPiNativeSplit(harness.pi, {
+      TERM_PROGRAM: 'kitty',
+      KITTY_WINDOW_ID: '1',
+      COLUMNS: '64',
+      SHELL: '/bin/zsh',
+    } as NodeJS.ProcessEnv);
+
+    const handler = getRegisteredHandler(harness.registerCommand, 'split-fork');
+    await handler('', harness.ctx);
+
+    const kittyArgs = harness.exec.mock.calls[0][1];
+    expect(harness.exec).toHaveBeenCalledWith('kitten', [
+      '@',
+      'launch',
+      '--type',
+      'tab',
+      '--location',
+      'after',
+      '--cwd',
+      harness.ctx.cwd,
+      '/bin/zsh',
+      '-ilc',
+      expect.any(String),
+    ]);
+    expect(kittyArgs).not.toContain('new-window');
+    expect(kittyArgs).not.toContain('os-window');
+
+    const wrapperCommand = String(kittyArgs.at(-1));
+    const markerFile = extractMarkerFilePath(wrapperCommand);
+    expect(markerFile).toBeDefined();
+    const childMarker = JSON.parse(fs.readFileSync(markerFile!, 'utf8'));
+    expect(childMarker.data.native).toEqual(
+      expect.objectContaining({
+        terminal: 'kitty',
+        parent: expect.objectContaining({ window: '1' }),
+        child: expect.objectContaining({ target: 'tab' }),
       }),
     );
   });

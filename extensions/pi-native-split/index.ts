@@ -768,7 +768,11 @@ async function launchKitty(
   env: NodeJS.ProcessEnv,
   beforeRun?: (native: NativeSplitDetails) => string | undefined,
 ) {
-  const markerFile = beforeRun?.(buildNativeDetails('kitty', env));
+  const shouldLaunchTab = shouldCreateNativeTab(env);
+  const markerFile = beforeRun?.({
+    ...buildNativeDetails('kitty', env),
+    child: { target: shouldLaunchTab ? 'tab' : 'pane' },
+  });
   const launch = buildLaunchWrapperArgs(ctx.cwd, sessionFile, prompt, markerFile);
   const shellPath = env.SHELL || process.env.SHELL || '/bin/sh';
   const wrapperCommand = launch.argv.map(shellQuote).join(' ');
@@ -776,9 +780,11 @@ async function launchKitty(
   try {
     const result = await pi.exec('kitten', [
       '@',
-      'new-window',
-      '--window-type',
-      'os',
+      'launch',
+      '--type',
+      shouldLaunchTab ? 'tab' : 'window',
+      '--location',
+      shouldLaunchTab ? 'after' : 'vsplit',
       '--cwd',
       ctx.cwd,
       shellPath,
@@ -892,7 +898,7 @@ function getTerminalColumns(env: NodeJS.ProcessEnv): number | undefined {
   return Number.isInteger(stdoutColumns) && stdoutColumns > 0 ? stdoutColumns : undefined;
 }
 
-function shouldCreateHerdrTab(env: NodeJS.ProcessEnv): boolean {
+function shouldCreateNativeTab(env: NodeJS.ProcessEnv): boolean {
   const columns = getTerminalColumns(env);
   return columns !== undefined && columns <= HERDR_MOBILE_WIDTH_THRESHOLD;
 }
@@ -917,7 +923,7 @@ async function launchHerdr(
     let newPaneId: string;
     let target: 'pane' | 'tab';
 
-    if (shouldCreateHerdrTab(env)) {
+    if (shouldCreateNativeTab(env)) {
       const createArgs = ['tab', 'create'];
       if (focusedPane.workspaceId) {
         createArgs.push('--workspace', focusedPane.workspaceId);
