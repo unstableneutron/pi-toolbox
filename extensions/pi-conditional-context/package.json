@@ -1,0 +1,46 @@
+{
+  "name": "pi-conditional-context",
+  "version": "0.1.0",
+  "description": "Pi extension that conditionally includes AGENTS.md/CLAUDE.md prompt blocks by model",
+  "keywords": [
+    "agents",
+    "conditional",
+    "context",
+    "pi-extension",
+    "pi-package",
+    "prompt"
+  ],
+  "type": "module",
+  "scripts": {
+    "check": "aube run check:lint && aube run check:format",
+    "check:lint": "aube exec oxlint -c .oxlintrc.json --type-aware --type-check --deny-warnings .",
+    "check:format": "aube exec oxfmt -c .oxfmtrc.json --check .",
+    "fix": "aube run fix:lint && aube run fix:format",
+    "fix:lint": "aube exec oxlint -c .oxlintrc.json --type-aware --type-check --fix --fix-suggestions --fix-dangerously .",
+    "fix:format": "aube exec oxfmt -c .oxfmtrc.json .",
+    "test": "aube exec vitest run"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.79.0",
+    "@types/node": "^24.3.0",
+    "oxfmt": "^0.44.0",
+    "oxlint": "^1.59.0",
+    "oxlint-tsgolint": "^0.20.0",
+    "typescript": "^5.7.3",
+    "vitest": "^3.2.4"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "prettier": {
+    "singleQuote": true
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
