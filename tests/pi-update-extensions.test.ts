@@ -231,7 +231,7 @@ describe('pi self-update package manager detection', () => {
     expect(buildPiSelfUpdateCommand('aube')).toEqual({
       packageManager: 'aube',
       command: 'aube',
-      args: ['update', '-g', '@earendil-works/pi-coding-agent', '--latest'],
+      args: ['add', '-g', '@earendil-works/pi-coding-agent@latest'],
     });
   });
 
@@ -263,12 +263,12 @@ describe('pi self-update package manager detection', () => {
     expect(calls).toEqual([
       {
         command: 'aube',
-        args: ['update', '-g', '@earendil-works/pi-coding-agent', '--latest'],
+        args: ['add', '-g', '@earendil-works/pi-coding-agent@latest'],
       },
       { command: 'pi', args: ['update', '--extensions'] },
     ]);
     expect(logs).toEqual([
-      'Ran: aube update -g @earendil-works/pi-coding-agent --latest',
+      'Ran: aube add -g @earendil-works/pi-coding-agent@latest',
       `Updated Aube trustPolicyExclude in ${aubeConfigPath}: pi-subagents`,
       'Ran: pi update --extensions',
     ]);
@@ -294,7 +294,7 @@ describe('pi self-update package manager detection', () => {
     expect(calls).toEqual([
       {
         command: 'aube',
-        args: ['update', '-g', '@earendil-works/pi-coding-agent', '--latest'],
+        args: ['add', '-g', '@earendil-works/pi-coding-agent@latest'],
       },
       { command: 'aube', args: ['approve-builds', '-g', '--all'] },
       { command: 'pi', args: ['update', '--extensions'] },

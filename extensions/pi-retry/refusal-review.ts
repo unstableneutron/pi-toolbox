@@ -1,4 +1,4 @@
-import type { AssistantMessage, Model, UserMessage } from '@earendil-works/pi-ai';
+import type { AssistantMessage, Model, UserMessage } from '@earendil-works/pi-ai/compat';
 
 type CompleteSimple = (
   model: Model<any>,
@@ -15,7 +15,7 @@ type CompleteSimple = (
 let completeSimplePromise: Promise<CompleteSimple | undefined> | undefined;
 
 async function loadCompleteSimple(): Promise<CompleteSimple | undefined> {
-  completeSimplePromise ??= import('@earendil-works/pi-ai')
+  completeSimplePromise ??= import('@earendil-works/pi-ai/compat')
     .then((mod) => {
       const candidate = (mod as { completeSimple?: unknown }).completeSimple;
       return typeof candidate === 'function' ? (candidate as CompleteSimple) : undefined;

@@ -8,7 +8,7 @@ import type {
   Model,
   SimpleStreamOptions,
   Usage,
-} from '@earendil-works/pi-ai';
+} from '@earendil-works/pi-ai/compat';
 
 import { buildResponsesBody } from './body.ts';
 import { shortHash, writeDebugLog } from './debug.ts';

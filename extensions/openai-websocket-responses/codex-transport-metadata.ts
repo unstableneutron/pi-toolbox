@@ -8,7 +8,7 @@ import {
   type Model,
   type ProviderResponse,
   type StreamOptions,
-} from '@earendil-works/pi-ai';
+} from '@earendil-works/pi-ai/compat';
 
 const CODEX_API = 'openai-codex-responses';
 const SOURCE_ID = 'extension:openai-websocket-responses/codex-transport-metadata';

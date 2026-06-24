@@ -1,4 +1,4 @@
-import { complete, type Message } from '@earendil-works/pi-ai';
+import { complete, type Message } from '@earendil-works/pi-ai/compat';
 import {
   BorderedLoader,
   SessionManager,

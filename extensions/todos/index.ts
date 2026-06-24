@@ -38,7 +38,7 @@ import {
   type ExtensionContext,
   type Theme,
 } from '@earendil-works/pi-coding-agent';
-import { StringEnum } from '@earendil-works/pi-ai';
+import { StringEnum } from '@earendil-works/pi-ai/compat';
 import { Type } from 'typebox';
 import path from 'node:path';
 import fs from 'node:fs/promises';

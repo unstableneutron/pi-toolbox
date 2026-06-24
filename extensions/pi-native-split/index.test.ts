@@ -3,11 +3,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { complete } from '@earendil-works/pi-ai';
+import { complete } from '@earendil-works/pi-ai/compat';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 
-vi.mock('@earendil-works/pi-ai', () => ({
+vi.mock('@earendil-works/pi-ai/compat', () => ({
   complete: vi.fn(),
 }));
 

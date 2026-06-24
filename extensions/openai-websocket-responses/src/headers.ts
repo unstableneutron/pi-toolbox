@@ -1,4 +1,4 @@
-import type { Api, Model, SimpleStreamOptions } from '@earendil-works/pi-ai';
+import type { Api, Model, SimpleStreamOptions } from '@earendil-works/pi-ai/compat';
 
 import { headersFingerprint } from './continuation-cache.ts';
 import { shortHash } from './debug.ts';
@@ -86,7 +86,7 @@ export function buildRequestHeaders(
 ): Headers {
   const headers = new Headers(model.headers ?? {});
   for (const [key, value] of Object.entries(options?.headers ?? {})) {
-    headers.set(key, value);
+    if (value !== null) headers.set(key, value);
   }
   if (!headers.has('authorization') && options?.apiKey) {
     headers.set('authorization', `Bearer ${options.apiKey}`);

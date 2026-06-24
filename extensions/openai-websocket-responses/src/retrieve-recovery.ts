@@ -3,7 +3,7 @@ import type {
   AssistantMessage,
   AssistantMessageEventStream,
   Model,
-} from '@earendil-works/pi-ai';
+} from '@earendil-works/pi-ai/compat';
 
 import {
   appendRecoveredFunctionCalls,

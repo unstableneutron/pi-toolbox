@@ -4,7 +4,7 @@ import type {
   Context,
   Model,
   SimpleStreamOptions,
-} from '@earendil-works/pi-ai';
+} from '@earendil-works/pi-ai/compat';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 
 import { installOpenAICodexTransportMetadataPatch } from './codex-transport-metadata';

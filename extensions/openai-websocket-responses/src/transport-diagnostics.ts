@@ -1,4 +1,4 @@
-import type { AssistantMessage, AssistantMessageDiagnostic } from '@earendil-works/pi-ai';
+import type { AssistantMessage, AssistantMessageDiagnostic } from '@earendil-works/pi-ai/compat';
 
 import { shortHash } from './debug.ts';
 import type { ContinuationDecision } from './continuation-cache.ts';

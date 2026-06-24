@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
-import { createAssistantMessageEventStream, type StreamFunction } from '@earendil-works/pi-ai';
+import {
+  createAssistantMessageEventStream,
+  type StreamFunction,
+} from '@earendil-works/pi-ai/compat';
 
 import {
   buildDelegatingStream,
@@ -481,9 +484,10 @@ describe('extension registration', () => {
   test('registers delegating providers for required apis', async () => {
     const registerApiProvider = vi.fn();
 
-    vi.doMock('@earendil-works/pi-ai', async () => {
-      const actual =
-        await vi.importActual<typeof import('@earendil-works/pi-ai')>('@earendil-works/pi-ai');
+    vi.doMock('@earendil-works/pi-ai/compat', async () => {
+      const actual = await vi.importActual<typeof import('@earendil-works/pi-ai/compat')>(
+        '@earendil-works/pi-ai/compat',
+      );
       const make = (): StreamFunction<never, never> => () => createAssistantMessageEventStream();
       const provider = { stream: make(), streamSimple: make() };
       return {
@@ -528,9 +532,10 @@ describe('extension registration', () => {
       streamSimple: originalProviderStreamSimple,
     };
 
-    vi.doMock('@earendil-works/pi-ai', async () => {
-      const actual =
-        await vi.importActual<typeof import('@earendil-works/pi-ai')>('@earendil-works/pi-ai');
+    vi.doMock('@earendil-works/pi-ai/compat', async () => {
+      const actual = await vi.importActual<typeof import('@earendil-works/pi-ai/compat')>(
+        '@earendil-works/pi-ai/compat',
+      );
       return {
         ...actual,
         registerApiProvider: vi.fn((provider: any, sourceId: string) => {
@@ -627,9 +632,10 @@ describe('extension registration', () => {
     const registeredProviders = new Map<string, any>();
     const originalProviderStreamSimple = vi.fn((model: any) => createDoneStream(model));
 
-    vi.doMock('@earendil-works/pi-ai', async () => {
-      const actual =
-        await vi.importActual<typeof import('@earendil-works/pi-ai')>('@earendil-works/pi-ai');
+    vi.doMock('@earendil-works/pi-ai/compat', async () => {
+      const actual = await vi.importActual<typeof import('@earendil-works/pi-ai/compat')>(
+        '@earendil-works/pi-ai/compat',
+      );
       const originalProvider = {
         stream: vi.fn((model: any) => createDoneStream(model)),
         streamSimple: originalProviderStreamSimple,
@@ -718,9 +724,10 @@ describe('extension registration', () => {
   test('treats a self route as a no-op and falls through to the original provider', async () => {
     const registeredProviders = new Map<string, any>();
 
-    vi.doMock('@earendil-works/pi-ai', async () => {
-      const actual =
-        await vi.importActual<typeof import('@earendil-works/pi-ai')>('@earendil-works/pi-ai');
+    vi.doMock('@earendil-works/pi-ai/compat', async () => {
+      const actual = await vi.importActual<typeof import('@earendil-works/pi-ai/compat')>(
+        '@earendil-works/pi-ai/compat',
+      );
       const originalProvider = {
         stream: vi.fn((model: any) => createDoneStream(model)),
         streamSimple: vi.fn((model: any) => createDoneStream(model)),
@@ -784,9 +791,10 @@ describe('extension registration', () => {
   test('treats an alias resolving back to the same model as a no-op', async () => {
     const registeredProviders = new Map<string, any>();
 
-    vi.doMock('@earendil-works/pi-ai', async () => {
-      const actual =
-        await vi.importActual<typeof import('@earendil-works/pi-ai')>('@earendil-works/pi-ai');
+    vi.doMock('@earendil-works/pi-ai/compat', async () => {
+      const actual = await vi.importActual<typeof import('@earendil-works/pi-ai/compat')>(
+        '@earendil-works/pi-ai/compat',
+      );
       const originalProvider = {
         stream: vi.fn((model: any) => createDoneStream(model)),
         streamSimple: vi.fn((model: any) => createDoneStream(model)),

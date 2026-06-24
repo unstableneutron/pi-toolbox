@@ -1,4 +1,4 @@
-import type { AssistantMessage, Model } from '@earendil-works/pi-ai';
+import type { AssistantMessage, Model } from '@earendil-works/pi-ai/compat';
 
 import { afterEach, describe, expect, test, vi } from 'vitest';
 

@@ -9,7 +9,7 @@ import {
   type Model,
   type SimpleStreamOptions,
   type StreamOptions,
-} from '@earendil-works/pi-ai';
+} from '@earendil-works/pi-ai/compat';
 
 import { shouldPatchModel } from './match.ts';
 import type { OpenAIWebSocketResponsesSettings } from './settings.ts';
@@ -81,7 +81,10 @@ function headersWithoutTraceparent(
   headers: StreamOptions['headers'] | undefined,
 ): Record<string, string> {
   return Object.fromEntries(
-    Object.entries(headers ?? {}).filter(([key]) => key.toLowerCase() !== 'traceparent'),
+    Object.entries(headers ?? {}).filter(
+      (entry): entry is [string, string] =>
+        entry[0].toLowerCase() !== 'traceparent' && entry[1] !== null,
+    ),
   );
 }
 

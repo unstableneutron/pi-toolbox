@@ -25,7 +25,7 @@ import type {
   TextContent,
   Tool,
   ToolCall,
-} from '@earendil-works/pi-ai';
+} from '@earendil-works/pi-ai/compat';
 
 import { parsePartialJson } from '../../partial-json.ts';
 

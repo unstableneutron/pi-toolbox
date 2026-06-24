@@ -4,9 +4,10 @@ const { completeMock } = vi.hoisted(() => ({
   completeMock: vi.fn(),
 }));
 
-vi.mock('@earendil-works/pi-ai', async () => {
-  const actual =
-    await vi.importActual<typeof import('@earendil-works/pi-ai')>('@earendil-works/pi-ai');
+vi.mock('@earendil-works/pi-ai/compat', async () => {
+  const actual = await vi.importActual<typeof import('@earendil-works/pi-ai/compat')>(
+    '@earendil-works/pi-ai/compat',
+  );
   return {
     ...actual,
     complete: completeMock,

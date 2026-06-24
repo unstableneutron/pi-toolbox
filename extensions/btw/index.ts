@@ -15,7 +15,7 @@ import {
   type AssistantMessage,
   type Message,
   type ThinkingLevel as AiThinkingLevel,
-} from '@earendil-works/pi-ai';
+} from '@earendil-works/pi-ai/compat';
 import {
   Container,
   Input,

@@ -6,7 +6,7 @@ import {
   createAssistantMessageEventStream,
   type AssistantMessage,
   type Model,
-} from '@earendil-works/pi-ai';
+} from '@earendil-works/pi-ai/compat';
 import { describe, expect, it, vi } from 'vitest';
 
 const wsModuleMock = vi.hoisted(() => ({
