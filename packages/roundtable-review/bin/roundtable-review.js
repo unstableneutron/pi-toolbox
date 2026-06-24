@@ -25,27 +25,12 @@ const THINKING_LEVEL_ALIASES = new Map([
 ]);
 const DEFAULT_REVIEWER_MODELS = [
   'openai/gpt-5.5:xhigh',
-  'anthropic/claude-opus-4-7:xhigh',
+  'anthropic/claude-opus-4-8:xhigh',
   'google/gemini-3.1-pro-preview:xhigh',
 ];
 const DEFAULT_SYNTHESIS_MODEL = 'openai/gpt-5.5:xhigh';
+const DEFAULT_STATUS_INTERVAL_MS = 60_000;
 const READ_ONLY_TOOLS = ['read', 'grep', 'find', 'ls'];
-
-const MODEL_ALIASES = new Map([
-  ['codex', 'openai-codex/gpt-5.5'],
-  ['gpt', 'openai/gpt-5.5'],
-  ['55', 'openai/gpt-5.5'],
-  ['mini', 'openai/gpt-5.4-mini'],
-  ['nano', 'openai/gpt-5.4-nano'],
-  ['haiku', 'anthropic/claude-haiku-4-5'],
-  ['sonnet', 'anthropic/claude-sonnet-4-6'],
-  ['opus', 'anthropic/claude-opus-4-8'],
-  ['gemini', 'google/gemini-3.1-pro-preview'],
-  ['pro', 'google/gemini-3.1-pro-preview'],
-  ['flash', 'google/gemini-3.5-flash'],
-  ['flash-lite', 'google/gemini-3.1-flash-lite-preview'],
-  ['lite', 'google/gemini-3.1-flash-lite-preview'],
-]);
 
 function usage() {
   return `roundtable-review - run model-diverse Pi reviewer sessions
@@ -68,6 +53,9 @@ Options:
   --output <path>             Also write the final output to a file
   --timeout-ms <ms>           Per-reviewer timeout (default: 900000)
   --synthesis-timeout-ms <ms> Synthesis timeout (default: 600000)
+  --status-interval-ms <ms>   Periodic live status interval on stderr (default: ${DEFAULT_STATUS_INTERVAL_MS})
+  --status                    Enable periodic live status output
+  --no-status                 Disable periodic live status output
   --max-diff-bytes <bytes>    Max bytes per collected diff section (default: 180000)
   --approve                   Trust project-local resources for this SDK run
   --no-extensions             Disable Pi extension loading (enabled by default)
@@ -76,7 +64,7 @@ Options:
   -h, --help                  Show this help
 
 Model specs use provider/model[:thinking], for example:
-  openai/gpt-5.5:xhigh, anthropic/claude-opus-4-7:max, gemini:extra-high
+  openai/gpt-5.5:xhigh, anthropic/claude-opus-4-8:max
 
 Thinking aliases: max, extra-high, extra_high, and extrahigh all map to Pi's xhigh.
 
@@ -98,6 +86,8 @@ function parseArgs(argv) {
     output: undefined,
     reviewerTimeoutMs: 15 * 60 * 1000,
     synthesisTimeoutMs: 10 * 60 * 1000,
+    statusEnabled: true,
+    statusIntervalMs: DEFAULT_STATUS_INTERVAL_MS,
     maxDiffBytes: 180_000,
     approve: false,
     loadExtensions: true,
@@ -170,6 +160,15 @@ function parseArgs(argv) {
       case '--synthesis-timeout-ms':
         options.synthesisTimeoutMs = parsePositiveInteger(readValue(arg), arg);
         break;
+      case '--status':
+        options.statusEnabled = true;
+        break;
+      case '--no-status':
+        options.statusEnabled = false;
+        break;
+      case '--status-interval-ms':
+        options.statusIntervalMs = parsePositiveInteger(readValue(arg), arg);
+        break;
       case '--max-diff-bytes':
         options.maxDiffBytes = parsePositiveInteger(readValue(arg), arg);
         break;
@@ -239,11 +238,7 @@ function normalizeModelSpec(input) {
   const trimmed = input.trim();
   if (!trimmed) throw new Error('Empty model spec');
 
-  const { base, thinkingLevel } = splitThinkingLevel(trimmed);
-  const aliasTarget = MODEL_ALIASES.get(base) ?? base;
-  const aliasSplit = splitThinkingLevel(aliasTarget);
-  const effectiveThinkingLevel = thinkingLevel ?? aliasSplit.thinkingLevel;
-  const providerModel = aliasSplit.base;
+  const { base: providerModel, thinkingLevel } = splitThinkingLevel(trimmed);
   const slashIndex = providerModel.indexOf('/');
   if (slashIndex <= 0 || slashIndex === providerModel.length - 1) {
     throw new Error(`Model spec must be provider/model[:thinking], got ${input}`);
@@ -251,8 +246,8 @@ function normalizeModelSpec(input) {
 
   const provider = providerModel.slice(0, slashIndex);
   const modelId = providerModel.slice(slashIndex + 1);
-  const spec = `${provider}/${modelId}${effectiveThinkingLevel ? `:${effectiveThinkingLevel}` : ''}`;
-  return { provider, modelId, thinkingLevel: effectiveThinkingLevel, spec };
+  const spec = `${provider}/${modelId}${thinkingLevel ? `:${thinkingLevel}` : ''}`;
+  return { provider, modelId, thinkingLevel, spec };
 }
 
 function splitThinkingLevel(spec) {
@@ -451,6 +446,354 @@ ${failed.length === 0 ? '(none)' : failed.map((result) => `- ${result.modelSpec}
 `;
 }
 
+function createRunTelemetry({ kind, modelSpec, timeoutMs }) {
+  return {
+    kind,
+    modelSpec,
+    timeoutMs,
+    createdAt: Date.now(),
+    startedAt: undefined,
+    endedAt: undefined,
+    status: 'pending',
+    lastEvent: 'pending',
+    lastActivityAt: undefined,
+    turnCount: 0,
+    textChars: 0,
+    thinkingChars: 0,
+    toolCallChars: 0,
+    modelToolCalls: 0,
+    toolCallsStarted: 0,
+    toolCallsCompleted: 0,
+    toolCallsFailed: 0,
+    activeTools: new Map(),
+    retrying: false,
+    retryAttempt: 0,
+    maxRetryAttempts: undefined,
+    retryDelayMs: undefined,
+    retryCount: 0,
+    retryFailures: 0,
+    lastRetryError: undefined,
+    compaction: undefined,
+    stopReason: undefined,
+    usage: undefined,
+    errorMessage: undefined,
+  };
+}
+
+function createStatusReporter(options, reviewerTelemetries) {
+  const startedAt = Date.now();
+  let timer;
+  let started = false;
+  let stopped = false;
+  const state = {
+    phase: 'starting',
+    reviewerTelemetries,
+    synthesisTelemetry: undefined,
+    synthesisStatus: 'pending',
+  };
+
+  // Terminal sessions never change again, so emit their full line once (when
+  // first observed terminal) and suppress it from later periodic frames; they
+  // remain summarized in the header counts. The final frame prints everything.
+  const printedTerminalLine = new Set();
+  const renderSessionLine = (telemetry, now, isFinal) => {
+    if (!isFinal && isTerminalTelemetryStatus(telemetry.status)) {
+      if (printedTerminalLine.has(telemetry)) return undefined;
+      printedTerminalLine.add(telemetry);
+    }
+    return `[roundtable-review]   ${formatTelemetryLine(telemetry, now)}`;
+  };
+
+  const emit = (reason = 'status') => {
+    if (!options.statusEnabled || stopped) return;
+    const now = Date.now();
+    const isFinal = reason === 'done';
+    const counts = countTelemetryStatuses(reviewerTelemetries);
+    const synthesisStatus = state.synthesisTelemetry?.status ?? state.synthesisStatus;
+    const running = (counts.starting ?? 0) + (counts.running ?? 0);
+    const failed = (counts.failed ?? 0) + (counts['timed-out'] ?? 0);
+    const lines = [
+      `[roundtable-review] ${reason} elapsed=${formatDuration(now - startedAt)} phase=${state.phase} reviewers=${counts.done ?? 0}/${reviewerTelemetries.length} done, ${failed} failed, ${running} running synthesis=${synthesisStatus}`,
+    ];
+
+    for (const telemetry of reviewerTelemetries) {
+      const line = renderSessionLine(telemetry, now, isFinal);
+      if (line) lines.push(line);
+    }
+    if (state.synthesisTelemetry) {
+      const line = renderSessionLine(state.synthesisTelemetry, now, isFinal);
+      if (line) lines.push(line);
+    }
+
+    process.stderr.write(`${lines.join('\n')}\n`);
+  };
+
+  return {
+    state,
+    start() {
+      if (!options.statusEnabled) return;
+      started = true;
+      emit('start');
+      timer = setInterval(() => emit('status'), options.statusIntervalMs);
+      timer.unref?.();
+    },
+    emit,
+    stop(reason = 'done') {
+      if (stopped) return;
+      if (timer) clearInterval(timer);
+      timer = undefined;
+      if (started) emit(reason);
+      stopped = true;
+    },
+  };
+}
+
+function countTelemetryStatuses(telemetries) {
+  const counts = {};
+  for (const telemetry of telemetries) {
+    counts[telemetry.status] = (counts[telemetry.status] ?? 0) + 1;
+  }
+  return counts;
+}
+
+function handleTelemetryEvent(telemetry, event) {
+  if (!telemetry) return;
+  try {
+    updateTelemetryFromEvent(telemetry, event);
+  } catch {
+    // Telemetry must never affect the review run.
+  }
+}
+
+function updateTelemetryFromEvent(telemetry, event) {
+  const now = Date.now();
+  const eventName = event.type === 'message_update' ? event.assistantMessageEvent.type : event.type;
+  recordTelemetryActivity(telemetry, eventName, now);
+
+  switch (event.type) {
+    case 'agent_start':
+      markTelemetryRunning(telemetry, now);
+      break;
+    case 'turn_start':
+      telemetry.turnCount += 1;
+      break;
+    case 'message_update':
+      updateTelemetryFromAssistantMessageEvent(telemetry, event.assistantMessageEvent);
+      break;
+    case 'message_end':
+      captureUsageFromAssistantMessage(telemetry, event.message);
+      break;
+    case 'agent_end':
+      if (event.willRetry) telemetry.retrying = true;
+      break;
+    case 'tool_execution_start':
+      telemetry.toolCallsStarted += 1;
+      telemetry.activeTools.set(event.toolCallId, { name: event.toolName, startedAt: now });
+      break;
+    case 'tool_execution_end':
+      telemetry.toolCallsCompleted += 1;
+      if (event.isError) telemetry.toolCallsFailed += 1;
+      telemetry.activeTools.delete(event.toolCallId);
+      break;
+    case 'compaction_start':
+      telemetry.compaction = `${event.reason}:running`;
+      break;
+    case 'compaction_end':
+      telemetry.compaction = `${event.reason}:${event.aborted ? 'aborted' : 'done'}`;
+      break;
+    case 'auto_retry_start':
+      telemetry.retrying = true;
+      telemetry.retryAttempt = event.attempt;
+      telemetry.maxRetryAttempts = event.maxAttempts;
+      telemetry.retryDelayMs = event.delayMs;
+      telemetry.retryCount = Math.max(telemetry.retryCount, event.attempt);
+      telemetry.lastRetryError = event.errorMessage;
+      break;
+    case 'auto_retry_end':
+      telemetry.retrying = false;
+      telemetry.retryDelayMs = undefined;
+      if (!event.success) telemetry.retryFailures += 1;
+      if (event.finalError) telemetry.lastRetryError = event.finalError;
+      break;
+  }
+}
+
+function updateTelemetryFromAssistantMessageEvent(telemetry, event) {
+  switch (event.type) {
+    case 'text_delta':
+      telemetry.textChars += event.delta.length;
+      break;
+    case 'thinking_delta':
+      telemetry.thinkingChars += event.delta.length;
+      break;
+    case 'toolcall_delta':
+      telemetry.toolCallChars += event.delta.length;
+      break;
+    case 'toolcall_end':
+      telemetry.modelToolCalls += 1;
+      break;
+    case 'done':
+      telemetry.stopReason = event.reason;
+      captureUsageFromAssistantMessage(telemetry, event.message);
+      break;
+    case 'error':
+      telemetry.stopReason = event.reason;
+      telemetry.errorMessage = event.error.errorMessage;
+      captureUsageFromAssistantMessage(telemetry, event.error);
+      break;
+  }
+}
+
+function recordTelemetryActivity(telemetry, eventName, now = Date.now()) {
+  telemetry.lastEvent = eventName;
+  telemetry.lastActivityAt = now;
+}
+
+function markTelemetryStarting(telemetry) {
+  if (!telemetry) return;
+  const now = Date.now();
+  telemetry.startedAt ??= now;
+  if (!isTerminalTelemetryStatus(telemetry.status)) telemetry.status = 'starting';
+  recordTelemetryActivity(telemetry, 'session_setup', now);
+}
+
+function markTelemetryRunning(telemetry, now = Date.now()) {
+  if (!telemetry) return;
+  telemetry.startedAt ??= now;
+  if (!isTerminalTelemetryStatus(telemetry.status)) telemetry.status = 'running';
+}
+
+function markTelemetryEnded(telemetry, status, errorMessage) {
+  if (!telemetry) return;
+  telemetry.status = status;
+  telemetry.endedAt = Date.now();
+  if (errorMessage) telemetry.errorMessage = errorMessage;
+}
+
+function isTerminalTelemetryStatus(status) {
+  return status === 'done' || status === 'failed' || status === 'timed-out' || status === 'skipped';
+}
+
+function finalizeTelemetryFromSession(telemetry, session) {
+  if (!telemetry || !session) return;
+  const message = getLastAssistantMessage(session.messages);
+  if (message) captureUsageFromAssistantMessage(telemetry, message);
+}
+
+function captureUsageFromAssistantMessage(telemetry, message) {
+  if (!message || message.role !== 'assistant') return;
+  telemetry.stopReason = message.stopReason ?? telemetry.stopReason;
+  telemetry.usage = message.usage ?? telemetry.usage;
+  if (message.errorMessage) telemetry.errorMessage = message.errorMessage;
+}
+
+function appendTelemetryDiagnostic(message, telemetry) {
+  const diagnostic = formatTelemetryDiagnostic(telemetry);
+  return diagnostic ? `${message}; ${diagnostic}` : message;
+}
+
+function formatTelemetryDiagnostic(telemetry) {
+  if (!telemetry) return '';
+  const now = Date.now();
+  const parts = [];
+  if (telemetry.lastActivityAt) {
+    parts.push(`last=${telemetry.lastEvent} ${formatDuration(now - telemetry.lastActivityAt)} ago`);
+  } else {
+    parts.push(`last=${telemetry.lastEvent}`);
+  }
+  parts.push(`turns=${telemetry.turnCount}`);
+  parts.push(`thinking=${formatChars(telemetry.thinkingChars)}`);
+  parts.push(`text=${formatChars(telemetry.textChars)}`);
+  parts.push(formatToolSummary(telemetry));
+  if (telemetry.retryCount > 0 || telemetry.retrying) parts.push(formatRetrySummary(telemetry));
+  if (telemetry.stopReason) parts.push(`stop=${telemetry.stopReason}`);
+  if (telemetry.usage) parts.push(formatUsage(telemetry.usage));
+  return parts.filter(Boolean).join(', ');
+}
+
+function formatTelemetryLine(telemetry, now = Date.now()) {
+  const parts = [telemetry.kind, telemetry.modelSpec, telemetry.status];
+  const elapsedBase = telemetry.startedAt ?? telemetry.createdAt;
+  const elapsedLabel = telemetry.startedAt ? 'elapsed' : 'pendingFor';
+  parts.push(`${elapsedLabel}=${formatDuration((telemetry.endedAt ?? now) - elapsedBase)}`);
+  if (telemetry.timeoutMs && telemetry.startedAt && !isTerminalTelemetryStatus(telemetry.status)) {
+    parts.push(
+      `timeoutIn=${formatDuration(Math.max(0, telemetry.timeoutMs - (now - telemetry.startedAt)))}`,
+    );
+  }
+  parts.push(`turn=${telemetry.turnCount}`);
+  if (telemetry.lastActivityAt) {
+    parts.push(`last=${telemetry.lastEvent} ${formatDuration(now - telemetry.lastActivityAt)} ago`);
+  } else {
+    parts.push(`last=${telemetry.lastEvent}`);
+  }
+  parts.push(`thinking=${formatChars(telemetry.thinkingChars)}`);
+  parts.push(`text=${formatChars(telemetry.textChars)}`);
+  if (telemetry.modelToolCalls > 0 || telemetry.toolCallChars > 0) {
+    parts.push(`modelToolCalls=${telemetry.modelToolCalls}`);
+  }
+  parts.push(formatToolSummary(telemetry));
+
+  const activeTools = [...new Set([...telemetry.activeTools.values()].map((tool) => tool.name))];
+  if (activeTools.length > 0) parts.push(`activeTool=${activeTools.join(',')}`);
+  if (telemetry.retryCount > 0 || telemetry.retrying) parts.push(formatRetrySummary(telemetry));
+  if (telemetry.compaction) parts.push(`compaction=${telemetry.compaction}`);
+  if (telemetry.stopReason) parts.push(`stop=${telemetry.stopReason}`);
+  if (telemetry.usage && isTerminalTelemetryStatus(telemetry.status)) {
+    parts.push(formatUsage(telemetry.usage));
+  }
+  return parts.filter(Boolean).join(' ');
+}
+
+function formatToolSummary(telemetry) {
+  if (telemetry.toolCallsStarted === 0) return 'tools=0';
+  const parts = [`tools=${telemetry.toolCallsCompleted}/${telemetry.toolCallsStarted} done`];
+  if (telemetry.toolCallsFailed > 0) parts.push(`${telemetry.toolCallsFailed} failed`);
+  return parts.join('/');
+}
+
+function formatRetrySummary(telemetry) {
+  if (telemetry.retrying) {
+    const max = telemetry.maxRetryAttempts ?? '?';
+    const delay = telemetry.retryDelayMs ? ` next=${formatDuration(telemetry.retryDelayMs)}` : '';
+    return `retry=${telemetry.retryAttempt}/${max}${delay}`;
+  }
+  const failures = telemetry.retryFailures > 0 ? `/${telemetry.retryFailures} failed` : '';
+  return `retries=${telemetry.retryCount}${failures}`;
+}
+
+function formatUsage(usage) {
+  const total =
+    usage.totalTokens ?? usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+  return `tokens=${formatCount(total)} in=${formatCount(usage.input)} out=${formatCount(usage.output)}`;
+}
+
+function formatChars(value) {
+  return `${formatCount(value)}ch`;
+}
+
+function formatCount(value) {
+  if (!Number.isFinite(value)) return '0';
+  if (value >= 1_000_000) return `${trimFixed(value / 1_000_000)}m`;
+  if (value >= 1_000) return `${trimFixed(value / 1_000)}k`;
+  return `${value}`;
+}
+
+function trimFixed(value) {
+  return value.toFixed(1).replace(/\.0$/, '');
+}
+
+function formatDuration(ms) {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  if (minutes < 60) return `${minutes}m${String(remainingSeconds).padStart(2, '0')}s`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return `${hours}h${String(remainingMinutes).padStart(2, '0')}m`;
+}
+
 async function createSessionRunner({
   cwd,
   modelSpec,
@@ -581,6 +924,25 @@ function resolveModel(modelRegistry, modelSpec) {
   return { ...normalized, model };
 }
 
+async function validateModelSpecs(modelSpecs) {
+  const { AuthStorage, ModelRegistry } = await loadPiCodingAgentSdk();
+  const authStorage = AuthStorage.create();
+  const modelRegistry = ModelRegistry.create(authStorage);
+  const errors = [];
+
+  for (const modelSpec of new Set(modelSpecs)) {
+    try {
+      resolveModel(modelRegistry, modelSpec);
+    } catch (error) {
+      errors.push(`${modelSpec}: ${error.message}`);
+    }
+  }
+
+  if (errors.length > 0) {
+    throw new Error(`Model preflight failed:\n${errors.map((error) => `- ${error}`).join('\n')}`);
+  }
+}
+
 async function runReviewer({
   cwd,
   modelSpec,
@@ -590,10 +952,13 @@ async function runReviewer({
   loadExtensions,
   loadSkills,
   verbose,
+  telemetry,
 }) {
   const startedAt = Date.now();
   let session;
+  let unsubscribe;
   try {
+    markTelemetryStarting(telemetry);
     if (verbose) console.error(`[roundtable-review] reviewer start: ${modelSpec}`);
     const runner = await createSessionRunner({
       cwd,
@@ -605,14 +970,19 @@ async function runReviewer({
       verbose,
     });
     session = runner.session;
+    if (telemetry) telemetry.modelSpec = runner.resolved.spec;
+    unsubscribe = session.subscribe((event) => handleTelemetryEvent(telemetry, event));
     await promptWithTimeout(
       session,
       buildReviewerPrompt(sharedBrief, runner.resolved.spec),
       timeoutMs,
       `reviewer ${runner.resolved.spec}`,
+      telemetry,
     );
+    finalizeTelemetryFromSession(telemetry, session);
     const text = getLastAssistantText(session.messages);
-    if (!text.trim()) throw new Error('Reviewer produced no assistant text');
+    if (!text.trim()) throw noAssistantTextError('Reviewer', session);
+    markTelemetryEnded(telemetry, 'done');
     if (verbose) console.error(`[roundtable-review] reviewer done: ${runner.resolved.spec}`);
     return {
       ok: true,
@@ -621,15 +991,20 @@ async function runReviewer({
       elapsedMs: Date.now() - startedAt,
     };
   } catch (error) {
+    finalizeTelemetryFromSession(telemetry, session);
+    const status = error.message.includes('timed out') ? 'timed-out' : 'failed';
+    markTelemetryEnded(telemetry, status, error.message);
+    const errorMessage = appendTelemetryDiagnostic(error.message, telemetry);
     if (verbose)
-      console.error(`[roundtable-review] reviewer failed: ${modelSpec}: ${error.message}`);
+      console.error(`[roundtable-review] reviewer failed: ${modelSpec}: ${errorMessage}`);
     return {
       ok: false,
       modelSpec,
-      error: error.message,
+      error: errorMessage,
       elapsedMs: Date.now() - startedAt,
     };
   } finally {
+    unsubscribe?.();
     session?.dispose();
   }
 }
@@ -644,9 +1019,12 @@ async function runSynthesis({
   loadExtensions,
   loadSkills,
   verbose,
+  telemetry,
 }) {
   let session;
+  let unsubscribe;
   try {
+    markTelemetryStarting(telemetry);
     if (verbose) console.error(`[roundtable-review] synthesis start: ${synthModel}`);
     const runner = await createSessionRunner({
       cwd,
@@ -659,29 +1037,43 @@ async function runSynthesis({
       verbose,
     });
     session = runner.session;
+    if (telemetry) telemetry.modelSpec = runner.resolved.spec;
+    unsubscribe = session.subscribe((event) => handleTelemetryEvent(telemetry, event));
     await promptWithTimeout(
       session,
       buildSynthesisPrompt({ sharedBrief, reviewerResults }),
       timeoutMs,
       `synthesis ${runner.resolved.spec}`,
+      telemetry,
     );
+    finalizeTelemetryFromSession(telemetry, session);
     const text = getLastAssistantText(session.messages);
-    if (!text.trim()) throw new Error('Synthesis produced no assistant text');
+    if (!text.trim()) throw noAssistantTextError('Synthesis', session);
+    markTelemetryEnded(telemetry, 'done');
     if (verbose) console.error(`[roundtable-review] synthesis done: ${runner.resolved.spec}`);
     return { ok: true, modelSpec: runner.resolved.spec, text };
   } catch (error) {
-    return { ok: false, modelSpec: synthModel, error: error.message };
+    finalizeTelemetryFromSession(telemetry, session);
+    const status = error.message.includes('timed out') ? 'timed-out' : 'failed';
+    markTelemetryEnded(telemetry, status, error.message);
+    return {
+      ok: false,
+      modelSpec: synthModel,
+      error: appendTelemetryDiagnostic(error.message, telemetry),
+    };
   } finally {
+    unsubscribe?.();
     session?.dispose();
   }
 }
 
-async function promptWithTimeout(session, prompt, timeoutMs, label) {
+async function promptWithTimeout(session, prompt, timeoutMs, label, telemetry) {
   let timedOut = false;
   let timeoutId;
   const timeout = new Promise((_, reject) => {
     timeoutId = setTimeout(() => {
       timedOut = true;
+      markTelemetryEnded(telemetry, 'timed-out', `${label} timed out after ${timeoutMs}ms`);
       void session.abort().catch(() => {});
       reject(new Error(`${label} timed out after ${timeoutMs}ms`));
     }, timeoutMs);
@@ -696,16 +1088,31 @@ async function promptWithTimeout(session, prompt, timeoutMs, label) {
 }
 
 function getLastAssistantText(messages) {
+  const message = getLastAssistantMessage(messages);
+  if (!message) return '';
+  return message.content
+    .filter((part) => part.type === 'text')
+    .map((part) => part.text)
+    .join('\n')
+    .trim();
+}
+
+function noAssistantTextError(kind, session) {
+  const message = getLastAssistantMessage(session?.messages ?? []);
+  if (message?.errorMessage) return new Error(`${kind} failed: ${message.errorMessage}`);
+  if (message?.stopReason === 'error') {
+    return new Error(`${kind} ended with a provider error and no assistant text`);
+  }
+  return new Error(`${kind} produced no assistant text`);
+}
+
+function getLastAssistantMessage(messages) {
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i];
     if (message.role !== 'assistant') continue;
-    return message.content
-      .filter((part) => part.type === 'text')
-      .map((part) => part.text)
-      .join('\n')
-      .trim();
+    return message;
   }
-  return '';
+  return undefined;
 }
 
 function fallbackSynthesis(reviewerResults) {
@@ -750,18 +1157,33 @@ async function main(argv) {
     return 0;
   }
 
-  const evidence = await collectEvidence(options);
-  const sharedBrief = buildSharedBrief(options, evidence);
-  if (options.verbose) {
-    console.error(`[roundtable-review] cwd: ${options.cwd}`);
-    console.error(`[roundtable-review] reviewers: ${options.models.join(', ')}`);
-    console.error(
-      `[roundtable-review] pi resources: extensions=${options.loadExtensions ? 'enabled' : 'disabled'}, skills=${options.loadSkills ? 'enabled' : 'disabled'}, project-local=${options.approve ? 'trusted' : 'untrusted'}`,
-    );
-  }
+  const reviewerTelemetries = options.models.map((modelSpec) =>
+    createRunTelemetry({ kind: 'reviewer', modelSpec, timeoutMs: options.reviewerTimeoutMs }),
+  );
+  const telemetryByModel = new Map(
+    reviewerTelemetries.map((telemetry) => [telemetry.modelSpec, telemetry]),
+  );
+  const reporter = createStatusReporter(options, reviewerTelemetries);
+  let completed = false;
 
-  const reviewerResults = await Promise.all(
-    options.models.map((modelSpec) =>
+  try {
+    await validateModelSpecs([...options.models, options.synthModel]);
+
+    reporter.state.phase = 'collecting-evidence';
+    reporter.start();
+
+    const evidence = await collectEvidence(options);
+    const sharedBrief = buildSharedBrief(options, evidence);
+    if (options.verbose) {
+      console.error(`[roundtable-review] cwd: ${options.cwd}`);
+      console.error(`[roundtable-review] reviewers: ${options.models.join(', ')}`);
+      console.error(
+        `[roundtable-review] pi resources: extensions=${options.loadExtensions ? 'enabled' : 'disabled'}, skills=${options.loadSkills ? 'enabled' : 'disabled'}, project-local=${options.approve ? 'trusted' : 'untrusted'}`,
+      );
+    }
+
+    reporter.state.phase = 'reviewing';
+    const reviewerPromises = options.models.map((modelSpec) =>
       runReviewer({
         cwd: options.cwd,
         modelSpec,
@@ -771,44 +1193,63 @@ async function main(argv) {
         loadExtensions: options.loadExtensions,
         loadSkills: options.loadSkills,
         verbose: options.verbose,
+        telemetry: telemetryByModel.get(modelSpec),
       }),
-    ),
-  );
+    );
+    reporter.emit('reviewers-start');
+    const reviewerResults = await Promise.all(reviewerPromises);
 
-  const successful = reviewerResults.filter((result) => result.ok);
-  let synthesis;
-  if (successful.length === 0) {
-    synthesis = { ok: false, modelSpec: options.synthModel, error: 'No reviewers succeeded' };
-  } else {
-    synthesis = await runSynthesis({
+    const successful = reviewerResults.filter((result) => result.ok);
+    let synthesis;
+    if (successful.length === 0) {
+      reporter.state.synthesisStatus = 'skipped';
+      synthesis = { ok: false, modelSpec: options.synthModel, error: 'No reviewers succeeded' };
+    } else {
+      const synthesisTelemetry = createRunTelemetry({
+        kind: 'synthesis',
+        modelSpec: options.synthModel,
+        timeoutMs: options.synthesisTimeoutMs,
+      });
+      reporter.state.synthesisTelemetry = synthesisTelemetry;
+      reporter.state.phase = 'synthesizing';
+      const synthesisPromise = runSynthesis({
+        cwd: options.cwd,
+        synthModel: options.synthModel,
+        sharedBrief,
+        reviewerResults,
+        timeoutMs: options.synthesisTimeoutMs,
+        approve: options.approve,
+        loadExtensions: options.loadExtensions,
+        loadSkills: options.loadSkills,
+        verbose: options.verbose,
+        telemetry: synthesisTelemetry,
+      });
+      reporter.emit('synthesis-start');
+      synthesis = await synthesisPromise;
+    }
+
+    reporter.state.phase = 'writing-output';
+    const markdown = synthesis.ok ? synthesis.text : fallbackSynthesis(reviewerResults);
+    const payload = {
       cwd: options.cwd,
-      synthModel: options.synthModel,
-      sharedBrief,
+      models: options.models,
+      synthesisModel: synthesis.modelSpec,
       reviewerResults,
-      timeoutMs: options.synthesisTimeoutMs,
-      approve: options.approve,
-      loadExtensions: options.loadExtensions,
-      loadSkills: options.loadSkills,
-      verbose: options.verbose,
-    });
+      synthesis,
+      markdown,
+    };
+
+    const output =
+      options.format === 'json' ? `${JSON.stringify(payload, null, 2)}\n` : `${markdown.trim()}\n`;
+    await writeOutputIfRequested(options.output, output);
+    process.stdout.write(output);
+
+    reporter.state.phase = 'complete';
+    completed = true;
+    return successful.length === 0 ? 2 : 0;
+  } finally {
+    reporter.stop(completed ? 'done' : 'stopped');
   }
-
-  const markdown = synthesis.ok ? synthesis.text : fallbackSynthesis(reviewerResults);
-  const payload = {
-    cwd: options.cwd,
-    models: options.models,
-    synthesisModel: synthesis.modelSpec,
-    reviewerResults,
-    synthesis,
-    markdown,
-  };
-
-  const output =
-    options.format === 'json' ? `${JSON.stringify(payload, null, 2)}\n` : `${markdown.trim()}\n`;
-  await writeOutputIfRequested(options.output, output);
-  process.stdout.write(output);
-
-  return successful.length === 0 ? 2 : 0;
 }
 
 main(process.argv.slice(2)).then(

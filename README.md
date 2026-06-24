@@ -25,7 +25,7 @@ the final analysis.
 Default reviewer lineup:
 
 - `openai/gpt-5.5:xhigh`
-- `anthropic/claude-opus-4-7:xhigh`
+- `anthropic/claude-opus-4-8:xhigh`
 - `google/gemini-3.1-pro-preview:xhigh`
 
 Default synthesis model: `openai/gpt-5.5:xhigh`.
@@ -38,6 +38,12 @@ The CLI loads enabled Pi extensions and skills by default through Pi's normal
 resolver, so user/global packages such as `pi-retry` participate when installed.
 Project-local resources remain gated unless you pass `--approve`. Use
 `--no-extensions` or `--no-skills` only for troubleshooting or isolation.
+
+Long-running runs print periodic live status to stderr by default, without
+changing the final Markdown/JSON written to stdout. The status includes each
+reviewer/synthesis session's phase, last SDK event, text/thinking character
+counts, tool activity, retry activity, and timeout countdown. Use
+`--status-interval-ms` to tune the heartbeat or `--no-status` to suppress it.
 
 ```bash
 # From this checkout
