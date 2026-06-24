@@ -3,6 +3,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   existsSync,
+  mkdirSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -38,6 +39,15 @@ const PI_SIBLING_PACKAGES = GITCHAMBER_PACKAGES;
 const GITCHAMBER_MANUAL_OVERRIDES: Record<string, string> = {
   'pi-boomerang': 'nicobailon/pi-boomerang',
 };
+
+/**
+ * Extension packages that currently publish without Aube trusted-publisher
+ * evidence even though older releases had it. Keeping these package-level
+ * excludes in the user Aube config lets `pi update --extensions` continue to
+ * fail closed for every other dependency while bypassing known Pi extension
+ * trust-downgrade false positives.
+ */
+const AUBE_EXTENSION_TRUST_POLICY_EXCLUDES = ['pi-subagents'] as const;
 
 export type UpdateCliArgs = {
   directory?: string;
@@ -90,6 +100,12 @@ export type PiSelfUpdateCommand = {
 export type PiApproveBuildsCommand = {
   command: string;
   args: string[];
+};
+
+export type AubeTrustPolicyExcludeResult = {
+  status: 'already-present' | 'updated' | 'would-update';
+  configPath: string;
+  entries: string[];
 };
 
 export type InstalledPackage = {
@@ -208,6 +224,65 @@ export function buildPiCodingAgentResolverReplacement(): string {
 
 function getDefaultPiSettingsPath(): string {
   return join(homedir(), '.pi', 'agent', 'settings.json');
+}
+
+function getDefaultAubeConfigPath(): string {
+  return join(homedir(), '.config', 'aube', 'config.toml');
+}
+
+function formatTomlString(value: string): string {
+  return JSON.stringify(value);
+}
+
+function addTomlStringArrayEntries(
+  content: string,
+  key: string,
+  entries: readonly string[],
+): string {
+  const missingEntries = entries.filter((entry) => !content.includes(formatTomlString(entry)));
+  if (missingEntries.length === 0) return content;
+
+  const arrayPattern = new RegExp(`(^${key}\\s*=\\s*\\[)([\\s\\S]*?)(^\\])`, 'm');
+  const match = content.match(arrayPattern);
+  if (match?.index === undefined) {
+    const prefix = content.trimEnd();
+    const block = [
+      `${key} = [`,
+      ...missingEntries.map((entry) => `    ${formatTomlString(entry)},`),
+      ']',
+    ].join('\n');
+    return `${prefix}${prefix ? '\n' : ''}${block}\n`;
+  }
+
+  return content.replace(arrayPattern, (_full, start: string, body: string, end: string) => {
+    const insertion = missingEntries.map((entry) => `    ${formatTomlString(entry)},`).join('\n');
+    const separator = body.endsWith('\n') || body.length === 0 ? '' : '\n';
+    return `${start}${body}${separator}${insertion}\n${end}`;
+  });
+}
+
+export function ensureAubeTrustPolicyExcludes(
+  entries: readonly string[] = AUBE_EXTENSION_TRUST_POLICY_EXCLUDES,
+  options: { dryRun?: boolean; configPath?: string } = {},
+): AubeTrustPolicyExcludeResult {
+  const configPath = options.configPath ?? getDefaultAubeConfigPath();
+  const content = existsSync(configPath) ? readFileSync(configPath, 'utf8') : '';
+  const missingEntries = entries.filter((entry) => !content.includes(formatTomlString(entry)));
+
+  if (missingEntries.length === 0) {
+    return { status: 'already-present', configPath, entries: [] };
+  }
+
+  if (options.dryRun) {
+    return { status: 'would-update', configPath, entries: missingEntries };
+  }
+
+  mkdirSync(dirname(configPath), { recursive: true });
+  writeFileSync(
+    configPath,
+    addTomlStringArrayEntries(content, 'trustPolicyExclude', missingEntries),
+  );
+  return { status: 'updated', configPath, entries: missingEntries };
 }
 
 export function readConfiguredNpmCommand(
@@ -2157,6 +2232,7 @@ export async function runPiUpdate(
     piPath?: string;
     execFile?: typeof execFileSync;
     log?: (message: string) => void;
+    aubeConfigPath?: string;
   } = {},
 ): Promise<void> {
   const execFile = options.execFile ?? execFileSync;
@@ -2191,6 +2267,20 @@ export async function runPiUpdate(
     } else {
       log(`Skipping approve-builds: ${packageManager} installs do not use Aube approve-builds.`);
     }
+  }
+
+  const trustPolicyExcludeResult = ensureAubeTrustPolicyExcludes(
+    AUBE_EXTENSION_TRUST_POLICY_EXCLUDES,
+    { dryRun: options.dryRun, configPath: options.aubeConfigPath },
+  );
+  if (trustPolicyExcludeResult.status === 'already-present') {
+    log(
+      `Aube trustPolicyExclude: already includes ${AUBE_EXTENSION_TRUST_POLICY_EXCLUDES.join(', ')}.`,
+    );
+  } else {
+    log(
+      `${trustPolicyExcludeResult.status === 'would-update' ? 'Would update' : 'Updated'} Aube trustPolicyExclude in ${trustPolicyExcludeResult.configPath}: ${trustPolicyExcludeResult.entries.join(', ')}`,
+    );
   }
 
   if (options.dryRun) {

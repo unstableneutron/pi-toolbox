@@ -23,6 +23,7 @@ import {
   buildPiSelfUpdateCommand,
   compareVersions,
   detectPiInstallPackageManagerFromPath,
+  ensureAubeTrustPolicyExcludes,
   findInstalledNpmPackagePath,
   formatPackageManagerCommand,
   getPackageManagerCommandCandidates,
@@ -180,6 +181,43 @@ describe('package manager command resolution', () => {
   });
 });
 
+describe('Aube trust policy excludes', () => {
+  it('adds package-level excludes to an existing trustPolicyExclude array', () => {
+    const dir = makeTempDir('aube-config-');
+    const configPath = join(dir, 'config.toml');
+    writeFileSync(
+      configPath,
+      [
+        'trustPolicy = "no-downgrade"',
+        'trustPolicyExclude = [',
+        '    "pi-subagents@0.28.0",',
+        ']',
+      ].join('\n'),
+    );
+
+    const result = ensureAubeTrustPolicyExcludes(['pi-subagents'], { configPath });
+
+    expect(result).toEqual({
+      status: 'updated',
+      configPath,
+      entries: ['pi-subagents'],
+    });
+    expect(readFileSync(configPath, 'utf8')).toContain('    "pi-subagents",\n]');
+  });
+
+  it('creates trustPolicyExclude when the Aube config is missing', () => {
+    const dir = makeTempDir('aube-config-');
+    const configPath = join(dir, 'nested', 'config.toml');
+
+    const result = ensureAubeTrustPolicyExcludes(['pi-subagents'], { configPath });
+
+    expect(result.status).toBe('updated');
+    expect(readFileSync(configPath, 'utf8')).toBe(
+      ['trustPolicyExclude = [', '    "pi-subagents",', ']', ''].join('\n'),
+    );
+  });
+});
+
 describe('pi self-update package manager detection', () => {
   it('detects aube-installed pi from the virtual store path', () => {
     expect(
@@ -209,8 +247,10 @@ describe('pi self-update package manager detection', () => {
   it('runs package-manager self-update before pi extension update', async () => {
     const calls: Array<{ command: string; args: string[] }> = [];
     const logs: string[] = [];
+    const aubeConfigPath = join(makeTempDir('aube-config-'), 'config.toml');
 
     await runPiUpdate({
+      aubeConfigPath,
       piPath:
         '/Users/me/.cache/aube/virtual-store/@earendil-works+pi-coding-agent@0.79.10-hash/node_modules/@earendil-works/pi-coding-agent/dist/cli.js',
       execFile: ((command: string, args: string[]) => {
@@ -229,6 +269,7 @@ describe('pi self-update package manager detection', () => {
     ]);
     expect(logs).toEqual([
       'Ran: aube update -g @earendil-works/pi-coding-agent --latest',
+      `Updated Aube trustPolicyExclude in ${aubeConfigPath}: pi-subagents`,
       'Ran: pi update --extensions',
     ]);
   });
@@ -236,9 +277,11 @@ describe('pi self-update package manager detection', () => {
   it('runs aube approve-builds when --approve is requested', async () => {
     const calls: Array<{ command: string; args: string[] }> = [];
     const logs: string[] = [];
+    const aubeConfigPath = join(makeTempDir('aube-config-'), 'config.toml');
 
     await runPiUpdate({
       approve: true,
+      aubeConfigPath,
       piPath:
         '/Users/me/.cache/aube/virtual-store/@earendil-works+pi-coding-agent@0.79.10-hash/node_modules/@earendil-works/pi-coding-agent/dist/cli.js',
       execFile: ((command: string, args: string[]) => {

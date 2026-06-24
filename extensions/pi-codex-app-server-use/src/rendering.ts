@@ -3,7 +3,6 @@ import {
   Image,
   Spacer,
   Text,
-  sliceByColumn,
   visibleWidth,
   wrapTextWithAnsi,
   type Component,
@@ -125,11 +124,22 @@ function truncateWithStyledEllipsis(text: string, maxWidth: number, ellipsis = '
   const ellipsisWidth = visibleWidth(ellipsis);
   const trailingAnsi = trailingAnsiCodes(text);
   if (ellipsisWidth >= maxWidth) {
-    return `${leadingAnsiCodes(text)}${sliceByColumn(ellipsis, 0, maxWidth, true)}${trailingAnsi}`;
+    return `${leadingAnsiCodes(text)}${truncateVisiblePrefix(ellipsis, maxWidth)}${trailingAnsi}`;
   }
 
-  const prefix = sliceByColumn(text, 0, maxWidth - ellipsisWidth, true);
+  const prefix = truncateVisiblePrefix(text, maxWidth - ellipsisWidth);
   return `${prefix}${ellipsis}${trailingAnsi}`;
+}
+
+function truncateVisiblePrefix(text: string, maxWidth: number): string {
+  if (maxWidth <= 0) return '';
+  let result = '';
+  for (const char of text) {
+    const next = `${result}${char}`;
+    if (visibleWidth(next) > maxWidth) break;
+    result = next;
+  }
+  return result;
 }
 
 function compactCommandInput(command: string, headLines = 3, tailLines = 3): string {
