@@ -778,7 +778,7 @@ export class CodexAppServerExecSessionManager {
   }
 }
 
-export function registerAppServerExecTools(
+export function registerAppServerExecControlTools(
   pi: ExtensionAPI,
   sessions: CodexAppServerExecSessionManager,
 ): void {
@@ -833,7 +833,12 @@ export function registerAppServerExecTools(
       };
     },
   });
+}
 
+export function registerAppServerApplyPatchTool(
+  pi: ExtensionAPI,
+  sessions: CodexAppServerExecSessionManager,
+): void {
   pi.registerTool({
     name: 'apply_patch',
     label: 'apply_patch',
@@ -857,4 +862,12 @@ export function registerAppServerExecTools(
       };
     },
   });
+}
+
+export function registerAppServerExecTools(
+  pi: ExtensionAPI,
+  sessions: CodexAppServerExecSessionManager,
+): void {
+  registerAppServerExecControlTools(pi, sessions);
+  registerAppServerApplyPatchTool(pi, sessions);
 }

@@ -440,7 +440,6 @@ export function findGlobalPackagePath(
     packageManagerCommand?: PackageManagerCommand;
   } = {},
 ): string | undefined {
-  const cwd = options.cwd ?? process.cwd();
   // Global package-manager commands should not inherit the project cwd. pnpm,
   // for example, warns when package.json contains npm-style `workspaces`, even
   // for `pnpm root -g` / `pnpm list -g`. Run these global lookups from a neutral

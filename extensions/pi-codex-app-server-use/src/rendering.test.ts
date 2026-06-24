@@ -522,6 +522,36 @@ describe('tool renderers', () => {
     expect(renderLines(slowCollapsed)).toEqual(['Took 1.2s']);
   });
 
+  test('renders multi-file sed range exec calls as read operations and suppresses output', () => {
+    const command =
+      "sed -n '1,120p' ~/.claude/agents/commit-message-generator.md ~/.claude/agents/gather-git-diff-context.md";
+    const state: Record<string, unknown> = {};
+    const call = renderExecCommandCall({ cmd: command }, theme, { state });
+    const result = renderExecCommandResult(
+      {
+        content: [{ type: 'text', text: 'raw sed output that should not be shown collapsed' }],
+        details: {
+          chunk_id: 'abc123',
+          wall_time_seconds: 0.2,
+          command,
+          output: 'raw sed output that should not be shown collapsed',
+          original_token_count: 1_800,
+          exit_code: 0,
+        },
+      },
+      { expanded: false, isPartial: false },
+      theme,
+      { args: { cmd: command }, state },
+    );
+
+    expect(renderLines(call)).toEqual([
+      'exec 2 operations · 1.8k tokens',
+      '✓ read   ~/.claude/agents/commit-message-generator.md:1-120 · 120L',
+      '✓ read   ~/.claude/agents/gather-git-diff-context.md:1-120 · 120L',
+    ]);
+    expect(renderLines(result)).toEqual([]);
+  });
+
   test('adds token count to multi-read operation headers when result metadata is available', () => {
     const command = "sed -n '1,20p' src/a.ts && sed -n '40,80p' src/b.ts";
     const state: Record<string, unknown> = {};

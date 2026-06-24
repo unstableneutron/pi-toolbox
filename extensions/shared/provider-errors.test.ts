@@ -121,7 +121,7 @@ describe('shared provider error classification', () => {
       error: {
         type: 'invalid_request_error',
         code: 'context_length_exceeded',
-        message: 'This model\'s maximum context length was exceeded. Please reduce your input.',
+        message: "This model's maximum context length was exceeded. Please reduce your input.",
         param: 'input',
       },
     };
@@ -161,7 +161,7 @@ describe('shared provider error classification', () => {
   test.each([
     'model_context_window_exceeded: the request is too large for the model context window.',
     'prompt too long; exceeded max context length 131072 tokens.',
-    'This model\'s maximum context length was exceeded. Please reduce your input.',
+    "This model's maximum context length was exceeded. Please reduce your input.",
     'context window exceeded while preparing the request.',
   ])('classifies context-overflow alias as terminal request error: %s', (errorMessage) => {
     const message = {

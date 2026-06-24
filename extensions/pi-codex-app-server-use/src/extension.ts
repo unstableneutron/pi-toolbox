@@ -21,7 +21,8 @@ import {
   APP_SERVER_EXEC_CONTROL_TOOL_NAMES,
   CodexAppServerExecSessionManager,
   getDefaultCodexRuntimeShell,
-  registerAppServerExecTools,
+  registerAppServerApplyPatchTool,
+  registerAppServerExecControlTools,
   REPLACED_PI_LOCAL_TOOL_NAMES,
   shouldUseAppServerExecTools,
 } from './exec-tools';
@@ -143,6 +144,45 @@ function buildCodexExecSystemPrompt(basePrompt: string): string {
   return injectShell(injectGuidelines(basePrompt));
 }
 
+function asStringRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+}
+
+function normalizedCommandEcho(text: string): string {
+  let trimmed = text.trim();
+  const fenced = /^```(?:bash|sh|shell)?\s*\n([\s\S]*?)\n```$/i.exec(trimmed);
+  if (fenced) trimmed = fenced[1]!.trim();
+  const codeSpan = /^`([^`]+)`$/.exec(trimmed);
+  if (codeSpan) trimmed = codeSpan[1]!.trim();
+  return trimmed.replace(/\s+/g, ' ');
+}
+
+function stripPureExecCommandEchoText(message: unknown): Record<string, unknown> | undefined {
+  const record = asStringRecord(message);
+  if (record.role !== 'assistant' || !Array.isArray(record.content)) return undefined;
+
+  const commandEchoes = new Set<string>();
+  for (const block of record.content) {
+    const content = asStringRecord(block);
+    if (content.type !== 'toolCall' || content.name !== 'exec_command') continue;
+    const args = asStringRecord(content.arguments);
+    const command = typeof args.cmd === 'string' ? args.cmd : args.command;
+    if (typeof command === 'string') commandEchoes.add(normalizedCommandEcho(command));
+  }
+  if (commandEchoes.size === 0) return undefined;
+
+  let changed = false;
+  const content = record.content.filter((block) => {
+    const item = asStringRecord(block);
+    if (item.type !== 'text' || typeof item.text !== 'string') return true;
+    if (!commandEchoes.has(normalizedCommandEcho(item.text))) return true;
+    changed = true;
+    return false;
+  });
+
+  return changed ? { ...record, content } : undefined;
+}
+
 function formatExecSessionList(
   sessions: ReturnType<CodexAppServerExecSessionManager['listSessions']>,
 ): string {
@@ -171,7 +211,8 @@ export default function piCodexAppServerUseExtension(
   const execSessions = new CodexAppServerExecSessionManager();
   const checkHealth = deps.checkAppServerControlSocket ?? checkCodexAppServerControlSocket;
   let computerUseToolsRegistered = false;
-  let execToolsRegistered = false;
+  let execControlToolsRegistered = false;
+  let execExtraToolsRegistered = false;
   let execWasActive = false;
   let previousToolNames: string[] | undefined;
   let lastUnavailableWarningKey: string | undefined;
@@ -184,12 +225,20 @@ export default function piCodexAppServerUseExtension(
     computerUseToolsRegistered = true;
   }
 
-  function ensureExecToolsRegistered(): void {
-    if (execToolsRegistered) return;
-    registerAppServerExecTools(pi, execSessions);
-    registerViewImageTool(pi);
-    execToolsRegistered = true;
+  function ensureExecControlToolsRegistered(): void {
+    if (execControlToolsRegistered) return;
+    registerAppServerExecControlTools(pi, execSessions);
+    execControlToolsRegistered = true;
   }
+
+  function ensureExecExtraToolsRegistered(): void {
+    if (execExtraToolsRegistered) return;
+    registerAppServerApplyPatchTool(pi, execSessions);
+    registerViewImageTool(pi);
+    execExtraToolsRegistered = true;
+  }
+
+  ensureExecControlToolsRegistered();
 
   function warnIfUnavailable(
     ctx: ExtensionContext,
@@ -246,7 +295,7 @@ export default function piCodexAppServerUseExtension(
 
     if (execActive) {
       const codexExecToolNames = getCodexExecToolNames(ctx);
-      ensureExecToolsRegistered();
+      ensureExecExtraToolsRegistered();
       if (!execWasActive) {
         previousToolNames = withoutTools(activeTools, APP_SERVER_EXEC_CONTROL_TOOL_NAMES);
       }
@@ -289,6 +338,11 @@ export default function piCodexAppServerUseExtension(
 
   pi.on('model_select', async (_event, ctx) => {
     await syncActiveTools(ctx);
+  });
+
+  pi.on('message_end', async (event) => {
+    const message = stripPureExecCommandEchoText(event.message);
+    return message ? { message: message as unknown as typeof event.message } : undefined;
   });
 
   pi.on('resources_discover', async (_event, ctx) => {

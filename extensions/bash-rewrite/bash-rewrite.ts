@@ -1278,21 +1278,15 @@ function classifyFd(tokens: Token[]): RewriteDecision | null {
  * correctly becomes `read(path=FILE, offset=10, limit=5)`.
  */
 function classifySedRange(tokens: Token[]): RewriteDecision | null {
-  const strs = asStrings(tokens);
-  if (!strs || strs[0] !== 'sed') return null;
-  if (strs.length !== 4) return null; // sed -n EXPR FILE — exactly 4 tokens
-  if (strs[1] !== '-n') return null;
-  const expr = strs[2]!;
-  const m = /^(\d+)(?:,(\d+))?p$/.exec(expr);
-  if (!m) return null;
-  const start = Number(m[1]);
-  const end = m[2] !== undefined ? Number(m[2]) : start;
-  if (start < 1 || end < start) return null;
-  const path = strs[3]!;
-  if (path.startsWith('-')) return null;
+  const operations = readOperationsFromSedRange(tokens);
+  if (!operations || operations.length !== 1) return null;
+  const operation = operations[0]!;
+  const params: Record<string, unknown> = { path: operation.path };
+  if (operation.offset !== undefined) params.offset = operation.offset;
+  if (operation.limit !== undefined) params.limit = operation.limit;
   return {
     tool: 'read',
-    params: { path, offset: start, limit: end - start + 1 },
+    params,
     recognizer: 'sed-range-print',
   };
 }
@@ -1516,7 +1510,28 @@ function readOperationFromDecision(decision: RewriteDecision): BashReadOperation
   return operation;
 }
 
-function classifyReadOperationSegment(tokens: Token[]): BashReadOperation | null {
+function readOperationsFromSedRange(tokens: Token[]): BashReadOperation[] | null {
+  const strs = asStrings(tokens);
+  if (!strs || strs[0] !== 'sed') return null;
+  if (strs.length < 4) return null; // sed -n EXPR FILE [FILE ...]
+  if (strs[1] !== '-n') return null;
+  const expr = strs[2]!;
+  const m = /^(\d+)(?:,(\d+))?p$/.exec(expr);
+  if (!m) return null;
+  const start = Number(m[1]);
+  const end = m[2] !== undefined ? Number(m[2]) : start;
+  if (start < 1 || end < start) return null;
+  const paths = strs.slice(3);
+  if (paths.some((p) => p.length === 0 || p.startsWith('-'))) return null;
+  return paths.map((p) => ({
+    path: p,
+    offset: start,
+    limit: end - start + 1,
+    recognizer: 'sed-range-print',
+  }));
+}
+
+function classifyReadOperationSegment(tokens: Token[]): BashReadOperation[] | null {
   const stripped = stripTrivialTrailingRedirects(tokens);
   if (stripped.length === 0) return null;
 
@@ -1530,8 +1545,11 @@ function classifyReadOperationSegment(tokens: Token[]): BashReadOperation | null
   if (strippedStages.some(hasUnsupportedRedirectOperator)) return null;
 
   if (strippedStages.length === 1) {
+    const sedOperations = readOperationsFromSedRange(strippedStages[0]!);
+    if (sedOperations) return sedOperations;
     const decision = classifySingleStage(strippedStages[0]!);
-    return decision ? readOperationFromDecision(decision) : null;
+    const operation = decision ? readOperationFromDecision(decision) : null;
+    return operation ? [operation] : null;
   }
 
   if (strippedStages.length !== 2) return null;
@@ -1540,12 +1558,14 @@ function classifyReadOperationSegment(tokens: Token[]): BashReadOperation | null
   if (sedRange) {
     const catDecision = classifyCat(strippedStages[0]!);
     if (catDecision && catDecision.recognizer === 'cat-file') {
-      return {
-        path: catDecision.params.path as string,
-        offset: sedRange.offset,
-        limit: sedRange.limit,
-        recognizer: 'cat-sed-range',
-      };
+      return [
+        {
+          path: catDecision.params.path as string,
+          offset: sedRange.offset,
+          limit: sedRange.limit,
+          recognizer: 'cat-sed-range',
+        },
+      ];
     }
   }
 
@@ -1553,11 +1573,12 @@ function classifyReadOperationSegment(tokens: Token[]): BashReadOperation | null
   if (limit === null) return null;
   const decision = classifySingleStage(strippedStages[0]!);
   if (!decision) return null;
-  return readOperationFromDecision({
+  const operation = readOperationFromDecision({
     ...decision,
     params: { ...decision.params, limit },
     recognizer: `${decision.recognizer}+head`,
   });
+  return operation ? [operation] : null;
 }
 
 function appendReadOperationSegments(target: Token[][], tokens: Token[]): boolean {
@@ -1658,9 +1679,9 @@ export function tryRewriteBashReadOperations(
   const operations: BashReadOperation[] = [];
   for (const segment of chainSegments) {
     if (isPrintfSectionHeader(segment)) continue;
-    const operation = classifyReadOperationSegment(segment);
-    if (!operation) return null;
-    operations.push(operation);
+    const segmentOperations = classifyReadOperationSegment(segment);
+    if (!segmentOperations) return null;
+    operations.push(...segmentOperations);
   }
   if (operations.length === 0) return null;
 

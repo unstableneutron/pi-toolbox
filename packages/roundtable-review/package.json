@@ -4,10 +4,10 @@
   "private": true,
   "description": "Standalone Pi SDK-powered roundtable reviewer CLI.",
   "license": "MIT",
-  "type": "module",
   "bin": {
     "roundtable-review": "./bin/roundtable-review.js"
   },
+  "type": "module",
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.79.10"
   },

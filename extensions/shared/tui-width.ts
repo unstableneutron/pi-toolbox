@@ -170,10 +170,7 @@ export function sanitizeBinaryOutput(text: string, preserveBackspace = false): s
     .join('');
 }
 
-export function isRenderableCodePoint(
-  code: number | undefined,
-  preserveBackspace = false,
-): boolean {
+function isRenderableCodePoint(code: number | undefined, preserveBackspace = false): boolean {
   if (code === undefined) return false;
   if (code === 0x09 || code === 0x0a || code === 0x0d) return true;
   if (preserveBackspace && code === 0x08) return true;

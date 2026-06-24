@@ -9,7 +9,7 @@ import {
   type TruncationResult,
 } from '@earendil-works/pi-coding-agent';
 
-export const DEFAULT_MAX_OUTPUT_TOKENS = 10_000;
+const DEFAULT_MAX_OUTPUT_TOKENS = 10_000;
 
 export interface ExecOutputSnapshot {
   output: string;

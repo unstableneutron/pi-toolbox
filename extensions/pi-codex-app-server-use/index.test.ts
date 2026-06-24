@@ -85,7 +85,88 @@ describe('pi-codex-app-server-use extension commands and activation', () => {
     expect(notifications).toEqual([['No AppServer exec sessions are running.', 'info']]);
   });
 
-  test('keeps all optional tools inactive by default', async () => {
+  test('registers exec renderers before session_start for reload history rendering', () => {
+    const tools = new Map<string, { renderCall?: unknown; renderResult?: unknown }>();
+    const pi = {
+      getActiveTools: () => [],
+      registerTool(tool: { name: string; renderCall?: unknown; renderResult?: unknown }) {
+        tools.set(tool.name, tool);
+      },
+      registerCommand() {},
+      on() {},
+      setActiveTools() {},
+    };
+
+    registerExtensionWithHealthyAppServer(pi as any);
+
+    expect(typeof tools.get('exec_command')?.renderCall).toBe('function');
+    expect(typeof tools.get('exec_command')?.renderResult).toBe('function');
+    expect(typeof tools.get('write_stdin')?.renderCall).toBe('function');
+    expect(typeof tools.get('write_stdin')?.renderResult).toBe('function');
+    expect(tools.has('apply_patch')).toBe(false);
+  });
+
+  test('strips pure exec command echo text before persisting assistant tool calls', async () => {
+    let messageEnd:
+      | ((event: { message: unknown }) => Promise<{ message: any } | undefined>)
+      | undefined;
+    const pi = {
+      getActiveTools: () => [],
+      registerTool() {},
+      registerCommand() {},
+      on(event: string, handler: typeof messageEnd) {
+        if (event === 'message_end') messageEnd = handler;
+      },
+      setActiveTools() {},
+    };
+    const command =
+      "sed -n '1,120p' ~/.claude/agents/commit-message-generator.md ~/.claude/agents/gather-git-diff-context.md";
+
+    registerExtensionWithHealthyAppServer(pi as any);
+    const result = await messageEnd?.({
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: `\`${command}\`` },
+          { type: 'toolCall', name: 'exec_command', arguments: { cmd: command } },
+        ],
+      },
+    });
+
+    expect(result?.message.content).toEqual([
+      { type: 'toolCall', name: 'exec_command', arguments: { cmd: command } },
+    ]);
+  });
+
+  test('preserves non-echo assistant text before exec tool calls', async () => {
+    let messageEnd:
+      | ((event: { message: unknown }) => Promise<{ message: any } | undefined>)
+      | undefined;
+    const pi = {
+      getActiveTools: () => [],
+      registerTool() {},
+      registerCommand() {},
+      on(event: string, handler: typeof messageEnd) {
+        if (event === 'message_end') messageEnd = handler;
+      },
+      setActiveTools() {},
+    };
+
+    registerExtensionWithHealthyAppServer(pi as any);
+    const result = await messageEnd?.({
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'I’ll inspect the agent definitions.' },
+          { type: 'toolCall', name: 'exec_command', arguments: { cmd: 'sed -n 1,2p a b' } },
+        ],
+      },
+    });
+
+    expect(result).toBeUndefined();
+  });
+
+  test('keeps optional tools inactive by default while registering exec renderers', async () => {
     const commands = new Map<string, unknown>();
     const tools: string[] = [];
     let activeTools = ['read', 'bash'];
@@ -114,7 +195,7 @@ describe('pi-codex-app-server-use extension commands and activation', () => {
     await sessionStart?.({ type: 'session_start' }, makeSessionContext(root));
 
     expect(commands.has('codex-app-server')).toBe(true);
-    expect(tools).toEqual([]);
+    expect(tools).toEqual(['exec_command', 'write_stdin']);
     expect(activeTools).toEqual(['read', 'bash']);
   });
 
@@ -143,11 +224,13 @@ describe('pi-codex-app-server-use extension commands and activation', () => {
     };
 
     registerExtensionWithHealthyAppServer(pi as any);
-    expect(tools).toEqual([]);
+    expect(tools).toEqual(['exec_command', 'write_stdin']);
 
     await sessionStart?.({ type: 'session_start' }, makeSessionContext(root));
 
     expect(tools).toEqual([
+      'exec_command',
+      'write_stdin',
       'computer_list_apps',
       'computer_get_app_state',
       'computer_click',
@@ -161,7 +244,20 @@ describe('pi-codex-app-server-use extension commands and activation', () => {
       'codex_browser_list',
       'codex_browser_eval',
     ]);
-    expect(activeTools).toEqual(tools);
+    expect(activeTools).toEqual([
+      'computer_list_apps',
+      'computer_get_app_state',
+      'computer_click',
+      'computer_drag',
+      'computer_press_key',
+      'computer_type_text',
+      'computer_scroll',
+      'computer_select_text',
+      'computer_set_value',
+      'computer_perform_secondary_action',
+      'codex_browser_list',
+      'codex_browser_eval',
+    ]);
   });
 
   test('adds exec tools alongside existing tools in enabled mode for gated models', async () => {
@@ -549,7 +645,7 @@ describe('pi-codex-app-server-use extension commands and activation', () => {
       },
     );
 
-    expect(tools).toEqual([]);
+    expect(tools).toEqual(['exec_command', 'write_stdin']);
     expect(activeTools).toEqual([]);
     expect(notifications).toHaveLength(1);
     expect(notifications[0]).toContain(

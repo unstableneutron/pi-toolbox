@@ -1,13 +1,8 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "tags": ["-lintignore"],
-  "ignoreBinaries": ["aubr"],
-  "ignoreDependencies": [
-    "@earendil-works/pi-agent-core",
-    "@aws-sdk/client-bedrock-runtime",
-    "partial-json",
-    "tsx"
-  ],
+  "ignoreBinaries": ["aube", "aubr"],
+  "ignoreDependencies": ["@earendil-works/pi-agent-core", "@aws-sdk/client-bedrock-runtime", "tsx"],
   "ignoreFiles": ["extensions/pi-fff-search/fff-router.d.ts"],
   "ignoreExportsUsedInFile": {
     "interface": true,

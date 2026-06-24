@@ -961,6 +961,31 @@ sed -n '1,160p' src/workspace/git/discovery.rs`);
     ]);
   });
 
+  test('extracts multi-file sed ranges as separate read operations', () => {
+    const r = readOperations(
+      "sed -n '1,120p' ~/.claude/agents/commit-message-generator.md ~/.claude/agents/gather-git-diff-context.md",
+    );
+
+    expect(r?.operations).toEqual([
+      {
+        path: '~/.claude/agents/commit-message-generator.md',
+        offset: 1,
+        limit: 120,
+        recognizer: 'sed-range-print',
+      },
+      {
+        path: '~/.claude/agents/gather-git-diff-context.md',
+        offset: 1,
+        limit: 120,
+        recognizer: 'sed-range-print',
+      },
+    ]);
+  });
+
+  test('keeps public rewrite conservative for multi-file sed ranges', () => {
+    expect(rewrite("sed -n '1,20p' src/a.ts src/b.ts")).toBeNull();
+  });
+
   test('rejects redirected printf typo and redirected reads', () => {
     expect(
       readOperations(

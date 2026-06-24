@@ -801,7 +801,7 @@ async function createSessionRunner({
   approve,
   loadExtensions,
   loadSkills,
-  noTools = undefined,
+  noTools,
   verbose = false,
 }) {
   const {
@@ -934,7 +934,9 @@ async function validateModelSpecs(modelSpecs) {
     try {
       resolveModel(modelRegistry, modelSpec);
     } catch (error) {
-      errors.push(`${modelSpec}: ${error.message}`);
+      const spec = String(modelSpec);
+      const message = error instanceof Error ? error.message : String(error);
+      errors.push(`${spec}: ${message}`);
     }
   }
 
