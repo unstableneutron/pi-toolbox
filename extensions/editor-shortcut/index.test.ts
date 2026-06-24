@@ -13,6 +13,11 @@ const models = [
   { provider: 'anthropic', id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6' },
   { provider: 'facade', id: 'global.anthropic.claude-sonnet-4-6', name: 'claude-sonnet-4-6' },
   { provider: 'facade', id: 'global.anthropic.claude-haiku-4-5', name: 'claude-haiku-4-5' },
+  { provider: 'openai-codex', id: 'gpt-5.5', name: 'GPT 5.5 Codex' },
+  { provider: 'openai', id: 'gpt-5.4-nomoderation', name: 'GPT 5.4 no moderation' },
+  { provider: 'openai', id: 'gpt-5.5-nomoderation', name: 'GPT 5.5 no moderation' },
+  { provider: 'anthropic', id: 'claude-opus-4-5', name: 'Claude Opus 4.5' },
+  { provider: 'anthropic', id: 'claude-opus-4-8', name: 'Claude Opus 4.8' },
 ] as any[];
 
 beforeEach(() => {
@@ -89,7 +94,7 @@ function createAutocompleteOptions() {
 
 describe('parseEditorShortcutText', () => {
   test('parses leading model and thinking directives before prompt text', () => {
-    expect(parseEditorShortcutText('/model:facade\n/thinking:high\nDo the work')).toEqual({
+    expect(parseEditorShortcutText('$model:facade\n$thinking:high\nDo the work')).toEqual({
       directives: [
         { command: 'model', value: 'facade' },
         { command: 'thinking', value: 'high' },
@@ -99,33 +104,43 @@ describe('parseEditorShortcutText', () => {
   });
 
   test('parses inline directives and removes them from prompt text', () => {
-    expect(parseEditorShortcutText('Please explain\n/model:sonnet')).toEqual({
+    expect(parseEditorShortcutText('Please explain\n$model:sonnet')).toEqual({
       directives: [{ command: 'model', value: 'sonnet' }],
       promptText: 'Please explain',
     });
 
-    expect(parseEditorShortcutText('Please /thinking:high explain this')).toEqual({
+    expect(parseEditorShortcutText('Please $thinking:high explain this')).toEqual({
       directives: [{ command: 'thinking', value: 'high' }],
+      promptText: 'Please explain this',
+    });
+
+    expect(parseEditorShortcutText('Please $fast:on explain this')).toEqual({
+      directives: [{ command: 'fast', value: 'on' }],
+      promptText: 'Please explain this',
+    });
+
+    expect(parseEditorShortcutText('Please $fast explain this')).toEqual({
+      directives: [{ command: 'fast', value: 'toggle' }],
       promptText: 'Please explain this',
     });
   });
 
-  test('accepts /reasoning as a thinking alias', () => {
-    expect(parseEditorShortcutText('/reasoning:xhigh')?.directives).toEqual([
-      { command: 'thinking', value: 'xhigh' },
-    ]);
+  test('does not accept $reasoning as a thinking alias', () => {
+    expect(parseEditorShortcutText('$reasoning:xhigh')).toBeNull();
   });
 
-  test('does not treat arbitrary words after /thinking as directives', () => {
-    expect(parseEditorShortcutText('/thinking and then explain')).toBeNull();
-    expect(parseEditorShortcutText('Please /thinking and then explain')).toBeNull();
-    expect(parseEditorShortcutText('Please /thinking:and then explain')).toBeNull();
+  test('does not treat arbitrary words after $thinking as directives', () => {
+    expect(parseEditorShortcutText('$thinking and then explain')).toBeNull();
+    expect(parseEditorShortcutText('Please $thinking and then explain')).toBeNull();
+    expect(parseEditorShortcutText('Please $thinking:and then explain')).toBeNull();
   });
 });
 
 describe('resolveEditorShortcutModel', () => {
-  test('resolves configured shorthand aliases', () => {
-    expect(resolveEditorShortcutModel('sonnet', models, undefined)).toBe(models[1]);
+  test('does not resolve hardcoded shorthand aliases', () => {
+    expect(resolveEditorShortcutModel('sonnet', models, undefined)).toEqual({
+      error: expect.stringContaining('Ambiguous model "sonnet"'),
+    });
   });
 
   test('resolves provider-only query to same current model on that provider', () => {
@@ -140,33 +155,49 @@ describe('resolveEditorShortcutModel', () => {
 });
 
 describe('createEditorShortcutAutocompleteProvider', () => {
-  test('adds /thinking to slash command suggestions without replacing delegated commands', async () => {
-    const delegated = { items: [{ value: 'model', label: 'model' }], prefix: '/thi' };
+  test('preserves native slash-command autocomplete triggers', () => {
+    const current = createDelegatingProvider();
+    current.triggerCharacters = ['@'];
+    const provider = createEditorShortcutAutocompleteProvider(current, () => models);
+
+    expect(provider.triggerCharacters).toEqual(['@', '/', '$']);
+  });
+
+  test('adds matching $thinking shortcut suggestions before delegated items', async () => {
+    const delegated = { items: [{ value: 'thinking-skill', label: 'thinking-skill' }], prefix: '$thi' };
     const current = createDelegatingProvider(delegated);
     const provider = createEditorShortcutAutocompleteProvider(current, () => models);
 
     const result = await provider.getSuggestions(
-      ['/thi'],
+      ['Please $thi'],
       0,
-      '/thi'.length,
+      'Please $thi'.length,
       createAutocompleteOptions(),
     );
 
-    expect(result?.items.map((item) => item.value)).toEqual(
-      expect.arrayContaining(['model:', 'thinking:']),
-    );
+    const values = result?.items.map((item) => item.value) ?? [];
+    expect(values.slice(0, 7)).toEqual([
+      'thinking:',
+      'thinking:off',
+      'thinking:minimal',
+      'thinking:low',
+      'thinking:medium',
+      'thinking:high',
+      'thinking:xhigh',
+    ]);
+    expect(values).toContain('thinking-skill');
     expect(current.getSuggestions).toHaveBeenCalledTimes(1);
   });
 
-  test('prefers canonical /model: over delegated /model when completing /mod', async () => {
-    const delegated = { items: [{ value: 'model', label: 'model' }], prefix: '/mod' };
+  test('prefers canonical $model: over delegated model items when completing $mod', async () => {
+    const delegated = { items: [{ value: 'model', label: 'model' }], prefix: '$mod' };
     const current = createDelegatingProvider(delegated);
     const provider = createEditorShortcutAutocompleteProvider(current, () => models);
 
     const result = await provider.getSuggestions(
-      ['/mod'],
+      ['Please $mod'],
       0,
-      '/mod'.length,
+      'Please $mod'.length,
       createAutocompleteOptions(),
     );
 
@@ -174,29 +205,97 @@ describe('createEditorShortcutAutocompleteProvider', () => {
     expect(result?.items.map((item) => item.value)).not.toContain('model');
   });
 
-  test('adds /thinking suggestions at whitespace-delimited inline slash tokens', async () => {
-    const current = createDelegatingProvider();
+  test('handles leading $model shortcut suggestions', async () => {
+    const delegated = { items: [{ value: 'model-skill', label: 'model-skill' }], prefix: '$mod' };
+    const current = createDelegatingProvider(delegated);
     const provider = createEditorShortcutAutocompleteProvider(current, () => models);
 
     const result = await provider.getSuggestions(
-      ['Please /think'],
+      ['$mod'],
       0,
-      'Please /think'.length,
+      '$mod'.length,
       createAutocompleteOptions(),
     );
 
-    expect(result?.prefix).toBe('/think');
-    expect(result?.items.map((item) => item.value)).toContain('thinking:');
+    const values = result?.items.map((item) => item.value) ?? [];
+    expect(values[0]).toBe('model:');
+    expect(values).toContain('model:facade/global.anthropic.claude-sonnet-4-6');
+    expect(values).toContain('model-skill');
   });
 
-  test('returns thinking level suggestions for /thinking arguments', async () => {
+  test('suggests precomputed thinking shortcuts from top-level fuzzy input', async () => {
     const current = createDelegatingProvider();
     const provider = createEditorShortcutAutocompleteProvider(current, () => models);
 
     const result = await provider.getSuggestions(
-      ['/thinking:h'],
+      ['$xh'],
       0,
-      '/thinking:h'.length,
+      '$xh'.length,
+      createAutocompleteOptions(),
+    );
+
+    expect(result?.prefix).toBe('$xh');
+    expect(result?.items.map((item) => item.value)).toContain('thinking:xhigh');
+  });
+
+  test('suggests precomputed model shortcuts from top-level fuzzy input', async () => {
+    const current = createDelegatingProvider();
+    const provider = createEditorShortcutAutocompleteProvider(current, () => models);
+
+    const result = await provider.getSuggestions(
+      ['$fa'],
+      0,
+      '$fa'.length,
+      createAutocompleteOptions(),
+    );
+
+    expect(result?.prefix).toBe('$fa');
+    expect(result?.items.map((item) => item.value)).toContain(
+      'model:facade/global.anthropic.claude-sonnet-4-6',
+    );
+  });
+
+  test('prefers $skill: over delegated skill-looking suggestions', async () => {
+    const delegated = { items: [{ value: 'skill-browser', label: 'skill-browser' }], prefix: '$ski' };
+    const current = createDelegatingProvider(delegated);
+    const provider = createEditorShortcutAutocompleteProvider(current, () => models);
+
+    const result = await provider.getSuggestions(
+      ['$ski'],
+      0,
+      '$ski'.length,
+      createAutocompleteOptions(),
+    );
+
+    const values = result?.items.map((item) => item.value) ?? [];
+    expect(values[0]).toBe('skill:');
+    expect(values).toContain('skill-browser');
+  });
+
+  test('adds $thinking suggestions at whitespace-delimited inline shortcut tokens', async () => {
+    const current = createDelegatingProvider();
+    const provider = createEditorShortcutAutocompleteProvider(current, () => models);
+
+    const result = await provider.getSuggestions(
+      ['Please $think'],
+      0,
+      'Please $think'.length,
+      createAutocompleteOptions(),
+    );
+
+    expect(result?.prefix).toBe('$think');
+    expect(result?.items.map((item) => item.value)).toContain('thinking:');
+  });
+
+  test('returns thinking level suggestions for leading $thinking arguments', async () => {
+    const delegated = { items: [{ value: 'native-thinking', label: 'native-thinking' }], prefix: '$thinking:h' };
+    const current = createDelegatingProvider(delegated);
+    const provider = createEditorShortcutAutocompleteProvider(current, () => models);
+
+    const result = await provider.getSuggestions(
+      ['$thinking:h'],
+      0,
+      '$thinking:h'.length,
       createAutocompleteOptions(),
     );
 
@@ -205,14 +304,14 @@ describe('createEditorShortcutAutocompleteProvider', () => {
     expect(current.getSuggestions).not.toHaveBeenCalled();
   });
 
-  test('returns thinking level suggestions for inline /thinking arguments', async () => {
+  test('returns thinking level suggestions for inline $thinking arguments', async () => {
     const current = createDelegatingProvider();
     const provider = createEditorShortcutAutocompleteProvider(current, () => models);
 
     const result = await provider.getSuggestions(
-      ['Please /thinking:h'],
+      ['Please $thinking:h'],
       0,
-      'Please /thinking:h'.length,
+      'Please $thinking:h'.length,
       createAutocompleteOptions(),
     );
 
@@ -220,63 +319,254 @@ describe('createEditorShortcutAutocompleteProvider', () => {
     expect(result?.items.map((item) => item.value)).toEqual(expect.arrayContaining(['high']));
   });
 
-  test('returns provider/model/alias suggestions for /model arguments', async () => {
+  test('returns provider/model suggestions for $model arguments without aliases', async () => {
     const current = createDelegatingProvider();
     const provider = createEditorShortcutAutocompleteProvider(current, () => models);
 
     const result = await provider.getSuggestions(
-      ['/model:fa'],
+      ['Please $model:fa'],
       0,
-      '/model:fa'.length,
+      'Please $model:fa'.length,
       createAutocompleteOptions(),
     );
 
     expect(result?.prefix).toBe('fa');
-    expect(result?.items.map((item) => item.value)).toContain('facade');
+    expect(result?.items.map((item) => item.value)).toContain(
+      'facade/global.anthropic.claude-sonnet-4-6',
+    );
+    expect(result?.items.map((item) => item.value)).not.toContain('sonnet');
   });
 
-  test('applies slash command and argument completions inline', () => {
+  test('sorts matching model suggestions newest first', async () => {
+    const current = createDelegatingProvider();
+    const provider = createEditorShortcutAutocompleteProvider(current, () => models);
+
+    const nomod = await provider.getSuggestions(
+      ['$model:nomod'],
+      0,
+      '$model:nomod'.length,
+      createAutocompleteOptions(),
+    );
+    expect(nomod?.items.map((item) => item.value).slice(0, 2)).toEqual([
+      'openai/gpt-5.5-nomoderation',
+      'openai/gpt-5.4-nomoderation',
+    ]);
+
+    const opus = await provider.getSuggestions(
+      ['$model:claude-opus'],
+      0,
+      '$model:claude-opus'.length,
+      createAutocompleteOptions(),
+    );
+    expect(opus?.items.map((item) => item.value).slice(0, 2)).toEqual([
+      'anthropic/claude-opus-4-8',
+      'anthropic/claude-opus-4-5',
+    ]);
+  });
+
+  test('suggests only the next fast mode state at leading shortcut commands', async () => {
+    const current = createDelegatingProvider();
+    const provider = createEditorShortcutAutocompleteProvider(current, () => models, () => false);
+
+    const result = await provider.getSuggestions(
+      ['$fa'],
+      0,
+      '$fa'.length,
+      createAutocompleteOptions(),
+    );
+
+    expect(result?.items.map((item) => item.value)).toContain('fast:on');
+    expect(result?.items.map((item) => item.value)).not.toContain('fast:off');
+    expect(result?.items.map((item) => item.value)).not.toContain('thinking:');
+  });
+
+  test('suggests explicit fast off shortcut completion when fast mode is enabled', async () => {
+    const current = createDelegatingProvider();
+    const provider = createEditorShortcutAutocompleteProvider(current, () => models, () => true);
+
+    const result = await provider.getSuggestions(
+      ['Please $fast'],
+      0,
+      'Please $fast'.length,
+      createAutocompleteOptions(),
+    );
+
+    expect(result?.items.map((item) => item.value)).toContain('fast:off');
+    expect(result?.items.map((item) => item.value)).not.toContain('fast:on');
+  });
+
+  test('does not suggest fast shortcuts when the current model is unsupported', async () => {
+    const current = createDelegatingProvider();
+    const provider = createEditorShortcutAutocompleteProvider(
+      current,
+      () => models,
+      () => false,
+      () => false,
+    );
+
+    const result = await provider.getSuggestions(
+      ['$fast'],
+      0,
+      '$fast'.length,
+      createAutocompleteOptions(),
+    );
+
+    expect(result?.items.map((item) => item.value) ?? []).not.toContain('fast:on');
+    expect(result?.items.map((item) => item.value) ?? []).not.toContain('fast:off');
+  });
+
+  test('applies shortcut command and argument completions inline', () => {
     const current = createDelegatingProvider();
     const provider = createEditorShortcutAutocompleteProvider(current, () => models);
 
     expect(
       provider.applyCompletion(
-        ['/thi'],
+        ['$xh'],
         0,
-        '/thi'.length,
-        { value: 'thinking:', label: 'thinking:' },
-        '/thi',
+        '$xh'.length,
+        { value: 'thinking:xhigh', label: 'thinking:xhigh' },
+        '$xh',
       ),
-    ).toMatchObject({ lines: ['/thinking:'], cursorCol: '/thinking:'.length });
+    ).toMatchObject({ lines: ['$thinking:xhigh '], cursorCol: '$thinking:xhigh '.length });
 
     expect(
       provider.applyCompletion(
-        ['Please /think'],
+        ['$thi'],
         0,
-        'Please /think'.length,
+        '$thi'.length,
         { value: 'thinking:', label: 'thinking:' },
-        '/think',
+        '$thi',
       ),
-    ).toMatchObject({ lines: ['Please /thinking:'], cursorCol: 'Please /thinking:'.length });
+    ).toMatchObject({ lines: ['$thinking:'], cursorCol: '$thinking:'.length });
 
     expect(
       provider.applyCompletion(
-        ['/thinking:h now'],
+        ['Please $think'],
         0,
-        '/thinking:h'.length,
+        'Please $think'.length,
+        { value: 'thinking:', label: 'thinking:' },
+        '$think',
+      ),
+    ).toMatchObject({ lines: ['Please $thinking:'], cursorCol: 'Please $thinking:'.length });
+
+    expect(
+      provider.applyCompletion(
+        ['$thinking:h now'],
+        0,
+        '$thinking:h'.length,
         { value: 'high', label: 'high' },
         'h',
       ),
-    ).toMatchObject({ lines: ['/thinking:high now'], cursorCol: '/thinking:high'.length });
+    ).toMatchObject({ lines: ['$thinking:high now'], cursorCol: '$thinking:high'.length });
+
+    expect(
+      provider.applyCompletion(
+        ['$fa'],
+        0,
+        '$fa'.length,
+        { value: 'fast:on', label: 'fast:on' },
+        '$fa',
+      ),
+    ).toMatchObject({ lines: ['$fast:on '], cursorCol: '$fast:on '.length });
+  });
+
+  test('delegates native slash command completions unchanged', () => {
+    const delegated = { lines: ['/model '], cursorLine: 0, cursorCol: '/model '.length };
+    const current = createDelegatingProvider();
+    current.applyCompletion.mockReturnValue(delegated);
+    const provider = createEditorShortcutAutocompleteProvider(current, () => models);
+    const item = { value: 'model', label: 'model' };
+
+    const result = provider.applyCompletion(['/mo'], 0, '/mo'.length, item, '/mo');
+
+    expect(result).toBe(delegated);
+    expect(current.applyCompletion).toHaveBeenCalledWith(['/mo'], 0, '/mo'.length, item, '/mo');
   });
 });
 
 describe('editorShortcut extension', () => {
-  test('does not register /model or /thinking commands', () => {
+  test('registers only /fast as a slash command', () => {
     const harness = createHarness();
     editorShortcut(harness.pi as any);
 
-    expect(harness.registerCommand).not.toHaveBeenCalled();
+    expect(harness.registerCommand).toHaveBeenCalledTimes(1);
+    expect(harness.registerCommand).toHaveBeenCalledWith('fast', expect.any(Object));
+  });
+
+  test('/fast toggles priority service tier for hardcoded supported models', async () => {
+    const harness = createHarness();
+    editorShortcut(harness.pi as any);
+
+    const fastCommand = harness.registerCommand.mock.calls[0]?.[1];
+    await fastCommand.handler('', { ...harness.ctx, model: models[4] });
+
+    const result = await harness.handlers.get('before_provider_request')?.(
+      { type: 'before_provider_request', payload: { model: 'gpt-5.5' } },
+      { ...harness.ctx, model: models[4] },
+    );
+
+    expect(result).toEqual({ model: 'gpt-5.5', service_tier: 'priority' });
+  });
+
+  test('/fast cannot be enabled for unsupported models', async () => {
+    const harness = createHarness();
+    editorShortcut(harness.pi as any);
+
+    const fastCommand = harness.registerCommand.mock.calls[0]?.[1];
+    await fastCommand.handler('', { ...harness.ctx, model: models[1] });
+
+    const result = await harness.handlers.get('before_provider_request')?.(
+      { type: 'before_provider_request', payload: { model: 'gpt-5.5' } },
+      { ...harness.ctx, model: models[4] },
+    );
+
+    expect(result).toBeUndefined();
+    expect(harness.notify).toHaveBeenCalledWith(
+      'Fast mode unavailable: current model does not support priority',
+      'warning',
+    );
+  });
+
+  test('/fast is disabled when switching to an unsupported model', async () => {
+    const harness = createHarness();
+    editorShortcut(harness.pi as any);
+
+    const fastCommand = harness.registerCommand.mock.calls[0]?.[1];
+    await fastCommand.handler('', { ...harness.ctx, model: models[4] });
+
+    await harness.handlers.get('model_select')?.(
+      { type: 'model_select', model: models[1], previousModel: models[4], source: 'set' },
+      harness.ctx,
+    );
+
+    const result = await harness.handlers.get('before_provider_request')?.(
+      { type: 'before_provider_request', payload: { model: 'gpt-5.5' } },
+      { ...harness.ctx, model: models[4] },
+    );
+
+    expect(result).toBeUndefined();
+    expect(harness.notify).toHaveBeenCalledWith(
+      'Fast mode: off (current model does not support priority)',
+      'warning',
+    );
+  });
+
+  test('input handler applies inline fast directives', async () => {
+    const harness = createHarness();
+    editorShortcut(harness.pi as any);
+
+    const result = await harness.handlers.get('input')?.(
+      { text: 'Please $fast:on do the work', source: 'interactive' },
+      { ...harness.ctx, model: models[4] },
+    );
+
+    const payload = await harness.handlers.get('before_provider_request')?.(
+      { type: 'before_provider_request', payload: { model: 'gpt-5.5' } },
+      { ...harness.ctx, model: models[4] },
+    );
+
+    expect(result).toEqual({ action: 'transform', text: 'Please do the work' });
+    expect(payload).toEqual({ model: 'gpt-5.5', service_tier: 'priority' });
   });
 
   test('session_start installs autocomplete and editor wrappers in TUI mode', async () => {
@@ -307,7 +597,7 @@ describe('editorShortcut extension', () => {
     editorShortcut(harness.pi as any);
 
     const result = await harness.handlers.get('input')?.(
-      { text: '/model:facade\n/thinking:high\nDo the work', source: 'interactive' },
+      { text: '$model:facade\n$thinking:high\nDo the work', source: 'interactive' },
       harness.ctx,
     );
 
@@ -321,7 +611,7 @@ describe('editorShortcut extension', () => {
     editorShortcut(harness.pi as any);
 
     const result = await harness.handlers.get('input')?.(
-      { text: 'Please /thinking:high do the work', source: 'interactive' },
+      { text: 'Please $thinking:high do the work', source: 'interactive' },
       harness.ctx,
     );
 
@@ -334,7 +624,7 @@ describe('editorShortcut extension', () => {
     editorShortcut(harness.pi as any);
 
     const result = await harness.handlers.get('input')?.(
-      { text: '/thinking:low', source: 'interactive' },
+      { text: '$thinking:low', source: 'interactive' },
       harness.ctx,
     );
 
@@ -347,7 +637,7 @@ describe('editorShortcut extension', () => {
     editorShortcut(harness.pi as any);
 
     const result = await harness.handlers.get('input')?.(
-      { text: '/thinking:low', source: 'extension' },
+      { text: '$thinking:low', source: 'extension' },
       harness.ctx,
     );
 
@@ -360,7 +650,7 @@ describe('editorShortcut extension', () => {
     editorShortcut(harness.pi as any);
 
     const result = await processEditorShortcutSubmission(
-      '/model:facade\nDo the work',
+      '$model:facade\nDo the work',
       harness.pi as any,
       harness.ctx as any,
     );
@@ -387,12 +677,24 @@ describe('editorShortcut extension', () => {
     expect(harness.setModel).not.toHaveBeenCalled();
   });
 
+  test('input handler lets native slash commands continue unchanged', async () => {
+    const harness = createHarness();
+    editorShortcut(harness.pi as any);
+
+    const result = await harness.handlers.get('input')?.(
+      { text: '/help', source: 'interactive' },
+      harness.ctx,
+    );
+
+    expect(result).toEqual({ action: 'continue' });
+  });
+
   test('submission processor handles resolvable command-only model shortcuts', async () => {
     const harness = createHarness();
     editorShortcut(harness.pi as any);
 
     const result = await processEditorShortcutSubmission(
-      '/model:facade',
+      '$model:facade',
       harness.pi as any,
       harness.ctx as any,
     );
@@ -406,7 +708,7 @@ describe('editorShortcut extension', () => {
     editorShortcut(harness.pi as any);
 
     const result = await harness.handlers.get('input')?.(
-      { text: '/thinking and then do the work', source: 'interactive' },
+      { text: '$thinking and then do the work', source: 'interactive' },
       harness.ctx,
     );
 
