@@ -91,6 +91,9 @@ describe('skill-shortcut helpers', () => {
     expect(transformSkillShortcutInput('Use $agent-browser now', ['agent-browser'])).toBe(
       'Use /skill:agent-browser now',
     );
+    expect(transformSkillShortcutInput('Use $skill:agent-browser now', ['agent-browser'])).toBe(
+      'Use /skill:agent-browser now',
+    );
     expect(transformSkillShortcutInput('Use $missing now', ['agent-browser'])).toBe(
       'Use $missing now',
     );
@@ -202,8 +205,67 @@ describe('createSkillAutocompleteProvider', () => {
     );
 
     expect(result?.prefix).toBe('$agent');
-    expect(result?.items.map((item) => item.value)).toContain('agent-browser');
-    expect(current.getSuggestions).not.toHaveBeenCalled();
+    expect(result?.items.map((item) => item.value)).toContain('skill:agent-browser');
+    expect(current.getSuggestions).toHaveBeenCalledTimes(1);
+  });
+
+  test('merges upstream shortcut suggestions before skill suggestions', async () => {
+    const delegated = { items: [{ value: 'thinking:medium', label: 'thinking:medium' }], prefix: '$med' };
+    const current = createDelegatingProvider(delegated);
+    const provider = createSkillAutocompleteProvider(current, () => [
+      { name: 'medical-review', description: 'Review medical text' },
+    ]);
+
+    const result = await provider.getSuggestions(
+      ['$med'],
+      0,
+      '$med'.length,
+      createAutocompleteOptions(),
+    );
+
+    expect(result?.prefix).toBe('$med');
+    expect(result?.items.map((item) => item.value)).toEqual([
+      'thinking:medium',
+      'skill:medical-review',
+    ]);
+  });
+
+  test('returns skill suggestions for $skill: prefixes', async () => {
+    const current = createDelegatingProvider();
+    const provider = createSkillAutocompleteProvider(current, () => [
+      { name: 'agent-browser', description: 'Open browser tooling' },
+      { name: 'systematic-debugging', description: 'Debug rigorously' },
+    ]);
+
+    const result = await provider.getSuggestions(
+      ['Use $skill:agent'],
+      0,
+      'Use $skill:agent'.length,
+      createAutocompleteOptions(),
+    );
+
+    expect(result?.prefix).toBe('$skill:agent');
+    expect(result?.items.map((item) => item.value)).toContain('skill:agent-browser');
+    expect(current.getSuggestions).toHaveBeenCalledTimes(1);
+  });
+
+  test('splits abbreviated $skill command prefixes from skill-name filters', async () => {
+    const current = createDelegatingProvider();
+    const provider = createSkillAutocompleteProvider(current, () => [
+      { name: 'agent-browser', description: 'Open browser tooling' },
+      { name: 'systematic-debugging', description: 'Debug rigorously' },
+    ]);
+
+    const result = await provider.getSuggestions(
+      ['$s:a'],
+      0,
+      '$s:a'.length,
+      createAutocompleteOptions(),
+    );
+
+    expect(result?.prefix).toBe('$s:a');
+    expect(result?.items.map((item) => item.value)).toContain('skill:agent-browser');
+    expect(result?.items.map((item) => item.value)).not.toContain('skill:systematic-debugging');
   });
 
   test('delegates getSuggestions for non-$ prefixes', async () => {
@@ -267,12 +329,28 @@ describe('createSkillAutocompleteProvider', () => {
       ['Use $ag now'],
       0,
       'Use $ag'.length,
-      { value: 'agent-browser', label: 'agent-browser' },
+      { value: 'skill:agent-browser', label: 'agent-browser' },
       '$ag',
     );
 
-    expect(result.lines).toEqual(['Use $agent-browser now']);
-    expect(result.cursorCol).toBe('Use $agent-browser'.length);
+    expect(result.lines).toEqual(['Use $skill:agent-browser now']);
+    expect(result.cursorCol).toBe('Use $skill:agent-browser'.length);
+  });
+
+  test('$skill applyCompletion preserves text after the cursor', () => {
+    const current = createDelegatingProvider();
+    const provider = createSkillAutocompleteProvider(current, () => [{ name: 'agent-browser' }]);
+
+    const result = provider.applyCompletion(
+      ['Use $skill:ag now'],
+      0,
+      'Use $skill:ag'.length,
+      { value: 'skill:agent-browser', label: 'agent-browser' },
+      '$skill:ag',
+    );
+
+    expect(result.lines).toEqual(['Use $skill:agent-browser now']);
+    expect(result.cursorCol).toBe('Use $skill:agent-browser'.length);
   });
 
   test.each(['$Foo', '$name.'])(
@@ -426,7 +504,7 @@ describe('extension registration', () => {
       createAutocompleteOptions(),
     );
 
-    expect(result?.items.map((item) => item.value)).toEqual(['agent-browser']);
+    expect(result?.items.map((item) => item.value)).toEqual(['skill:agent-browser']);
   });
 
   test('input handler transforms only loaded skill shortcuts', async () => {
@@ -444,6 +522,20 @@ describe('extension registration', () => {
     expect(inputHandler?.({ text: 'use $missing now' }, harness.ctx as any)).toEqual({
       action: 'continue',
     });
+  });
+
+  test('input handler lets native non-skill slash commands continue unchanged', async () => {
+    const harness = createExtensionHarness();
+
+    skillShortcut(harness.pi as any);
+    await harness.handlers.get('session_start')?.({ type: 'session_start' }, harness.ctx);
+
+    const inputHandler = harness.handlers.get('input');
+
+    expect(inputHandler?.({ text: '/help' }, harness.ctx as any)).toEqual({
+      action: 'continue',
+    });
+    expect(harness.sendUserMessage).not.toHaveBeenCalled();
   });
 
   test('input handler handles embedded skill commands by sending expanded skill XML', async () => {

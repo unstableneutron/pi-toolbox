@@ -17,7 +17,32 @@ type SkillCommand = {
 const DELIMITERS = new Set([' ', '\t', '\n']);
 
 function isPotentialSkillShortcutToken(token: string): boolean {
-  return /^\$(?:|[a-z0-9][-a-z0-9]*)$/.test(token);
+  return /^\$(?:|[a-z0-9][-a-z0-9]*|[a-z0-9][-a-z0-9]*:[a-z0-9-]*)$/.test(token);
+}
+
+function getSkillShortcutQuery(dollarPrefix: string): string | null {
+  const body = dollarPrefix.slice(1).toLowerCase();
+  const colonIndex = body.indexOf(':');
+
+  if (colonIndex === -1) return body;
+
+  const commandPrefix = body.slice(0, colonIndex);
+  if (!'skill'.startsWith(commandPrefix)) return null;
+
+  return body.slice(colonIndex + 1);
+}
+
+function uniqueAutocompleteItems(items: AutocompleteItem[]): AutocompleteItem[] {
+  const seen = new Set<string>();
+  const result: AutocompleteItem[] = [];
+
+  for (const item of items) {
+    if (seen.has(item.value)) continue;
+    seen.add(item.value);
+    result.push(item);
+  }
+
+  return result;
 }
 
 export function extractDollarPrefix(textBeforeCursor: string): string | null {
@@ -32,7 +57,7 @@ export function extractDollarPrefix(textBeforeCursor: string): string | null {
 }
 
 export function transformSkillShortcutInput(text: string, skillNames: string[]): string {
-  return text.replace(/(?:^|(?<=\s))\$([a-z0-9][-a-z0-9]*)/g, (match, name: string) => {
+  return text.replace(/(?:^|(?<=\s))\$(?:skill:)?([a-z0-9][-a-z0-9]*)/g, (match, name: string) => {
     return skillNames.includes(name) ? `/skill:${name}` : match;
   });
 }
@@ -219,22 +244,28 @@ export function createSkillAutocompleteProvider(
         return current.getSuggestions(lines, cursorLine, cursorCol, options);
       }
 
-      const query = dollarPrefix.slice(1);
-      const items: AutocompleteItem[] = fuzzyFilter(
-        getSkillCommands(),
-        query,
-        (item) => item.name,
-      ).map((item) => ({
-        value: item.name,
+      const delegated = await current.getSuggestions(lines, cursorLine, cursorCol, options);
+      const query = getSkillShortcutQuery(dollarPrefix);
+      if (query === null) return delegated;
+
+      const skillCommands = getSkillCommands();
+      const matchedSkills = query.length <= 1
+        ? skillCommands.filter((item) => item.name.startsWith(query))
+        : fuzzyFilter(skillCommands, query, (item) => item.name);
+      const items: AutocompleteItem[] = matchedSkills.map((item) => ({
+        value: `skill:${item.name}`,
         label: item.name,
         ...(item.description && { description: item.description }),
       }));
 
       if (items.length === 0) {
-        return current.getSuggestions(lines, cursorLine, cursorCol, options);
+        return delegated;
       }
 
-      return { items, prefix: dollarPrefix };
+      return {
+        prefix: dollarPrefix,
+        items: uniqueAutocompleteItems([...(delegated?.items ?? []), ...items]),
+      };
     },
 
     applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
