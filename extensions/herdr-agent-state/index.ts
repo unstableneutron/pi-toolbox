@@ -135,14 +135,19 @@ function updateSessionRef(ctx: SessionContextLike | undefined): void {
   }
 }
 
-function withSessionRef(params: Record<string, unknown>): Record<string, unknown> {
+function currentSessionRef(): Record<string, unknown> | undefined {
   if (currentAgentSessionPath) {
-    return { ...params, agent_session_path: currentAgentSessionPath };
+    return { agent_session_path: currentAgentSessionPath };
   }
   if (currentAgentSessionId) {
-    return { ...params, agent_session_id: currentAgentSessionId };
+    return { agent_session_id: currentAgentSessionId };
   }
-  return params;
+  return undefined;
+}
+
+function withSessionRef(params: Record<string, unknown>): Record<string, unknown> {
+  const sessionRef = currentSessionRef();
+  return sessionRef ? { ...params, ...sessionRef } : params;
 }
 
 function sendState(
@@ -163,6 +168,25 @@ function sendState(
       custom_status: customStatus,
       seq,
     }),
+  });
+}
+
+function reportSession(): Promise<void> {
+  const sessionRef = currentSessionRef();
+  if (!sessionRef) {
+    return Promise.resolve();
+  }
+
+  return sendRequest({
+    id: `${source}:session:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+    method: 'pane.report_agent_session',
+    params: {
+      pane_id: paneId,
+      source,
+      agent: 'pi',
+      seq: nextReportSeq(),
+      ...sessionRef,
+    },
   });
 }
 
@@ -232,6 +256,15 @@ function releaseAgent(): Promise<void> {
       seq: nextReportSeq(),
     },
   });
+}
+
+function shouldReleaseOnSessionShutdown(event: SessionShutdownEventLike | undefined): boolean {
+  // Pi tears down and rebinds extension runtimes for internal lifecycle actions
+  // such as /reload, /new, /resume, and /fork. Those do not mean the pane's
+  // agent process has exited, and releasing hook authority there can suppress
+  // legitimate reports from the replacement runtime. Only a user/process quit
+  // should release Herdr's full-lifecycle authority.
+  return event?.reason === 'quit';
 }
 
 function toolCallId(event: EventLike): string | undefined {
@@ -443,6 +476,7 @@ export default function herdrAgentState(pi: ExtensionAPI): void {
 
     stateReportingActive = true;
     updateSessionRef(ctx as SessionContextLike | undefined);
+    void reportSession();
     publishState(true);
   });
 
@@ -473,6 +507,8 @@ export default function herdrAgentState(pi: ExtensionAPI): void {
       return;
     }
 
+    updateSessionRef(ctx as SessionContextLike | undefined);
+    void reportSession();
     clearPendingTimers();
     clearFailureState();
     startActiveRun();
@@ -540,14 +576,8 @@ export default function herdrAgentState(pi: ExtensionAPI): void {
     activeToolCalls.clear();
     clearPendingTimers();
 
-    // Pi reloads tear down and recreate extension runtimes while keeping the
-    // same process and session file. Releasing Herdr authority here causes
-    // Herdr's graceful-exit suppression to ignore subsequent same-session
-    // reports, leaving the pane stuck on screen-detection Idle/Done.
-    if ((event as SessionShutdownEventLike | undefined)?.reason === 'reload') {
-      return;
+    if (shouldReleaseOnSessionShutdown(event as SessionShutdownEventLike | undefined)) {
+      await releaseAgent();
     }
-
-    await releaseAgent();
   });
 }

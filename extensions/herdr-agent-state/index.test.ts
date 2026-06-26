@@ -211,6 +211,57 @@ describe('herdr agent state extension', () => {
     expect(recording.requests).toEqual([]);
   });
 
+  test('reports the active session to Herdr on session and agent start', async () => {
+    const pi = await loadHarness();
+
+    await pi.emit('session_start');
+    await flushSocketWork();
+
+    expect(recording.requests).toContainEqual(
+      expect.objectContaining({
+        method: 'pane.report_agent_session',
+        params: expect.objectContaining({
+          pane_id: 'p_1',
+          source: 'herdr:pi',
+          agent: 'pi',
+          agent_session_path: '/tmp/herdr-agent-state-test.jsonl',
+        }),
+      }),
+    );
+
+    recording.requests = [];
+
+    await pi.emit('agent_start');
+    await flushSocketWork();
+
+    expect(recording.requests).toContainEqual(
+      expect.objectContaining({
+        method: 'pane.report_agent_session',
+        params: expect.objectContaining({
+          pane_id: 'p_1',
+          source: 'herdr:pi',
+          agent: 'pi',
+          agent_session_path: '/tmp/herdr-agent-state-test.jsonl',
+        }),
+      }),
+    );
+  });
+
+  test('does not release the agent on unqualified session shutdown', async () => {
+    const pi = await loadHarness();
+
+    await pi.emit('session_start');
+    await flushSocketWork();
+    recording.requests = [];
+
+    await pi.emit('session_shutdown');
+    await flushSocketWork();
+
+    expect(recording.requests).not.toContainEqual(
+      expect.objectContaining({ method: 'pane.release_agent' }),
+    );
+  });
+
   test('reasserts working after a dropped active report', async () => {
     const pi = await loadHarness({ HERDR_PI_ACTIVE_HEARTBEAT_MS: '30' });
     recording.dropNextWorking = true;
@@ -318,14 +369,14 @@ describe('herdr agent state extension', () => {
     expect(lastReport()).toMatchObject({ state: 'idle', custom_status: 'took 5m11s' });
   });
 
-  test('releases the agent on session shutdown', async () => {
+  test('releases the agent on quit session shutdown', async () => {
     const pi = await loadHarness();
 
     await pi.emit('session_start');
     await flushSocketWork();
     recording.requests = [];
 
-    await pi.emit('session_shutdown');
+    await pi.emit('session_shutdown', { reason: 'quit' });
     await flushSocketWork();
 
     expect(recording.requests).toContainEqual(
