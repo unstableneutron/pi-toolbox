@@ -911,6 +911,26 @@ async function executePatch(
   });
 }
 
+export async function executeApplyPatchPayload(
+  patch: string,
+  cwd: string,
+  signal?: AbortSignal,
+  onUpdate?: (result: {
+    content: Array<{ type: 'text'; text: string }>;
+    details?: unknown;
+  }) => void,
+  context?: { state?: unknown; model?: { provider?: string; id?: string } },
+) {
+  return executePatch(
+    patch,
+    cwd,
+    signal,
+    onUpdate,
+    context,
+    getToolProfileForModel(context?.model),
+  );
+}
+
 function getPatchTextFromArgs(args: unknown): string | undefined {
   if (typeof args === 'string') {
     return args;

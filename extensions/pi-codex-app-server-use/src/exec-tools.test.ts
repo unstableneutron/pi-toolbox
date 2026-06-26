@@ -1,4 +1,5 @@
-import { readFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
@@ -73,6 +74,14 @@ function createResolvingClient(response: unknown) {
 }
 
 describe('AppServer exec tool helpers', () => {
+  function createFakeApplyPatchBin(): string {
+    const bin = mkdtempSync(path.join(tmpdir(), 'pi-apply-patch-bin-'));
+    const executable = path.join(bin, 'apply_patch');
+    writeFileSync(executable, '#!/bin/sh\nexit 0\n');
+    chmodSync(executable, 0o755);
+    return bin;
+  }
+
   test('builds danger-full-access command/exec requests from exec_command params', () => {
     expect(
       buildCommandExecRequest(
@@ -161,7 +170,11 @@ describe('AppServer exec tool helpers', () => {
 
   test('snapshots manager shell environment at construction', async () => {
     const fake = createResolvingClient({ exitCode: 0, stdout: 'Success\n', stderr: '' });
-    const env: NodeJS.ProcessEnv = { HERDR_PANE_ID: 'before', PATH: '/before' };
+    const applyPatchBin = createFakeApplyPatchBin();
+    const env: NodeJS.ProcessEnv = {
+      HERDR_PANE_ID: 'before',
+      PATH: `${applyPatchBin}${path.delimiter}/before`,
+    };
     const sessions = new CodexAppServerExecSessionManager({
       clientFactory: () => fake.client as any,
       env,
@@ -177,6 +190,7 @@ describe('AppServer exec tool helpers', () => {
     expect(params.env.HERDR_PANE_ID).toBe('before');
     expect(params.env.PATH.split(path.delimiter)).toEqual([
       path.join(getAgentDir(), 'bin'),
+      applyPatchBin,
       '/before',
     ]);
     sessions.close();
@@ -297,6 +311,7 @@ describe('AppServer exec tool helpers', () => {
     const fake = createResolvingClient({ exitCode: 0, stdout: 'Success\n', stderr: '' });
     const sessions = new CodexAppServerExecSessionManager({
       clientFactory: () => fake.client as any,
+      env: { PATH: createFakeApplyPatchBin() },
     });
     const registeredTools: Array<{ name: string; execute?: (...args: any[]) => Promise<any> }> = [];
     registerAppServerExecTools(
@@ -328,6 +343,35 @@ describe('AppServer exec tool helpers', () => {
     ]);
     expect(result).toMatchObject({ content: [{ type: 'text', text: 'Success\n' }] });
     expect(result).toMatchObject({ details: { original_token_count: 2 } });
+    sessions.close();
+  });
+
+  test('apply_patch falls back to the multi-edit implementation when no CLI is on PATH', async () => {
+    const cwd = mkdtempSync(path.join(tmpdir(), 'pi-apply-patch-fallback-'));
+    const patch = '*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch';
+    const fake = createResolvingClient({ exitCode: 0, stdout: 'should not run\n', stderr: '' });
+    const sessions = new CodexAppServerExecSessionManager({
+      clientFactory: () => fake.client as any,
+      env: { PATH: '/definitely/missing' },
+    });
+    const registeredTools: Array<{ name: string; execute?: (...args: any[]) => Promise<any> }> = [];
+    registerAppServerExecTools(
+      {
+        registerTool(tool: { name: string; execute?: (...args: any[]) => Promise<any> }) {
+          registeredTools.push(tool);
+        },
+      } as any,
+      sessions,
+    );
+
+    const tool = registeredTools.find((registeredTool) => registeredTool.name === 'apply_patch');
+    const result = await tool!.execute?.('call-1', { input: patch }, undefined, undefined, {
+      cwd,
+    });
+
+    expect(fake.calls).toEqual([]);
+    expect(readFileSync(path.join(cwd, 'hello.txt'), 'utf8')).toBe('hello\n');
+    expect(result?.content?.[0]?.text).toContain('Applied patch');
     sessions.close();
   });
 

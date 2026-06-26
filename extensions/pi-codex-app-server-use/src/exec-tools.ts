@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { accessSync, constants } from 'node:fs';
 import path from 'node:path';
 
 import {
@@ -10,6 +11,7 @@ import {
 } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 
+import { executeApplyPatchPayload } from '../../multi-edit';
 import { sanitizeBinaryOutput, stripTerminalControlSequences } from '../../shared/tui-width';
 import { CodexAppServerWebSocketClient } from './app-server';
 import {
@@ -451,6 +453,25 @@ function createShellEnvironment(env: NodeJS.ProcessEnv): Record<string, string> 
   return shellEnv;
 }
 
+function isExecutableFile(filePath: string): boolean {
+  try {
+    accessSync(filePath, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function commandExistsOnPath(command: string, environment: Record<string, string>): boolean {
+  if (path.isAbsolute(command) || command.includes(path.sep)) return isExecutableFile(command);
+  const pathKey = Object.keys(environment).find((key) => key.toLowerCase() === 'path') ?? 'PATH';
+  const pathValue = environment[pathKey];
+  if (!pathValue) return false;
+  return pathValue
+    .split(path.delimiter)
+    .some((entry) => entry.length > 0 && isExecutableFile(path.join(entry, command)));
+}
+
 function shouldForwardShellEnvironmentVariable(name: string): boolean {
   const normalized = name.toUpperCase();
   return SHELL_ENVIRONMENT_ALLOWLIST.some((pattern) =>
@@ -560,12 +581,18 @@ export class CodexAppServerExecSessionManager {
   private client?: CodexAppServerWebSocketClient;
   private cleanupNotifications?: () => void;
   private nextSessionId = 1;
+  private readonly applyPatchCliAvailable: boolean;
   private readonly shellEnvironment: Record<string, string>;
   private readonly sessions = new Map<number, ExecSession>();
   private readonly sessionsByProcessId = new Map<string, ExecSession>();
 
   constructor(private readonly options: AppServerExecSessionManagerOptions = {}) {
     this.shellEnvironment = createShellEnvironment(options.env ?? process.env);
+    this.applyPatchCliAvailable = commandExistsOnPath('apply_patch', this.shellEnvironment);
+  }
+
+  hasApplyPatchCli(): boolean {
+    return this.applyPatchCliAvailable;
   }
 
   async exec(
@@ -850,6 +877,15 @@ export function registerAppServerApplyPatchTool(
     renderResult: renderApplyPatchResult,
     async execute(_toolCallId, params, signal, _onUpdate, ctx: ExtensionContext) {
       const typedParams = parseApplyPatchParams(params);
+      if (!sessions.hasApplyPatchCli()) {
+        return executeApplyPatchPayload(
+          typedParams.input,
+          ctx.cwd,
+          signal,
+          _onUpdate as any,
+          ctx as any,
+        );
+      }
       const result = await sessions.applyPatch(typedParams, ctx.cwd, signal);
       const originalTokenCount =
         result.output.length > 0 ? Math.ceil(result.output.length / 4) : undefined;
