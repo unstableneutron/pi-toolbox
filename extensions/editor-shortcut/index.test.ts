@@ -3,6 +3,7 @@ import type { AutocompleteProvider } from '@earendil-works/pi-tui';
 
 import editorShortcut, {
   createEditorShortcutAutocompleteProvider,
+  createPasteShortcutState,
   parseEditorShortcutText,
   processEditorShortcutSubmission,
   resolveEditorShortcutModel,
@@ -31,6 +32,7 @@ function createHarness() {
   const setModel = vi.fn(async () => true);
   const setThinkingLevel = vi.fn();
   const sendUserMessage = vi.fn();
+  const appendEntry = vi.fn();
   const addAutocompleteProvider = vi.fn();
   const setEditorComponent = vi.fn();
   const getEditorComponent = vi.fn(() => undefined);
@@ -43,6 +45,7 @@ function createHarness() {
     setModel,
     setThinkingLevel,
     sendUserMessage,
+    appendEntry,
   };
 
   const ctx = {
@@ -52,6 +55,9 @@ function createHarness() {
     modelRegistry: {
       getAll: vi.fn(() => models),
       getAvailable: vi.fn(() => models),
+    },
+    sessionManager: {
+      getBranch: vi.fn(() => []),
     },
     ui: {
       notify,
@@ -70,6 +76,7 @@ function createHarness() {
     setModel,
     setThinkingLevel,
     sendUserMessage,
+    appendEntry,
     addAutocompleteProvider,
     setEditorComponent,
     getEditorComponent,
@@ -164,7 +171,10 @@ describe('createEditorShortcutAutocompleteProvider', () => {
   });
 
   test('adds matching $thinking shortcut suggestions before delegated items', async () => {
-    const delegated = { items: [{ value: 'thinking-skill', label: 'thinking-skill' }], prefix: '$thi' };
+    const delegated = {
+      items: [{ value: 'thinking-skill', label: 'thinking-skill' }],
+      prefix: '$thi',
+    };
     const current = createDelegatingProvider(delegated);
     const provider = createEditorShortcutAutocompleteProvider(current, () => models);
 
@@ -255,8 +265,35 @@ describe('createEditorShortcutAutocompleteProvider', () => {
     );
   });
 
+  test('suggests paste shortcuts and generated-tag paste arguments', async () => {
+    const current = createDelegatingProvider();
+    const provider = createEditorShortcutAutocompleteProvider(current, () => models);
+
+    const commands = await provider.getSuggestions(
+      ['$pa'],
+      0,
+      '$pa'.length,
+      createAutocompleteOptions(),
+    );
+    const values = commands?.items.map((item) => item.value) ?? [];
+    expect(values).toEqual(expect.arrayContaining(['paste', 'paste:auto']));
+    expect(values).not.toContain('paste:');
+    expect(values).not.toContain('paste:generate');
+
+    const args = await provider.getSuggestions(
+      ['$paste:g'],
+      0,
+      '$paste:g'.length,
+      createAutocompleteOptions(),
+    );
+    expect(args?.items.map((item) => item.value)).toEqual(['auto']);
+  });
+
   test('prefers $skill: over delegated skill-looking suggestions', async () => {
-    const delegated = { items: [{ value: 'skill-browser', label: 'skill-browser' }], prefix: '$ski' };
+    const delegated = {
+      items: [{ value: 'skill-browser', label: 'skill-browser' }],
+      prefix: '$ski',
+    };
     const current = createDelegatingProvider(delegated);
     const provider = createEditorShortcutAutocompleteProvider(current, () => models);
 
@@ -288,7 +325,10 @@ describe('createEditorShortcutAutocompleteProvider', () => {
   });
 
   test('returns thinking level suggestions for leading $thinking arguments', async () => {
-    const delegated = { items: [{ value: 'native-thinking', label: 'native-thinking' }], prefix: '$thinking:h' };
+    const delegated = {
+      items: [{ value: 'native-thinking', label: 'native-thinking' }],
+      prefix: '$thinking:h',
+    };
     const current = createDelegatingProvider(delegated);
     const provider = createEditorShortcutAutocompleteProvider(current, () => models);
 
@@ -366,7 +406,11 @@ describe('createEditorShortcutAutocompleteProvider', () => {
 
   test('suggests only the next fast mode state at leading shortcut commands', async () => {
     const current = createDelegatingProvider();
-    const provider = createEditorShortcutAutocompleteProvider(current, () => models, () => false);
+    const provider = createEditorShortcutAutocompleteProvider(
+      current,
+      () => models,
+      () => false,
+    );
 
     const result = await provider.getSuggestions(
       ['$fa'],
@@ -382,7 +426,11 @@ describe('createEditorShortcutAutocompleteProvider', () => {
 
   test('suggests explicit fast off shortcut completion when fast mode is enabled', async () => {
     const current = createDelegatingProvider();
-    const provider = createEditorShortcutAutocompleteProvider(current, () => models, () => true);
+    const provider = createEditorShortcutAutocompleteProvider(
+      current,
+      () => models,
+      () => true,
+    );
 
     const result = await provider.getSuggestions(
       ['Please $fast'],
@@ -481,6 +529,49 @@ describe('createEditorShortcutAutocompleteProvider', () => {
 
     expect(result).toBe(delegated);
     expect(current.applyCompletion).toHaveBeenCalledWith(['/mo'], 0, '/mo'.length, item, '/mo');
+  });
+
+  test('queues generated paste tags when applying paste:auto completions', async () => {
+    const current = createDelegatingProvider();
+    const harness = createHarness();
+    const pasteState = createPasteShortcutState({
+      attachmentSeed: 1000,
+      readClipboardText: async () => 'Error: connection refused',
+      generateTag: async () => 'error log',
+    });
+    const provider = createEditorShortcutAutocompleteProvider(
+      current,
+      () => models,
+      () => false,
+      () => true,
+      { ctx: harness.ctx as any, state: pasteState },
+    );
+
+    const completion = provider.applyCompletion(
+      ['$pa'],
+      0,
+      '$pa'.length,
+      { value: 'paste:auto', label: 'paste:auto' },
+      '$pa',
+    );
+
+    expect(completion.lines[0]).toBe('$paste:auto-1 ');
+
+    const result = await processEditorShortcutSubmission(
+      completion.lines[0]!,
+      harness.pi as any,
+      harness.ctx as any,
+      undefined,
+      pasteState,
+    );
+
+    expect(result).toEqual({
+      action: 'submit',
+      text: '[error-log · 25 chars]',
+    });
+    expect([...pasteState.expansions.values()]).toEqual([
+      '<error-log>\nError: connection refused\n</error-log>',
+    ]);
   });
 });
 
@@ -611,6 +702,40 @@ describe('editorShortcut extension', () => {
     expect(harness.setEditorComponent).not.toHaveBeenCalled();
   });
 
+  test('context handler expands hidden paste placeholders for the model', async () => {
+    const harness = createHarness();
+    const placeholder = '[attachment-1929 · 7 chars]';
+    harness.ctx.sessionManager.getBranch.mockReturnValue([
+      {
+        type: 'custom',
+        customType: 'editor-shortcut.paste-expansion',
+        data: {
+          placeholder,
+          text: '<attachment-1929>\npayload\n</attachment-1929>',
+        },
+      },
+    ] as any);
+    editorShortcut(harness.pi as any);
+
+    await harness.handlers.get('session_start')?.({ type: 'session_start' }, harness.ctx);
+    const result = await harness.handlers.get('context')?.(
+      {
+        type: 'context',
+        messages: [{ role: 'user', content: [{ type: 'text', text: placeholder }] }],
+      },
+      harness.ctx,
+    );
+
+    expect(result).toEqual({
+      messages: [
+        {
+          role: 'user',
+          content: [{ type: 'text', text: '<attachment-1929>\npayload\n</attachment-1929>' }],
+        },
+      ],
+    });
+  });
+
   test('input handler applies leading directives and sends only prompt text onward', async () => {
     const harness = createHarness();
     editorShortcut(harness.pi as any);
@@ -720,6 +845,164 @@ describe('editorShortcut extension', () => {
 
     expect(result).toEqual({ action: 'handled' });
     expect(harness.setModel).toHaveBeenCalledWith(models[2]);
+  });
+
+  test('submission processor replaces $paste without an explicit tag', async () => {
+    const harness = createHarness();
+    editorShortcut(harness.pi as any);
+    const pasteState = createPasteShortcutState({
+      attachmentSeed: 1929,
+      readClipboardText: async () => 'payload',
+    });
+
+    await expect(
+      processEditorShortcutSubmission(
+        '$paste',
+        harness.pi as any,
+        harness.ctx as any,
+        undefined,
+        pasteState,
+      ),
+    ).resolves.toEqual({
+      action: 'submit',
+      text: '[attachment-1929 · 7 chars]',
+    });
+
+    await expect(
+      processEditorShortcutSubmission(
+        '$paste:',
+        harness.pi as any,
+        harness.ctx as any,
+        undefined,
+        pasteState,
+      ),
+    ).resolves.toEqual({
+      action: 'submit',
+      text: '[attachment-1930 · 7 chars]',
+    });
+    expect([...pasteState.expansions.values()]).toEqual([
+      '<attachment-1929>\npayload\n</attachment-1929>',
+      '<attachment-1930>\npayload\n</attachment-1930>',
+    ]);
+
+    await expect(
+      processEditorShortcutSubmission(
+        'before $paste after',
+        harness.pi as any,
+        harness.ctx as any,
+        undefined,
+        pasteState,
+      ),
+    ).resolves.toEqual({
+      action: 'submit',
+      text: 'before\n[attachment-1931 · 7 chars]\nafter',
+    });
+  });
+
+  test('submission processor falls back from paste:auto to an attachment tag', async () => {
+    const harness = createHarness();
+    editorShortcut(harness.pi as any);
+    const pasteState = createPasteShortcutState({
+      attachmentSeed: 4000,
+      readClipboardText: async () => 'payload',
+      generateTag: async () => null,
+    });
+
+    await expect(
+      processEditorShortcutSubmission(
+        '$paste:auto',
+        harness.pi as any,
+        harness.ctx as any,
+        undefined,
+        pasteState,
+      ),
+    ).resolves.toEqual({
+      action: 'submit',
+      text: '[attachment-4000 · 7 chars]',
+    });
+    expect([...pasteState.expansions.values()]).toEqual([
+      '<attachment-4000>\npayload\n</attachment-4000>',
+    ]);
+  });
+
+  test('submission processor applies explicit and generated paste tags', async () => {
+    const harness = createHarness();
+    editorShortcut(harness.pi as any);
+    const pasteState = createPasteShortcutState({
+      attachmentSeed: 3000,
+      readClipboardText: async () => 'line one\n\n\nline two',
+      generateTag: async () => 'meeting notes',
+    });
+
+    await expect(
+      processEditorShortcutSubmission(
+        '$paste:custom.tag',
+        harness.pi as any,
+        harness.ctx as any,
+        undefined,
+        pasteState,
+      ),
+    ).resolves.toEqual({
+      action: 'submit',
+      text: '[custom-tag · 4 lines]',
+    });
+
+    await expect(
+      processEditorShortcutSubmission(
+        '$paste custom.tag',
+        harness.pi as any,
+        harness.ctx as any,
+        undefined,
+        pasteState,
+      ),
+    ).resolves.toEqual({
+      action: 'submit',
+      text: '[custom-tag #2 · 4 lines]',
+    });
+
+    await expect(
+      processEditorShortcutSubmission(
+        '$paste:generate',
+        harness.pi as any,
+        harness.ctx as any,
+        undefined,
+        pasteState,
+      ),
+    ).resolves.toEqual({
+      action: 'submit',
+      text: '[meeting-notes · 4 lines]',
+    });
+    expect([...pasteState.expansions.values()]).toEqual([
+      '<custom-tag>\nline one\n\n\nline two\n</custom-tag>',
+      '<custom-tag>\nline one\n\n\nline two\n</custom-tag>',
+      '<meeting-notes>\nline one\n\n\nline two\n</meeting-notes>',
+    ]);
+  });
+
+  test('submission processor combines model shortcuts with paste replacements', async () => {
+    const harness = createHarness();
+    editorShortcut(harness.pi as any);
+    const pasteState = createPasteShortcutState({
+      attachmentSeed: 2000,
+      readClipboardText: async () => 'line one\n\n\nline two',
+    });
+
+    const result = await processEditorShortcutSubmission(
+      '$thinking:low\n$paste',
+      harness.pi as any,
+      harness.ctx as any,
+      undefined,
+      pasteState,
+    );
+
+    expect(result).toEqual({
+      action: 'submit',
+      text: '[attachment-2000 · 4 lines]',
+    });
+    expect(harness.setThinkingLevel).toHaveBeenCalledWith('low');
+    expect([...pasteState.expansions.values()]).toEqual([
+      '<attachment-2000>\nline one\n\n\nline two\n</attachment-2000>',
+    ]);
   });
 
   test('invalid thinking-looking prose continues without changing settings', async () => {

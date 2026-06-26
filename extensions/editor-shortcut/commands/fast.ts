@@ -139,7 +139,7 @@ export function setFastModeServiceTier(
   payload: unknown,
   ctx: ExtensionContext,
   state: FastModeState,
-): unknown | undefined {
+): RequestPayload | undefined {
   if (!state.enabled || !isPriorityCapableModel(ctx.model as Model<Api> | undefined)) {
     return undefined;
   }

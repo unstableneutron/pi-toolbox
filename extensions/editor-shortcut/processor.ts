@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-a
 
 import { applyFastDirective, type FastModeState } from './commands/fast';
 import { applyModelDirective } from './commands/model';
+import { replacePasteDirectivesInText, type PasteShortcutState } from './commands/paste';
 import { applyThinkingDirective } from './commands/thinking';
 import { parseEditorShortcutText } from './parser';
 import type { EditorShortcutDirective, ParsedEditorShortcut, SubmitResult } from './types';
@@ -40,11 +41,30 @@ export async function processEditorShortcutSubmission(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
   fastMode?: FastModeState,
+  pasteState?: PasteShortcutState,
 ): Promise<SubmitResult> {
   const parsed = parseEditorShortcutText(text);
-  if (!parsed) return { action: 'continue' };
+  if (parsed && !(await applyDirectives(parsed, pi, ctx, fastMode))) {
+    return { action: 'restore', text };
+  }
 
-  if (!(await applyDirectives(parsed, pi, ctx, fastMode))) return { action: 'restore', text };
+  // Expand $paste after parsing/applying other directives so parser whitespace
+  // normalization never rewrites the pasted payload itself.
+  const promptText = parsed ? parsed.promptText : text;
+  if (!pasteState) {
+    if (!parsed) return { action: 'continue' };
+    return parsed.promptText
+      ? { action: 'submit', text: parsed.promptText }
+      : { action: 'handled' };
+  }
+
+  const pasteResult = await replacePasteDirectivesInText(promptText, pi, ctx, pasteState);
+  if (pasteResult.found) {
+    if (!pasteResult.ok) return { action: 'restore', text };
+    return pasteResult.text ? { action: 'submit', text: pasteResult.text } : { action: 'handled' };
+  }
+
+  if (!parsed) return { action: 'continue' };
 
   return parsed.promptText ? { action: 'submit', text: parsed.promptText } : { action: 'handled' };
 }

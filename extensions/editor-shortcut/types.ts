@@ -27,9 +27,7 @@ export type EditorFactory = NonNullable<ReturnType<ExtensionContext['ui']['getEd
 export const EDITOR_SHORTCUT_WRAPPED_FACTORY = Symbol.for(
   'pi-toolbox.editor-shortcut.wrapped-factory',
 );
-export const EDITOR_SHORTCUT_BASE_FACTORY = Symbol.for(
-  'pi-toolbox.editor-shortcut.base-factory',
-);
+export const EDITOR_SHORTCUT_BASE_FACTORY = Symbol.for('pi-toolbox.editor-shortcut.base-factory');
 
 export type WrappedEditorFactory = EditorFactory & {
   [EDITOR_SHORTCUT_WRAPPED_FACTORY]?: true;

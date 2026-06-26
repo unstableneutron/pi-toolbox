@@ -1,9 +1,15 @@
 import type { Api, Model } from '@earendil-works/pi-ai/compat';
+import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type { AutocompleteItem, AutocompleteProvider } from '@earendil-works/pi-tui';
 import { fuzzyFilter } from '@earendil-works/pi-tui';
 
 import { getNextFastModeAction, getNextFastModeDirective } from './commands/fast';
 import { createModelCompletionItems, uniqueAutocompleteItems } from './commands/model';
+import {
+  createPendingGeneratedPaste,
+  isGeneratedPasteValue,
+  type PasteShortcutState,
+} from './commands/paste';
 import { THINKING_LEVELS } from './commands/thinking';
 
 function filterAutocompleteItems(items: AutocompleteItem[], query: string): AutocompleteItem[] {
@@ -36,14 +42,20 @@ function getDirectiveCommandSuggestions(
       label: `thinking:${level}`,
       description: `Set thinking level to ${level}`,
     })),
+    { value: 'paste', label: 'paste', description: 'Paste clipboard as a wrapped block' },
+    {
+      value: 'paste:auto',
+      label: 'paste:auto',
+      description: 'Paste clipboard and generate a summarizing tag',
+    },
     { value: 'skill:', label: 'skill:', description: 'Invoke a skill for this prompt' },
     ...(fastModeSupported
       ? [
-    {
-      value: fastModeDirective,
-      label: fastModeDirective,
-      description: `Turn fast mode ${getNextFastModeAction(fastModeEnabled)}`,
-    },
+          {
+            value: fastModeDirective,
+            label: fastModeDirective,
+            description: `Turn fast mode ${getNextFastModeAction(fastModeEnabled)}`,
+          },
         ]
       : []),
   ];
@@ -67,13 +79,11 @@ function filterCommandItems(items: AutocompleteItem[], commandPrefix: string): A
   return filterAutocompleteItems(items, commandPrefix);
 }
 
-function getShortcutDirectiveContext(
-  textBeforeCursor: string,
-):
+function getShortcutDirectiveContext(textBeforeCursor: string):
   | { kind: 'command'; commandPrefix: string }
   | {
       kind: 'argument';
-      command: 'model' | 'thinking' | 'fast';
+      command: 'model' | 'thinking' | 'fast' | 'paste';
       argumentPrefix: string;
     }
   | null {
@@ -82,14 +92,34 @@ function getShortcutDirectiveContext(
     return { kind: 'command', commandPrefix: commandMatch[1] ?? '' };
   }
 
-  const argumentMatch = textBeforeCursor.match(/(?:^|\s)\$(model|thinking|fast):(\S*)$/i);
+  const argumentMatch = textBeforeCursor.match(/(?:^|\s)\$(model|thinking|fast|paste):(\S*)$/i);
   if (!argumentMatch) return null;
 
   return {
     kind: 'argument',
-    command: argumentMatch[1]!.toLowerCase() as 'model' | 'thinking' | 'fast',
+    command: argumentMatch[1]!.toLowerCase() as 'model' | 'thinking' | 'fast' | 'paste',
     argumentPrefix: argumentMatch[2] ?? '',
   };
+}
+
+type PasteAutocompleteOptions = {
+  ctx: ExtensionContext;
+  state: PasteShortcutState;
+};
+
+function resolvePasteCompletionValue(
+  value: string,
+  pasteOptions: PasteAutocompleteOptions | undefined,
+): string {
+  const pasteValue = value.startsWith('paste:') ? value.slice('paste:'.length) : value;
+  if (!isGeneratedPasteValue(pasteValue) || !pasteOptions) return value;
+
+  const pendingValue = createPendingGeneratedPaste(
+    pasteValue,
+    pasteOptions.ctx,
+    pasteOptions.state,
+  );
+  return value.startsWith('paste:') ? `paste:${pendingValue}` : pendingValue;
 }
 
 export function createEditorShortcutAutocompleteProvider(
@@ -97,6 +127,7 @@ export function createEditorShortcutAutocompleteProvider(
   getModels: () => Model<Api>[],
   getFastModeEnabled: () => boolean = () => false,
   getFastModeSupported: () => boolean = () => true,
+  pasteOptions?: PasteAutocompleteOptions,
 ): AutocompleteProvider {
   return {
     triggerCharacters: [...new Set([...(current.triggerCharacters ?? []), '/', '$'])],
@@ -138,6 +169,14 @@ export function createEditorShortcutAutocompleteProvider(
         return items.length === 0 ? null : { items, prefix: context.argumentPrefix };
       }
 
+      if (context.command === 'paste') {
+        const items = filterAutocompleteItems(
+          [{ value: 'auto', label: 'auto', description: 'Generate a summarizing tag' }],
+          context.argumentPrefix,
+        );
+        return items.length === 0 ? null : { items, prefix: context.argumentPrefix };
+      }
+
       const items = filterAutocompleteItems(
         createModelCompletionItems(getModels()),
         context.argumentPrefix,
@@ -150,16 +189,17 @@ export function createEditorShortcutAutocompleteProvider(
         const line = lines[cursorLine] ?? '';
         const before = line.slice(0, cursorCol - prefix.length);
         const after = line.slice(cursorCol);
-        const separator = item.value.endsWith(':') ? '' : ' ';
+        const completionValue = resolvePasteCompletionValue(item.value, pasteOptions);
+        const separator = completionValue.endsWith(':') ? '' : ' ';
 
         return {
           lines: [
             ...lines.slice(0, cursorLine),
-            `${before}$${item.value}${separator}${after}`,
+            `${before}$${completionValue}${separator}${after}`,
             ...lines.slice(cursorLine + 1),
           ],
           cursorLine,
-          cursorCol: before.length + item.value.length + 1 + separator.length,
+          cursorCol: before.length + completionValue.length + 1 + separator.length,
         };
       }
 
@@ -172,17 +212,21 @@ export function createEditorShortcutAutocompleteProvider(
       const line = lines[cursorLine] ?? '';
       const before = line.slice(0, cursorCol - prefix.length);
       const after = line.slice(cursorCol);
+      const completionValue =
+        context.command === 'paste'
+          ? resolvePasteCompletionValue(item.value, pasteOptions)
+          : item.value;
       const separator =
         after.startsWith(' ') || after.startsWith('\t') || after.startsWith('\n') ? '' : ' ';
 
       return {
         lines: [
           ...lines.slice(0, cursorLine),
-          `${before}${item.value}${separator}${after}`,
+          `${before}${completionValue}${separator}${after}`,
           ...lines.slice(cursorLine + 1),
         ],
         cursorLine,
-        cursorCol: before.length + item.value.length + separator.length,
+        cursorCol: before.length + completionValue.length + separator.length,
       };
     },
 

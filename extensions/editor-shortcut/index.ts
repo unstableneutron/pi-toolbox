@@ -10,17 +10,23 @@ import {
   setFastModeServiceTier,
 } from './commands/fast';
 import { getModelCandidates, resolveEditorShortcutModel } from './commands/model';
-import { parseEditorShortcutText } from './parser';
-import { applyDirectives, processEditorShortcutSubmission } from './processor';
+import {
+  createPasteShortcutState,
+  expandPastePlaceholdersInMessages,
+  restorePasteExpansions,
+} from './commands/paste';
+import { processEditorShortcutSubmission } from './processor';
 import { hasTui } from '../shared/ui-mode';
 
 export { createEditorShortcutAutocompleteProvider } from './autocomplete';
 export { resolveEditorShortcutModel } from './commands/model';
+export { createPasteShortcutState } from './commands/paste';
 export { parseEditorShortcutText } from './parser';
 export { processEditorShortcutSubmission } from './processor';
 
 export default function editorShortcut(pi: ExtensionAPI) {
   const fastMode = createFastModeState();
+  const pasteState = createPasteShortcutState();
 
   registerFastCommand(pi, fastMode);
 
@@ -34,7 +40,14 @@ export default function editorShortcut(pi: ExtensionAPI) {
     }
   });
 
+  pi.on('context', (event) => {
+    const messages = expandPastePlaceholdersInMessages(event.messages, pasteState);
+    return messages ? { messages } : undefined;
+  });
+
   pi.on('session_start', (_event, ctx) => {
+    restorePasteExpansions(ctx, pasteState);
+
     if (!hasTui(ctx)) return;
 
     ctx.ui.addAutocompleteProvider((current) =>
@@ -43,11 +56,14 @@ export default function editorShortcut(pi: ExtensionAPI) {
         () => getModelCandidates(ctx),
         () => fastMode.enabled,
         () => isPriorityCapableModel(ctx.model as any),
+        { ctx, state: pasteState },
       ),
     );
 
     const previousFactory = ctx.ui.getEditorComponent();
-    ctx.ui.setEditorComponent(createWrappedEditorFactory(previousFactory, pi, ctx, fastMode));
+    ctx.ui.setEditorComponent(
+      createWrappedEditorFactory(previousFactory, pi, ctx, fastMode, pasteState),
+    );
   });
 
   pi.on('input', async (event, ctx) => {
@@ -55,12 +71,11 @@ export default function editorShortcut(pi: ExtensionAPI) {
       return { action: 'continue' as const };
     }
 
-    const parsed = parseEditorShortcutText(event.text);
-    if (!parsed) return { action: 'continue' as const };
+    const result = await processEditorShortcutSubmission(event.text, pi, ctx, fastMode, pasteState);
 
-    const success = await applyDirectives(parsed, pi, ctx, fastMode);
-    if (!success || !parsed.promptText) return { action: 'handled' as const };
+    if (result.action === 'continue') return { action: 'continue' as const };
+    if (result.action === 'submit') return { action: 'transform' as const, text: result.text };
 
-    return { action: 'transform' as const, text: parsed.promptText };
+    return { action: 'handled' as const };
   });
 }

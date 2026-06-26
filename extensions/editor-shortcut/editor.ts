@@ -6,6 +6,7 @@ import {
 import type { AutocompleteProvider, EditorComponent } from '@earendil-works/pi-tui';
 
 import type { FastModeState } from './commands/fast';
+import type { PasteShortcutState } from './commands/paste';
 import { processEditorShortcutSubmission } from './processor';
 import {
   EDITOR_SHORTCUT_BASE_FACTORY,
@@ -169,6 +170,7 @@ export function createWrappedEditorFactory(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
   fastMode?: FastModeState,
+  pasteState?: PasteShortcutState,
 ): WrappedEditorFactory {
   const previousWrappedFactory = previousFactory as WrappedEditorFactory | undefined;
   const baseFactory = previousWrappedFactory?.[EDITOR_SHORTCUT_BASE_FACTORY] ?? previousFactory;
@@ -176,7 +178,7 @@ export function createWrappedEditorFactory(
     const base =
       baseFactory?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings);
     return new EditorShortcutWrappedEditor(base, (text) =>
-      processEditorShortcutSubmission(text, pi, ctx, fastMode),
+      processEditorShortcutSubmission(text, pi, ctx, fastMode, pasteState),
     );
   }) as WrappedEditorFactory;
 
