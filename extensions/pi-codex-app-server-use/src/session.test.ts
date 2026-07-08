@@ -216,14 +216,29 @@ describe('ComputerUseSession.callMcpTool', () => {
     expect((session as any).threadId).toBeUndefined();
   });
 
-  test('routes Chrome browser calls through the shared global app-server daemon', async () => {
-    const rawNodeResult = { content: [{ type: 'text', text: 'hello from shared daemon' }] };
-    const { session, calls } = makeSessionWithClient([rawNodeResult]);
-    (session as any).getChromeClient = vi.fn(async () => {
-      throw new Error(
-        'Chrome extension-host bridge should not be used when the global daemon is selected',
-      );
-    });
+  test('routes Chrome browser calls through the Chrome extension-host app-server bridge', async () => {
+    const rawNodeResult = { content: [{ type: 'text', text: 'hello from chrome app-server' }] };
+    const session = new ComputerUseSession();
+    const chromeCalls: unknown[] = [];
+    const chromeClient = {
+      close: vi.fn(),
+      setElicitationHandler() {
+        return () => {};
+      },
+      async startThread() {
+        return 'chrome-thread-1';
+      },
+      async callMcpTool(input: unknown) {
+        chromeCalls.push(input);
+        return rawNodeResult;
+      },
+    };
+    (session as any).getChromeBridge = vi.fn(async () => ({
+      browserClientPath: '/tmp/browser-client.mjs',
+      client: chromeClient,
+      key: 'test',
+      localAppServerUrl: 'ws://127.0.0.1:12345?token=test',
+    }));
 
     const result = await session.callBrowserMcpTool(
       { cwd: '/tmp', hasUI: false } as any,
@@ -232,15 +247,19 @@ describe('ComputerUseSession.callMcpTool', () => {
     );
 
     expect(result.rawResult).toBe(rawNodeResult);
-    expect(calls).toEqual([
+    expect(chromeCalls).toEqual([
       expect.objectContaining({
         arguments: { code: 'await agent.browsers.list()' },
         server: 'node_repl',
-        threadId: 'thread-1',
+        threadId: 'chrome-thread-1',
         tool: 'js',
       }),
     ]);
-    expect((session as any).getChromeClient).not.toHaveBeenCalled();
+    expect((session as any).getChromeBridge).toHaveBeenCalledWith(
+      { cwd: '/tmp', hasUI: false },
+      {},
+      undefined,
+    );
   });
 });
 
@@ -300,6 +319,71 @@ describe('ComputerUseSession.getDiagnosticStatus', () => {
     expect(status).toContain('- codex_apps auth: unsupported tools: 1');
     expect(status).not.toContain('"inputSchema"');
     expect(status).not.toContain('"data"');
+  });
+
+  test('reports connected Chrome/Brave bridge diagnostics in status and verbose JSON', async () => {
+    const { session } = makeSessionWithClient([]);
+    const client = (session as any).client;
+    client.getProcessInfo = () => ({ pid: 12345, killed: false, lastStderr: [] });
+    client.listMcpServers = async () => ({ data: [] });
+    (session as any).chromeBridge = {
+      browserClientPath: __filename,
+      client: { close: vi.fn() },
+      key: 'http://127.0.0.1:9224|extension-id',
+      localAppServerUrl: 'ws://127.0.0.1:12345/app-server',
+      threadId: 'chrome-thread-1',
+    };
+
+    const status = await session.getDiagnosticStatus({ cwd: '/tmp/example', hasUI: true } as any, {
+      verbose: true,
+    });
+
+    expect(status).toContain('Chrome/Brave AppServer bridge:');
+    expect(status).toContain('Status: connected');
+    expect(status).toContain('Local AppServer URL: ws://127.0.0.1:12345/app-server');
+    expect(status).toContain('Runtime browser client:');
+    expect(status).toContain('Thread: chrome-thread-1');
+    const match = status.match(/Verbose diagnostic JSON: (.+\.json)/);
+    expect(match).not.toBeNull();
+    const diagnostic = JSON.parse(fs.readFileSync(match![1], 'utf8'));
+    expect(diagnostic.browserBridgeConfig).toMatchObject({
+      appServerControlSocket: expect.any(String),
+      appServerControlSocketHealth: expect.any(Object),
+      chromeAppServerOrigin: expect.any(String),
+      chromeBrowserClientSha256: expect.any(String),
+      chromeDebugBaseUrl: expect.any(String),
+      chromeExtensionId: expect.any(String),
+      iabBrowserClientSha256: expect.any(String),
+    });
+    expect(diagnostic.chromeBridge).toMatchObject({
+      browserClientPath: __filename,
+      browserClientSha256: expect.any(String),
+      localAppServerUrl: 'ws://127.0.0.1:12345/app-server',
+      threadId: 'chrome-thread-1',
+    });
+  });
+
+  test('reports Chrome/Brave bridge bootstrap failures', async () => {
+    const { session } = makeSessionWithClient([]);
+    const client = (session as any).client;
+    client.getProcessInfo = () => ({ pid: 12345, killed: false, lastStderr: [] });
+    client.listMcpServers = async () => ({ data: [] });
+    (session as any).lastChromeBridgeBootstrapFailure = {
+      at: '2026-06-24T12:00:00.000Z',
+      chromeAppServerOrigin: 'chrome-extension://extension-id',
+      debugBaseUrl: 'http://127.0.0.1:9224',
+      error: 'bootstrap exploded',
+      extensionId: 'extension-id',
+    };
+
+    const status = await session.getDiagnosticStatus({ cwd: '/tmp/example', hasUI: true } as any);
+
+    expect(status).toContain('Chrome/Brave AppServer bridge:');
+    expect(status).toContain('Status: last bootstrap failed');
+    expect(status).toContain('Error: bootstrap exploded');
+    expect(status).toContain('Chrome/Brave debug URL: http://127.0.0.1:9224');
+    expect(status).toContain('Chrome extension ID: extension-id');
+    expect(status).toContain('Chrome AppServer origin: chrome-extension://extension-id');
   });
 
   test('writes verbose MCP JSON to a temp file instead of stdout', async () => {

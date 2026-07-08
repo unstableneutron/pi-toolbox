@@ -245,7 +245,179 @@ process.stdin.on('end', () => process.exit(0));
     );
   });
 
-  test('forwards native messaging frames and logs both directions', async () => {
+  test('handles extension control frames in the shim', async () => {
+    const directory = await makeTempDir();
+    const fakeHostPath = path.join(directory, 'fake-native-host-unused.mjs');
+    const logPath = path.join(directory, 'native-host-control.jsonl');
+    const seenPath = path.join(directory, 'seen.json');
+    await writeFile(
+      fakeHostPath,
+      `#!/usr/bin/env node
+import { writeFileSync } from 'node:fs';
+let buffer = Buffer.alloc(0);
+const seen = [];
+process.stdin.on('data', (chunk) => {
+  buffer = Buffer.concat([buffer, chunk]);
+  while (buffer.length >= 4) {
+    const length = buffer.readUInt32LE(0);
+    if (buffer.length - 4 < length) return;
+    const message = JSON.parse(buffer.subarray(4, 4 + length).toString('utf8'));
+    buffer = buffer.subarray(4 + length);
+    seen.push(message.method);
+  }
+});
+process.stdin.resume();
+process.stdin.on('end', () => process.exit(0));
+process.on('exit', () => writeFileSync(${JSON.stringify(seenPath)}, JSON.stringify(seen)));
+`,
+    );
+    await chmod(fakeHostPath, 0o755);
+
+    const shimPath = fileURLToPath(new URL('./codex-native-host-shim.mjs', import.meta.url));
+    const child = spawn(process.execPath, [shimPath, 'chrome-extension://test-extension/'], {
+      env: {
+        ...process.env,
+        PI_CODEX_NATIVE_HOST_SHIM_APP_SERVER_CONTROL_SOCKET: '/tmp/codex-test.sock',
+        PI_CODEX_NATIVE_HOST_SHIM_BROWSER_CLIENT_PATH: '/tmp/browser-client.mjs',
+        PI_CODEX_NATIVE_HOST_SHIM_LOG: logPath,
+        PI_CODEX_NATIVE_HOST_SHIM_REAL_HOST: fakeHostPath,
+      },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    const stdoutChunks: Buffer[] = [];
+    child.stdout.on('data', (chunk) => stdoutChunks.push(Buffer.from(chunk)));
+
+    child.stdin.write(
+      encodeNativeMessageFrame({
+        jsonrpc: '2.0',
+        id: 'native-host:ping',
+        method: 'ping',
+      }),
+    );
+    child.stdin.end(
+      encodeNativeMessageFrame({
+        jsonrpc: '2.0',
+        id: 'native-host:ensure',
+        method: 'ensureCodexAppServer',
+      }),
+    );
+
+    await expect(waitForExit(child)).resolves.toEqual({ code: 0 });
+    expect(decodeNativeMessageFramesForTest(Buffer.concat(stdoutChunks))).toEqual([
+      {
+        jsonrpc: '2.0',
+        id: 'native-host:ping',
+        result: 'pong',
+      },
+      {
+        jsonrpc: '2.0',
+        id: 'native-host:ensure',
+        result: {
+          localAppServerUrl: 'unix:///tmp/codex-test.sock',
+          runtimeConfig: { browserClientPath: '/tmp/browser-client.mjs' },
+        },
+      },
+    ]);
+    await expect(waitForFileText(seenPath)).resolves.toBe(
+      JSON.stringify(['ping', 'ensureCodexAppServer']),
+    );
+
+    const logLines = (await waitForFileText(logPath))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    expect(logLines).toContainEqual(
+      expect.objectContaining({ event: 'shim-ping-reply', id: 'native-host:ping' }),
+    );
+    expect(logLines).toContainEqual(
+      expect.objectContaining({
+        event: 'shim-ensure-codex-app-server-reply',
+        forward: true,
+        id: 'native-host:ensure',
+        suppressChildResponse: true,
+      }),
+    );
+  });
+
+  test('suppresses the real host ensureCodexAppServer response after returning the daemon URL', async () => {
+    const directory = await makeTempDir();
+    const fakeHostPath = path.join(directory, 'fake-native-host-ensure-response.mjs');
+    const logPath = path.join(directory, 'native-host-ensure-response.jsonl');
+    await writeFile(
+      fakeHostPath,
+      `#!/usr/bin/env node
+function encode(value) {
+  const payload = Buffer.from(JSON.stringify(value), 'utf8');
+  const header = Buffer.alloc(4);
+  header.writeUInt32LE(payload.length, 0);
+  return Buffer.concat([header, payload]);
+}
+let buffer = Buffer.alloc(0);
+process.stdin.on('data', (chunk) => {
+  buffer = Buffer.concat([buffer, chunk]);
+  while (buffer.length >= 4) {
+    const length = buffer.readUInt32LE(0);
+    if (buffer.length - 4 < length) return;
+    const message = JSON.parse(buffer.subarray(4, 4 + length).toString('utf8'));
+    buffer = buffer.subarray(4 + length);
+    if (message.method === 'ensureCodexAppServer') {
+      process.stdout.write(encode({ jsonrpc: '2.0', id: message.id, result: { localAppServerUrl: 'ws://real-host.invalid' } }));
+    }
+  }
+});
+`,
+    );
+    await chmod(fakeHostPath, 0o755);
+
+    const shimPath = fileURLToPath(new URL('./codex-native-host-shim.mjs', import.meta.url));
+    const child = spawn(process.execPath, [shimPath, 'chrome-extension://test-extension/'], {
+      env: {
+        ...process.env,
+        PI_CODEX_NATIVE_HOST_SHIM_APP_SERVER_CONTROL_SOCKET: '/tmp/codex-test.sock',
+        PI_CODEX_NATIVE_HOST_SHIM_BROWSER_CLIENT_PATH: '/tmp/browser-client.mjs',
+        PI_CODEX_NATIVE_HOST_SHIM_LOG: logPath,
+        PI_CODEX_NATIVE_HOST_SHIM_REAL_HOST: fakeHostPath,
+      },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    const stdoutChunks: Buffer[] = [];
+    child.stdout.on('data', (chunk) => stdoutChunks.push(Buffer.from(chunk)));
+
+    child.stdin.write(
+      encodeNativeMessageFrame({
+        jsonrpc: '2.0',
+        id: 'native-host:ensure',
+        method: 'ensureCodexAppServer',
+      }),
+    );
+    await waitForStdoutBytes(stdoutChunks);
+    child.stdin.end();
+
+    await expect(waitForExit(child)).resolves.toEqual({ code: 0 });
+    expect(decodeNativeMessageFramesForTest(Buffer.concat(stdoutChunks))).toEqual([
+      {
+        jsonrpc: '2.0',
+        id: 'native-host:ensure',
+        result: {
+          localAppServerUrl: 'unix:///tmp/codex-test.sock',
+          runtimeConfig: { browserClientPath: '/tmp/browser-client.mjs' },
+        },
+      },
+    ]);
+
+    const logLines = (await waitForFileText(logPath))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    expect(logLines).toContainEqual(
+      expect.objectContaining({
+        event: 'suppressed-real-host-control-response',
+        id: 'native-host:ensure',
+      }),
+    );
+  });
+
+  test('forwards non-control native messaging frames and logs both directions', async () => {
     const directory = await makeTempDir();
     const fakeHostPath = path.join(directory, 'fake-native-host.mjs');
     const logPath = path.join(directory, 'native-host.jsonl');
@@ -292,7 +464,7 @@ process.stdin.on('data', (chunk) => {
       encodeNativeMessageFrame({
         jsonrpc: '2.0',
         id: 'native-host:1',
-        method: 'ensureCodexAppServer',
+        method: 'getInfo',
       }),
     );
 
@@ -304,7 +476,7 @@ process.stdin.on('data', (chunk) => {
         id: 'native-host:1',
         result: {
           argv: ['chrome-extension://test-extension/'],
-          seen: 'ensureCodexAppServer',
+          seen: 'getInfo',
         },
       },
     ]);
@@ -321,7 +493,7 @@ process.stdin.on('data', (chunk) => {
     ]);
     expect(logLines[1]).toMatchObject({
       direction: 'extension->host',
-      method: 'ensureCodexAppServer',
+      method: 'getInfo',
     });
     expect(logLines[2]).toMatchObject({ direction: 'host->extension', id: 'native-host:1' });
   });

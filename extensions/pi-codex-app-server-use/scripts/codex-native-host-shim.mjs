@@ -16,6 +16,14 @@ const DEFAULT_CONFIG_PATH = path.join(
 const DEFAULT_MAX_PAYLOAD_CHARS = 50_000;
 const DEFAULT_FAKE_GET_INFO_VERSION = '1.1.5';
 const DEFAULT_CODEX_APP_VERSION = '26.602.30954';
+const DEFAULT_APP_SERVER_CONTROL_SOCKET_PATH = path.join(
+  os.homedir(),
+  '.codex/app-server-control/app-server-control.sock',
+);
+const DEFAULT_BROWSER_CLIENT_PATH = path.join(
+  os.homedir(),
+  '.codex/plugins/cache/openai-bundled/chrome/latest/scripts/browser-client.mjs',
+);
 
 function buildRealHostChildEnv(env = process.env) {
   return {
@@ -91,13 +99,36 @@ export function resolveShimOptions(env = process.env) {
       config.rewriteCloseTargetToFinalizeTabs,
     false,
   );
+  const forwardEnsureCodexAppServerToRealHost = readBoolean(
+    env.PI_CODEX_NATIVE_HOST_SHIM_FORWARD_ENSURE_CODEX_APP_SERVER_TO_REAL_HOST ??
+      config.forwardEnsureCodexAppServerToRealHost,
+    true,
+  );
+  const appServerControlSocketPath =
+    env.PI_CODEX_NATIVE_HOST_SHIM_APP_SERVER_CONTROL_SOCKET?.trim() ||
+    (typeof config.appServerControlSocketPath === 'string'
+      ? config.appServerControlSocketPath
+      : undefined) ||
+    DEFAULT_APP_SERVER_CONTROL_SOCKET_PATH;
+  const browserClientPath =
+    env.PI_CODEX_NATIVE_HOST_SHIM_BROWSER_CLIENT_PATH?.trim() ||
+    (typeof config.browserClientPath === 'string' ? config.browserClientPath : undefined) ||
+    DEFAULT_BROWSER_CLIENT_PATH;
+  const localAppServerUrl =
+    env.PI_CODEX_NATIVE_HOST_SHIM_APP_SERVER_URL?.trim() ||
+    (typeof config.localAppServerUrl === 'string' ? config.localAppServerUrl : undefined) ||
+    `unix://${appServerControlSocketPath}`;
 
   return {
+    appServerControlSocketPath,
+    browserClientPath,
     configPath,
     configReadError:
       typeof config.configReadError === 'string' ? config.configReadError : undefined,
     fakeGetInfo,
     fakeGetInfoVersion,
+    forwardEnsureCodexAppServerToRealHost,
+    localAppServerUrl,
     logPath,
     maxPayloadChars,
     realHostPath,
@@ -188,6 +219,49 @@ function buildCloseTargetFinalizeTabsRewrite(json) {
   };
 }
 
+function buildEnsureCodexAppServerResult(options) {
+  return {
+    localAppServerUrl: options.localAppServerUrl,
+    runtimeConfig: {
+      browserClientPath: options.browserClientPath,
+    },
+  };
+}
+
+function buildShimControlReply(frame, options) {
+  const json = frame.json;
+  if (!json || json.id === undefined || typeof json.method !== 'string') return undefined;
+
+  if (json.method === 'ping') {
+    return {
+      event: 'shim-ping-reply',
+      forward: true,
+      frame: {
+        jsonrpc: typeof json.jsonrpc === 'string' ? json.jsonrpc : '2.0',
+        id: json.id,
+        result: 'pong',
+      },
+    };
+  }
+
+  if (json.method === 'ensureCodexAppServer') {
+    return {
+      event: 'shim-ensure-codex-app-server-reply',
+      forward: options.forwardEnsureCodexAppServerToRealHost,
+      frame: {
+        jsonrpc: typeof json.jsonrpc === 'string' ? json.jsonrpc : '2.0',
+        id: json.id,
+        result: buildEnsureCodexAppServerResult(options),
+      },
+      suppressChildResponse: options.forwardEnsureCodexAppServerToRealHost,
+    };
+  }
+}
+
+function nativeMessageIdKey(id) {
+  return `${typeof id}:${String(id)}`;
+}
+
 function jsonRpcField(json, field) {
   return json && typeof json === 'object' && field in json ? json[field] : undefined;
 }
@@ -258,6 +332,12 @@ function logTextChunk({ bytes, event, logPath, maxPayloadChars }) {
 function createNativeMessageLogger({ direction, logPath, maxPayloadChars }) {
   let buffered = Buffer.alloc(0);
   return {
+    get buffered() {
+      return buffered;
+    },
+    set buffered(value) {
+      buffered = Buffer.from(value);
+    },
     append(chunk) {
       const decoded = decodeNativeMessageFrames(Buffer.concat([buffered, chunk]));
       buffered = decoded.rest;
@@ -287,6 +367,7 @@ function runShim() {
     configPath: options.configPath,
     event: 'shim-start',
     fakeGetInfo: options.fakeGetInfo,
+    forwardEnsureCodexAppServerToRealHost: options.forwardEnsureCodexAppServerToRealHost,
     logPath: options.logPath,
     pid: process.pid,
     realHostPath: options.realHostPath,
@@ -306,6 +387,7 @@ function runShim() {
     maxPayloadChars: options.maxPayloadChars,
   });
   let outboundBuffer = Buffer.alloc(0);
+  const suppressedChildResponseIds = new Set();
 
   child.on('error', (error) => {
     appendJsonLine(options.logPath, {
@@ -317,8 +399,34 @@ function runShim() {
   });
 
   process.stdin.on('data', (chunk) => {
-    inbound.append(chunk);
-    child.stdin.write(chunk);
+    const decoded = decodeNativeMessageFrames(
+      Buffer.concat([inbound.buffered ?? Buffer.alloc(0), chunk]),
+    );
+    inbound.buffered = decoded.rest;
+    for (const frame of decoded.frames) {
+      appendJsonLine(
+        options.logPath,
+        summarizeNativeMessage('extension->host', frame, {
+          maxPayloadChars: options.maxPayloadChars,
+        }),
+      );
+      const reply = buildShimControlReply(frame, options);
+      if (reply) {
+        appendJsonLine(options.logPath, {
+          event: reply.event,
+          id: frame.json.id,
+          forward: reply.forward === true,
+          suppressChildResponse: reply.suppressChildResponse === true,
+          ts: new Date().toISOString(),
+        });
+        process.stdout.write(encodeNativeMessageFrame(reply.frame));
+        if (reply.suppressChildResponse) {
+          suppressedChildResponseIds.add(nativeMessageIdKey(frame.json.id));
+        }
+        if (!reply.forward) continue;
+      }
+      child.stdin.write(frame.raw);
+    }
   });
   process.stdin.on('end', () => {
     inbound.flushIncomplete();
@@ -337,6 +445,18 @@ function runShim() {
     const decoded = decodeNativeMessageFrames(Buffer.concat([outboundBuffer, chunk]));
     outboundBuffer = decoded.rest;
     for (const frame of decoded.frames) {
+      if (frame.json?.id !== undefined && frame.json?.method === undefined) {
+        const idKey = nativeMessageIdKey(frame.json.id);
+        if (suppressedChildResponseIds.delete(idKey)) {
+          appendJsonLine(options.logPath, {
+            direction: 'host->extension',
+            event: 'suppressed-real-host-control-response',
+            id: frame.json.id,
+            ts: new Date().toISOString(),
+          });
+          continue;
+        }
+      }
       appendJsonLine(
         options.logPath,
         summarizeNativeMessage('host->extension', frame, {

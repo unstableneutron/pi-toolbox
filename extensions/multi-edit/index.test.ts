@@ -25,23 +25,29 @@ function createTheme() {
   };
 }
 
-function getApplyPatchTool() {
+function getApplyPatchTool(config?: any) {
   const tools: any[] = [];
-  multiEditExtension({
-    registerTool(tool: any) {
-      tools.push(tool);
-    },
-  } as any);
+  multiEditExtension(
+    {
+      registerTool(tool: any) {
+        tools.push(tool);
+      },
+    } as any,
+    config,
+  );
   return tools.find((tool) => tool.name === 'apply_patch');
 }
 
-function getEditTool() {
+function getEditTool(config?: any) {
   const tools: any[] = [];
-  multiEditExtension({
-    registerTool(tool: any) {
-      tools.push(tool);
-    },
-  } as any);
+  multiEditExtension(
+    {
+      registerTool(tool: any) {
+        tools.push(tool);
+      },
+    } as any,
+    config,
+  );
   return tools.find((tool) => tool.name === 'edit');
 }
 
@@ -316,6 +322,164 @@ describe('multi-edit extension', () => {
     );
     expect(result.systemPrompt).not.toContain('apply_patch or edit would suffice');
     expect(result.systemPrompt).not.toContain('copy/write commands');
+  });
+
+  test('classic profile exposes built-in-like edit/write surface without apply_patch prompt append', async () => {
+    const tools: any[] = [];
+    const handlers = new Map<string, Function[]>();
+    let activeTools: string[] = ['read', 'edit', 'write', 'apply_patch'];
+    const allTools = activeTools.map((name) => ({ name }));
+    const pi = {
+      registerTool(tool: any) {
+        tools.push(tool);
+      },
+      on(event: string, handler: Function) {
+        handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+      },
+      getActiveTools() {
+        return activeTools;
+      },
+      getAllTools() {
+        return allTools;
+      },
+      setActiveTools(names: string[]) {
+        activeTools = [...names];
+      },
+    } as any;
+
+    multiEditExtension(pi, { profiles: { default: 'classic' } } as any);
+
+    const editTool = tools.find((tool) => tool.name === 'edit');
+    expect(editTool.parameters.properties.path).toBeDefined();
+    expect(editTool.parameters.properties.edits).toBeDefined();
+    expect(editTool.parameters.properties.patch).toBeUndefined();
+    expect(editTool.parameters.properties.multi).toBeUndefined();
+    expect(editTool.parameters.properties.oldText).toBeUndefined();
+    expect(editTool.promptSnippet).toBe(
+      'Make precise file edits with exact text replacement, including multiple disjoint edits in one call',
+    );
+    expect(editTool.promptGuidelines).toContain(
+      'Use edit for precise changes (edits[].oldText must match exactly)',
+    );
+    expect(editTool.promptGuidelines.join('\n')).not.toContain('apply_patch');
+
+    const beforeAgentStart = handlers.get('before_agent_start')?.[0];
+    expect(beforeAgentStart).toBeTypeOf('function');
+    if (!beforeAgentStart) {
+      throw new Error('Expected before_agent_start handler');
+    }
+
+    const result = await beforeAgentStart({ systemPrompt: 'BASE' }, {});
+
+    expect(activeTools).toEqual(['read', 'edit', 'write']);
+    expect(result).toBeUndefined();
+  });
+
+  test('classic profile swaps edit schema for matching models', async () => {
+    const tools: any[] = [];
+    const handlers = new Map<string, Function[]>();
+    let activeTools: string[] = ['read', 'edit', 'write', 'apply_patch'];
+    const allTools = activeTools.map((name) => ({ name }));
+    const pi = {
+      registerTool(tool: any) {
+        tools.push(tool);
+      },
+      on(event: string, handler: Function) {
+        handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+      },
+      getActiveTools() {
+        return activeTools;
+      },
+      getAllTools() {
+        return allTools;
+      },
+      setActiveTools(names: string[]) {
+        activeTools = [...names];
+      },
+    } as any;
+
+    multiEditExtension(pi, {
+      profiles: {
+        default: 'extended',
+        modelProfiles: [{ match: { includes: ['classic-model'] }, profile: 'classic' }],
+      },
+    } as any);
+
+    expect(tools.filter((tool) => tool.name === 'edit')).toHaveLength(1);
+    expect(tools.find((tool) => tool.name === 'edit').parameters.properties.patch).toBeDefined();
+
+    const sessionStart = handlers.get('session_start')?.[0];
+    expect(sessionStart).toBeTypeOf('function');
+    if (!sessionStart) {
+      throw new Error('Expected session_start handler');
+    }
+
+    await sessionStart({}, { model: { id: 'classic-model-v1', provider: 'test' } });
+
+    const editTools = tools.filter((tool) => tool.name === 'edit');
+    const swappedEditTool = editTools.at(-1)!;
+    expect(editTools).toHaveLength(2);
+    expect(swappedEditTool.parameters.properties.patch).toBeUndefined();
+    expect(swappedEditTool.parameters.properties.edits).toBeDefined();
+    expect(activeTools).toEqual(['read', 'edit', 'write']);
+  });
+
+  test('classic profile blocks apply_patch and patch-style edit inputs', async () => {
+    const handlers = new Map<string, Function[]>();
+    const pi = {
+      registerTool() {},
+      on(event: string, handler: Function) {
+        handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+      },
+      getAllTools() {
+        return [];
+      },
+      setActiveTools() {},
+    } as any;
+
+    multiEditExtension(pi, { profiles: { default: 'classic' } } as any);
+
+    const toolCall = handlers.get('tool_call')?.[0];
+    expect(toolCall).toBeTypeOf('function');
+    if (!toolCall) {
+      throw new Error('Expected tool_call handler');
+    }
+
+    await expect(
+      getApplyPatchTool({ profiles: { default: 'classic' } }).execute(
+        'classic-apply-patch',
+        { patch: '*** Begin Patch\n*** End Patch' },
+        undefined,
+        undefined,
+        { cwd: '/tmp' },
+      ),
+    ).rejects.toThrow(/apply_patch.*disabled.*classic/);
+
+    await expect(
+      getEditTool({ profiles: { default: 'classic' } }).execute(
+        'classic-edit-patch',
+        { patch: '*** Begin Patch\n*** End Patch' },
+        undefined,
+        undefined,
+        { cwd: '/tmp' },
+      ),
+    ).rejects.toThrow(/Patch-style edit input.*classic/);
+
+    await expect(
+      toolCall({ toolName: 'apply_patch', input: { patch: '*** Begin Patch\n*** End Patch' } }, {}),
+    ).resolves.toEqual({
+      block: true,
+      reason:
+        "Tool 'apply_patch' is disabled for profile 'classic'; use edit with { path, edits[] } for exact replacements or write for complete rewrites.",
+    });
+
+    await expect(
+      toolCall({ toolName: 'edit', input: { patch: '*** Begin Patch\n*** End Patch' } }, {}),
+    ).resolves.toEqual({
+      block: true,
+      reason:
+        "Patch-style edit input is disabled for profile 'classic'; use edit with { path, edits[] } for exact replacements or write for complete rewrites.",
+    });
   });
 
   test('extended profile accepts FindReplace payloads', async () => {

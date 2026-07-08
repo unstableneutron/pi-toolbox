@@ -59,6 +59,30 @@ describe('getCodexComputerUsePaths', () => {
 });
 
 describe('resolveCodexPluginScript', () => {
+  test('prefers the trusted bundled marketplace temp path over plugin cache copies', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-plugin-marketplace-'));
+    const marketplaceClient = path.join(
+      root,
+      'codex-home/.tmp/bundled-marketplaces/openai-bundled/plugins/chrome/scripts/browser-client.mjs',
+    );
+    writeFile(marketplaceClient);
+    writeFile(
+      path.join(
+        root,
+        'codex-home/plugins/cache/openai-bundled/chrome/latest/scripts/browser-client.mjs',
+      ),
+    );
+
+    expect(
+      resolveCodexPluginScript({
+        codexApp: path.join(root, 'Codex.app'),
+        codexHome: path.join(root, 'codex-home'),
+        plugin: 'chrome',
+        scriptRelativePath: 'scripts/browser-client.mjs',
+      }),
+    ).toBe(marketplaceClient);
+  });
+
   test('prefers the latest cache alias over versioned plugin directories', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-plugin-latest-'));
     const latestClient = path.join(

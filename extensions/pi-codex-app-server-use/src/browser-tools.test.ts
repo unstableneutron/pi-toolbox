@@ -21,6 +21,8 @@ describe('browser script builders', () => {
     expect(script).toContain('"iab",');
     expect(script).toContain('await browser.tabs.list()');
     expect(script).toContain('await browser.tabs.selected().catch(() => undefined)');
+    expect(script).toContain('globalThis.__piCodexNodeReplNativePipeStatus');
+    expect(script).toContain('nodeReplNativePipe: globalThis.__piCodexNodeReplNativePipeStatus');
     expect(script).toContain('__piNodeRepl.write(JSON.stringify(__piBrowserResult, null, 2));');
     expect(script).not.toContain('await browser.tabs.new()');
   });
@@ -29,11 +31,14 @@ describe('browser script builders', () => {
     const script = buildCodexBrowserListScript({
       backend: 'chrome',
       browserClientPath: '/tmp/chrome/scripts/browser-client.mjs',
+      debugUrl: 'http://127.0.0.1:9333',
+      extensionId: 'custom-extension-id',
     });
 
     expect(script).toContain('globalThis.__piCodexGetBrowser(');
     expect(script).toContain('"chrome",');
     expect(script).toContain('"extension",');
+    expect(script).not.toContain('startCodexDevtoolsBrowserUseBackend');
   });
 
   test('filters bundled browser runtime telemetry and display noise from node_repl output', () => {
@@ -50,6 +55,8 @@ describe('browser script builders', () => {
     expect(script).toContain('[Statsig]');
     expect(script).toContain('oaistatsig.com');
     expect(script).toContain('selectedBrowser');
+    expect(script).toContain('Codex browser runtime setup failed for chrome.');
+    expect(script).toContain('nodeRepl.nativePipe available:');
     expect(script).toContain('<<<pi-codex-browser-result:start>>>');
     expect(script).toContain('<<<pi-codex-browser-result:end>>>');
     expect(script).toContain('Object.defineProperty(__piNodeRepl, "write"');
@@ -297,12 +304,19 @@ describe('registerCodexBrowserTools', () => {
     ]);
   });
 
-  test('passes AbortSignal to Chrome DevTools fallback calls', async () => {
+  test('passes AbortSignal to Chrome AppServer attempt and DevTools fallback calls', async () => {
     const registered: any[] = [];
     const controller = new AbortController();
+    const nativeCalls: any[] = [];
     const directCalls: any[] = [];
     const session = {
-      async callBrowserMcpTool() {
+      async callBrowserMcpTool(
+        _ctx: unknown,
+        _backend: unknown,
+        _input: unknown,
+        signal: AbortSignal | undefined,
+      ) {
+        nativeCalls.push({ signal });
         throw new Error('Timed out waiting for Codex extension-host WebSocket upgrade');
       },
     };
@@ -325,6 +339,7 @@ describe('registerCodexBrowserTools', () => {
       cwd: '/tmp/project',
     });
 
+    expect(nativeCalls).toEqual([{ signal: controller.signal }]);
     expect(directCalls).toEqual([{ signal: controller.signal }]);
   });
 
@@ -364,7 +379,9 @@ describe('registerCodexBrowserTools', () => {
     const registered: any[] = [];
     const session = {
       async callBrowserMcpTool() {
-        throw new Error('Chrome debug Runtime.evaluate timed out after 8000ms');
+        throw new Error(
+          'Timed out waiting for Codex Chrome Extension native host ensureCodexAppServer response after 7000ms. (nativeHostStatus={"state":"connected"}, sidePanelOpen=true)',
+        );
       },
     };
     registerCodexBrowserTools(

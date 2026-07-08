@@ -99,6 +99,7 @@ const appServerInfo = {
 
 class FakeWebSocket {
   static closeCount = 0;
+  static ensureResult: unknown = { ok: true, result: appServerInfo };
   static expressions: Array<{ url: string; expression: string }> = [];
   static urls: string[] = [];
 
@@ -133,7 +134,7 @@ class FakeWebSocket {
       this.emit('message', { data: makeRuntimeEvaluationResult(message.id, { ok: true }) });
     } else {
       this.emit('message', {
-        data: makeRuntimeEvaluationResult(message.id, { ok: true, result: appServerInfo }),
+        data: makeRuntimeEvaluationResult(message.id, FakeWebSocket.ensureResult),
       });
     }
   }
@@ -149,6 +150,7 @@ class FakeWebSocket {
 
 function resetFakeWebSocket(): void {
   FakeWebSocket.closeCount = 0;
+  FakeWebSocket.ensureResult = { ok: true, result: appServerInfo };
   FakeWebSocket.expressions = [];
   FakeWebSocket.urls = [];
 }
@@ -239,5 +241,28 @@ describe('ensureChromeExtensionAppServer', () => {
 
     await expect(operation).rejects.toThrow('Operation aborted');
     expect(FakeWebSocket.closeCount).toBe(1);
+  });
+
+  test('surfaces native host status when app-server bootstrap fails', async () => {
+    vi.stubEnv('PI_CODEX_CHROME_EXTENSION_ID', '');
+    resetFakeWebSocket();
+    FakeWebSocket.ensureResult = {
+      ok: false,
+      error:
+        'Timed out waiting for Codex Chrome Extension native host ensureCodexAppServer response after 7000ms.',
+      nativeHostStatus: { hostName: 'com.openai.codexextension', state: 'connected' },
+      sidePanelOpen: true,
+    };
+    const fetchImpl = async () => makeResponse([pageTarget()]);
+
+    await expect(
+      ensureChromeExtensionAppServer({
+        debugBaseUrl,
+        fetchImpl: fetchImpl as typeof fetch,
+        WebSocketImpl: FakeWebSocket as any,
+      }),
+    ).rejects.toThrow(
+      'nativeHostStatus={"hostName":"com.openai.codexextension","state":"connected"}',
+    );
   });
 });

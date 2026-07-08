@@ -48,8 +48,9 @@ import { renderApplyPatchRows } from '../shared/apply-patch-summary';
 import { TOOL_REWRITE_ARROW } from '../shared/rewrite-label';
 import type { Workspace } from './workspace';
 
-type ToolProfile = 'extended' | 'codex-compatible';
-type ApplyPatchProfile = ToolProfile;
+type ToolProfile = 'extended' | 'codex-compatible' | 'classic';
+type ApplyPatchProfile = 'extended' | 'codex-compatible';
+type EditToolShape = 'extended' | 'classic';
 
 interface MatchConfig {
   includes?: string[];
@@ -118,6 +119,14 @@ function materializeLazyDiffDetails(
 }
 
 const EXTENSION_CONFIG = loadExtensionConfig();
+
+function buildProfilePromptAppend(disabledTools: string[] = [], profile: ToolProfile): string {
+  if (profile === 'classic') {
+    return '';
+  }
+
+  return buildApplyPatchPromptAppend(disabledTools, profile);
+}
 
 function buildApplyPatchPromptAppend(
   disabledTools: string[] = [],
@@ -269,6 +278,28 @@ const legacyEditItemSchema = Type.Object({
   }),
 });
 
+const classicReplaceEditSchema = Type.Object(
+  {
+    oldText: Type.String({
+      description:
+        'Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call.',
+    }),
+    newText: Type.String({ description: 'Replacement text for this targeted edit.' }),
+  },
+  { additionalProperties: false },
+);
+
+const classicEditSchema = Type.Object(
+  {
+    path: Type.String({ description: 'Path to the file to edit (relative or absolute).' }),
+    edits: Type.Array(classicReplaceEditSchema, {
+      description:
+        'One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.',
+    }),
+  },
+  { additionalProperties: false },
+);
+
 const multiEditSchema = Type.Object(
   {
     path: Type.Optional(
@@ -324,6 +355,101 @@ function prepareApplyPatchArguments(args: unknown): { patch: string } {
   throw new Error('apply_patch requires a patch string.');
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function parseJsonArrayArgument(value: unknown): unknown {
+  if (typeof value !== 'string') {
+    return value;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed.startsWith('[') || !trimmed.endsWith(']')) {
+    return value;
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    return Array.isArray(parsed) ? parsed : value;
+  } catch {
+    return value;
+  }
+}
+
+function prepareExtendedEditArguments(args: unknown): unknown {
+  if (typeof args === 'string' && args.trimStart().startsWith('*** Begin Patch')) {
+    return { patch: args };
+  }
+
+  if (!isRecord(args)) {
+    return args;
+  }
+
+  const prepared = { ...args };
+  const edits = parseJsonArrayArgument(args.edits);
+  const multi = parseJsonArrayArgument(args.multi);
+  if (edits === undefined) {
+    delete prepared.edits;
+  } else {
+    prepared.edits = edits;
+  }
+  if (multi === undefined) {
+    delete prepared.multi;
+  } else {
+    prepared.multi = multi;
+  }
+  return prepared;
+}
+
+function prepareClassicEditArguments(args: unknown): unknown {
+  if (hasPatchStyleEditInput(args)) {
+    throw new Error(getClassicPatchDisabledReason('edit'));
+  }
+
+  if (!isRecord(args)) {
+    return args;
+  }
+
+  const edits = parseJsonArrayArgument(args.edits);
+  if (typeof args.oldText === 'string' && typeof args.newText === 'string') {
+    const existingEdits = Array.isArray(edits) ? edits : [];
+    return {
+      path: args.path,
+      edits: [...existingEdits, { oldText: args.oldText, newText: args.newText }],
+    };
+  }
+
+  return edits === undefined ? { path: args.path } : { path: args.path, edits };
+}
+
+function hasPatchStyleEditInput(input: unknown): boolean {
+  if (typeof input === 'string') {
+    return input.trimStart().startsWith('*** Begin Patch');
+  }
+
+  return isRecord(input) && Object.prototype.hasOwnProperty.call(input, 'patch');
+}
+
+function getClassicPatchDisabledReason(toolName: 'apply_patch' | 'edit'): string {
+  if (toolName === 'apply_patch') {
+    return "Tool 'apply_patch' is disabled for profile 'classic'; use edit with { path, edits[] } for exact replacements or write for complete rewrites.";
+  }
+
+  return "Patch-style edit input is disabled for profile 'classic'; use edit with { path, edits[] } for exact replacements or write for complete rewrites.";
+}
+
+function toApplyPatchProfile(
+  profile: ToolProfile,
+  toolName: 'apply_patch' | 'edit',
+): ApplyPatchProfile {
+  if (profile === 'classic') {
+    throw new Error(getClassicPatchDisabledReason(toolName));
+  }
+
+  return profile;
+}
+
 function getModelIdentity(model: { provider?: string; id?: string } | undefined): string {
   if (!model) return '';
   const provider = typeof model.provider === 'string' ? model.provider : '';
@@ -340,18 +466,21 @@ function matchesModel(identity: string, match: MatchConfig | undefined): boolean
 }
 
 function normalizeToolProfile(value: unknown): ToolProfile | undefined {
-  return value === 'extended' || value === 'codex-compatible' ? value : undefined;
+  return value === 'extended' || value === 'codex-compatible' || value === 'classic'
+    ? value
+    : undefined;
 }
 
 function getToolProfileForModel(
   model: { provider?: string; id?: string } | undefined,
+  config: ExtensionConfig = EXTENSION_CONFIG,
 ): ToolProfile {
-  const configuredDefault = normalizeToolProfile(EXTENSION_CONFIG.profiles?.default);
+  const configuredDefault = normalizeToolProfile(config.profiles?.default);
   const defaultProfile = configuredDefault ?? 'extended';
   const identity = getModelIdentity(model);
   if (!identity) return defaultProfile;
 
-  for (const policy of EXTENSION_CONFIG.profiles?.modelProfiles ?? []) {
+  for (const policy of config.profiles?.modelProfiles ?? []) {
     if (!matchesModel(identity, policy.match)) continue;
     return normalizeToolProfile(policy.profile) ?? defaultProfile;
   }
@@ -359,16 +488,20 @@ function getToolProfileForModel(
   return defaultProfile;
 }
 
-const CODEX_COMPATIBLE_DISABLED_TOOLS = new Set(['edit', 'write']);
+const PROFILE_DISABLED_TOOLS: Record<ToolProfile, ReadonlySet<string>> = {
+  extended: new Set(),
+  'codex-compatible': new Set(['edit', 'write']),
+  classic: new Set(['apply_patch']),
+};
+const PROMPT_RELEVANT_MUTATION_TOOLS = new Set(['edit', 'write', 'apply_patch']);
 
 function isToolAllowedForProfile(toolName: string, profile: ToolProfile): boolean {
-  return profile === 'extended' || !CODEX_COMPATIBLE_DISABLED_TOOLS.has(toolName);
+  return !PROFILE_DISABLED_TOOLS[profile].has(toolName);
 }
 
 function getDisabledToolsForProfile(profile: ToolProfile, allTools: string[]): string[] {
-  return profile === 'extended'
-    ? []
-    : allTools.filter((name) => CODEX_COMPATIBLE_DISABLED_TOOLS.has(name));
+  const disabledTools = PROFILE_DISABLED_TOOLS[profile];
+  return allTools.filter((name) => disabledTools.has(name));
 }
 
 function areToolNameListsEqual(left: string[], right: string[]): boolean {
@@ -383,10 +516,11 @@ function applyModelToolPolicy(
         id?: string;
       }
     | undefined,
+  config: ExtensionConfig = EXTENSION_CONFIG,
 ): string[] {
-  const profile = getToolProfileForModel(model);
+  const profile = getToolProfileForModel(model, config);
   if (typeof pi.getAllTools !== 'function') {
-    return profile === 'extended' ? [] : ['edit', 'write'];
+    return [...PROFILE_DISABLED_TOOLS[profile]];
   }
 
   const allTools = pi.getAllTools().map((tool) => tool.name);
@@ -404,7 +538,7 @@ function applyModelToolPolicy(
 
   const activeAfterPolicy = new Set(nextActive);
   return allTools.filter(
-    (name) => CODEX_COMPATIBLE_DISABLED_TOOLS.has(name) && !activeAfterPolicy.has(name),
+    (name) => PROMPT_RELEVANT_MUTATION_TOOLS.has(name) && !activeAfterPolicy.has(name),
   );
 }
 
@@ -921,13 +1055,14 @@ export async function executeApplyPatchPayload(
   }) => void,
   context?: { state?: unknown; model?: { provider?: string; id?: string } },
 ) {
+  const profile = getToolProfileForModel(context?.model);
   return executePatch(
     patch,
     cwd,
     signal,
     onUpdate,
     context,
-    getToolProfileForModel(context?.model),
+    toApplyPatchProfile(profile, 'apply_patch'),
   );
 }
 
@@ -1668,7 +1803,113 @@ async function buildClassicEditPlan(
   };
 }
 
-export default function multiEditExtension(pi: ExtensionAPI) {
+export default function multiEditExtension(
+  pi: ExtensionAPI,
+  extensionConfig: ExtensionConfig = EXTENSION_CONFIG,
+) {
+  const getProfile = (model: { provider?: string; id?: string } | undefined) =>
+    getToolProfileForModel(model, extensionConfig);
+  const getEditToolShape = (profile: ToolProfile): EditToolShape =>
+    profile === 'classic' ? 'classic' : 'extended';
+
+  let registeredEditToolShape: EditToolShape | undefined;
+  const registerEditTool = (profile: ToolProfile) => {
+    const shape = getEditToolShape(profile);
+    if (registeredEditToolShape === shape) {
+      return;
+    }
+    registeredEditToolShape = shape;
+
+    const isClassicShape = shape === 'classic';
+    pi.registerTool({
+      name: 'edit',
+      label: 'edit',
+      description: isClassicShape
+        ? 'Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes.'
+        : 'Edit files using cursor-based exact text replacement. Use { path, edits[] } as the primary API. Legacy single-edit, multi-edit, and patch compatibility inputs are still accepted.',
+      promptSnippet: isClassicShape
+        ? 'Make precise file edits with exact text replacement, including multiple disjoint edits in one call'
+        : 'Make classic text edits with { path, edits[] }.',
+      promptGuidelines: isClassicShape
+        ? [
+            'Use edit for precise changes (edits[].oldText must match exactly)',
+            'When changing multiple separate locations in one file, use one edit call with multiple entries in edits[] instead of multiple edit calls',
+            'Each edits[].oldText is matched against the original file, not after earlier edits are applied. Do not emit overlapping or nested edits. Merge nearby changes into one edit.',
+            'Keep edits[].oldText as small as possible while still being unique in the file. Do not pad with large unchanged regions.',
+          ]
+        : [
+            'Use edit with { path, edits[] } as the primary classic edit API.',
+            'edit applies classic edits sequentially with cursor semantics in file order.',
+            'Use apply_patch for Codex-style patch payloads, file creation/deletion, or renames.',
+            'edit rejects empty oldText values.',
+          ],
+      parameters: isClassicShape ? classicEditSchema : multiEditSchema,
+      prepareArguments: (isClassicShape
+        ? prepareClassicEditArguments
+        : prepareExtendedEditArguments) as any,
+      async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+        const profile = getProfile(ctx.model);
+        const normalized = normalizeClassicParams(params);
+        if (normalized.mode === 'patch') {
+          return executePatch(
+            normalized.patch,
+            ctx.cwd,
+            signal,
+            _onUpdate as any,
+            ctx as any,
+            toApplyPatchProfile(profile, 'edit'),
+          );
+        }
+
+        return executeClassic(normalized.edits, ctx.cwd, signal);
+      },
+      renderCall(args, theme, context) {
+        const path = shortenDisplayPath(getToolPathArg(args), context?.cwd);
+        const lineCount = getEditLineCount(args);
+        return new Text(
+          `${theme.fg('toolTitle', theme.bold('edit'))} ${theme.fg('accent', path || '...')}${formatLineCountSuffix(lineCount, theme)}`,
+          0,
+          0,
+        );
+      },
+      renderResult(result, options: ToolRenderResultOptions, theme, context) {
+        const lineCount = getEditLineCount(context?.args);
+        if (options.isPartial) {
+          return new Text(formatInProgressLineCount('editing', lineCount, theme), 0, 0);
+        }
+
+        const fallbackText = extractTextOutput(result as { content?: unknown });
+        if (isToolError(result, context)) {
+          const error = fallbackText || 'Edit failed.';
+          return new Text(theme.fg('error', error), 0, 0);
+        }
+
+        const details = materializeLazyDiffDetails(
+          result.details as LazyDiffDetails | undefined,
+          options.expanded,
+        );
+        return renderEditDiffResult(
+          details,
+          { expanded: options.expanded, filePath: getToolPathArg(context?.args) },
+          DEFAULT_TOOL_DISPLAY_CONFIG,
+          theme,
+          fallbackText,
+        );
+      },
+    });
+  };
+
+  const syncModelProfile = (model: { provider?: string; id?: string } | undefined) => {
+    const profile = getProfile(model);
+    registerEditTool(profile);
+    return {
+      profile,
+      disabledTools: applyModelToolPolicy(pi, model, extensionConfig),
+    };
+  };
+
+  registerEditTool(getProfile(undefined));
+
   const unregisterBashRewriteProvider =
     pi.events?.on?.('bash-rewrite:collect-providers', (payload: unknown) => {
       if (!payload || typeof payload !== 'object') return;
@@ -1697,7 +1938,7 @@ export default function multiEditExtension(pi: ExtensionAPI) {
             runtime.signal,
             runtime.onUpdate as any,
             runtime.ctx as any,
-            getToolProfileForModel(runtime.ctx.model),
+            toApplyPatchProfile(getProfile(runtime.ctx.model), 'apply_patch'),
           );
         },
         renderPreview(decision: { params: { patch?: unknown } }, theme: any, runtime: any) {
@@ -1714,21 +1955,39 @@ export default function multiEditExtension(pi: ExtensionAPI) {
   });
 
   pi.on?.('session_start', async (_event, ctx) => {
-    applyModelToolPolicy(pi, ctx.model);
+    syncModelProfile(ctx.model);
   });
 
   pi.on?.('before_agent_start', async (event, ctx) => {
-    const disabledTools = applyModelToolPolicy(pi, ctx.model);
-    const profile = getToolProfileForModel(ctx.model);
+    const { disabledTools, profile } = syncModelProfile(ctx.model);
+    const promptAppend = buildProfilePromptAppend(disabledTools, profile);
+    if (!promptAppend) {
+      return undefined;
+    }
+
     return {
-      systemPrompt: `${event.systemPrompt}\n\n${buildApplyPatchPromptAppend(disabledTools, profile)}`,
+      systemPrompt: `${event.systemPrompt}\n\n${promptAppend}`,
     };
   });
 
   pi.on?.('tool_call', async (event, ctx) => {
-    const profile = getToolProfileForModel(ctx.model);
+    const profile = getProfile(ctx.model);
+    if (profile === 'classic' && event.toolName === 'edit' && hasPatchStyleEditInput(event.input)) {
+      return {
+        block: true,
+        reason: getClassicPatchDisabledReason('edit'),
+      };
+    }
+
     if (isToolAllowedForProfile(event.toolName, profile)) {
       return undefined;
+    }
+
+    if (profile === 'classic' && event.toolName === 'apply_patch') {
+      return {
+        block: true,
+        reason: getClassicPatchDisabledReason('apply_patch'),
+      };
     }
 
     const identity = getModelIdentity(ctx.model) || 'unknown-model';
@@ -1736,69 +1995,6 @@ export default function multiEditExtension(pi: ExtensionAPI) {
       block: true,
       reason: `Tool '${event.toolName}' is disabled for profile '${profile}' on model '${identity}'; use apply_patch instead.`,
     };
-  });
-
-  pi.registerTool({
-    name: 'edit',
-    label: 'edit',
-    description:
-      'Edit files using cursor-based exact text replacement. Use { path, edits[] } as the primary API. Legacy single-edit, multi-edit, and patch compatibility inputs are still accepted.',
-    promptSnippet: 'Make classic text edits with { path, edits[] }.',
-    promptGuidelines: [
-      'Use edit with { path, edits[] } as the primary classic edit API.',
-      'edit applies classic edits sequentially with cursor semantics in file order.',
-      'Use apply_patch for Codex-style patch payloads, file creation/deletion, or renames.',
-      'edit rejects empty oldText values.',
-    ],
-    parameters: multiEditSchema,
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      const normalized = normalizeClassicParams(params);
-      if (normalized.mode === 'patch') {
-        return executePatch(
-          normalized.patch,
-          ctx.cwd,
-          signal,
-          _onUpdate as any,
-          ctx as any,
-          getToolProfileForModel(ctx.model),
-        );
-      }
-
-      return executeClassic(normalized.edits, ctx.cwd, signal);
-    },
-    renderCall(args, theme, context) {
-      const path = shortenDisplayPath(getToolPathArg(args), context?.cwd);
-      const lineCount = getEditLineCount(args);
-      return new Text(
-        `${theme.fg('toolTitle', theme.bold('edit'))} ${theme.fg('accent', path || '...')}${formatLineCountSuffix(lineCount, theme)}`,
-        0,
-        0,
-      );
-    },
-    renderResult(result, options: ToolRenderResultOptions, theme, context) {
-      const lineCount = getEditLineCount(context?.args);
-      if (options.isPartial) {
-        return new Text(formatInProgressLineCount('editing', lineCount, theme), 0, 0);
-      }
-
-      const fallbackText = extractTextOutput(result as { content?: unknown });
-      if (isToolError(result, context)) {
-        const error = fallbackText || 'Edit failed.';
-        return new Text(theme.fg('error', error), 0, 0);
-      }
-
-      const details = materializeLazyDiffDetails(
-        result.details as LazyDiffDetails | undefined,
-        options.expanded,
-      );
-      return renderEditDiffResult(
-        details,
-        { expanded: options.expanded, filePath: getToolPathArg(context?.args) },
-        DEFAULT_TOOL_DISPLAY_CONFIG,
-        theme,
-        fallbackText,
-      );
-    },
   });
 
   pi.registerTool({
@@ -1814,13 +2010,14 @@ export default function multiEditExtension(pi: ExtensionAPI) {
     parameters: applyPatchSchema,
     prepareArguments: prepareApplyPatchArguments,
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
+      const profile = getProfile(ctx.model);
       return executePatch(
         params.patch,
         ctx.cwd,
         signal,
         onUpdate as any,
         ctx as any,
-        getToolProfileForModel(ctx.model),
+        toApplyPatchProfile(profile, 'apply_patch'),
       );
     },
     renderCall(args, theme, context) {

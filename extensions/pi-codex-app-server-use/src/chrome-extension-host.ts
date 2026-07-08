@@ -118,18 +118,50 @@ function buildCloseExtensionPageExpression(tabId: number): string {
   return `chrome.tabs.remove(${JSON.stringify(tabId)}).then(() => ({ ok: true }), (error) => ({ ok: false, error: String(error && (error.message || error)) }))`;
 }
 
-function buildEnsureExpression(): string {
+function buildEnsureExpression(timeoutMs: number): string {
+  const ensureTimeoutMs = Math.max(1_000, timeoutMs - 1_000);
   return `
 (async () => {
   const win = await chrome.windows.getCurrent();
   await chrome.storage.session.set({ codexSidePanelOpenWindowIds: win.id == null ? [] : [win.id] });
-  return await chrome.runtime.sendMessage({ type: 'ensure_codex_app_server', windowId: win.id });
+  const readNativeHostStatus = async () => {
+    try {
+      const status = await chrome.runtime.sendMessage({ type: 'GET_NATIVE_HOST_STATUS' });
+      return status?.status ?? status;
+    } catch (error) {
+      return { error: String(error && (error.message || error)) };
+    }
+  };
+  const timeout = new Promise((resolve) => setTimeout(async () => {
+    resolve({
+      ok: false,
+      error: 'Timed out waiting for Codex Chrome Extension native host ensureCodexAppServer response after ${ensureTimeoutMs}ms.',
+      nativeHostStatus: await readNativeHostStatus(),
+      sidePanelOpen: true,
+    });
+  }, ${ensureTimeoutMs}));
+  return await Promise.race([
+    chrome.runtime.sendMessage({ type: 'ensure_codex_app_server', windowId: win.id }),
+    timeout,
+  ]);
 })()`;
+}
+
+function formatEnsureFailure(value: any): string {
+  const details: string[] = [];
+  if (value?.nativeHostStatus) {
+    details.push(`nativeHostStatus=${JSON.stringify(value.nativeHostStatus)}`);
+  }
+  if (value && typeof value === 'object' && 'sidePanelOpen' in value) {
+    details.push(`sidePanelOpen=${String(value.sidePanelOpen)}`);
+  }
+  const suffix = details.length > 0 ? ` (${details.join(', ')})` : '';
+  return `${value?.error ?? 'Codex Chrome Extension native host did not start app-server.'}${suffix}`;
 }
 
 function validateEnsureResult(value: any): ChromeExtensionAppServerInfo {
   if (value?.ok !== true) {
-    throw new Error(value?.error ?? 'Codex Chrome Extension native host did not start app-server.');
+    throw new Error(formatEnsureFailure(value));
   }
   const result = value.result ?? value;
   if ('string' !== typeof result?.localAppServerUrl || result.localAppServerUrl.length === 0) {
@@ -195,7 +227,7 @@ export async function ensureChromeExtensionAppServer(
 
   try {
     const runtimeResult = await evaluateInDebugTarget({
-      expression: buildEnsureExpression(),
+      expression: buildEnsureExpression(timeoutMs),
       signal: options.signal,
       timeoutMs,
       webSocketDebuggerUrl: pageTarget.webSocketDebuggerUrl,

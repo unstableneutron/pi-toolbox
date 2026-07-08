@@ -65,15 +65,15 @@ interface BrowserToolSpec {
   parameters: BrowserToolParamsSchema;
 }
 
+interface ChromeNativeBridgeOptions {
+  debugBaseUrl?: string;
+  extensionId?: string;
+}
+
 interface ChromeDebugBrowserToolOptions {
   debugUrl?: string;
   extensionId?: string;
   signal?: AbortSignal;
-}
-
-interface ChromeNativeBridgeOptions {
-  debugBaseUrl?: string;
-  extensionId?: string;
 }
 
 interface BrowserToolRuntimeDeps {
@@ -162,6 +162,14 @@ if (!globalThis.__piCodexFilteredConsole) {
 globalThis.console = globalThis.__piCodexFilteredConsole;`;
 }
 
+function buildNodeReplNativePipeStatusScript(): string {
+  return `globalThis.__piCodexNodeReplNativePipeStatus = {
+  available: !!globalThis.nodeRepl?.nativePipe?.createConnection,
+  hasNativePipe: !!globalThis.nodeRepl?.nativePipe,
+  hasNodeRepl: !!globalThis.nodeRepl,
+};`;
+}
+
 function buildNodeReplResultWrapperScript(): string {
   return `var __piNodeRepl = Object.create(nodeRepl);
 Object.defineProperty(__piNodeRepl, "write", {
@@ -181,10 +189,23 @@ function buildBrowserRuntimePrelude({
       : 'Open the Codex in-app Browser for this Codex thread, then retry.';
 
   return `${buildBrowserRuntimeNoiseFilterScript()}
+${buildNodeReplNativePipeStatusScript()}
 ${buildNodeReplResultWrapperScript()}
 if (!globalThis.agent) {
   const { setupBrowserRuntime } = await import(${quoted(browserClientPath)});
-  await setupBrowserRuntime({ globals: globalThis });
+  try {
+    await setupBrowserRuntime({ globals: globalThis });
+  } catch (__piSetupError) {
+    throw new Error(
+      "Codex browser runtime setup failed for ${backend}. " +
+        "nodeRepl.nativePipe available: " +
+        String(globalThis.__piCodexNodeReplNativePipeStatus.available) +
+        "; browserClientPath: " +
+        ${quoted(browserClientPath)} +
+        ". " +
+        String(__piSetupError && (__piSetupError.message || __piSetupError)),
+    );
+  }
 }
 if (!globalThis.__piCodexBrowsers) {
   globalThis.__piCodexBrowsers = {};
@@ -206,6 +227,8 @@ if (!globalThis.__piCodexGetBrowser) {
           unavailableMessage +
             " Available browser backends: " +
             __piAvailableSummary +
+            "; nodeRepl.nativePipe available: " +
+            String(globalThis.__piCodexNodeReplNativePipeStatus.available) +
             ". " +
             recoveryHint,
         );
@@ -247,6 +270,7 @@ var __piSelectedTabInfo = __piSelectedTab
 var __piBrowserResult = {
   backend: ${quoted(input.backend)},
   browserId: browser.browserId,
+  nodeReplNativePipe: globalThis.__piCodexNodeReplNativePipeStatus,
   selectedTab: __piSelectedTabInfo,
   tabs: await browser.tabs.list(),
 };
@@ -379,8 +403,27 @@ function isChromeBridgeUnavailableError(error: unknown): boolean {
     message.includes('Chrome debug target connection timed out') ||
     message.includes('Could not find a debuggable Codex Chrome Extension') ||
     message.includes('Could not open a debuggable Codex Chrome Extension page') ||
-    message.includes('No handler registered for method: ensureCodexAppServer')
+    message.includes('No handler registered for method: ensureCodexAppServer') ||
+    message.includes('privileged native pipe bridge is not available') ||
+    message.includes('nodeRepl.nativePipe available: false') ||
+    message.includes(
+      'Timed out waiting for Codex Chrome Extension native host ensureCodexAppServer response',
+    )
   );
+}
+
+function withChromeFallbackDetails<T extends { details?: Record<string, unknown> }>(
+  result: T,
+  error: unknown,
+): T {
+  return {
+    ...result,
+    details: {
+      ...result.details,
+      fallbackFrom: 'codex-app-server-node-repl-browser-runtime',
+      fallbackReason: error instanceof Error ? error.message : String(error),
+    },
+  };
 }
 
 function getBrowserScriptInput(params: any): BrowserRuntimeScriptInput {
@@ -449,7 +492,7 @@ export function registerCodexBrowserTools(
             );
           } catch (error) {
             if (input.backend !== 'chrome' || !isChromeBridgeUnavailableError(error)) throw error;
-            return await runDirectChromeList(chromeOptions);
+            return withChromeFallbackDetails(await runDirectChromeList(chromeOptions), error);
           }
         }
 
@@ -465,7 +508,10 @@ export function registerCodexBrowserTools(
           );
         } catch (error) {
           if (input.backend !== 'chrome' || !isChromeBridgeUnavailableError(error)) throw error;
-          return await runDirectChromeEval({ ...chromeOptions, script: params.script });
+          return withChromeFallbackDetails(
+            await runDirectChromeEval({ ...chromeOptions, script: params.script }),
+            error,
+          );
         }
       },
     });

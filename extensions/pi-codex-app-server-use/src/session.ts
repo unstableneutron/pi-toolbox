@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -5,7 +6,17 @@ import path from 'node:path';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 
 import { CodexAppServerWebSocketClient } from './app-server';
-import { CODEX_APP_SERVER_ORIGIN, getCodexAppServerControlSocketPath } from './app-server-control';
+import {
+  CODEX_APP_SERVER_ORIGIN,
+  checkCodexAppServerControlSocket,
+  getCodexAppServerControlSocketPath,
+} from './app-server-control';
+import {
+  ensureChromeExtensionAppServer,
+  getConfiguredChromeDebugBaseUrl,
+  getConfiguredChromeAppServerOrigin,
+  getConfiguredChromeExtensionId,
+} from './chrome-extension-host';
 import { getCodexComputerUsePaths } from './codex-paths';
 import { answerComputerUseElicitation } from './elicitation';
 
@@ -14,6 +25,27 @@ const NODE_REPL_SERVER = 'node_repl';
 const RETRYABLE_OBSERVATION_TOOLS = new Set(['list_apps', 'get_app_state']);
 const TRANSIENT_PROCESS_ERROR = /NSOSStatusErrorDomain Code=-600|procNotFound/;
 type CodexAppServerBridgeClient = CodexAppServerWebSocketClient;
+
+interface ChromeNativeBridgeOptions {
+  debugBaseUrl?: string;
+  extensionId?: string;
+}
+
+interface ChromeAppServerBridge {
+  browserClientPath?: string;
+  client: CodexAppServerBridgeClient;
+  key: string;
+  localAppServerUrl: string;
+  threadId?: string;
+}
+
+interface ChromeBridgeBootstrapFailure {
+  at: string;
+  chromeAppServerOrigin: string;
+  debugBaseUrl: string;
+  error: string;
+  extensionId: string;
+}
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) return Promise.reject(new Error('Operation aborted'));
@@ -82,6 +114,18 @@ function formatPathStatus(label: string, filePath: string | undefined): string {
     return `${label}: (not found)`;
   }
   return `${label}: ${filePath} [${fs.existsSync(filePath) ? 'exists' : 'missing'}]`;
+}
+
+function getFileSha256(filePath: string | undefined): string | undefined {
+  if (!filePath || !fs.existsSync(filePath)) return undefined;
+  return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+}
+
+function formatPathHashStatus(label: string, filePath: string | undefined): string[] {
+  const lines = [formatPathStatus(label, filePath)];
+  const sha256 = getFileSha256(filePath);
+  if (sha256) lines.push(`${label} sha256: ${sha256}`);
+  return lines;
 }
 
 function truncate(value: string, maxLength = 100): string {
@@ -197,6 +241,8 @@ export interface CodexDiagnosticStatusOptions {
 
 export class ComputerUseSession {
   private client?: CodexAppServerBridgeClient;
+  private chromeBridge?: ChromeAppServerBridge;
+  private lastChromeBridgeBootstrapFailure?: ChromeBridgeBootstrapFailure;
   private threadId?: string;
   private nextNodeReplTurnNumber = 1;
 
@@ -210,6 +256,13 @@ export class ComputerUseSession {
   ): Promise<string> {
     const paths = getCodexComputerUsePaths();
     const cwd = ctx.cwd ?? process.cwd();
+    const controlSocketHealth = await checkCodexAppServerControlSocket().catch(
+      (error: unknown) => ({
+        ok: false as const,
+        socketPath: getCodexAppServerControlSocketPath(),
+        error: getErrorMessage(error),
+      }),
+    );
     const lines = [
       'pi-codex-app-server-use diagnostics',
       '',
@@ -219,8 +272,17 @@ export class ComputerUseSession {
       formatPathStatus('  Codex home', paths.codexHome),
       formatPathStatus('  Computer Use app', paths.stableComputerUseApp),
       formatPathStatus('  Computer Use client', paths.stableComputerUseClient),
-      formatPathStatus('  IAB browser client', paths.browserClientScripts.iab),
-      formatPathStatus('  Chrome browser client', paths.browserClientScripts.chrome),
+      ...formatPathHashStatus('  IAB browser client', paths.browserClientScripts.iab),
+      ...formatPathHashStatus('  Chrome browser client', paths.browserClientScripts.chrome),
+      '',
+      'Browser bridge config:',
+      `  Chrome/Brave debug URL: ${getConfiguredChromeDebugBaseUrl()}`,
+      `  Chrome extension ID: ${getConfiguredChromeExtensionId()}`,
+      `  Chrome AppServer origin: ${getConfiguredChromeAppServerOrigin()}`,
+      `  AppServer control socket: ${getCodexAppServerControlSocketPath()}`,
+      `  AppServer control socket health: ${controlSocketHealth.ok ? 'ok' : `failed (${controlSocketHealth.error})`}`,
+      '',
+      ...this.formatChromeBridgeDiagnosticLines(),
       '',
       'Bridge:',
       `  CWD: ${cwd}`,
@@ -250,6 +312,24 @@ export class ComputerUseSession {
           cwd,
           hasUI: ctx.hasUI,
           paths,
+          browserBridgeConfig: {
+            appServerControlSocket: getCodexAppServerControlSocketPath(),
+            appServerControlSocketHealth: controlSocketHealth,
+            chromeAppServerOrigin: getConfiguredChromeAppServerOrigin(),
+            chromeBrowserClientSha256: getFileSha256(paths.browserClientScripts.chrome),
+            chromeDebugBaseUrl: getConfiguredChromeDebugBaseUrl(),
+            chromeExtensionId: getConfiguredChromeExtensionId(),
+            iabBrowserClientSha256: getFileSha256(paths.browserClientScripts.iab),
+          },
+          chromeBridge: this.chromeBridge
+            ? {
+                browserClientPath: this.chromeBridge.browserClientPath,
+                browserClientSha256: getFileSha256(this.chromeBridge.browserClientPath),
+                localAppServerUrl: this.chromeBridge.localAppServerUrl,
+                threadId: this.chromeBridge.threadId,
+              }
+            : null,
+          lastChromeBridgeBootstrapFailure: this.lastChromeBridgeBootstrapFailure ?? null,
           bridge: { threadId, processInfo },
           mcpServers: servers,
         });
@@ -260,6 +340,33 @@ export class ComputerUseSession {
     }
 
     return lines.join('\n');
+  }
+
+  private formatChromeBridgeDiagnosticLines(): string[] {
+    const lines = ['Chrome/Brave AppServer bridge:'];
+    if (this.chromeBridge) {
+      lines.push(
+        `  Status: connected`,
+        `  Local AppServer URL: ${this.chromeBridge.localAppServerUrl}`,
+        ...formatPathHashStatus('  Runtime browser client', this.chromeBridge.browserClientPath),
+        `  Thread: ${this.chromeBridge.threadId ?? '(not started)'}`,
+      );
+      return lines;
+    }
+    if (this.lastChromeBridgeBootstrapFailure) {
+      const failure = this.lastChromeBridgeBootstrapFailure;
+      lines.push(
+        '  Status: last bootstrap failed',
+        `  At: ${failure.at}`,
+        `  Error: ${failure.error}`,
+        `  Chrome/Brave debug URL: ${failure.debugBaseUrl}`,
+        `  Chrome extension ID: ${failure.extensionId}`,
+        `  Chrome AppServer origin: ${failure.chromeAppServerOrigin}`,
+      );
+      return lines;
+    }
+    lines.push('  Status: not attempted');
+    return lines;
   }
 
   async callTool(
@@ -338,10 +445,57 @@ export class ComputerUseSession {
     backend: BrowserBackend,
     input: CodexMcpToolCall,
     signal?: AbortSignal,
-    _options: unknown = {},
+    options: ChromeNativeBridgeOptions = {},
   ): Promise<{ threadId: string; rawResult: any }> {
-    void backend;
-    return await this.callMcpTool(ctx, input, signal);
+    if (backend !== 'chrome') return await this.callMcpTool(ctx, input, signal);
+
+    let lastError: unknown;
+    for (let bridgeAttempt = 0; bridgeAttempt < 2; bridgeAttempt++) {
+      const bridge = await this.getChromeBridge(ctx, options, signal);
+      const client = bridge.client;
+      const threadId = await this.getChromeThreadId(ctx, bridge, signal);
+      const restore = client.setElicitationHandler((params) =>
+        answerComputerUseElicitation(params, ctx),
+      );
+      try {
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const rawResult = await client.callMcpTool({
+            server: input.server,
+            threadId,
+            tool: input.tool,
+            arguments: input.arguments,
+            timeoutMs: input.timeoutMs ?? 120_000,
+            signal,
+            ...(input.server === NODE_REPL_SERVER
+              ? { _meta: buildNodeReplRequestMeta(threadId, this.nextNodeReplTurnNumber++) }
+              : {}),
+          });
+          const errorMessage = getMcpErrorMessage(rawResult);
+          if (!errorMessage) {
+            return { threadId, rawResult };
+          }
+          if (attempt === 0 && isRetryableMcpError(input.server, input.tool, errorMessage)) {
+            await sleep(250, signal);
+            continue;
+          }
+          throw new Error(`Codex MCP ${input.server}.${input.tool} failed: ${errorMessage}`);
+        }
+        throw new Error(`Codex MCP ${input.server}.${input.tool} failed unexpectedly`);
+      } catch (error) {
+        lastError = error;
+        if (isUnknownMcpServerError(error) && bridgeAttempt === 0) {
+          this.resetChromeBridge();
+          continue;
+        }
+        if (shouldResetBridgeAfterError(error) || isUnknownMcpServerError(error)) {
+          this.resetChromeBridge();
+        }
+        throw isUnknownMcpServerError(error) ? makeUnknownMcpServerError(error) : error;
+      } finally {
+        restore();
+      }
+    }
+    throw isUnknownMcpServerError(lastError) ? makeUnknownMcpServerError(lastError) : lastError;
   }
 
   async getMcpServerAvailability(ctx: ExtensionContext): Promise<{
@@ -367,8 +521,14 @@ export class ComputerUseSession {
 
   private resetDefaultBridge(): void {
     this.client?.close();
+    this.resetChromeBridge();
     this.client = undefined;
     this.threadId = undefined;
+  }
+
+  private resetChromeBridge(): void {
+    this.chromeBridge?.client.close();
+    this.chromeBridge = undefined;
   }
 
   private async getClient(signal?: AbortSignal): Promise<CodexAppServerBridgeClient> {
@@ -381,6 +541,69 @@ export class ComputerUseSession {
       await this.client.init(signal);
     }
     return this.client;
+  }
+
+  private async getChromeBridge(
+    _ctx: ExtensionContext,
+    options: ChromeNativeBridgeOptions,
+    signal?: AbortSignal,
+  ): Promise<ChromeAppServerBridge> {
+    const debugBaseUrl = options.debugBaseUrl ?? getConfiguredChromeDebugBaseUrl();
+    const extensionId = options.extensionId ?? getConfiguredChromeExtensionId();
+    const chromeAppServerOrigin = getConfiguredChromeAppServerOrigin();
+    const key = JSON.stringify({
+      debugBaseUrl,
+      extensionId,
+      origin: chromeAppServerOrigin,
+    });
+    if (this.chromeBridge?.key === key) return this.chromeBridge;
+    this.resetChromeBridge();
+
+    try {
+      const info = await ensureChromeExtensionAppServer({
+        debugBaseUrl,
+        extensionId,
+        ...(signal ? { signal } : {}),
+      });
+      const client = new CodexAppServerWebSocketClient({
+        clientName: 'pi-codex-app-server-use-chrome',
+        origin: chromeAppServerOrigin,
+        url: info.localAppServerUrl,
+      });
+      await client.init(signal);
+      this.lastChromeBridgeBootstrapFailure = undefined;
+      this.chromeBridge = {
+        browserClientPath: info.runtimeConfig.browserClientPath,
+        client,
+        key,
+        localAppServerUrl: info.localAppServerUrl,
+      };
+      return this.chromeBridge;
+    } catch (error) {
+      this.lastChromeBridgeBootstrapFailure = {
+        at: new Date().toISOString(),
+        chromeAppServerOrigin,
+        debugBaseUrl,
+        error: getErrorMessage(error),
+        extensionId,
+      };
+      throw error;
+    }
+  }
+
+  private async getChromeThreadId(
+    ctx: ExtensionContext,
+    bridge: ChromeAppServerBridge,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    if (!bridge.threadId) {
+      bridge.threadId = await bridge.client.startThread({
+        cwd: ctx.cwd ?? process.cwd(),
+        name: 'Pi Brave Browser',
+        signal,
+      });
+    }
+    return bridge.threadId;
   }
 
   private async getThreadId(

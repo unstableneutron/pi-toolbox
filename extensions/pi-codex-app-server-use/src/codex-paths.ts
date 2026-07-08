@@ -71,6 +71,16 @@ export function resolveCodexPluginPath({
   relativePath,
   type,
 }: ResolveCodexPluginPathOptions): string | undefined {
+  const marketplaceCandidate = path.join(
+    codexHome,
+    '.tmp/bundled-marketplaces/openai-bundled/plugins',
+    plugin,
+    relativePath,
+  );
+  if (pathHasType(marketplaceCandidate, type)) {
+    return marketplaceCandidate;
+  }
+
   const cacheRoot = path.join(codexHome, 'plugins/cache/openai-bundled', plugin);
   const latestCandidate = path.join(cacheRoot, 'latest', relativePath);
   if (pathHasType(latestCandidate, type)) {
