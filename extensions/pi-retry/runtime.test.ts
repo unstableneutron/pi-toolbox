@@ -43,7 +43,7 @@ function createFakeErrorSession() {
       message: {
         role: 'assistant',
         stopReason: 'error',
-        errorMessage: 'The server had an error processing your request',
+        errorMessage: 'The server had an error while processing your request. Sorry about that!',
         content: [],
       },
     },

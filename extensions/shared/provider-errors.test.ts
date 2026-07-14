@@ -203,6 +203,12 @@ describe('shared provider error classification', () => {
       'providerServerError',
     );
 
+    expect(
+      classifyRetryableProviderError(
+        'The server had an error while processing your request. Sorry about that!',
+      ),
+    ).toBe('providerServerError');
+
     expect(classifyRetryableProviderError('Error: The model produced invalid content.')).toBe(
       'providerServerError',
     );

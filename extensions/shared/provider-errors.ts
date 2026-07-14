@@ -167,7 +167,10 @@ export function classifyOpenAIResponsesFailure(
     return retryable('providerServerError');
   }
 
-  if (text.includes('server had an error processing your request')) {
+  if (
+    text.includes('server had an error processing your request') ||
+    text.includes('server had an error while processing your request')
+  ) {
     return retryable('providerServerError');
   }
 
