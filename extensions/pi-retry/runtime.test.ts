@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test, vi } from 'vitest';
 
 import {
+  PREMATURE_ABANDONMENT_CONTINUE_MESSAGE,
   STOCK_REFUSAL_CONTINUE_MESSAGES,
   buildRecoveryStatus,
   branchLatestAssistantErrorOutOfMainPath,
@@ -419,6 +420,8 @@ function createFakeCreatedByCompactionSession() {
 }
 
 const REFUSAL_TEXT = "I'm sorry, but I cannot assist with that request.";
+const PREMATURE_ABANDONMENT_TEXT =
+  'I’m sorry, but I couldn’t complete the observer and multi-window work.';
 
 function refusalEvent(text = REFUSAL_TEXT) {
   return {
@@ -488,6 +491,88 @@ function createFakeRefusalSession() {
   }
 
   return { sessionManager, entries, session: { sessionManager }, pushRefusal };
+}
+
+function createFakePrematureAbandonmentSession() {
+  const entries = [
+    {
+      id: 'user-1',
+      parentId: undefined,
+      type: 'message',
+      message: { role: 'user', content: [{ type: 'text', text: 'Finish the implementation' }] },
+    },
+    {
+      id: 'assistant-tool-use',
+      parentId: 'user-1',
+      type: 'message',
+      message: {
+        role: 'assistant',
+        stopReason: 'toolUse',
+        content: [{ type: 'toolCall', id: 'call-edit', name: 'edit', arguments: {} }],
+      },
+    },
+    {
+      id: 'tool-result-1',
+      parentId: 'assistant-tool-use',
+      type: 'message',
+      message: {
+        role: 'toolResult',
+        toolCallId: 'call-edit',
+        content: [{ type: 'text', text: 'Applied patch' }],
+      },
+    },
+    {
+      id: 'assistant-abandonment-1',
+      parentId: 'tool-result-1',
+      type: 'message',
+      message: {
+        role: 'assistant',
+        stopReason: 'stop',
+        content: [{ type: 'text', text: PREMATURE_ABANDONMENT_TEXT }],
+      },
+    },
+  ] as any[];
+
+  const sessionManager = {
+    leafId: 'assistant-abandonment-1',
+    getSessionId: () => 'session-1',
+    getLeafId() {
+      return this.leafId;
+    },
+    getEntries() {
+      return entries;
+    },
+    branch(entryId: string) {
+      this.leafId = entryId;
+    },
+  };
+
+  function pushSecondAbandonment() {
+    entries.push(
+      {
+        id: 'user-recovery-1',
+        parentId: 'assistant-abandonment-1',
+        type: 'message',
+        message: {
+          role: 'user',
+          content: [{ type: 'text', text: PREMATURE_ABANDONMENT_CONTINUE_MESSAGE }],
+        },
+      },
+      {
+        id: 'assistant-abandonment-2',
+        parentId: 'user-recovery-1',
+        type: 'message',
+        message: {
+          role: 'assistant',
+          stopReason: 'stop',
+          content: [{ type: 'text', text: 'Sorry, I wasn’t able to complete this.' }],
+        },
+      },
+    );
+    sessionManager.leafId = 'assistant-abandonment-2';
+  }
+
+  return { sessionManager, entries, session: { sessionManager }, pushSecondAbandonment };
 }
 
 function createCtx(sessionManager: any, overrides: { [key: string]: unknown } = {}) {
@@ -742,6 +827,25 @@ describe('detectRetryableTerminalLeaf', () => {
     });
   });
 
+  test('detects terse premature abandonment after tool results', () => {
+    const { sessionManager } = createFakePrematureAbandonmentSession();
+
+    expect(detectRetryableTerminalLeaf(sessionManager as any)).toMatchObject({
+      kind: 'premature-abandonment',
+      entryId: 'assistant-abandonment-1',
+      parentEntryId: 'tool-result-1',
+    });
+  });
+
+  test('does not detect premature abandonment when the assistant made no tool-backed progress', () => {
+    const { sessionManager } = createSessionWithTrailingCustomLeaf({
+      stopReason: 'stop',
+      content: [{ type: 'text', text: PREMATURE_ABANDONMENT_TEXT }],
+    });
+
+    expect(detectRetryableTerminalLeaf(sessionManager as any)).toBeUndefined();
+  });
+
   test('does not treat mixed answer plus refusal tail content as a retryable refusal', () => {
     const { sessionManager } = createSessionWithTrailingCustomLeaf({
       stopReason: 'stop',
@@ -808,6 +912,79 @@ describe('handleRefusalRecovery', () => {
     expect(getPendingRecovery('session-1')).toBeUndefined();
     expect(getRefusalContinueAttempt('session-1')).toBe(0);
     expect(getRefusalAttempt('session-1')).toBe(0);
+  });
+
+  test('queues one visible continuation for tool-backed premature abandonment', async () => {
+    const reviewRewrite = vi.fn();
+    const sendUserMessage = vi.fn();
+    const { session, sessionManager } = createFakePrematureAbandonmentSession();
+    const { ctx, statusCalls, notify } = createCtx(sessionManager);
+
+    await handleRefusalRecovery({
+      event: refusalEvent(PREMATURE_ABANDONMENT_TEXT),
+      ctx,
+      patchedSession: session as any,
+      reviewRewrite,
+      sendUserMessage,
+    });
+
+    expect(reviewRewrite).not.toHaveBeenCalled();
+    expect(statusCalls).toEqual([
+      '↻ Premature abandonment detected; sending a visible continuation...',
+    ]);
+    expect(getPendingRecovery('session-1')).toMatchObject({
+      kind: 'premature-abandonment',
+      message: PREMATURE_ABANDONMENT_CONTINUE_MESSAGE,
+      expectedLeafId: 'assistant-abandonment-1',
+      details: {
+        kind: 'premature-abandonment',
+        attempt: 1,
+        expectedLeafId: 'assistant-abandonment-1',
+      },
+    });
+    expect(getPendingRecovery('session-1')?.details?.replacement).toBeUndefined();
+    expect(sessionManager.leafId).toBe('assistant-abandonment-1');
+
+    await dispatchPendingRecovery({ sessionId: 'session-1', sendUserMessage });
+
+    expect(sendUserMessage).toHaveBeenCalledWith(
+      PREMATURE_ABANDONMENT_CONTINUE_MESSAGE,
+      expect.objectContaining({ kind: 'premature-abandonment', attempt: 1 }),
+    );
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  test('does not loop when the first visible continuation receives another give-up response', async () => {
+    const reviewRewrite = vi.fn();
+    const sendUserMessage = vi.fn();
+    const { session, sessionManager, pushSecondAbandonment } =
+      createFakePrematureAbandonmentSession();
+    const { ctx, notify } = createCtx(sessionManager);
+
+    await handleRefusalRecovery({
+      event: refusalEvent(PREMATURE_ABANDONMENT_TEXT),
+      ctx,
+      patchedSession: session as any,
+      reviewRewrite,
+      sendUserMessage,
+    });
+    await dispatchPendingRecovery({ sessionId: 'session-1', sendUserMessage });
+
+    pushSecondAbandonment();
+    await handleRefusalRecovery({
+      event: refusalEvent('Sorry, I wasn’t able to complete this.'),
+      ctx,
+      patchedSession: session as any,
+      reviewRewrite,
+      sendUserMessage,
+    });
+
+    expect(sendUserMessage).toHaveBeenCalledTimes(1);
+    expect(getPendingRecovery('session-1')).toBeUndefined();
+    expect(notify).toHaveBeenCalledWith(
+      'pi-retry stopped premature-abandonment recovery after one attempt',
+      'warning',
+    );
   });
 
   test('branches the first refusal and queues a stock continue message before asking review models', async () => {

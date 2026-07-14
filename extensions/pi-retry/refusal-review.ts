@@ -35,6 +35,13 @@ const REFUSAL_PATTERNS = [
   /i\s*'?m sorry,?\s*but\s*i\s*cannot assist/i,
 ];
 
+const PREMATURE_ABANDONMENT_PATTERN =
+  /\b(?:could(?:n['’]?t| not)|was(?:n['’]?t| not) able to|unable to|failed to)\s+(?:fully\s+)?(?:complete|finish)\b/i;
+const CONCRETE_BLOCKER_PATTERN =
+  /\b(?:because|due to|blocked by|requires?|permission|authentication|credentials?|unavailable|not found|missing|failed with|error|timeout|rate limit|cannot access)\b/i;
+const COMPLETION_EVIDENCE_PATTERN =
+  /\b(?:implemented|completed|finished|done|tests? pass(?:ed)?|verified)\b/i;
+
 const REVIEW_MODEL_IDS: Record<ModelFamily, string[]> = {
   openai: ['claude-opus-4-6', 'gemini-3.1-pro'],
   claude: ['gpt-5.4', 'gemini-3.1-pro'],
@@ -116,6 +123,21 @@ export function isLikelyRefusalText(text: string | undefined): boolean {
   );
 
   return 0 === substantiveSegments.length;
+}
+
+export function isLikelyPrematureAbandonmentText(text: string | undefined): boolean {
+  const normalized = text?.trim();
+  if (!normalized || 40 < countWords(normalized) || 320 < normalized.length) {
+    return false;
+  }
+
+  if (!PREMATURE_ABANDONMENT_PATTERN.test(normalized)) {
+    return false;
+  }
+
+  return (
+    !CONCRETE_BLOCKER_PATTERN.test(normalized) && !COMPLETION_EVIDENCE_PATTERN.test(normalized)
+  );
 }
 
 export function inferModelFamily(

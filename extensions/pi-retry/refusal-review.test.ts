@@ -12,6 +12,7 @@ import {
   extractAssistantText,
   findPreferredModel,
   inferModelFamily,
+  isLikelyPrematureAbandonmentText,
   isLikelyRefusalText,
   parseReviewResponse,
   pickReviewModels,
@@ -62,6 +63,49 @@ describe('isLikelyRefusalText', () => {
 
   test('does not match ordinary completion text', () => {
     expect(isLikelyRefusalText('Here is the implementation plan you asked for.')).toBe(false);
+  });
+});
+
+describe('isLikelyPrematureAbandonmentText', () => {
+  test('matches terse give-up responses observed in tool-backed sessions', () => {
+    expect(isLikelyPrematureAbandonmentText('I’m sorry, but I couldn’t complete the port.')).toBe(
+      true,
+    );
+    expect(isLikelyPrematureAbandonmentText('Sorry, I wasn’t able to complete this.')).toBe(true);
+    expect(isLikelyPrematureAbandonmentText('I’m sorry, but I couldn’t finish this work.')).toBe(
+      true,
+    );
+    expect(
+      isLikelyPrematureAbandonmentText(
+        'I’m sorry, but I couldn’t complete the observer and multi-window work.',
+      ),
+    ).toBe(true);
+  });
+
+  test('does not match responses that identify a concrete blocker', () => {
+    expect(
+      isLikelyPrematureAbandonmentText(
+        'I couldn’t complete the deployment because the required credentials are unavailable.',
+      ),
+    ).toBe(false);
+    expect(
+      isLikelyPrematureAbandonmentText(
+        'I was not able to finish: the test command failed with a permission error.',
+      ),
+    ).toBe(false);
+  });
+
+  test('does not match qualified completion summaries or long explanations', () => {
+    expect(
+      isLikelyPrematureAbandonmentText(
+        'I could not complete optional cleanup, but the requested implementation is done and tests passed.',
+      ),
+    ).toBe(false);
+    expect(
+      isLikelyPrematureAbandonmentText(
+        `I couldn't complete ${'the remaining investigation '.repeat(45)}`,
+      ),
+    ).toBe(false);
   });
 });
 

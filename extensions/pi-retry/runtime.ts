@@ -5,6 +5,7 @@ import {
   buildRefusalStatus,
   buildReviewTranscript,
   extractTextContent,
+  isLikelyPrematureAbandonmentText,
   isLikelyRefusalText,
   pickReviewModels,
 } from './refusal-review';
@@ -18,9 +19,13 @@ const DEFAULT_REFUSAL_REWRITE_ATTEMPTS = 2;
 const MAX_EMPTY_RESPONSE_CONTINUE_ATTEMPTS = 3;
 const DEFAULT_CORE_RETRY_MAX_RETRIES = 3;
 const CONTINUE_RETRY_MESSAGE = 'Continue.';
+export const PREMATURE_ABANDONMENT_CONTINUE_MESSAGE =
+  '[pi-retry] Continue the unfinished work. The previous response appears to have stopped prematurely; complete the task or report a concrete blocker with evidence.';
 export const LENGTH_TRUNCATION_CONTINUE_MESSAGE =
   'Continue from where you were cut off. Do not repeat prior content.';
 const CONTINUE_RETRY_STATUS = '↻ Refusal detected; retrying...';
+const PREMATURE_ABANDONMENT_RETRY_STATUS =
+  '↻ Premature abandonment detected; sending a visible continuation...';
 const EMPTY_RESPONSE_RETRY_STATUS = '↻ Empty assistant response; retrying with Continue...';
 const LENGTH_TRUNCATION_CONTINUE_STATUS =
   '↻ Length-truncated response detected; continuing after compaction...';
@@ -99,7 +104,13 @@ export interface RetryRecoveryMessageDetails {
 }
 
 export interface PendingRecovery {
-  kind: 'empty-stop' | 'length-truncated' | 'refusal' | 'retryable-error' | 'stranded-tool-results';
+  kind:
+    | 'empty-stop'
+    | 'length-truncated'
+    | 'premature-abandonment'
+    | 'refusal'
+    | 'retryable-error'
+    | 'stranded-tool-results';
   message: string;
   expectedLeafId?: string;
   details?: RetryRecoveryMessageDetails;
@@ -386,6 +397,8 @@ export function buildRecoveryStatus(recovery: ActiveRecovery): string {
       return `${EMPTY_RESPONSE_RETRY_STATUS}${suffix}`;
     case 'length-truncated':
       return `${LENGTH_TRUNCATION_CONTINUE_STATUS}${suffix}`;
+    case 'premature-abandonment':
+      return `${PREMATURE_ABANDONMENT_RETRY_STATUS}${suffix}`;
     case 'retryable-error':
       return `${RETRYABLE_ERROR_CONTINUE_STATUS}${suffix}`;
     case 'stranded-tool-results':
@@ -1034,7 +1047,7 @@ export function resolveRecoveryOnAssistantMessage(
   }
 
   const assistantText = extractTextContent(message.content);
-  if (isLikelyRefusalText(assistantText)) {
+  if (isLikelyRefusalText(assistantText) || isLikelyPrematureAbandonmentText(assistantText)) {
     return false;
   }
 
@@ -1071,6 +1084,50 @@ function getNearestTerminalAssistantMessageEntry(
   sessionManager: SessionManagerLike | undefined,
 ): SessionEntry | undefined {
   return getBranchEntries(sessionManager).find(isTerminalAssistantMessageEntry);
+}
+
+function hasToolResultInCurrentUserTurn(
+  sessionManager: SessionManagerLike | undefined,
+  assistantEntryId: string | undefined,
+): boolean {
+  if (!assistantEntryId) {
+    return false;
+  }
+
+  let reachedAssistant = false;
+  for (const entry of getBranchEntries(sessionManager)) {
+    if (!reachedAssistant) {
+      reachedAssistant = entry.id === assistantEntryId;
+      continue;
+    }
+
+    const role = entry.message?.role;
+    if ('user' === role) {
+      return false;
+    }
+    if ('toolResult' === role) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function isRecoverablePrematureAbandonment(
+  sessionManager: SessionManagerLike | undefined,
+  text: string,
+  assistantEntryId: string | undefined,
+): boolean {
+  if (!isLikelyPrematureAbandonmentText(text)) {
+    return false;
+  }
+
+  const sessionId = sessionManager?.getSessionId?.();
+  if (sessionId && 'premature-abandonment' === getActiveRecovery(sessionId)?.kind) {
+    return true;
+  }
+
+  return hasToolResultInCurrentUserTurn(sessionManager, assistantEntryId);
 }
 
 function getToolCallIds(entry: SessionEntry | undefined): Set<string> {
@@ -1196,6 +1253,15 @@ export function detectRetryableTerminalLeaf(
   }
 
   const refusalText = extractTextContent(message.content);
+  if (isRecoverablePrematureAbandonment(sessionManager, refusalText, leafEntry?.id)) {
+    return {
+      kind: 'premature-abandonment',
+      entryId: leafEntry?.id,
+      parentEntryId: leafEntry?.parentId,
+      message,
+    };
+  }
+
   if (!isLikelyRefusalText(refusalText)) {
     return undefined;
   }
@@ -1224,6 +1290,11 @@ export function buildRetryableLeafPrompt(candidate: RetryableTerminalLeaf): {
         title: 'pi-retry: Length-truncated response detected',
         message:
           'This session appears to have stopped because the response hit the output limit. Send Continue now?',
+      };
+    case 'premature-abandonment':
+      return {
+        title: 'pi-retry: Premature abandonment detected',
+        message: 'Send a visible user continuation for the unfinished tool-backed task?',
       };
     case 'refusal':
       return {
@@ -1464,6 +1535,50 @@ export async function handleRefusalRecovery(input: {
         expectedLeafId: branchResult.parentEntryId,
         failedEntryId: branchResult.failedEntryId,
         parentEntryId: branchResult.parentEntryId,
+      }),
+    );
+    return;
+  }
+
+  const terminalAssistantEntry = getNearestTerminalAssistantMessageEntry(
+    input.patchedSession.sessionManager,
+  );
+  const isPrematureAbandonment = isRecoverablePrematureAbandonment(
+    input.patchedSession.sessionManager,
+    refusalText,
+    terminalAssistantEntry?.id,
+  );
+
+  if (isPrematureAbandonment) {
+    const previousRecovery = getActiveRecovery(sessionId);
+    if ('premature-abandonment' === previousRecovery?.kind && 1 <= previousRecovery.attempt) {
+      clearRecoveryState(sessionId);
+      ui.clearStatus();
+      ui.notify('pi-retry stopped premature-abandonment recovery after one attempt', 'warning');
+      return;
+    }
+
+    appendDebugEntry(input.patchedSession, {
+      kind: 'premature-abandonment-continue',
+      abandonmentText: refusalText,
+      attempt: 1,
+      assistantEntryId: terminalAssistantEntry?.id,
+    });
+
+    await deliverRecoveryMessage(
+      {
+        kind: 'premature-abandonment',
+        attempt: 1,
+        messageKind: 'continue',
+        maxAttempts: 1,
+      },
+      PREMATURE_ABANDONMENT_CONTINUE_MESSAGE,
+      terminalAssistantEntry?.id,
+      createRecoveryMessageDetails({
+        kind: 'premature-abandonment',
+        messageKind: 'continue',
+        attempt: 1,
+        expectedLeafId: terminalAssistantEntry?.id,
       }),
     );
     return;

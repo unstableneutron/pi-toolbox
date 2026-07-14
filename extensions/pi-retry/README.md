@@ -5,6 +5,7 @@
 It handles:
 
 - refusals
+- terse premature-abandonment stops after tool-backed work
 - empty assistant stops
 - malformed empty OpenAI Responses completions
 - stranded tool-result leaves
@@ -114,6 +115,19 @@ is needed.
 ### Refusal
 
 Assistant stop message whose visible text matches the refusal heuristics in `refusal-review.ts`.
+
+### Premature abandonment
+
+A terse assistant stop such as “I couldn’t complete the work” after the current user turn
+already produced tool results. `pi-retry` leaves that response in the transcript and sends one
+visible user message:
+
+```text
+[pi-retry] Continue the unfinished work. The previous response appears to have stopped prematurely; complete the task or report a concrete blocker with evidence.
+```
+
+The detector excludes responses that identify concrete blockers or include completion evidence.
+Recovery is limited to one attempt so a model that gives up again cannot create a retry loop.
 
 ### Retryable terminal error
 

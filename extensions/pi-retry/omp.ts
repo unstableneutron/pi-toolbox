@@ -6,8 +6,9 @@ setRetrySettingsSource('omp');
 export default createPiRetryExtension({
   // OMP's AgentSession retry/compaction helpers are private class methods, so the
   // Pi prototype patch layer is intentionally disabled. The public extension
-  // events still provide terminal-leaf detection, hidden Continue dispatch,
-  // context filtering, status updates, manual /retry, and refusal rewrites.
+  // events still provide terminal-leaf detection, hidden generic Continue dispatch,
+  // visible premature-abandonment recovery, context filtering, status updates,
+  // manual /retry, and refusal rewrites.
   installAgentSessionPatch: false,
   // OMP's session_start payload does not include Pi's startup/resume/reload
   // reason. Prompting on every session_start is harmless because the prompt is

@@ -2707,6 +2707,80 @@ describe('pi-retry extension runtime', () => {
     ]);
   });
 
+  test('agent_end sends premature-abandonment recovery as a visible user message', async () => {
+    vi.useFakeTimers();
+
+    const fakeModule = makeFakeAgentSessionModule();
+    const harness = await createExtensionHarness(async () => fakeModule);
+    let leafId = 'assistant-abandonment-1';
+
+    harness.ctx.isIdle = () => true;
+    harness.ctx.hasPendingMessages = () => false;
+    harness.ctx.sessionManager.branch = vi.fn((nextLeafId: string) => {
+      leafId = nextLeafId;
+    });
+    harness.ctx.sessionManager.getLeafId = () => leafId;
+    harness.ctx.sessionManager.getEntries = () => [
+      {
+        id: 'user-1',
+        type: 'message',
+        message: { role: 'user', content: [{ type: 'text', text: 'Finish the implementation' }] },
+      },
+      {
+        id: 'assistant-tool-use',
+        parentId: 'user-1',
+        type: 'message',
+        message: {
+          role: 'assistant',
+          stopReason: 'toolUse',
+          content: [{ type: 'toolCall', id: 'call-edit', name: 'edit', arguments: {} }],
+        },
+      },
+      {
+        id: 'tool-result-1',
+        parentId: 'assistant-tool-use',
+        type: 'message',
+        message: {
+          role: 'toolResult',
+          toolCallId: 'call-edit',
+          content: [{ type: 'text', text: 'Applied patch' }],
+        },
+      },
+      {
+        id: 'assistant-abandonment-1',
+        parentId: 'tool-result-1',
+        type: 'message',
+        message: {
+          role: 'assistant',
+          stopReason: 'stop',
+          content: [{ type: 'text', text: 'I’m sorry, but I couldn’t complete the work.' }],
+        },
+      },
+    ];
+
+    await getHandler(harness.handlers, 'agent_end')(
+      {
+        type: 'agent_end',
+        messages: [
+          {
+            role: 'assistant',
+            stopReason: 'stop',
+            content: [{ type: 'text', text: 'I’m sorry, but I couldn’t complete the work.' }],
+          },
+        ],
+      },
+      harness.ctx,
+    );
+
+    await vi.runAllTimersAsync();
+
+    expect(harness.ctx.sessionManager.branch).not.toHaveBeenCalled();
+    expect(harness.sendUserMessageCalls).toEqual([
+      { content: runtime.PREMATURE_ABANDONMENT_CONTINUE_MESSAGE, options: undefined },
+    ]);
+    expect(harness.sendMessageCalls).toEqual([]);
+  });
+
   test('turn_end queues replay-safe websocket transport fallback as retryable error', async () => {
     vi.useFakeTimers();
 

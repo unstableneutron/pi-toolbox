@@ -490,6 +490,7 @@ function parseRetryRecoveryDetails(value: unknown): RetryRecoveryMessageDetails 
   if (
     candidate.kind !== 'empty-stop' &&
     candidate.kind !== 'length-truncated' &&
+    candidate.kind !== 'premature-abandonment' &&
     candidate.kind !== 'refusal' &&
     candidate.kind !== 'retryable-error' &&
     candidate.kind !== 'stranded-tool-results'
@@ -1165,6 +1166,20 @@ export function createPiRetryExtension(
       patchFailureReason = undefined;
     }
 
+    const sendHiddenRecoveryMessage = (content: string, details?: RetryRecoveryMessageDetails) =>
+      pi.sendMessage(
+        { customType: PI_RETRY_RECOVERY_CUSTOM_TYPE, content, display: false, details },
+        { triggerTurn: true },
+      );
+
+    const sendRoutedRecoveryMessage = (content: string, details?: RetryRecoveryMessageDetails) => {
+      if ('premature-abandonment' === details?.kind) {
+        pi.sendUserMessage(content);
+        return;
+      }
+      sendHiddenRecoveryMessage(content, details);
+    };
+
     const promptAndRecoverCurrentLeaf = async (
       ctx: ExtensionContext,
       options?: { notifyWhenNotRetryable?: boolean },
@@ -1211,11 +1226,7 @@ export function createPiRetryExtension(
         ctx,
         patchedSession: { sessionManager: ctx.sessionManager as any },
         reviewRewrite: requestRefusalRewrite,
-        sendUserMessage: (content, details) =>
-          pi.sendMessage(
-            { customType: PI_RETRY_RECOVERY_CUSTOM_TYPE, content, display: false, details },
-            { triggerTurn: true },
-          ),
+        sendUserMessage: sendRoutedRecoveryMessage,
         dispatchMode: 'immediate',
       });
       return true;
@@ -1334,12 +1345,6 @@ export function createPiRetryExtension(
       schedulePendingRecoveryDispatch(sessionId, ctx, pi);
     };
 
-    const sendRecoveryMessage = (content: string, details?: RetryRecoveryMessageDetails) =>
-      pi.sendMessage(
-        { customType: PI_RETRY_RECOVERY_CUSTOM_TYPE, content, display: false, details },
-        { triggerTurn: true },
-      );
-
     const sameTerminalLeaf = (
       expected: NonNullable<ReturnType<typeof detectRetryableTerminalLeaf>>,
       ctx: ExtensionContext,
@@ -1389,7 +1394,7 @@ export function createPiRetryExtension(
           ctx,
           patchedSession: { sessionManager: ctx.sessionManager as any },
           reviewRewrite: requestRefusalRewrite,
-          sendUserMessage: sendRecoveryMessage,
+          sendUserMessage: sendRoutedRecoveryMessage,
           dispatchMode: 'pending',
         });
       }
@@ -1397,7 +1402,7 @@ export function createPiRetryExtension(
       if (getPendingRecovery(sessionId)) {
         await dispatchPendingRecovery({
           sessionId,
-          sendUserMessage: sendRecoveryMessage,
+          sendUserMessage: sendRoutedRecoveryMessage,
           ui: createDispatchRecoveryUi(ctx),
         });
       }
@@ -1538,11 +1543,7 @@ export function createPiRetryExtension(
         ctx,
         patchedSession: { sessionManager: ctx.sessionManager as any },
         reviewRewrite: requestRefusalRewrite,
-        sendUserMessage: (content, details) =>
-          pi.sendMessage(
-            { customType: PI_RETRY_RECOVERY_CUSTOM_TYPE, content, display: false, details },
-            { triggerTurn: true },
-          ),
+        sendUserMessage: sendRoutedRecoveryMessage,
         dispatchMode: shouldDispatchImmediately ? 'immediate' : 'pending',
       });
     });
