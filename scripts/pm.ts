@@ -24,10 +24,6 @@ function main(argv: string[] = process.argv.slice(2)): number {
 
   const packageManager = resolvePackageManagerCommand({ cwd: process.cwd() });
   const packageManagerArgs = withNoInstallForAubeRunCommands(packageManager.command, argv);
-  const env = { ...process.env };
-  if (packageManager.command.endsWith('pnpm-npm-shim.sh')) {
-    env.PI_NPM_SHIM_NO_INSTALL ??= '1';
-  }
   console.error(`Running: ${formatPackageManagerCommand(packageManager, packageManagerArgs)}`);
 
   const result = spawnSync(
@@ -35,7 +31,6 @@ function main(argv: string[] = process.argv.slice(2)): number {
     [...packageManager.args, ...packageManagerArgs],
     {
       cwd: process.cwd(),
-      env,
       stdio: 'inherit',
     },
   );

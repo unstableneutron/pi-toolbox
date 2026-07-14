@@ -89,17 +89,17 @@ best run via `aube run ...` or the `~/.local/bin` symlink above.
 
 ```bash
 # 1. Install workspace dependencies.
-aube install
+pnpm install
 
 # 2. Run tests.
-aube run test
+pnpm run test
 
 # 3. Lint + format.
-aube run check
+pnpm run check
 
-# 4. (Optional) Re-pin workspace deps to the globally installed pi CLI
-#    and refresh gitchamber source snapshots.
-aube exec tsx scripts/pi-update-extensions.ts
+# 4. (Optional) Update Pi and its extensions, re-pin workspace deps,
+#    apply compatibility patches, and refresh gitchamber snapshots.
+mise pi-update
 ```
 
 ## Using this with pi

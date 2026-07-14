@@ -26,11 +26,12 @@ import {
   buildPiSelfUpdateCommand,
   compareVersions,
   detectPiInstallPackageManagerFromPath,
-  ensureAubeTrustPolicyExcludes,
+  detectPiInstallPackageManagerFromPaths,
   findInstalledNpmPackagePath,
   findPiCodingAgentRootFromExecutable,
   formatPackageManagerCommand,
   getPackageManagerCommandCandidates,
+  getPnpmWorkspaceOverrideChanges,
   isPiCodexGoalPostCompactionUserFollowupPatchApplied,
   isPiCodingAgentResolverPatchApplied,
   isPiCodingAgentTranscriptCachePatchApplied,
@@ -47,6 +48,7 @@ import {
   readConfiguredNpmCommand,
   resolvePackageManagerCommand,
   runPiUpdate,
+  writePnpmWorkspaceOverrides,
 } from '../scripts/pi-update-extensions.ts';
 
 const tempDirs: string[] = [];
@@ -186,40 +188,45 @@ describe('package manager command resolution', () => {
   });
 });
 
-describe('Aube trust policy excludes', () => {
-  it('adds package-level excludes to an existing trustPolicyExclude array', () => {
-    const dir = makeTempDir('aube-config-');
-    const configPath = join(dir, 'config.toml');
+describe('pnpm workspace override sync', () => {
+  it('updates existing Pi overrides without adding absent ones', () => {
+    const workspacePath = join(makeTempDir('pnpm-workspace-'), 'pnpm-workspace.yaml');
     writeFileSync(
-      configPath,
+      workspacePath,
       [
-        'trustPolicy = "no-downgrade"',
-        'trustPolicyExclude = [',
-        '    "pi-subagents@0.28.0",',
-        ']',
+        'overrides:',
+        "  '@earendil-works/pi-ai': 0.80.2",
+        "  '@earendil-works/pi-coding-agent': 0.80.2",
+        '',
       ].join('\n'),
     );
+    const desired = {
+      '@earendil-works/pi-agent-core': '0.80.7',
+      '@earendil-works/pi-ai': '0.80.7',
+      '@earendil-works/pi-coding-agent': '0.80.7',
+    };
 
-    const result = ensureAubeTrustPolicyExcludes(['pi-subagents'], { configPath });
+    const changes = getPnpmWorkspaceOverrideChanges(workspacePath, desired);
+    expect(changes).toEqual([
+      {
+        kind: 'bump',
+        name: '@earendil-works/pi-ai',
+        from: '0.80.2',
+        to: '0.80.7',
+      },
+      {
+        kind: 'bump',
+        name: '@earendil-works/pi-coding-agent',
+        from: '0.80.2',
+        to: '0.80.7',
+      },
+    ]);
 
-    expect(result).toEqual({
-      status: 'updated',
-      configPath,
-      entries: ['pi-subagents'],
-    });
-    expect(readFileSync(configPath, 'utf8')).toContain('    "pi-subagents",\n]');
-  });
-
-  it('creates trustPolicyExclude when the Aube config is missing', () => {
-    const dir = makeTempDir('aube-config-');
-    const configPath = join(dir, 'nested', 'config.toml');
-
-    const result = ensureAubeTrustPolicyExcludes(['pi-subagents'], { configPath });
-
-    expect(result.status).toBe('updated');
-    expect(readFileSync(configPath, 'utf8')).toBe(
-      ['trustPolicyExclude = [', '    "pi-subagents",', ']', ''].join('\n'),
-    );
+    writePnpmWorkspaceOverrides(workspacePath, changes);
+    const updated = readFileSync(workspacePath, 'utf8');
+    expect(updated).toContain("'@earendil-works/pi-ai': 0.80.7");
+    expect(updated).toContain("'@earendil-works/pi-coding-agent': 0.80.7");
+    expect(updated).not.toContain('@earendil-works/pi-agent-core');
   });
 });
 
@@ -251,6 +258,14 @@ describe('pi self-update package manager detection', () => {
     );
   });
 
+  it('checks later PATH entries when a shell wrapper appears first', () => {
+    expect(
+      detectPiInstallPackageManagerFromPaths([
+        '/Users/me/.dotfiles/bin/pi',
+        '/Users/me/.cache/aube/virtual-store/@earendil-works+pi-coding-agent@0.79.10-hash/node_modules/@earendil-works/pi-coding-agent/dist/cli.js',
+      ]),
+    ).toBe('aube');
+  });
   it('builds an aube global update command for pi', () => {
     expect(buildPiSelfUpdateCommand('aube')).toEqual({
       packageManager: 'aube',
@@ -271,10 +286,8 @@ describe('pi self-update package manager detection', () => {
   it('runs package-manager self-update before pi extension update', async () => {
     const calls: Array<{ command: string; args: string[] }> = [];
     const logs: string[] = [];
-    const aubeConfigPath = join(makeTempDir('aube-config-'), 'config.toml');
 
     await runPiUpdate({
-      aubeConfigPath,
       piPath:
         '/Users/me/.cache/aube/virtual-store/@earendil-works+pi-coding-agent@0.79.10-hash/node_modules/@earendil-works/pi-coding-agent/dist/cli.js',
       execFile: ((command: string, args: string[]) => {
@@ -293,7 +306,6 @@ describe('pi self-update package manager detection', () => {
     ]);
     expect(logs).toEqual([
       'Ran: aube add -g @earendil-works/pi-coding-agent@latest',
-      `Updated Aube trustPolicyExclude in ${aubeConfigPath}: pi-subagents`,
       'Ran: pi update --extensions',
     ]);
   });
@@ -301,11 +313,9 @@ describe('pi self-update package manager detection', () => {
   it('runs aube approve-builds when --approve is requested', async () => {
     const calls: Array<{ command: string; args: string[] }> = [];
     const logs: string[] = [];
-    const aubeConfigPath = join(makeTempDir('aube-config-'), 'config.toml');
 
     await runPiUpdate({
       approve: true,
-      aubeConfigPath,
       piPath:
         '/Users/me/.cache/aube/virtual-store/@earendil-works+pi-coding-agent@0.79.10-hash/node_modules/@earendil-works/pi-coding-agent/dist/cli.js',
       execFile: ((command: string, args: string[]) => {
@@ -1097,6 +1107,18 @@ describe('pi-codex-goal post-compaction continuation patching', () => {
     '',
   ].join('\n');
 
+  const UPSTREAM_FALLBACK_CONTENT = [
+    'const schedulePostCompactContinuationFallback = (ctx, options) => {',
+    '  if (options.clearHostOverflowRecovery) {',
+    '    clearActiveHostOverflowRecovery(runtimeState.recoveryState);',
+    '  }',
+    '};',
+    'schedulePostCompactContinuationFallback(ctx, {',
+    '  clearHostOverflowRecovery: wasRecoveringFromHostOverflow,',
+    '});',
+    '',
+  ].join('\n');
+
   function setupFakePackage(version: string, handlerContent = FIXTURE_CONTENT): string {
     const packageRoot = makeTempDir('pi-codex-goal-');
     writeFileSync(
@@ -1143,6 +1165,19 @@ describe('pi-codex-goal post-compaction continuation patching', () => {
       patched.indexOf('continuation.maybeContinueAfterCurrentEvent(ctx);'),
     );
     expect(isPiCodexGoalPostCompactionUserFollowupPatchApplied(packageRoot)).toBe(true);
+  });
+
+  it('recognizes the upstream post-compaction fallback', async () => {
+    const packageRoot = setupFakePackage('0.1.35', UPSTREAM_FALLBACK_CONTENT);
+
+    expect(isPiCodexGoalPostCompactionUserFollowupPatchApplied(packageRoot)).toBe(true);
+    await expect(
+      applyPiCodexGoalPostCompactionUserFollowupPatch({ packageRoot }),
+    ).resolves.toMatchObject({
+      status: 'already-applied',
+      packageRoot,
+      version: '0.1.35',
+    });
   });
 
   it('is idempotent after patching', async () => {
@@ -1545,6 +1580,19 @@ describe('pi-ai Bedrock apiKey bearer patching', () => {
     '',
   ].join('\n');
 
+  const UPSTREAM_API_KEY_FIXTURE_CONTENT = [
+    'export const streamBedrock = (model, context, options = {}) => {',
+    '    const config = {};',
+    '        const bearerToken =',
+    '            options.bearerToken ||',
+    '            options.apiKey ||',
+    '            getProviderEnvValue("AWS_BEARER_TOKEN_BEDROCK", options.env) ||',
+    '            undefined;',
+    '    return config;',
+    '};',
+    '',
+  ].join('\n');
+
   function setupFakePackage(version: string, bedrockContent = FIXTURE_CONTENT): string {
     const packageRoot = makeTempDir('pi-ai-');
     writeFileSync(
@@ -1609,6 +1657,17 @@ describe('pi-ai Bedrock apiKey bearer patching', () => {
       'const bearerToken = options.bearerToken || getProviderEnvValue("AWS_BEARER_TOKEN_BEDROCK", options.env) || undefined;',
     );
     expect(isPiAiBedrockApiKeyBearerPatchApplied(packageRoot)).toBe(true);
+  });
+
+  it('recognizes the upstream apiKey bearer implementation', async () => {
+    const packageRoot = setupFakePackage('0.80.7', UPSTREAM_API_KEY_FIXTURE_CONTENT);
+
+    expect(isPiAiBedrockApiKeyBearerPatchApplied(packageRoot)).toBe(true);
+    await expect(applyPiAiBedrockApiKeyBearerPatch({ packageRoot })).resolves.toMatchObject({
+      status: 'already-applied',
+      packageRoot,
+      version: '0.80.7',
+    });
   });
 
   it('is idempotent after patching', async () => {

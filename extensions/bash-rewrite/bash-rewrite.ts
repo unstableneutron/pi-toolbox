@@ -435,9 +435,10 @@ function isStringToken(t: Token): t is string {
   return typeof t === 'string';
 }
 
-type OpToken = { op: ControlOperator } | { op: 'glob'; pattern: string };
+type ControlOperatorName = ControlOperator['op'];
+type OpToken = ControlOperator | { op: 'glob'; pattern: string };
 
-function isOp(t: Token, op?: ControlOperator | 'glob'): t is OpToken {
+function isOp(t: Token, op?: ControlOperatorName | 'glob'): t is OpToken {
   if (typeof t !== 'object' || !t) return false;
   if (!('op' in t)) return false;
   if (op === undefined) return true;

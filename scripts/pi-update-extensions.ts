@@ -3,7 +3,6 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   existsSync,
-  mkdirSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -41,15 +40,6 @@ const PI_SIBLING_PACKAGES = GITCHAMBER_PACKAGES;
 const GITCHAMBER_MANUAL_OVERRIDES: Record<string, string> = {
   'pi-boomerang': 'nicobailon/pi-boomerang',
 };
-
-/**
- * Extension packages that currently publish without Aube trusted-publisher
- * evidence even though older releases had it. Keeping these package-level
- * excludes in the user Aube config lets `pi update --extensions` continue to
- * fail closed for every other dependency while bypassing known Pi extension
- * trust-downgrade false positives.
- */
-const AUBE_EXTENSION_TRUST_POLICY_EXCLUDES = ['pi-subagents'] as const;
 
 export type UpdateCliArgs = {
   directory?: string;
@@ -102,12 +92,6 @@ export type PiSelfUpdateCommand = {
 export type PiApproveBuildsCommand = {
   command: string;
   args: string[];
-};
-
-export type AubeTrustPolicyExcludeResult = {
-  status: 'already-present' | 'updated' | 'would-update';
-  configPath: string;
-  entries: string[];
 };
 
 export type InstalledPackage = {
@@ -414,65 +398,6 @@ function getDefaultPiSettingsPath(): string {
   return join(homedir(), '.pi', 'agent', 'settings.json');
 }
 
-function getDefaultAubeConfigPath(): string {
-  return join(homedir(), '.config', 'aube', 'config.toml');
-}
-
-function formatTomlString(value: string): string {
-  return JSON.stringify(value);
-}
-
-function addTomlStringArrayEntries(
-  content: string,
-  key: string,
-  entries: readonly string[],
-): string {
-  const missingEntries = entries.filter((entry) => !content.includes(formatTomlString(entry)));
-  if (missingEntries.length === 0) return content;
-
-  const arrayPattern = new RegExp(`(^${key}\\s*=\\s*\\[)([\\s\\S]*?)(^\\])`, 'm');
-  const match = content.match(arrayPattern);
-  if (match?.index === undefined) {
-    const prefix = content.trimEnd();
-    const block = [
-      `${key} = [`,
-      ...missingEntries.map((entry) => `    ${formatTomlString(entry)},`),
-      ']',
-    ].join('\n');
-    return `${prefix}${prefix ? '\n' : ''}${block}\n`;
-  }
-
-  return content.replace(arrayPattern, (_full, start: string, body: string, end: string) => {
-    const insertion = missingEntries.map((entry) => `    ${formatTomlString(entry)},`).join('\n');
-    const separator = body.endsWith('\n') || body.length === 0 ? '' : '\n';
-    return `${start}${body}${separator}${insertion}\n${end}`;
-  });
-}
-
-export function ensureAubeTrustPolicyExcludes(
-  entries: readonly string[] = AUBE_EXTENSION_TRUST_POLICY_EXCLUDES,
-  options: { dryRun?: boolean; configPath?: string } = {},
-): AubeTrustPolicyExcludeResult {
-  const configPath = options.configPath ?? getDefaultAubeConfigPath();
-  const content = existsSync(configPath) ? readFileSync(configPath, 'utf8') : '';
-  const missingEntries = entries.filter((entry) => !content.includes(formatTomlString(entry)));
-
-  if (missingEntries.length === 0) {
-    return { status: 'already-present', configPath, entries: [] };
-  }
-
-  if (options.dryRun) {
-    return { status: 'would-update', configPath, entries: missingEntries };
-  }
-
-  mkdirSync(dirname(configPath), { recursive: true });
-  writeFileSync(
-    configPath,
-    addTomlStringArrayEntries(content, 'trustPolicyExclude', missingEntries),
-  );
-  return { status: 'updated', configPath, entries: missingEntries };
-}
-
 export function readConfiguredNpmCommand(
   options: { settingsPath?: string } = {},
 ): string[] | undefined {
@@ -585,19 +510,42 @@ export function detectPiInstallPackageManagerFromPath(path: string): PiInstallPa
   return 'unknown';
 }
 
-function findPiExecutablePath(): string | undefined {
+export function detectPiInstallPackageManagerFromPaths(
+  piPaths: readonly string[],
+): PiInstallPackageManager {
+  for (const piPath of piPaths) {
+    const candidates = [piPath];
+    try {
+      candidates.push(realpathSync(piPath));
+    } catch {
+      // The direct path is still useful for non-symlink installs and wrappers.
+    }
+
+    for (const candidate of candidates) {
+      const packageManager = detectPiInstallPackageManagerFromPath(candidate);
+      if (packageManager !== 'unknown') return packageManager;
+    }
+  }
+  return 'unknown';
+}
+
+function getPiExecutablePaths(): string[] {
   try {
-    const piPaths = execFileSync('which', ['-a', 'pi'], { encoding: 'utf8' })
+    return execFileSync('which', ['-a', 'pi'], { encoding: 'utf8' })
       .split(/\r?\n/)
       .map((entry) => entry.trim())
       .filter(Boolean);
-    return (
-      piPaths.find((entry) => !entry.startsWith(join(REPO_ROOT, 'node_modules', '.bin'))) ??
-      piPaths[0]
-    );
   } catch {
-    return undefined;
+    return [];
   }
+}
+
+function findPiExecutablePath(): string | undefined {
+  const piPaths = getPiExecutablePaths();
+  return (
+    piPaths.find((entry) => !entry.startsWith(join(REPO_ROOT, 'node_modules', '.bin'))) ??
+    piPaths[0]
+  );
 }
 
 export function findPiCodingAgentRootFromExecutable(
@@ -633,21 +581,17 @@ export function findPiCodingAgentRootFromExecutable(
 export function detectPiInstallPackageManager(
   options: { piPath?: string } = {},
 ): PiInstallPackageManager {
-  const piPath = options.piPath ?? findPiExecutablePath();
-  if (!piPath) return 'unknown';
-
-  const candidates = [piPath];
-  try {
-    candidates.push(realpathSync(piPath));
-  } catch {
-    // The direct path is still useful for non-symlink installs.
+  if (options.piPath) {
+    return detectPiInstallPackageManagerFromPaths([options.piPath]);
   }
 
-  for (const candidate of candidates) {
-    const packageManager = detectPiInstallPackageManagerFromPath(candidate);
-    if (packageManager !== 'unknown') return packageManager;
-  }
-  return 'unknown';
+  const piPaths = getPiExecutablePaths();
+  const nonWorkspacePaths = piPaths.filter(
+    (entry) => !entry.startsWith(join(REPO_ROOT, 'node_modules', '.bin')),
+  );
+  return detectPiInstallPackageManagerFromPaths(
+    nonWorkspacePaths.length > 0 ? nonWorkspacePaths : piPaths,
+  );
 }
 
 export function buildPiSelfUpdateCommand(
@@ -693,6 +637,35 @@ function readPackageName(packageRoot: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function findContainingPackageRoot(filePath: string, packageName: string): string | undefined {
+  let current = dirname(filePath);
+  while (true) {
+    if (readPackageName(current) === packageName) return current;
+    const parent = dirname(current);
+    if (parent === current) return undefined;
+    current = parent;
+  }
+}
+
+function findPackagePathFromActivePi(packageName: string): string | undefined {
+  for (const piPath of getPiExecutablePaths()) {
+    let realPiPath: string;
+    try {
+      realPiPath = realpathSync(piPath);
+    } catch {
+      continue;
+    }
+
+    const piPackageRoot = findContainingPackageRoot(realPiPath, PI_CODING_AGENT_PACKAGE_NAME);
+    if (!piPackageRoot) continue;
+    if (packageName === PI_CODING_AGENT_PACKAGE_NAME) return piPackageRoot;
+
+    const dependencyPath = join(piPackageRoot, 'node_modules', packageName);
+    if (existsSync(dependencyPath)) return realpathSync(dependencyPath);
+  }
+  return undefined;
 }
 
 function findPackagePathFromGlobalList(
@@ -742,6 +715,11 @@ export function findGlobalPackagePath(
     packageManagerCommand?: PackageManagerCommand;
   } = {},
 ): string | undefined {
+  if (!options.packageManagerCommand) {
+    const activePiPackagePath = findPackagePathFromActivePi(packageName);
+    if (activePiPackagePath) return activePiPackagePath;
+  }
+
   // Global package-manager commands should not inherit the project cwd. pnpm,
   // for example, warns when package.json contains npm-style `workspaces`, even
   // for `pnpm root -g` / `pnpm list -g`. Run these global lookups from a neutral
@@ -749,7 +727,23 @@ export function findGlobalPackagePath(
   const globalCommandCwd = tmpdir();
   const packageManagers = options.packageManagerCommand
     ? [options.packageManagerCommand]
-    : getPackageManagerCommandCandidates(options);
+    : (() => {
+        const configuredCandidates = getPackageManagerCommandCandidates(options);
+        const piInstallManager = detectPiInstallPackageManager();
+        const ownerCandidate: PackageManagerCommand | undefined =
+          piInstallManager === 'aube' || piInstallManager === 'pnpm'
+            ? { command: piInstallManager, args: [], source: piInstallManager }
+            : undefined;
+        if (!ownerCandidate) return configuredCandidates;
+        return [ownerCandidate, ...configuredCandidates].filter(
+          (candidate, index, candidates) =>
+            candidates.findIndex(
+              (other) =>
+                other.command === candidate.command &&
+                other.args.join('\0') === candidate.args.join('\0'),
+            ) === index,
+        );
+      })();
 
   for (const packageManager of packageManagers) {
     try {
@@ -1033,7 +1027,11 @@ export function buildPiAiBedrockApiKeyBearerReplacement(): string {
 export function isPiAiBedrockApiKeyBearerPatchApplied(packageRoot: string): boolean {
   const filePath = findExistingPackageFile(packageRoot, PI_AI_BEDROCK_RELATIVE_PATHS);
   if (!filePath) return false;
-  return readFileSync(filePath, 'utf8').includes(PI_AI_BEDROCK_API_KEY_BEARER_PATCH_MARKER);
+  const content = readFileSync(filePath, 'utf8');
+  return (
+    content.includes(PI_AI_BEDROCK_API_KEY_BEARER_PATCH_MARKER) ||
+    /const bearerToken\s*=\s*options\.bearerToken\s*\|\|\s*options\.apiKey\s*\|\|/.test(content)
+  );
 }
 
 function findPiAiPackageRoot(options: { cwd?: string } = {}): string | undefined {
@@ -2151,14 +2149,18 @@ function buildPiCodexGoalPostCompactionUserFollowupReplacement(): string {
 }
 
 function isPiCodexGoalPostCompactionUserFollowupSemanticallyPatched(content: string): boolean {
-  return (
+  const hasLegacyUserFollowup =
     content.includes('const postCompactionGoal = stateController.getGoal();') &&
     content.includes(
       'runtimeState.recoveryState.phase.kind === "hostOverflowRecoveringNeedsUserStart"',
     ) &&
     content.includes('pi.sendUserMessage(compactContinuationPrompt(postCompactionGoal), {') &&
-    content.includes('deliverAs: "followUp"')
-  );
+    content.includes('deliverAs: "followUp"');
+  const hasUpstreamFallback =
+    content.includes('const schedulePostCompactContinuationFallback = (') &&
+    content.includes('clearActiveHostOverflowRecovery(runtimeState.recoveryState);') &&
+    content.includes('clearHostOverflowRecovery: wasRecoveringFromHostOverflow');
+  return hasLegacyUserFollowup || hasUpstreamFallback;
 }
 
 export function isPiCodexGoalPostCompactionUserFollowupPatchApplied(packageRoot: string): boolean {
@@ -2592,7 +2594,6 @@ export async function runPiUpdate(
     piPath?: string;
     execFile?: typeof execFileSync;
     log?: (message: string) => void;
-    aubeConfigPath?: string;
   } = {},
 ): Promise<void> {
   const execFile = options.execFile ?? execFileSync;
@@ -2627,20 +2628,6 @@ export async function runPiUpdate(
     } else {
       log(`Skipping approve-builds: ${packageManager} installs do not use Aube approve-builds.`);
     }
-  }
-
-  const trustPolicyExcludeResult = ensureAubeTrustPolicyExcludes(
-    AUBE_EXTENSION_TRUST_POLICY_EXCLUDES,
-    { dryRun: options.dryRun, configPath: options.aubeConfigPath },
-  );
-  if (trustPolicyExcludeResult.status === 'already-present') {
-    log(
-      `Aube trustPolicyExclude: already includes ${AUBE_EXTENSION_TRUST_POLICY_EXCLUDES.join(', ')}.`,
-    );
-  } else {
-    log(
-      `${trustPolicyExcludeResult.status === 'would-update' ? 'Would update' : 'Updated'} Aube trustPolicyExclude in ${trustPolicyExcludeResult.configPath}: ${trustPolicyExcludeResult.entries.join(', ')}`,
-    );
   }
 
   if (options.dryRun) {
@@ -2756,11 +2743,56 @@ function writeDepSyncToPackageJson(packageJsonPath: string, changes: DepSyncChan
   writeFileSync(packageJsonPath, `${JSON.stringify(pkg, null, 2)}\n`);
 }
 
+export function getPnpmWorkspaceOverrideChanges(
+  workspacePath: string,
+  desired: Record<string, string>,
+): DepSyncChange[] {
+  if (!existsSync(workspacePath)) return [];
+  const content = readFileSync(workspacePath, 'utf8');
+  const changes: DepSyncChange[] = [];
+
+  for (const [name, to] of Object.entries(desired)) {
+    const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const match = content.match(new RegExp(`^\\s*['"]?${escapedName}['"]?\\s*:\\s*(\\S+)`, 'm'));
+    const from = match?.[1]?.replace(/^['"]|['"]$/g, '');
+    if (from && from !== to) changes.push({ kind: 'bump', name, from, to });
+  }
+
+  return changes;
+}
+
+export function writePnpmWorkspaceOverrides(
+  workspacePath: string,
+  changes: readonly DepSyncChange[],
+): void {
+  if (changes.length === 0) return;
+  let content = readFileSync(workspacePath, 'utf8');
+
+  for (const change of changes) {
+    const escapedName = change.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const pattern = new RegExp(`^(\\s*['"]?${escapedName}['"]?\\s*:\\s*)\\S+`, 'm');
+    content = content.replace(pattern, `$1${change.to}`);
+  }
+
+  writeFileSync(workspacePath, content);
+}
+
+function dedupeDepSyncChanges(changes: readonly DepSyncChange[]): DepSyncChange[] {
+  const seen = new Set<string>();
+  return changes.filter((change) => {
+    const key = JSON.stringify(change);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 export async function syncDevDependenciesWithGlobalPi(
   options: { dryRun?: boolean; cwd?: string } = {},
 ): Promise<DepSyncResult> {
   const cwd = options.cwd ?? REPO_ROOT;
   const packageJsonPath = join(cwd, 'package.json');
+  const pnpmWorkspacePath = join(cwd, 'pnpm-workspace.yaml');
 
   const { piCodingAgentVersion, desired } = computeDesiredPiSiblingVersions();
   const pkg = JSON.parse(readFileSync(packageJsonPath, 'utf8')) as {
@@ -2768,7 +2800,9 @@ export async function syncDevDependenciesWithGlobalPi(
   };
   const current: Record<string, string> = { ...pkg.devDependencies };
 
-  const changes = planDepSyncChanges(current, desired);
+  const packageJsonChanges = planDepSyncChanges(current, desired);
+  const workspaceOverrideChanges = getPnpmWorkspaceOverrideChanges(pnpmWorkspacePath, desired);
+  const changes = dedupeDepSyncChanges([...packageJsonChanges, ...workspaceOverrideChanges]);
 
   if (changes.length === 0) {
     return { status: 'in-sync', changes, piCodingAgentVersion };
@@ -2778,7 +2812,8 @@ export async function syncDevDependenciesWithGlobalPi(
     return { status: 'would-update', changes, piCodingAgentVersion };
   }
 
-  writeDepSyncToPackageJson(packageJsonPath, changes);
+  writeDepSyncToPackageJson(packageJsonPath, packageJsonChanges);
+  writePnpmWorkspaceOverrides(pnpmWorkspacePath, workspaceOverrideChanges);
   const packageManager = resolvePackageManagerCommand({ cwd });
   execFileSync(packageManager.command, [...packageManager.args, 'install'], {
     stdio: 'inherit',

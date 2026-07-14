@@ -210,7 +210,10 @@ describe('createSkillAutocompleteProvider', () => {
   });
 
   test('merges upstream shortcut suggestions before skill suggestions', async () => {
-    const delegated = { items: [{ value: 'thinking:medium', label: 'thinking:medium' }], prefix: '$med' };
+    const delegated = {
+      items: [{ value: 'thinking:medium', label: 'thinking:medium' }],
+      prefix: '$med',
+    };
     const current = createDelegatingProvider(delegated);
     const provider = createSkillAutocompleteProvider(current, () => [
       { name: 'medical-review', description: 'Review medical text' },

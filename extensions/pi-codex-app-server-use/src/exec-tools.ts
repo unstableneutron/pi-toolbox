@@ -14,11 +14,7 @@ import { Type } from 'typebox';
 import { executeApplyPatchPayload } from '../../multi-edit';
 import { sanitizeBinaryOutput, stripTerminalControlSequences } from '../../shared/tui-width';
 import { CodexAppServerWebSocketClient } from './app-server';
-import {
-  checkCodexAppServerControlSocket,
-  CODEX_APP_SERVER_ORIGIN,
-  getCodexAppServerControlSocketPath,
-} from './app-server-control';
+import { CODEX_APP_SERVER_ORIGIN, getCodexAppServerControlSocketPath } from './app-server-control';
 import type { CodexAppServerExecModels } from './config';
 import {
   ExecOutputAccumulator,

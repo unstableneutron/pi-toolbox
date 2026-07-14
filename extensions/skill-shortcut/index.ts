@@ -249,9 +249,10 @@ export function createSkillAutocompleteProvider(
       if (query === null) return delegated;
 
       const skillCommands = getSkillCommands();
-      const matchedSkills = query.length <= 1
-        ? skillCommands.filter((item) => item.name.startsWith(query))
-        : fuzzyFilter(skillCommands, query, (item) => item.name);
+      const matchedSkills =
+        query.length <= 1
+          ? skillCommands.filter((item) => item.name.startsWith(query))
+          : fuzzyFilter(skillCommands, query, (item) => item.name);
       const items: AutocompleteItem[] = matchedSkills.map((item) => ({
         value: `skill:${item.name}`,
         label: item.name,

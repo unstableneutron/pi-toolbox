@@ -9,7 +9,7 @@ import {
   registerFastCommand,
   setFastModeServiceTier,
 } from './commands/fast';
-import { getModelCandidates, resolveEditorShortcutModel } from './commands/model';
+import { getModelCandidates } from './commands/model';
 import {
   createPasteShortcutState,
   expandPastePlaceholdersInMessages,
