@@ -106,3 +106,14 @@ Fall back to a full read only when you need context beyond the body
 `show` returned. `ast-outline help` for flags.
 
 <!-- ast-outline:end -->
+
+## Completed implementation workflow
+
+Before reporting an implementation task as fully complete:
+
+1. Identify every versioned package or artifact changed by the implementation.
+2. Choose and apply the appropriate Semantic Versioning bump (patch, minor, or major) based on compatibility and scope. If the repository has no applicable versioned artifact, explicitly skip this step.
+3. Run the relevant tests, lint, formatting, and package checks after the version bump.
+4. Create a focused git commit containing the completed implementation and its version metadata. Do not leave fully completed implementation work uncommitted.
+
+Do not bump versions for investigation-only, planning-only, partial, or abandoned work. Preserve unrelated working-tree changes and exclude them from the implementation commit.
