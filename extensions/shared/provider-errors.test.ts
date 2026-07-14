@@ -9,7 +9,7 @@ import {
 } from './provider-errors';
 
 describe('shared provider error classification', () => {
-  test('classifies deployment lookup failures as terminal configuration errors', () => {
+  test('classifies missing configured deployments as terminal configuration errors', () => {
     expect(
       classifyOpenAIResponsesFailure({
         status: 404,
@@ -27,7 +27,9 @@ describe('shared provider error classification', () => {
       retryable: false,
       category: 'terminal_config_error',
     });
+  });
 
+  test('classifies unavailable active resource-bucket deployments as transient', () => {
     expect(
       classifyOpenAIResponsesFailure({
         status: 404,
@@ -36,14 +38,14 @@ describe('shared provider error classification', () => {
             type: 'not_found_error',
             code: 'not_found',
             message:
-              'Failed to find an active deployment in region: swedencentral for Azure resource bucket: PROTOTYPE',
+              'Failed to find an active deployment in region: eastus2 for Azure resource bucket: EXAMPLE_BUCKET',
           },
         },
       }),
     ).toMatchObject({
-      reason: 'deploymentMissing',
-      retryable: false,
-      category: 'terminal_config_error',
+      reason: 'providerServerError',
+      retryable: true,
+      category: 'transient_retryable',
     });
   });
 

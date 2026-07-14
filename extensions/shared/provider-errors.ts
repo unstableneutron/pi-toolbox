@@ -114,10 +114,16 @@ export function classifyOpenAIResponsesFailure(
   const status = input.status;
 
   if (
+    text.includes('failed to find an active deployment') &&
+    text.includes('azure resource bucket')
+  ) {
+    return retryable('providerServerError');
+  }
+
+  if (
     text.includes('deploymentnotfound') ||
     text.includes('deploymentmissing') ||
-    text.includes('api deployment for this resource does not exist') ||
-    text.includes('failed to find an active deployment')
+    text.includes('api deployment for this resource does not exist')
   ) {
     return terminal('deploymentMissing', 'terminal_config_error');
   }

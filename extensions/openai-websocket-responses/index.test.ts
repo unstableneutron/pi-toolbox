@@ -2389,7 +2389,7 @@ describe('WebSocket transport', () => {
     });
   });
 
-  it('probes empty websocket upgrade 500s before retrying', async () => {
+  it('retries empty websocket upgrade 500s when the probe finds no active deployment', async () => {
     const instances: any[] = [];
     const fetchCalls: any[] = [];
     class FakeWebSocket {
@@ -2477,15 +2477,15 @@ describe('WebSocket transport', () => {
       ),
     ).rejects.toThrow('Unexpected server response: 500');
 
-    expect(instances).toHaveLength(1);
-    expect(fetchCalls).toHaveLength(1);
+    expect(instances).toHaveLength(3);
+    expect(fetchCalls).toHaveLength(3);
     expect(fetchCalls[0].url).toBe('https://example.test/responses?deployment=missing');
     expect(JSON.parse(fetchCalls[0].init.body)).toEqual({});
-    expect(diagnostics.hasEvent('ws_retry')).toBe(false);
+    expect(diagnostics.hasEvent('ws_retry')).toBe(true);
     expect(diagnostics.getFields()).toMatchObject({
-      failureReason: 'deploymentMissing',
-      failureCategory: 'terminal_config_error',
-      retryable: false,
+      failureReason: 'providerServerError',
+      failureCategory: 'transient_retryable',
+      retryable: true,
       classificationProbeStatus: 404,
     });
   });

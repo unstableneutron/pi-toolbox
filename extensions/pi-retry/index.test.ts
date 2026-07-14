@@ -37,6 +37,8 @@ const CREATED_BY_ERROR = `Error: 400 litellm.BadRequestError: AzureException Bad
   }
 }`;
 
+const ACTIVE_DEPLOYMENT_UNAVAILABLE_ERROR = `Error: OpenAI API error (404): {"message":"litellm.APIError: AzureException APIError - {\\"error\\":{\\"message\\":\\"Failed to find an active deployment in region: eastus2 for Azure resource bucket: EXAMPLE_BUCKET\\",\\"code\\":\\"not_found\\",\\"type\\":\\"not_found_error\\"},\\"status_code\\":404}. Received Model Group=gpt-5.6-luna Available Model Group Fallbacks=None","code":"404"}`;
+
 function makeAssistantErrorMessage(
   errorMessage: string,
   overrides: { [key: string]: unknown } = {},
@@ -63,12 +65,18 @@ afterEach(() => {
 });
 
 describe('pi-retry extra provider classification', () => {
-  test('does not classify deployment-missing 404 as retryable', () => {
+  test('does not classify a missing configured deployment as retryable', () => {
     expect(
       classifyRetryableProviderError(
         '404 The API deployment for this resource does not exist. If you created the deployment recently, please wait a moment and try again.',
       ),
     ).toBeUndefined();
+  });
+
+  test('classifies an unavailable active resource-bucket deployment as retryable', () => {
+    expect(classifyRetryableProviderError(ACTIVE_DEPLOYMENT_UNAVAILABLE_ERROR)).toBe(
+      'providerServerError',
+    );
   });
 
   test('classifies encrypted-content verification 400 as retryable', () => {
@@ -540,8 +548,16 @@ describe('pi-retry patch installation', () => {
       }),
     ).toBe(false);
 
+    expect(
+      session._isRetryableError({
+        role: 'assistant',
+        stopReason: 'error',
+        errorMessage: ACTIVE_DEPLOYMENT_UNAVAILABLE_ERROR,
+      }),
+    ).toBe(true);
+
     expect(loader).toHaveBeenCalledTimes(1);
-    expect(session.baseClassifierCalls).toHaveLength(1);
+    expect(session.baseClassifierCalls).toHaveLength(2);
   });
 
   test('keeps terminal websocket deployment diagnostics out of the core retry classifier', async () => {
