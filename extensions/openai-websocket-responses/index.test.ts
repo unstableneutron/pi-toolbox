@@ -51,13 +51,17 @@ import {
   buildWebSocketHeaders,
   headersDiagnosticFields,
 } from './src/headers.ts';
-import { shouldPatchModel } from './src/match.ts';
+import { resolveModelTransportPolicy, shouldPatchModel } from './src/match.ts';
 import { resolveRequestProfile } from './src/profile.ts';
 import {
   buildWebSocketResponseHeaders,
   createOpenAIWebSocketResponsesStream,
 } from './src/provider.ts';
-import { wrapProviderForWebSocketResponses } from './src/patch.ts';
+import {
+  clearWebSocketCapabilityCache,
+  isWebSocketUnsupportedError,
+  wrapProviderForWebSocketResponses,
+} from './src/patch.ts';
 import {
   attachTransportDiagnostic,
   createTransportDiagnostics,
@@ -86,6 +90,7 @@ import {
   readOpenAIWebSocketResponsesOmpSettings,
   readOpenAIWebSocketResponsesSettings,
 } from './src/settings.ts';
+import { createOpenAISseResponsesStream } from './src/sse-provider.ts';
 import { resolveRetrieveResponseUrl, resolveWebSocketResponsesUrl } from './src/urls.ts';
 import {
   closeAllCachedWebSockets,
@@ -379,6 +384,30 @@ describe('settings and patch matching', () => {
       },
       trace: { enabled: true },
     });
+  });
+
+  it('normalizes per-model transport policy and treats it as a parser route', () => {
+    const settings = normalizeSettings({
+      patch: {
+        providers: [],
+        providerModels: [],
+        transportByProviderModel: {
+          'devai/*': 'sse',
+          'devai/gpt-5.6-ws': 'websocket',
+          ignored: 'invalid',
+        },
+      },
+    });
+    const sseModel = makeModel({ provider: 'devai', id: 'gpt-5.6-sol' });
+    const websocketModel = makeModel({ provider: 'devai', id: 'gpt-5.6-ws' });
+
+    expect(settings.patch.transportByProviderModel).toEqual({
+      'devai/*': 'sse',
+      'devai/gpt-5.6-ws': 'websocket',
+    });
+    expect(shouldPatchModel(sseModel, settings)).toBe(true);
+    expect(resolveModelTransportPolicy(sseModel, settings)).toBe('sse');
+    expect(resolveModelTransportPolicy(websocketModel, settings)).toBe('websocket');
   });
 
   it('normalizes store overrides by provider/model glob', () => {
@@ -1530,7 +1559,21 @@ describe('Responses adapter and retrieve recovery', () => {
           output_index: 0,
           item: webSearchItem,
         },
-        { type: 'response.completed', response: { id: 'resp_web', status: 'completed' } },
+        {
+          type: 'response.completed',
+          response: {
+            id: 'resp_web',
+            status: 'completed',
+            output: [
+              {
+                type: 'message',
+                id: 'msg_web',
+                role: 'assistant',
+                content: [{ type: 'output_text', text: 'Found the documentation.' }],
+              },
+            ],
+          },
+        },
       ),
       output,
       stream,
@@ -1540,8 +1583,14 @@ describe('Responses adapter and retrieve recovery', () => {
     expect((output.content as any[]).filter((block) => block.type === 'response_item')).toEqual([
       { type: 'response_item', item: webSearchItem },
     ]);
-    expect(assistantMessageToResponseItems(output)).toEqual([webSearchItem]);
-    expect(buildResponsesBody(model, { messages: [output] }).input).toEqual([webSearchItem]);
+    expect(assistantMessageToResponseItems(output)).toEqual([
+      webSearchItem,
+      expect.objectContaining({ type: 'message', id: 'msg_web' }),
+    ]);
+    expect(buildResponsesBody(model, { messages: [output] }).input).toEqual([
+      webSearchItem,
+      expect.objectContaining({ type: 'message', id: 'msg_web' }),
+    ]);
   });
 
   it('omits provider item ids when prior reasoning is unavailable for replay', () => {
@@ -1678,6 +1727,88 @@ describe('Responses adapter and retrieve recovery', () => {
         textSignature: JSON.stringify({ v: 1, id: 'msg_b' }),
       }),
     ]);
+  });
+
+  it('recovers text and function calls found only in response.completed output', async () => {
+    const model = makeModel();
+    const output = makeAssistantMessage(model);
+    const stream = createAssistantMessageEventStream();
+    const push = vi.spyOn(stream, 'push');
+
+    await processResponsesEvents(
+      events({
+        type: 'response.completed',
+        response: {
+          id: 'resp_terminal_only',
+          status: 'completed',
+          output: [
+            {
+              type: 'message',
+              id: 'msg_terminal_only',
+              role: 'assistant',
+              content: [{ type: 'output_text', text: 'Recovered terminal text.' }],
+            },
+            {
+              type: 'function_call',
+              id: 'fc_terminal_only',
+              call_id: 'call_terminal_only',
+              name: 'read',
+              arguments: '{"path":"README.md"}',
+            },
+          ],
+        },
+      }),
+      output,
+      stream,
+      model,
+    );
+
+    expect(output.stopReason).toBe('toolUse');
+    expect(output.content).toEqual([
+      expect.objectContaining({
+        type: 'text',
+        text: 'Recovered terminal text.',
+        textSignature: JSON.stringify({ v: 1, id: 'msg_terminal_only' }),
+      }),
+      expect.objectContaining({
+        type: 'toolCall',
+        id: 'call_terminal_only|fc_terminal_only',
+        name: 'read',
+        arguments: { path: 'README.md' },
+      }),
+    ]);
+    expect(push.mock.calls.map(([event]) => event.type)).toEqual([
+      'text_start',
+      'text_delta',
+      'text_end',
+      'toolcall_start',
+      'toolcall_delta',
+      'toolcall_end',
+    ]);
+  });
+
+  it('rejects completed responses with reasoning but no text or function calls', async () => {
+    const model = makeModel();
+    const output = makeAssistantMessage(model);
+    const stream = createAssistantMessageEventStream();
+
+    await expect(
+      processResponsesEvents(
+        events({
+          type: 'response.completed',
+          response: {
+            id: 'resp_reasoning_only',
+            status: 'completed',
+            output: [{ type: 'reasoning', id: 'rs_only', summary: [] }],
+          },
+        }),
+        output,
+        stream,
+        model,
+      ),
+    ).rejects.toThrow(
+      'Model produced invalid content: response.completed contained no assistant text or function calls',
+    );
   });
 
   it('preserves text phase in replay input', () => {
@@ -2166,6 +2297,109 @@ describe('Responses adapter and retrieve recovery', () => {
       expect.objectContaining({ type: 'text', text: 'Hello world' }),
     ]);
     expect(extractResponseOutputText(result.response)).toBe('Hello world');
+  });
+});
+
+describe('SSE Responses transport', () => {
+  it('uses terminal response output when incremental item events are missing', async () => {
+    const requests: Array<{ url: string; body: any }> = [];
+    const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const requestUrl = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+      const requestBody = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined;
+      requests.push({ url: requestUrl, body: requestBody });
+      const terminalEvent = {
+        type: 'response.completed',
+        response: {
+          id: 'resp_sse_terminal',
+          status: 'completed',
+          usage: { input_tokens: 5, output_tokens: 4, total_tokens: 9 },
+          output: [
+            {
+              type: 'message',
+              id: 'msg_sse_terminal',
+              role: 'assistant',
+              content: [{ type: 'output_text', text: 'Recovered from terminal output.' }],
+            },
+          ],
+        },
+      };
+      return new Response(`data: ${JSON.stringify(terminalEvent)}\n\n`, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    });
+    const settings = normalizeSettings({});
+    const streamFactory = createOpenAISseResponsesStream(
+      () => settings,
+      () => fetchImpl as typeof fetch,
+    );
+
+    const result = await collectStreamEvents(
+      streamFactory(
+        makeModel({ provider: 'devai', id: 'gpt-5.6-sol' }),
+        { messages: [{ role: 'user', content: 'hello', timestamp: 1 }] },
+        { apiKey: 'test-token', transport: 'sse' },
+      ),
+    );
+
+    expect(result.map((event) => event.type)).toEqual([
+      'start',
+      'text_start',
+      'text_delta',
+      'text_end',
+      'done',
+    ]);
+    expect(result.at(-1)).toMatchObject({
+      type: 'done',
+      reason: 'stop',
+      message: {
+        api: 'openai-responses',
+        content: [
+          expect.objectContaining({ type: 'text', text: 'Recovered from terminal output.' }),
+        ],
+      },
+    });
+    expect(requests).toEqual([
+      expect.objectContaining({
+        url: expect.stringContaining('/responses'),
+        body: expect.objectContaining({ stream: true, store: false }),
+      }),
+    ]);
+  });
+
+  it('emits an error for a completed SSE response with no actionable output', async () => {
+    const fetchImpl = vi.fn(async () => {
+      const terminalEvent = {
+        type: 'response.completed',
+        response: {
+          id: 'resp_sse_empty',
+          status: 'completed',
+          output: [{ type: 'reasoning', id: 'rs_sse_empty', summary: [] }],
+        },
+      };
+      return new Response(`data: ${JSON.stringify(terminalEvent)}\n\n`, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    });
+    const streamFactory = createOpenAISseResponsesStream(
+      () => normalizeSettings({}),
+      () => fetchImpl as typeof fetch,
+    );
+
+    const result = await collectStreamEvents(
+      streamFactory(makeModel(), { messages: [] }, { apiKey: 'test-token', transport: 'sse' }),
+    );
+
+    expect(result.at(-1)).toMatchObject({
+      type: 'error',
+      reason: 'error',
+      error: {
+        stopReason: 'error',
+        errorMessage:
+          'Model produced invalid content: response.completed contained no assistant text or function calls',
+      },
+    });
   });
 });
 
@@ -2975,7 +3209,18 @@ describe('WebSocket transport', () => {
           this.emit('message', {
             data: JSON.stringify({
               type: 'response.completed',
-              response: { id: 'resp_ok', status: 'completed' },
+              response: {
+                id: 'resp_ok',
+                status: 'completed',
+                output: [
+                  {
+                    type: 'message',
+                    id: 'msg_ok',
+                    role: 'assistant',
+                    content: [{ type: 'output_text', text: 'Recovered.' }],
+                  },
+                ],
+              },
             }),
           });
         });
@@ -4856,7 +5101,18 @@ describe('WebSocket transport', () => {
         socket.emit('message', {
           data: JSON.stringify({
             type: 'response.completed',
-            response: { id: 'resp_full', status: 'completed' },
+            response: {
+              id: 'resp_full',
+              status: 'completed',
+              output: [
+                {
+                  type: 'message',
+                  id: 'msg_full',
+                  role: 'assistant',
+                  content: [{ type: 'output_text', text: 'Recovered from full replay.' }],
+                },
+              ],
+            },
           }),
         });
       },
@@ -4991,7 +5247,18 @@ describe('provider transport diagnostics', () => {
           this.emit('message', {
             data: JSON.stringify({
               type: 'response.completed',
-              response: { id: 'resp_full', status: 'completed' },
+              response: {
+                id: 'resp_full',
+                status: 'completed',
+                output: [
+                  {
+                    type: 'message',
+                    id: 'msg_full_diagnostic',
+                    role: 'assistant',
+                    content: [{ type: 'output_text', text: 'Full-context response.' }],
+                  },
+                ],
+              },
             }),
           });
         });
@@ -5066,7 +5333,18 @@ describe('provider transport diagnostics', () => {
           this.emit('message', {
             data: JSON.stringify({
               type: 'response.completed',
-              response: { id: 'resp_delta', status: 'completed' },
+              response: {
+                id: 'resp_delta',
+                status: 'completed',
+                output: [
+                  {
+                    type: 'message',
+                    id: 'msg_delta_diagnostic',
+                    role: 'assistant',
+                    content: [{ type: 'output_text', text: 'Delta response.' }],
+                  },
+                ],
+              },
             }),
           });
         });
@@ -5315,7 +5593,18 @@ describe('provider transport diagnostics', () => {
           this.emit('message', {
             data: JSON.stringify({
               type: 'response.completed',
-              response: { id: 'resp_trace', status: 'completed' },
+              response: {
+                id: 'resp_trace',
+                status: 'completed',
+                output: [
+                  {
+                    type: 'message',
+                    id: 'msg_trace',
+                    role: 'assistant',
+                    content: [{ type: 'output_text', text: 'Traced response.' }],
+                  },
+                ],
+              },
             }),
           });
         });
@@ -5600,7 +5889,18 @@ describe('provider transport diagnostics', () => {
           this.emit('message', {
             data: JSON.stringify({
               type: 'response.completed',
-              response: { id, status: 'completed' },
+              response: {
+                id,
+                status: 'completed',
+                output: [
+                  {
+                    type: 'message',
+                    id: `msg_${id}`,
+                    role: 'assistant',
+                    content: [{ type: 'output_text', text: 'Cached response.' }],
+                  },
+                ],
+              },
             }),
           });
         });
@@ -5860,6 +6160,101 @@ describe('transparent provider patching', () => {
     expect(websocketStream).not.toHaveBeenCalled();
     expect(originalStreamSimple).toHaveBeenCalledTimes(1);
     expect(events.map((event) => event.type)).toEqual(['start', 'done']);
+  });
+
+  it('routes configured SSE models through the shared Responses SSE parser', async () => {
+    const settings = normalizeSettings({
+      patch: {
+        enabled: true,
+        providers: [],
+        providerModels: [],
+        transportByProviderModel: { 'devai/*': 'sse' },
+      },
+    });
+    const websocketStream = vi.fn((_model: Model<any>, _context: any, _options?: any) =>
+      createAssistantMessageEventStream(),
+    );
+    const originalStreamSimple = vi.fn((_model: Model<any>, _context: any, _options?: any) =>
+      createAssistantMessageEventStream(),
+    );
+    const sseMessage = makeAssistantMessage(makeModel({ provider: 'devai', id: 'gpt-5.6-sol' }));
+    sseMessage.content.push({ type: 'text', text: 'SSE response' });
+    const sseStream = vi.fn((_model: Model<any>, _context: any, _options?: any) =>
+      streamFromEvents(
+        { type: 'start', partial: sseMessage },
+        { type: 'done', reason: 'stop', message: sseMessage },
+      ),
+    );
+    const provider = wrapProviderForWebSocketResponses(
+      {
+        api: 'openai-responses',
+        stream: originalStreamSimple as any,
+        streamSimple: originalStreamSimple,
+      },
+      () => settings,
+      websocketStream as any,
+      undefined,
+      sseStream as any,
+    );
+
+    const result = await collectStreamEvents(
+      provider.streamSimple(makeModel({ provider: 'devai', id: 'gpt-5.6-sol' }), { messages: [] }),
+    );
+
+    expect(result.map((event) => event.type)).toEqual(['start', 'done']);
+    expect(sseStream).toHaveBeenCalledOnce();
+    expect(sseStream.mock.calls[0]?.[2]).toMatchObject({ transport: 'sse' });
+    expect(websocketStream).not.toHaveBeenCalled();
+    expect(originalStreamSimple).not.toHaveBeenCalled();
+  });
+
+  it('remembers deterministic WebSocket incompatibility for the rest of the session', async () => {
+    clearWebSocketCapabilityCache();
+    const settings = normalizeSettings({
+      patch: { enabled: true, providers: [], providerModels: ['facade/gpt-5*'] },
+    });
+    const websocketError = makeAssistantMessage(makeModel({ id: 'gpt-5.5' }));
+    websocketError.stopReason = 'error';
+    websocketError.errorMessage = 'WebSocket transport is not supported by this endpoint';
+    const websocketStream = vi.fn((_model: Model<any>, _context: any, _options?: any) =>
+      streamFromEvents({ type: 'error', reason: 'error', error: websocketError }),
+    );
+    const sseMessage = makeAssistantMessage(makeModel({ id: 'gpt-5.5' }));
+    sseMessage.content.push({ type: 'text', text: 'SSE fallback' });
+    const sseStream = vi.fn((_model: Model<any>, _context: any, _options?: any) =>
+      streamFromEvents(
+        { type: 'start', partial: sseMessage },
+        { type: 'done', reason: 'stop', message: sseMessage },
+      ),
+    );
+    const originalStreamSimple = vi.fn();
+    const provider = wrapProviderForWebSocketResponses(
+      {
+        api: 'openai-responses',
+        stream: originalStreamSimple as any,
+        streamSimple: originalStreamSimple as any,
+      },
+      () => settings,
+      websocketStream as any,
+      undefined,
+      sseStream as any,
+    );
+    const model = makeModel({ id: 'gpt-5.5' });
+    const options = { sessionId: 'capability-session', transport: 'auto' } as any;
+
+    try {
+      await collectStreamEvents(provider.streamSimple(model, { messages: [] }, options));
+      await collectStreamEvents(provider.streamSimple(model, { messages: [] }, options));
+
+      expect(isWebSocketUnsupportedError(websocketError)).toBe(true);
+      expect(isWebSocketUnsupportedError(new Error('Unexpected server response: 500'))).toBe(false);
+      expect(isWebSocketUnsupportedError(new Error('WebSocket timed out'))).toBe(false);
+      expect(websocketStream).toHaveBeenCalledOnce();
+      expect(sseStream).toHaveBeenCalledTimes(2);
+      expect(originalStreamSimple).not.toHaveBeenCalled();
+    } finally {
+      clearWebSocketCapabilityCache();
+    }
   });
 
   it('falls back to the original SSE stream when auto WebSocket fails before start', async () => {

@@ -10,6 +10,7 @@ import {
   installAgentSessionPatch,
   isExtraRetryableAssistantError,
   isSkippableEmptyFailedAssistantArtifact,
+  normalizeInvalidOpenAIResponsesStop,
   resetPiRetryTestState,
 } from './index';
 import * as runtime from './runtime';
@@ -70,6 +71,44 @@ describe('pi-retry extra provider classification', () => {
       classifyRetryableProviderError(
         '404 The API deployment for this resource does not exist. If you created the deployment recently, please wait a moment and try again.',
       ),
+    ).toBeUndefined();
+  });
+
+  test('normalizes empty completed OpenAI Responses output into a retryable provider error', () => {
+    const normalized = normalizeInvalidOpenAIResponsesStop({
+      role: 'assistant',
+      api: 'openai-responses',
+      stopReason: 'stop',
+      content: [
+        {
+          type: 'thinking',
+          thinking: '',
+          thinkingSignature: JSON.stringify({ type: 'reasoning', id: 'rs_empty' }),
+        },
+      ],
+    });
+
+    expect(normalized).toMatchObject({
+      stopReason: 'error',
+      errorMessage:
+        'Model produced invalid content: response.completed contained no assistant text or function calls',
+    });
+    expect(classifyRetryableProviderError(normalized?.errorMessage)).toBe('providerServerError');
+    expect(
+      normalizeInvalidOpenAIResponsesStop({
+        role: 'assistant',
+        api: 'openai-responses',
+        stopReason: 'stop',
+        content: [{ type: 'text', text: 'visible output' }],
+      }),
+    ).toBeUndefined();
+    expect(
+      normalizeInvalidOpenAIResponsesStop({
+        role: 'assistant',
+        api: 'anthropic-messages',
+        stopReason: 'stop',
+        content: [],
+      }),
     ).toBeUndefined();
   });
 
@@ -1991,6 +2030,36 @@ describe('pi-retry extension runtime', () => {
         options: { triggerTurn: true },
       },
     ]);
+  });
+
+  test('message_end rewrites empty OpenAI Responses stops before persistence', async () => {
+    const fakeModule = makeFakeAgentSessionModule();
+    const harness = await createExtensionHarness(async () => fakeModule);
+    const messageEnd = getHandler(harness.handlers, 'message_end');
+
+    const result = await messageEnd(
+      {
+        type: 'message_end',
+        message: {
+          role: 'assistant',
+          api: 'openai-responses',
+          provider: 'devai',
+          model: 'gpt-5.6-sol',
+          stopReason: 'stop',
+          content: [{ type: 'thinking', thinking: '', thinkingSignature: '{"id":"rs_1"}' }],
+        },
+      },
+      harness.ctx,
+    );
+
+    expect(result).toEqual({
+      message: expect.objectContaining({
+        role: 'assistant',
+        stopReason: 'error',
+        errorMessage:
+          'Model produced invalid content: response.completed contained no assistant text or function calls',
+      }),
+    });
   });
 
   test('marks terminating tool results before persistence', async () => {

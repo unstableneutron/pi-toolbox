@@ -83,8 +83,38 @@ export type RetryReason = RetryableProviderErrorReason;
 
 export interface AssistantErrorLike {
   role?: string;
+  api?: string;
+  content?: unknown;
   stopReason?: string;
   errorMessage?: string;
+}
+
+const OPENAI_RESPONSES_APIS = new Set([
+  'openai-responses',
+  'azure-openai-responses',
+  'openai-codex-responses',
+  'openai-websocket-responses',
+]);
+const INVALID_EMPTY_RESPONSES_ERROR =
+  'Model produced invalid content: response.completed contained no assistant text or function calls';
+
+export function normalizeInvalidOpenAIResponsesStop<TMessage extends AssistantErrorLike>(
+  message: TMessage,
+): (TMessage & { stopReason: 'error'; errorMessage: string }) | undefined {
+  if (
+    message.role !== 'assistant' ||
+    message.stopReason !== 'stop' ||
+    !OPENAI_RESPONSES_APIS.has(message.api ?? '') ||
+    hasUserVisibleAssistantOutput(message.content)
+  ) {
+    return undefined;
+  }
+
+  return {
+    ...message,
+    stopReason: 'error',
+    errorMessage: INVALID_EMPTY_RESPONSES_ERROR,
+  };
 }
 
 type StatusUi = Pick<ExtensionUIContext, 'setStatus' | 'notify'>;
@@ -1526,6 +1556,13 @@ export function createPiRetryExtension(
 
     pi.on('message_end', async (event, ctx) => {
       const message = event.message as unknown as Record<string, unknown>;
+      if ('assistant' === message.role) {
+        const normalized = normalizeInvalidOpenAIResponsesStop(message);
+        if (normalized) {
+          return { message: normalized as unknown as typeof event.message };
+        }
+      }
+
       if ('toolResult' === message.role) {
         if (isTerminatingToolResult(ctx.sessionManager.getSessionId(), message)) {
           return {

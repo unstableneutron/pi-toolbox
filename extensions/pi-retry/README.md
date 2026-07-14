@@ -6,6 +6,7 @@ It handles:
 
 - refusals
 - empty assistant stops
+- malformed empty OpenAI Responses completions
 - stranded tool-result leaves
 - retryable terminal assistant errors
 - length-truncated responses after successful compaction
@@ -100,6 +101,15 @@ The command:
 ### Empty stop
 
 Assistant message with `stopReason: "stop"` but no user-visible text or tool call output.
+Generic providers retain the bounded hidden-`Continue.` recovery path.
+
+For OpenAI Responses API families, `message_end` normalizes an empty or
+reasoning-only completed response into a retryable provider error before it is
+persisted. This prevents malformed `response.completed` output from appearing as
+a successful assistant stop and lets Pi's normal retry/backoff path handle it.
+Adapters that reconcile terminal `response.output` first, such as
+`openai-websocket-responses`, recover missing terminal text before this fallback
+is needed.
 
 ### Refusal
 

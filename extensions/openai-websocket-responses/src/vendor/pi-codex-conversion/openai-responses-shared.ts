@@ -428,7 +428,7 @@ function applyResponseUsage<TApi extends Api>(
   output.usage.cost = calculateCost(model, output.usage);
 }
 
-export function applyCompletedResponse<TApi extends Api>(
+function applyCompletedResponse<TApi extends Api>(
   output: AssistantMessage,
   model: Model<TApi>,
   response: Record<string, any>,
@@ -442,6 +442,79 @@ export function applyCompletedResponse<TApi extends Api>(
   }
   if (output.content.some((block) => block.type === 'toolCall') && output.stopReason === 'stop') {
     output.stopReason = 'toolUse';
+  }
+}
+
+function hasActionableAssistantOutput(output: AssistantMessage): boolean {
+  return output.content.some(
+    (block) =>
+      block.type === 'toolCall' ||
+      (block.type === 'text' && typeof block.text === 'string' && block.text.trim().length > 0),
+  );
+}
+
+function appendTerminalText(
+  response: Record<string, any>,
+  output: AssistantMessage,
+  stream: AssistantMessageEventStream,
+): void {
+  const terminalText = extractResponseOutputText(response);
+  const emittedText = getOutputText(output);
+  if (terminalText && !terminalText.startsWith(emittedText)) {
+    throw new Error('OpenAI Responses terminal output diverged from streamed text');
+  }
+
+  let textIndex = -1;
+  for (let index = output.content.length - 1; index >= 0; index--) {
+    if (output.content[index]?.type === 'text') {
+      textIndex = index;
+      break;
+    }
+  }
+
+  const missingText = terminalText.slice(emittedText.length);
+  if (missingText) {
+    if (textIndex < 0) {
+      const created = ensureTextBlock(output, stream);
+      textIndex = created.index;
+    }
+    const block = output.content[textIndex] as TextContent;
+    block.text += missingText;
+    stream.push({
+      type: 'text_delta',
+      contentIndex: textIndex,
+      delta: missingText,
+      partial: output,
+    });
+  }
+
+  if (textIndex < 0) return;
+  const block = output.content[textIndex] as TextContent;
+  if (isFinalizedTextBlock(block)) return;
+  block.textSignature ??= responseMessageTextSignature(response);
+  stream.push({
+    type: 'text_end',
+    contentIndex: textIndex,
+    content: block.text,
+    partial: output,
+  });
+}
+
+export function reconcileCompletedResponse<TApi extends Api>(
+  response: Record<string, any>,
+  output: AssistantMessage,
+  stream: AssistantMessageEventStream,
+  model: Model<TApi>,
+): void {
+  appendRecoveredReasoningItems(response, output, stream);
+  appendTerminalText(response, output, stream);
+  appendRecoveredFunctionCalls(response, output, stream);
+  applyCompletedResponse(output, model, response);
+
+  if (output.stopReason === 'stop' && !hasActionableAssistantOutput(output)) {
+    throw new Error(
+      'Model produced invalid content: response.completed contained no assistant text or function calls',
+    );
   }
 }
 
@@ -788,11 +861,18 @@ export function createResponsesEventProcessor<TApi extends Api>(
       type === 'response.incomplete'
     ) {
       backfillReasoningSignatures(event.response?.output);
-      applyCompletedResponse(output, model, {
+      const response = {
         ...event.response,
         status:
           event.response?.status ?? (type === 'response.incomplete' ? 'incomplete' : undefined),
-      });
+      };
+      if (type === 'response.incomplete' || response.status === 'incomplete') {
+        applyCompletedResponse(output, model, response);
+      } else if (response.status === 'failed' || response.status === 'cancelled') {
+        applyCompletedResponse(output, model, response);
+      } else {
+        reconcileCompletedResponse(response, output, stream, model);
+      }
       return;
     }
 

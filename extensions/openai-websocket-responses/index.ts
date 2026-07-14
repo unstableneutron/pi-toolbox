@@ -10,13 +10,17 @@ import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-a
 
 import { installOpenAICodexTransportMetadataPatch } from './codex-transport-metadata';
 import { clearAllContinuations } from './src/continuation-cache.ts';
-import { installOpenAIWebSocketResponsesPatch } from './src/patch.ts';
+import {
+  clearWebSocketCapabilityCache,
+  installOpenAIWebSocketResponsesPatch,
+} from './src/patch.ts';
 import {
   API,
   createOpenAIWebSocketResponsesStream,
   type MissingCodexAccountIdWarningEvent,
 } from './src/provider.ts';
 import { readOpenAIWebSocketResponsesSettings } from './src/settings.ts';
+import { createOpenAISseResponsesStream } from './src/sse-provider.ts';
 import {
   closeAllCachedWebSockets,
   type WebSocketCacheStatus,
@@ -322,8 +326,14 @@ export default function (pi: ExtensionAPI) {
     (diagnostic) => pi.appendEntry(WEBSOCKET_DIAGNOSTIC_ENTRY, diagnostic),
     notifyMissingCodexAccountId,
   );
+  const streamSse = createOpenAISseResponsesStream(settingsProvider);
   const installTransparentPatch = () => {
-    installOpenAIWebSocketResponsesPatch(settingsProvider, streamWebSocket, onLifecycleEvent);
+    installOpenAIWebSocketResponsesPatch(
+      settingsProvider,
+      streamWebSocket,
+      onLifecycleEvent,
+      streamSse,
+    );
   };
   const installApiPatches = () => {
     registerOpenAIWebSocketResponsesApiProvider(streamWebSocket);
@@ -335,6 +345,15 @@ export default function (pi: ExtensionAPI) {
 
   installApiPatches();
   registerOpenAIWebSocketResponsesPatchRefreshHooks(pi, installApiPatches);
+
+  pi.registerCommand('responses-transport-reset', {
+    description: 'Clear learned OpenAI Responses WebSocket transport capability',
+    handler: async (_args, ctx) => {
+      clearWebSocketCapabilityCache();
+      closeAllCachedWebSockets();
+      if (ctx.hasUI) ctx.ui.notify('OpenAI Responses transport capability reset', 'info');
+    },
+  });
 
   pi.on('session_start', (_event, ctx) => {
     setCurrentContext(ctx);
@@ -357,6 +376,7 @@ export default function (pi: ExtensionAPI) {
     clearStatus();
     closeAllCachedWebSockets();
     clearAllContinuations();
+    clearWebSocketCapabilityCache();
     currentCtx = undefined;
     idleKeepaliveActivity.clear();
   });

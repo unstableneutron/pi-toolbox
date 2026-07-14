@@ -1,13 +1,14 @@
 # openai-websocket-responses
 
-Experimental Pi extension for OpenAI-compatible Responses API WebSocket
-endpoints, with Azure/LFM-friendly URL handling and midstream recovery.
+Experimental Pi extension providing a transport facade for OpenAI-compatible
+Responses APIs, with shared SSE/WebSocket parsing, Azure/LFM-friendly URL
+handling, terminal-output reconciliation, and midstream recovery.
 
 The extension provides two modes:
 
 1. An explicit `openai-websocket-responses` API provider.
-2. Optional transparent patching of existing API providers such as
-   `openai-responses` for selected providers/models.
+2. Optional transparent handling of existing APIs such as `openai-responses`
+   for selected providers/models, with per-model SSE/WebSocket routing.
 
 ## Settings
 
@@ -21,7 +22,11 @@ Configure the extension in `~/.pi/agent/settings.json`:
       "apis": ["openai-responses", "openai-codex-responses"],
       "providers": ["openai", "openai-codex"],
       "providerModels": [],
-      "excludeProviderModels": []
+      "excludeProviderModels": [],
+      "transportByProviderModel": {
+        "devai/*": "sse",
+        "facade/*": "auto"
+      }
     },
     "request": {
       "profile": "auto",
@@ -69,7 +74,8 @@ Configure the extension in `~/.pi/agent/settings.json`:
 Defaults: `patch.enabled` is `true`; `patch.apis` is
 `["openai-responses", "openai-codex-responses"]`; `patch.providers` is
 `["openai", "openai-codex"]`; `patch.providerModels` and
-`patch.excludeProviderModels` are empty arrays; `request.profile` is `"auto"`;
+`patch.excludeProviderModels` are empty arrays;
+`patch.transportByProviderModel` is an empty object; `request.profile` is `"auto"`;
 `request.queryParams`, `request.queryParamsByProvider`,
 `request.queryParamsByProviderModel`, and `request.storeByProviderModel` are
 empty; WebSocket defaults are `retries: 2`, `connectTimeoutMs: 15000`,
@@ -109,11 +115,20 @@ profile requests ignore store overrides and always use `store: false`.
 
 The extension intentionally has no built-in model-family allowlist. WebSocket
 compatibility depends on the configured provider endpoint and model deployment.
-Use provider-level defaults for known OpenAI Responses/Codex Responses providers,
-use `providerModels` for proxy/facade routes where only some deployments are WSS
-compatible, and use `excludeProviderModels` for any model that fails on WebSocket.
-Do not assume legacy model families such as `gpt-4*` support this transport
-without a smoke test against the exact provider/model route.
+Use provider-level defaults for known OpenAI Responses/Codex Responses providers
+and `providerModels` for proxy/facade routes that the extension should own.
+
+`transportByProviderModel` accepts provider/model globs with `"auto"`, `"sse"`,
+or `"websocket"` values. A matching entry also opts that route into the shared
+Responses parser. Later matching entries override earlier broad globs. `"sse"`
+never attempts a WebSocket; `"websocket"` is strict and does not fall back;
+`"auto"` tries WebSocket and falls back before output begins.
+
+`excludeProviderModels` remains a stronger escape hatch: matching routes bypass
+this extension entirely and use Pi's built-in provider/parser. Use it for routes
+that need stock behavior, not merely for models that should use SSE. Do not
+assume a model family supports WebSocket without a smoke test against the exact
+provider/model route.
 
 `request.profile` controls endpoint-specific request shaping:
 
@@ -127,8 +142,10 @@ without a smoke test against the exact provider/model route.
 
 ## Request body behavior
 
-The WebSocket `response.create` body follows Azure Responses fields that also
-match Pi's Codex Responses path where Azure supports them:
+SSE and WebSocket requests share the same Responses body builder. SSE requests
+set `stream: true` and `store: false`; WebSocket requests use the storage policy
+below for continuation support. The body follows Azure Responses fields that
+also match Pi's Codex Responses path where Azure supports them:
 
 - Pi system prompts are sent as top-level `instructions` instead of an input
   `system`/`developer` item.
@@ -208,11 +225,18 @@ request instead.
 ## Recovery behavior
 
 `websocket.retries` applies only before response state exists: connection
-failure, send failure, or close before any response event. When transparent
-patching runs with Pi's default `auto` transport, a WebSocket failure before the
-stream starts falls back to the original provider with `transport: "sse"`.
-Explicit `transport: "websocket"` and `transport: "websocket-cached"` requests
-stay on WebSocket and report the failure.
+failure, send failure, or close before any response event. In `"auto"` mode, a
+WebSocket failure before the stream starts falls back to the extension's SSE
+transport, which feeds the same Responses event processor. Explicit
+`transport: "websocket"` and `transport: "websocket-cached"` requests stay on
+WebSocket and report the failure.
+
+When an exact route reports deterministic WebSocket incompatibility, the
+extension remembers that provider/model/base-URL route for the current session
+and sends later `"auto"` requests directly over SSE. Transient timeouts, resets,
+rate limits, authentication failures, and 5xx responses do not poison this
+capability cache. Run `/responses-transport-reset` to clear learned capability
+and close cached sockets without restarting Pi.
 
 After `response.created` provides a `response_id`, the extension does not resend
 the same request over a new socket. It polls:
@@ -233,6 +257,13 @@ before any response events are processed, the extension clears the stale
 continuation and retries once without `previous_response_id` using the full Pi
 model context for that turn. That pays the full-context penalty once and creates
 a fresh response id for later delta turns.
+
+Both transports reconcile `response.completed.response.output` against streamed
+items. Missing terminal text and function calls are emitted exactly once; output
+that diverges from already-streamed text fails rather than rewriting history. A
+completed response with only reasoning, empty/whitespace text, and no function
+call is emitted as a retryable `Model produced invalid content` error instead of
+a successful empty stop.
 
 The extension keeps its own per-session socket/continuation cache keyed by
 session, URL, provider, model, and headers; it does not share Pi's built-in

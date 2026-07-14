@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 export type RequestProfile = 'auto' | 'azure' | 'codex' | 'generic';
+export type ResponsesTransportPolicy = 'auto' | 'sse' | 'websocket';
 
 export interface OpenAIWebSocketResponsesSettings {
   patch: {
@@ -11,6 +12,7 @@ export interface OpenAIWebSocketResponsesSettings {
     providers: string[];
     providerModels: string[];
     excludeProviderModels: string[];
+    transportByProviderModel: Record<string, ResponsesTransportPolicy>;
   };
   request: {
     profile: RequestProfile;
@@ -53,6 +55,7 @@ const DEFAULT_SETTINGS: OpenAIWebSocketResponsesSettings = {
     providers: ['openai', 'openai-codex'],
     providerModels: [],
     excludeProviderModels: [],
+    transportByProviderModel: {},
   },
   request: {
     profile: 'auto',
@@ -90,6 +93,19 @@ function stringArray(value: unknown, fallback: string[]): string[] {
 
 function booleanValue(value: unknown, fallback: boolean): boolean {
   return typeof value === 'boolean' ? value : fallback;
+}
+
+function transportPolicyMap(
+  value: unknown,
+  fallback: Record<string, ResponsesTransportPolicy>,
+): Record<string, ResponsesTransportPolicy> {
+  if (!isRecord(value)) return { ...fallback };
+  return Object.fromEntries(
+    Object.entries(value).filter(
+      (entry): entry is [string, ResponsesTransportPolicy] =>
+        entry[1] === 'auto' || entry[1] === 'sse' || entry[1] === 'websocket',
+    ),
+  );
 }
 
 function nonNegativeNumber(value: unknown, fallback: number): number {
@@ -313,6 +329,10 @@ export function normalizeSettings(raw: unknown): OpenAIWebSocketResponsesSetting
       excludeProviderModels: stringArray(
         patch.excludeProviderModels,
         DEFAULT_SETTINGS.patch.excludeProviderModels,
+      ),
+      transportByProviderModel: transportPolicyMap(
+        patch.transportByProviderModel,
+        DEFAULT_SETTINGS.patch.transportByProviderModel,
       ),
     },
     request: {

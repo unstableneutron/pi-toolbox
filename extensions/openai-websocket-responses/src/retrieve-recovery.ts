@@ -9,10 +9,10 @@ import {
   appendRecoveredFunctionCalls,
   appendRecoveredReasoningItems,
   appendSyntheticTextDelta,
-  applyCompletedResponse,
   ensureTextBlock,
   extractResponseOutputText,
   isFinalizedTextBlock,
+  reconcileCompletedResponse,
   responseMessageTextSignature,
 } from './responses-adapter.ts';
 import type { ResolvedRequestProfile } from './profile.ts';
@@ -136,10 +136,12 @@ export async function recoverResponseByRetrieve(request: {
           });
         }
       }
-      applyCompletedResponse(request.output, request.model, {
-        ...snapshot,
-        id: snapshot.id ?? request.responseId,
-      });
+      reconcileCompletedResponse(
+        { ...snapshot, id: snapshot.id ?? request.responseId },
+        request.output,
+        request.stream,
+        request.model,
+      );
       return { response: snapshot, recoveredText: snapshotText, emittedSyntheticDeltas, polls };
     }
     if (snapshotText && request.settings.recovery.emitSyntheticDeltas) {

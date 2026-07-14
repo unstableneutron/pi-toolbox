@@ -131,18 +131,27 @@ function resolveResponsesBaseUrl(
   return url;
 }
 
+export function resolveSseResponsesUrl(
+  model: Model<Api>,
+  settings: OpenAIWebSocketResponsesSettings,
+  runtimeHeaders?: HeaderTemplateSource,
+  profile: ResolvedRequestProfile = resolveRequestProfile(model, settings),
+): string {
+  return applySettingsQueryParams(
+    resolveResponsesBaseUrl(model, profile),
+    model,
+    settings,
+    runtimeHeaders,
+  ).toString();
+}
+
 export function resolveWebSocketResponsesUrl(
   model: Model<Api>,
   settings: OpenAIWebSocketResponsesSettings,
   runtimeHeaders?: HeaderTemplateSource,
   profile: ResolvedRequestProfile = resolveRequestProfile(model, settings),
 ): string {
-  const url = applySettingsQueryParams(
-    resolveResponsesBaseUrl(model, profile),
-    model,
-    settings,
-    runtimeHeaders,
-  );
+  const url = new URL(resolveSseResponsesUrl(model, settings, runtimeHeaders, profile));
   if (url.protocol === 'https:') url.protocol = 'wss:';
   else if (url.protocol === 'http:') url.protocol = 'ws:';
   return url.toString();

@@ -11,7 +11,8 @@ import {
   type StreamOptions,
 } from '@earendil-works/pi-ai/compat';
 
-import { shouldPatchModel } from './match.ts';
+import { shortHash } from './debug.ts';
+import { resolveModelTransportPolicy, shouldPatchModel } from './match.ts';
 import type { OpenAIWebSocketResponsesSettings } from './settings.ts';
 import { extractTransportDiagnostics, mergeTransportDiagnostics } from './transport-diagnostics.ts';
 import { createTraceContextForTraceId, type TraceContext } from './trace-context.ts';
@@ -24,6 +25,7 @@ type StreamSimple = (
 ) => AssistantMessageEventStream;
 
 const WRAPPED = Symbol.for('openai-websocket-responses.wrapped');
+const unsupportedWebSocketRoutes = new Set<string>();
 
 type WrappedFunction = Function & { [WRAPPED]?: boolean };
 
@@ -52,6 +54,33 @@ function errorMessage(error: unknown): string | undefined {
     if (typeof candidate.message === 'string') return candidate.message;
   }
   return typeof error === 'string' ? error : undefined;
+}
+
+export function isWebSocketUnsupportedError(error: unknown): boolean {
+  const message = errorMessage(error) ?? '';
+  return (
+    /websocket.{0,80}(?:not supported|unsupported|not implemented)/i.test(message) ||
+    /(?:unexpected server response|upgrade failed with http)[: ]+(?:404|405|501)\b/i.test(message)
+  );
+}
+
+function capabilityKey(
+  model: Pick<Model<Api>, 'api' | 'provider' | 'id' | 'baseUrl' | 'headers'>,
+  options: StreamOptions | undefined,
+): string {
+  const routeHeaders = { ...model.headers, ...options?.headers };
+  return [
+    options?.sessionId ?? '<no-session>',
+    model.api,
+    model.provider,
+    model.id,
+    model.baseUrl,
+    shortHash(JSON.stringify(routeHeaders)),
+  ].join('\u0000');
+}
+
+export function clearWebSocketCapabilityCache(): void {
+  unsupportedWebSocketRoutes.clear();
 }
 
 function isSseTransport(options: StreamOptions | undefined): boolean {
@@ -199,10 +228,11 @@ async function pipeSseFallback<TOptions extends StreamOptions>(input: {
 function streamWithAutoSseFallback<TOptions extends StreamOptions>(
   options: TOptions | undefined,
   websocketStream: StreamForOptions<TOptions>,
-  originalStream: StreamForOptions<TOptions>,
+  sseStream: StreamForOptions<TOptions>,
   onLifecycleEvent?: WebSocketLifecycleObserver,
+  onUnsupported?: () => void,
 ): AssistantMessageEventStream {
-  if (isSseTransport(options)) return originalStream(sseOptions(options, undefined));
+  if (isSseTransport(options)) return sseStream(sseOptions(options, undefined));
   if (!canFallbackToSse(options)) return websocketStream(options);
 
   const proxy = createAssistantMessageEventStream();
@@ -214,9 +244,10 @@ function streamWithAutoSseFallback<TOptions extends StreamOptions>(
         if (!started && event.type === 'error') {
           const fallbackDiagnostics = extractTransportDiagnostics(event.error);
           const fallbackTrace = traceFromDiagnostics(fallbackDiagnostics);
+          if (isWebSocketUnsupportedError(event.error)) onUnsupported?.();
           await pipeSseFallback({
             options,
-            originalStream,
+            originalStream: sseStream,
             proxy,
             fallbackDiagnostics,
             fallbackTrace,
@@ -232,9 +263,10 @@ function streamWithAutoSseFallback<TOptions extends StreamOptions>(
       if (!started) {
         const fallbackDiagnostics = extractTransportDiagnostics(error as { diagnostics?: any[] });
         const fallbackTrace = traceFromDiagnostics(fallbackDiagnostics);
+        if (isWebSocketUnsupportedError(error)) onUnsupported?.();
         await pipeSseFallback({
           options,
-          originalStream,
+          originalStream: sseStream,
           proxy,
           fallbackDiagnostics,
           fallbackTrace,
@@ -256,6 +288,7 @@ export function wrapProviderForWebSocketResponses<TProvider extends ApiProvider<
   settingsProvider: () => OpenAIWebSocketResponsesSettings,
   websocketStream: StreamSimple,
   onLifecycleEvent?: WebSocketLifecycleObserver,
+  sseStream?: StreamSimple,
 ): TProvider {
   const originalStreamSimple = provider.streamSimple as StreamSimple & WrappedFunction;
   if (originalStreamSimple[WRAPPED]) return provider;
@@ -267,11 +300,22 @@ export function wrapProviderForWebSocketResponses<TProvider extends ApiProvider<
   ) => {
     const settings = settingsProvider();
     if (shouldPatchModel(model, settings)) {
+      const configuredPolicy = resolveModelTransportPolicy(model, settings);
+      const routeKey = capabilityKey(model, options);
+      const selectedTransport =
+        options?.transport && options.transport !== 'auto'
+          ? options.transport
+          : configuredPolicy === 'auto' && unsupportedWebSocketRoutes.has(routeKey)
+            ? 'sse'
+            : configuredPolicy;
+      const selectedOptions = { ...options, transport: selectedTransport };
       return streamWithAutoSseFallback(
-        options,
+        selectedOptions,
         (nextOptions) => websocketStream(model, context, nextOptions),
-        (nextOptions) => originalStreamSimple.call(provider, model, context, nextOptions),
+        (nextOptions) =>
+          (sseStream ?? originalStreamSimple).call(provider, model, context, nextOptions),
         onLifecycleEvent,
+        () => unsupportedWebSocketRoutes.add(routeKey),
       );
     }
     return originalStreamSimple.call(provider, model, context, options);
@@ -286,11 +330,24 @@ export function wrapProviderForWebSocketResponses<TProvider extends ApiProvider<
   const wrappedStream = ((model: Model<Api>, context: Context, options?: StreamOptions) => {
     const settings = settingsProvider();
     if (shouldPatchModel(model, settings)) {
+      const configuredPolicy = resolveModelTransportPolicy(model, settings);
+      const routeKey = capabilityKey(model, options);
+      const selectedTransport =
+        options?.transport && options.transport !== 'auto'
+          ? options.transport
+          : configuredPolicy === 'auto' && unsupportedWebSocketRoutes.has(routeKey)
+            ? 'sse'
+            : configuredPolicy;
+      const selectedOptions = { ...options, transport: selectedTransport };
       return streamWithAutoSseFallback(
-        options,
+        selectedOptions,
         (nextOptions) => websocketStream(model, context, nextOptions as SimpleStreamOptions),
-        (nextOptions) => originalStream.call(provider, model, context, nextOptions),
+        (nextOptions) =>
+          sseStream
+            ? sseStream(model, context, nextOptions as SimpleStreamOptions)
+            : originalStream.call(provider, model, context, nextOptions),
         onLifecycleEvent,
+        () => unsupportedWebSocketRoutes.add(routeKey),
       );
     }
     return originalStream.call(provider, model, context, options);
@@ -308,6 +365,7 @@ export function installOpenAIWebSocketResponsesPatch(
   settingsProvider: () => OpenAIWebSocketResponsesSettings,
   websocketStream: StreamSimple,
   onLifecycleEvent?: WebSocketLifecycleObserver,
+  sseStream?: StreamSimple,
 ): void {
   for (const provider of getApiProviders()) {
     const settings = settingsProvider();
@@ -318,6 +376,7 @@ export function installOpenAIWebSocketResponsesPatch(
         settingsProvider,
         websocketStream,
         onLifecycleEvent,
+        sseStream,
       ),
     );
   }
