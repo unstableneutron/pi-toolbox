@@ -508,6 +508,25 @@ describe('editorShortcut extension', () => {
     expect(result).toEqual({ model: 'gpt-5.5', service_tier: 'priority' });
   });
 
+  test.each(['gpt-5.3-codex-spark', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'])(
+    '/fast supports openai-codex/%s',
+    async (modelId) => {
+      const harness = createHarness();
+      editorShortcut(harness.pi as any);
+      const model = { provider: 'openai-codex', id: modelId, name: modelId };
+
+      const fastCommand = harness.registerCommand.mock.calls[0]?.[1];
+      await fastCommand.handler('on', { ...harness.ctx, model });
+
+      const result = await harness.handlers.get('before_provider_request')?.(
+        { type: 'before_provider_request', payload: { model: modelId } },
+        { ...harness.ctx, model },
+      );
+
+      expect(result).toEqual({ model: modelId, service_tier: 'priority' });
+    },
+  );
+
   test('/fast cannot be enabled for unsupported models', async () => {
     const harness = createHarness();
     editorShortcut(harness.pi as any);

@@ -9,7 +9,11 @@ import { modelRef, normalizeModelRef } from './model';
 export const FAST_MODE_SERVICE_TIER = 'priority';
 
 export const PRIORITY_CAPABLE_MODEL_REFS = [
+  'openai-codex/gpt-5.3-codex-spark',
   'openai-codex/gpt-5.5',
+  'openai-codex/gpt-5.6-sol',
+  'openai-codex/gpt-5.6-terra',
+  'openai-codex/gpt-5.6-luna',
   'openai/gpt-5.5',
 ] as const;
 
@@ -50,7 +54,7 @@ export function parseFastModeAction(value: string | undefined): FastModeAction |
 
 export function registerFastCommand(pi: ExtensionAPI, state: FastModeState): void {
   pi.registerCommand('fast', {
-    description: 'Toggle priority fast mode for supported GPT-5.5 models',
+    description: 'Toggle priority fast mode for supported OpenAI models',
     getArgumentCompletions(argumentPrefix) {
       const items = ['on', 'off'].map((value) => ({ value, label: value }));
       const filtered = items.filter((item) => item.value.startsWith(argumentPrefix));
