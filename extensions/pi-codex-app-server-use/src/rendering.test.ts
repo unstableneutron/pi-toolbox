@@ -502,7 +502,7 @@ describe('tool renderers', () => {
       theme,
     );
 
-    expect(renderLines(collapsed)).toEqual([]);
+    expect(renderLines(collapsed)).toEqual(['Took 0.2s']);
 
     const slowCollapsed = renderExecCommandResult(
       {
@@ -545,14 +545,14 @@ describe('tool renderers', () => {
     );
 
     expect(renderLines(call)).toEqual([
-      'exec 2 operations · 1.8k tokens',
+      'exec 2 operations',
       '✓ read   ~/.claude/agents/commit-message-generator.md:1-120 · 120L',
       '✓ read   ~/.claude/agents/gather-git-diff-context.md:1-120 · 120L',
     ]);
-    expect(renderLines(result)).toEqual([]);
+    expect(renderLines(result)).toEqual(['Took 0.2s · 1.8k tokens']);
   });
 
-  test('adds token count to multi-read operation headers when result metadata is available', () => {
+  test('renders multi-read token count in the result without mutating the call', () => {
     const command = "sed -n '1,20p' src/a.ts && sed -n '40,80p' src/b.ts";
     const state: Record<string, unknown> = {};
     const call = renderExecCommandCall({ cmd: command }, theme, { state });
@@ -574,14 +574,14 @@ describe('tool renderers', () => {
     );
 
     expect(renderLines(call)).toEqual([
-      'exec 2 operations · 2.5k tokens',
+      'exec 2 operations',
       '✓ read   src/a.ts:1-20 · 20L',
       '✓ read   src/b.ts:40-80 · 41L',
     ]);
-    expect(renderLines(result)).toEqual([]);
+    expect(renderLines(result)).toEqual(['Took 0.2s · 2.5k tokens']);
   });
 
-  test('adds token count to single-read operation rows when result metadata is available', () => {
+  test('renders single-read token count in the result without mutating the call', () => {
     const command = "sed -n '1,12p' src/a.ts";
     const state: Record<string, unknown> = {};
     const call = renderExecCommandCall({ cmd: command }, theme, { state });
@@ -602,8 +602,8 @@ describe('tool renderers', () => {
       { args: { cmd: command }, state },
     );
 
-    expect(renderLines(call)).toEqual(['read src/a.ts:1-12 · 12L · 45 tokens']);
-    expect(renderLines(result)).toEqual([]);
+    expect(renderLines(call)).toEqual(['read src/a.ts:1-12 · 12L']);
+    expect(renderLines(result)).toEqual(['Took 0.2s · 45 tokens']);
   });
 
   test('renders single sed range exec calls as one compact read line', () => {
@@ -700,7 +700,7 @@ sed -n '1,160p' src/workspace/git/discovery.rs`;
     );
   });
 
-  test('adds token count to apply_patch call headers when result metadata is available', () => {
+  test('renders apply_patch token count in an explicit result status', () => {
     const state: Record<string, unknown> = {};
     const call = renderApplyPatchCall(
       {
@@ -720,14 +720,15 @@ sed -n '1,160p' src/workspace/git/discovery.rs`;
       { state },
     );
 
-    expect(renderLines(call)).toEqual([
-      'apply_patch 1 operation · 45 tokens',
-      '✓ edit   extensions/pi-codex-app-server-use/src/rendering.ts  +1/-1L · 6B',
-    ]);
-    expect(renderLines(result)).toEqual([]);
+    expect(renderLines(call)[0]).toBe('apply_patch 1 operation');
+    expect(renderLines(call)[1]).toContain(
+      'edit   extensions/pi-codex-app-server-use/src/rendering.ts  +1/-1L · 6B',
+    );
+    expect(renderLines(call)[1]).not.toContain('✓');
+    expect(renderLines(result)).toEqual(['Applied · 45 tokens']);
   });
 
-  test('collapses no-output write_stdin results into the call line', () => {
+  test('renders no-output write_stdin results separately from immutable calls', () => {
     const state: Record<string, unknown> = {};
     const call = renderWriteStdinCall({ session_id: 4, yield_time_ms: 5000 }, theme, { state });
     const result = renderExecCommandResult(
@@ -746,11 +747,11 @@ sed -n '1,160p' src/workspace/git/discovery.rs`;
       { args: { session_id: 4, yield_time_ms: 5000 }, state },
     );
 
-    expect(renderLines(call)).toEqual(['exec #4 poll (exited 0 · Took 0.0s · no output)']);
-    expect(renderLines(result)).toEqual([]);
+    expect(renderLines(call)).toEqual(['exec #4 poll (wait ≤5.0s)']);
+    expect(renderLines(result)).toEqual(['Exec #4 exited 0 · Took 0.0s · no output']);
   });
 
-  test('renders collapsed write_stdin status parentheses as muted text', () => {
+  test('renders separate write_stdin result status as muted text', () => {
     const styledTheme = {
       bold: (text: string) => text,
       fg: (role: string, text: string) => (role === 'muted' ? `<muted>${text}</muted>` : text),
@@ -759,7 +760,7 @@ sed -n '1,160p' src/workspace/git/discovery.rs`;
     const call = renderWriteStdinCall({ session_id: 4, yield_time_ms: 5000 }, styledTheme, {
       state,
     });
-    renderExecCommandResult(
+    const result = renderExecCommandResult(
       {
         content: [{ type: 'text', text: '' }],
         details: {
@@ -775,12 +776,13 @@ sed -n '1,160p' src/workspace/git/discovery.rs`;
       { args: { session_id: 4, yield_time_ms: 5000 }, state },
     );
 
-    expect(renderLines(call)).toEqual([
-      'exec #4 poll<muted> (exited 0 · Took 0.0s · no output)</muted>',
+    expect(renderLines(call)).toEqual(['exec #4 poll<muted> (wait ≤5.0s)</muted>']);
+    expect(renderLines(result)).toEqual([
+      '<muted>Exec #4 exited 0 · Took 0.0s · no output</muted>',
     ]);
   });
 
-  test('collapses no-output exec status into the call line when it fits', () => {
+  test('renders no-output exec status separately from immutable calls', () => {
     const state: Record<string, unknown> = {};
     const call = renderExecCommandCall({ cmd: 'sleep 6', yield_time_ms: 5000 }, theme, { state });
     const result = renderExecCommandResult(
@@ -799,14 +801,11 @@ sed -n '1,160p' src/workspace/git/discovery.rs`;
       { args: { cmd: 'sleep 6', yield_time_ms: 5000 }, state },
     );
 
-    expect(call.render(80).map((line) => line.trimEnd())).toEqual([
-      '$ sleep 6 (exec #5 still running after 5.0s · no output yet)',
-    ]);
+    expect(call.render(80).map((line) => line.trimEnd())).toEqual(['$ sleep 6 (wait ≤5.0s)']);
     const narrow = call.render(30).map((line) => line.trimEnd());
-    expect(narrow[0]).toBe('$ sleep 6 (wait ≤5.0s)');
-    expect(narrow[1]).toContain('Exec #5 still running');
+    expect(narrow).toEqual(['$ sleep 6 (wait ≤5.0s)']);
     expect(narrow.every((line) => visibleWidth(line) <= 30)).toBe(true);
-    expect(renderLines(result)).toEqual([]);
+    expect(renderLines(result)).toEqual(['Exec #5 still running after 5.0s · no output yet']);
   });
 
   test('clamps long exec command calls to the render width', () => {
@@ -850,7 +849,7 @@ sed -n '1,160p' src/workspace/git/discovery.rs`;
     expect(rendered.every((line) => visibleWidth(line) <= 40)).toBe(true);
   });
 
-  test('hides successful collapsed apply_patch results but shows failures', () => {
+  test('renders explicit successful apply_patch status and shows failures', () => {
     expect(
       renderLines(
         renderApplyPatchResult(
@@ -859,7 +858,7 @@ sed -n '1,160p' src/workspace/git/discovery.rs`;
           theme,
         ),
       ),
-    ).toEqual([]);
+    ).toEqual(['Applied']);
     expect(
       renderLines(
         renderApplyPatchResult(
@@ -869,6 +868,65 @@ sed -n '1,160p' src/workspace/git/discovery.rs`;
         ),
       ),
     ).toEqual(['apply_patch failed: bad patch']);
+  });
+
+  test('memoizes custom component renders by one current width', () => {
+    const call = renderExecCommandCall({ cmd: 'printf hello' }, theme);
+    const wideCall = call.render(80);
+    expect(call.render(80)).toBe(wideCall);
+    const narrowCall = call.render(30);
+    expect(narrowCall).not.toBe(wideCall);
+    expect(call.render(30)).toBe(narrowCall);
+    call.invalidate();
+    expect(call.render(30)).not.toBe(narrowCall);
+
+    const result = renderExecCommandResult(
+      {
+        content: [{ type: 'text', text: 'hello' }],
+        details: { output: 'hello', wall_time_seconds: 0.1, exit_code: 0 },
+      },
+      { expanded: false, isPartial: false },
+      theme,
+    );
+    const wideResult = result.render(80);
+    expect(result.render(80)).toBe(wideResult);
+    const narrowResult = result.render(30);
+    expect(narrowResult).not.toBe(wideResult);
+    expect(result.render(30)).toBe(narrowResult);
+  });
+
+  test('uses a deterministic completed status when exec metadata is absent', () => {
+    expect(
+      renderLines(
+        renderExecCommandResult(
+          { content: [{ type: 'text', text: '' }] },
+          { expanded: false, isPartial: false },
+          theme,
+        ),
+      ),
+    ).toEqual(['Completed · no output']);
+  });
+
+  test('keeps exec calls immutable when no-output results arrive', () => {
+    const state: Record<string, unknown> = {};
+    const call = renderExecCommandCall({ cmd: 'sleep 1', yield_time_ms: 500 }, theme, { state });
+    const before = renderLines(call);
+    const result = renderExecCommandResult(
+      {
+        content: [{ type: 'text', text: '' }],
+        details: {
+          output: '',
+          wall_time_seconds: 0.5,
+          exit_code: 0,
+        },
+      },
+      { expanded: false, isPartial: false },
+      theme,
+      { args: { cmd: 'sleep 1', yield_time_ms: 500 }, state },
+    );
+
+    expect(renderLines(call)).toEqual(before);
+    expect(renderLines(result)).toEqual(['Took 0.5s · no output']);
   });
 
   test('renders view_image and computer use calls compactly', () => {

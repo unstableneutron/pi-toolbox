@@ -42,10 +42,34 @@ interface RenderContext {
   isError?: boolean | undefined;
 }
 
+class WidthCachedComponent implements Component {
+  private cachedWidth: number | undefined;
+  private cachedLines: string[] | undefined;
+
+  constructor(private readonly component: Component) {}
+
+  render(width: number): string[] {
+    if (this.cachedWidth === width && this.cachedLines) return this.cachedLines;
+    const lines = this.component.render(width);
+    this.cachedWidth = width;
+    this.cachedLines = lines;
+    return lines;
+  }
+
+  invalidate(): void {
+    this.cachedWidth = undefined;
+    this.cachedLines = undefined;
+    this.component.invalidate();
+  }
+}
+
+function cached(component: Component): Component {
+  return new WidthCachedComponent(component);
+}
+
 const COLLAPSED_EXEC_PREVIEW_LINES = 3;
 const EXPANDED_EXEC_HEAD_LINES = 80;
 const EXPANDED_EXEC_TAIL_LINES = 80;
-const READ_DURATION_NOTICE_SECONDS = 1;
 const DISPLAY_TAB = '   ';
 const ANSI_CODE_PATTERN = String.raw`(?:\u001B\[[0-?]*[ -/]*[@-~]|\u001B\][^\u0007]*(?:\u0007|\u001B\\)|\u001B[@-Z\\-_])`;
 const TRAILING_ANSI_CODES = new RegExp(`${ANSI_CODE_PATTERN}+$`, 'u');
@@ -258,13 +282,27 @@ function formatExecStatus(
   return `Took ${duration}${suffix}${tokenText}`;
 }
 
-function stripExecStatusPrefix(status: string, id: number | undefined): string {
-  return id === undefined ? status : status.replace(new RegExp(`^Exec #${id}\\s+`), '');
-}
+function formatExecStatusOrFallback(
+  details: UnifiedExecResult | undefined,
+  running: boolean,
+  isPartial: boolean | undefined,
+  hasOutput: boolean,
+): string {
+  const status = formatExecStatus(details, running, isPartial, hasOutput);
+  if (status) return status;
 
-function inlineExecStatus(status: string): string {
-  if (status.startsWith('Exec #')) return `exec #${status.slice('Exec #'.length)}`;
-  return status.charAt(0).toLowerCase() + status.slice(1);
+  const id = execSessionId(details);
+  const prefix = id === undefined ? '' : `Exec #${id} `;
+  const tokenCount = formatTokenCount(details?.original_token_count);
+  const tokenSuffix = tokenCount ? ` · ${tokenCount}` : '';
+
+  if (running || isPartial) {
+    return `${prefix}${isPartial ? 'running' : 'still running'}${hasOutput ? '' : ' · no output yet'}${tokenSuffix}`;
+  }
+  if (details?.exit_code !== undefined) {
+    return `${prefix}exited ${details.exit_code}${hasOutput ? '' : ' · no output'}${tokenSuffix}`;
+  }
+  return `Completed${hasOutput ? '' : ' · no output'}${tokenSuffix}`;
 }
 
 function extractEmbeddedExecStatus(text: string): { output: string; status: string } | null {
@@ -316,19 +354,11 @@ class ExecResultComponent implements Component {
 }
 
 class ExecCommandCallComponent implements Component {
-  private inlineStatus: string | undefined;
-  private fallbackStatus: string | undefined;
-
   constructor(
     private commandText: string,
     private yieldLimit: string | undefined,
     private theme: RenderTheme,
   ) {}
-
-  setInlineStatus(inlineStatusText: string, fallbackStatusText: string): void {
-    this.inlineStatus = inlineStatusText;
-    this.fallbackStatus = fallbackStatusText;
-  }
 
   render(width: number): string[] {
     const safeWidth = Math.max(1, width);
@@ -336,19 +366,15 @@ class ExecCommandCallComponent implements Component {
     const originalSuffix = this.yieldLimit ? this.theme.fg('muted', ` (${this.yieldLimit})`) : '';
 
     if (!this.commandText.includes('\n')) {
-      if (this.inlineStatus) {
-        const inline = title(this.commandText) + this.theme.fg('muted', ` (${this.inlineStatus})`);
-        if (visibleWidth(inline) <= safeWidth) return clampRenderLines([inline], safeWidth);
-      }
-      return [
-        title(this.commandText) + originalSuffix,
-        ...(this.fallbackStatus ? [this.theme.fg('muted', this.fallbackStatus)] : []),
-      ].map((line) => clampRenderLine(line, safeWidth));
+      return [title(this.commandText) + originalSuffix].map((line) =>
+        clampRenderLine(line, safeWidth),
+      );
     }
 
-    const lines = this.commandText.split('\n').map((line) => title(line));
-    if (this.fallbackStatus) lines.push(this.theme.fg('muted', this.fallbackStatus));
-    return clampRenderLines(lines, safeWidth);
+    return clampRenderLines(
+      this.commandText.split('\n').map((line) => title(line)),
+      safeWidth,
+    );
   }
 
   invalidate(): void {}
@@ -379,24 +405,18 @@ function formatReadPathAndMetric(
 }
 
 class ExecReadOperationsComponent implements Component {
-  private tokenCount: string | undefined;
-
   constructor(
     private operations: BashReadOperation[],
     private theme: RenderTheme,
     private cwd: string | undefined,
   ) {}
 
-  setTokenCount(tokenCount: string): void {
-    this.tokenCount = tokenCount;
-  }
-
   render(width: number): string[] {
     const count = this.operations.length;
     if (count === 1)
       return clampRenderLines([this.renderOperation(this.operations[0]!, width, false)], width);
 
-    const metric = `${count} operations${this.tokenCount ? ` · ${this.tokenCount}` : ''}`;
+    const metric = `${count} operations`;
     const lines = [
       `${this.theme.fg('toolTitle', this.theme.bold('exec'))} ${this.theme.fg('muted', metric)}`,
     ];
@@ -413,7 +433,7 @@ class ExecReadOperationsComponent implements Component {
       ? `${this.theme.fg('success', '✓')} ${this.theme.fg('text', 'read'.padEnd(6, ' '))} `
       : this.theme.fg('toolTitle', this.theme.bold('read '));
     const { path, metric } = formatReadPathAndMetric(operation, this.cwd);
-    const suffixMetric = `${metric}${!bullet && this.tokenCount ? ` · ${this.tokenCount}` : ''}`;
+    const suffixMetric = metric;
     const suffix = this.theme.fg('muted', ` · ${suffixMetric}`);
     const pathWidth = Math.max(1, width - visibleWidth(prefix) - visibleWidth(suffix));
     const renderedPath = this.theme.fg('accent', truncatePathLikeToWidth(path, pathWidth));
@@ -424,34 +444,18 @@ class ExecReadOperationsComponent implements Component {
 }
 
 class ApplyPatchCallComponent implements Component {
-  private tokenCount: string | undefined;
-  private applied = false;
-
   constructor(
     private rows: ReturnType<typeof parsePatchStreaming>['operations'],
     private theme: RenderTheme,
   ) {}
 
-  setTokenCount(tokenCount: string): void {
-    this.tokenCount = tokenCount;
-  }
-
-  markApplied(): void {
-    this.applied = true;
-  }
-
   render(width: number): string[] {
     const count = this.rows.length;
-    const metric = `${count} operation${count === 1 ? '' : 's'}${this.tokenCount ? ` · ${this.tokenCount}` : ''}`;
+    const metric = `${count} operation${count === 1 ? '' : 's'}`;
     return clampRenderLines(
       [
         `${this.theme.fg('toolTitle', this.theme.bold('apply_patch'))} ${this.theme.fg('muted', metric)}`,
-        ...renderApplyPatchRows(
-          this.applied
-            ? this.rows.map((row) => ({ ...row, state: 'applied' as const }))
-            : this.rows,
-          this.theme,
-        ).render(width),
+        ...renderApplyPatchRows(this.rows, this.theme).render(width),
       ],
       width,
     );
@@ -478,13 +482,9 @@ export function renderExecCommandCall(
     stringValue(record.workdir) ?? stringValue(record.cwd) ?? stringValue(record.working_directory);
   const readOperations = tryExecReadOperations(command, cwd);
   if (!context?.expanded && readOperations) {
-    const component = new ExecReadOperationsComponent(
-      readOperations.operations,
-      theme,
-      readOperations.cwd ?? cwd,
+    return cached(
+      new ExecReadOperationsComponent(readOperations.operations, theme, readOperations.cwd ?? cwd),
     );
-    if (context?.state) context.state.execReadOperationsComponent = component;
-    return component;
   }
   const compact =
     command === undefined
@@ -492,18 +492,14 @@ export function renderExecCommandCall(
       : context?.expanded
         ? fullCommandInput(commandDisplay)
         : compactCommandInput(commandDisplay);
-  const component = new ExecCommandCallComponent(compact, yieldLimit, theme);
-  if (context?.state) {
-    context.state.execCommandCallComponent = component;
-  }
-  return component;
+  return cached(new ExecCommandCallComponent(compact, yieldLimit, theme));
 }
 
 export function renderExecCommandResult(
   result: ToolResult,
   options: RenderOptions,
   theme: RenderTheme,
-  context?: RenderContext,
+  _context?: RenderContext,
 ): Component {
   const details = execDetails(result.details);
   const embedded = details ? null : extractEmbeddedExecStatus(firstTextContent(result));
@@ -513,53 +509,21 @@ export function renderExecCommandResult(
   const running = details?.session_id !== undefined && details.exit_code === undefined;
   const readOperations = tryExecReadOperations(details?.command);
   const hasOutput = hasMeaningfulOutput(output);
+  const status =
+    embedded?.status ?? formatExecStatusOrFallback(details, running, options.isPartial, hasOutput);
 
   if (!options.expanded) {
     if (!options.isPartial && !running && details?.exit_code === 0 && readOperations) {
-      const tokenCount = formatTokenCount(details.original_token_count);
-      const readOperationsComponent = context?.state?.execReadOperationsComponent;
-      if (tokenCount && readOperationsComponent instanceof ExecReadOperationsComponent) {
-        readOperationsComponent.setTokenCount(tokenCount);
-      }
-      const duration = formatDuration(details.wall_time_seconds);
-      if (duration && details.wall_time_seconds >= READ_DURATION_NOTICE_SECONDS) {
-        return new Text(theme.fg('muted', `Took ${duration}`), 0, 0);
-      }
-      return empty();
+      return cached(new ExecResultComponent([theme.fg('muted', status)], false));
     }
-    const status =
-      embedded?.status ?? formatExecStatus(details, running, options.isPartial, hasOutput);
     if (!hasOutput) {
-      const argsRecord = asRecord(context?.args);
-      const writeSessionId = numberValue(argsRecord.session_id);
-      const writeCallText = context?.state?.writeStdinCallText;
-      const writeCallBase = context?.state?.writeStdinCallBase;
-      if (
-        writeSessionId !== undefined &&
-        writeCallText instanceof Text &&
-        typeof writeCallBase === 'string' &&
-        status
-      ) {
-        writeCallText.setText(
-          theme.fg('toolTitle', theme.bold(writeCallBase)) +
-            theme.fg('muted', ` (${stripExecStatusPrefix(status, writeSessionId)})`),
-        );
-        return empty();
-      }
-      const execCallComponent = context?.state?.execCommandCallComponent;
-      const hasExecCommandArgs =
-        stringValue(argsRecord.cmd) !== undefined || stringValue(argsRecord.command) !== undefined;
-      if (hasExecCommandArgs && execCallComponent instanceof ExecCommandCallComponent && status) {
-        execCallComponent.setInlineStatus(inlineExecStatus(status), status);
-        return empty();
-      }
       const lines = [
         ...(details?.truncation?.truncated
           ? [theme.fg('warning', formatOutputTruncationNotice(details.truncation))]
           : []),
-        ...(status ? [theme.fg('muted', status)] : []),
+        theme.fg('muted', status),
       ];
-      return new ExecResultComponent(lines, false);
+      return cached(new ExecResultComponent(lines, false));
     }
     const { lines, skipped } = previewOutputLines(output || '(no output)');
     const rendered = lines.map((line) => theme.fg('toolOutput', line));
@@ -569,33 +533,36 @@ export function renderExecCommandResult(
     const truncation = details?.truncation?.truncated
       ? theme.fg('warning', formatOutputTruncationNotice(details.truncation))
       : undefined;
-    return new ExecResultComponent(
-      [
-        ...leadingSeparator,
-        ...prefix,
-        ...rendered,
-        ...(truncation ? [truncation] : []),
-        ...(status ? ['', theme.fg('muted', status)] : []),
-      ],
-      false,
+    return cached(
+      new ExecResultComponent(
+        [
+          ...leadingSeparator,
+          ...prefix,
+          ...rendered,
+          ...(truncation ? [truncation] : []),
+          '',
+          theme.fg('muted', status),
+        ],
+        false,
+      ),
     );
   }
 
   const lines = expandedOutputLines(output, theme);
   if (details?.truncation?.truncated) lines.push(formatOutputTruncationNotice(details.truncation));
-  const status = formatExecStatus(details, running, options.isPartial, hasOutput);
-  if (status) lines.push(status);
-  else if (details?.exit_code !== undefined) lines.push(`Exit code: ${details.exit_code}`);
-  return new ExecResultComponent(
-    lines.map((line) => theme.fg('dim', line)),
-    true,
+  lines.push(status);
+  return cached(
+    new ExecResultComponent(
+      lines.map((line) => theme.fg('dim', line)),
+      true,
+    ),
   );
 }
 
 export function renderWriteStdinCall(
   args: unknown,
   theme: RenderTheme,
-  context?: RenderContext,
+  _context?: RenderContext,
 ): Text {
   const record = asRecord(args);
   const sessionId = numberValue(record.session_id);
@@ -606,22 +573,17 @@ export function renderWriteStdinCall(
     effectiveWriteYieldTime(numberValue(record.yield_time_ms), isEmptyPoll),
   );
   const base = `exec #${sessionId ?? '?'} ${action}`;
-  const text = new Text(
+  return new Text(
     theme.fg('toolTitle', theme.bold(base)) + theme.fg('muted', ` (${yieldLimit})`),
     0,
     0,
   );
-  if (context?.state) {
-    context.state.writeStdinCallText = text;
-    context.state.writeStdinCallBase = base;
-  }
-  return text;
 }
 
 export function renderApplyPatchCall(
   args: unknown,
   theme: RenderTheme,
-  context?: RenderContext,
+  _context?: RenderContext,
 ): Component {
   const record = asRecord(args);
   const patch =
@@ -629,35 +591,29 @@ export function renderApplyPatchCall(
   try {
     const rows = parsePatchStreaming(patch).operations;
     if (rows.length > 0) {
-      const component = new ApplyPatchCallComponent(rows, theme);
-      if (context?.state) context.state.applyPatchCallComponent = component;
-      return component;
+      return cached(new ApplyPatchCallComponent(rows, theme));
     }
   } catch {
     // Fall back to a tiny summary for incomplete or malformed patch text.
   }
-  return textCell('Applied patch', truncateOneLine(patch, 100), theme);
+  return textCell('apply_patch', truncateOneLine(patch, 100), theme);
 }
 
 export function renderApplyPatchResult(
   result: ToolResult,
   options: RenderOptions,
   theme: RenderTheme,
-  context?: RenderContext,
+  _context?: RenderContext,
 ): Text | Container {
   const text = firstTextContent(result);
   const failed = /failed|partial/i.test(text);
-  if (!failed && !options.expanded && !options.isPartial) {
-    const tokenCount = formatTokenCount(numberValue(asRecord(result.details).original_token_count));
-    const component = context?.state?.applyPatchCallComponent;
-    if (component instanceof ApplyPatchCallComponent) {
-      component.markApplied();
-      if (tokenCount) component.setTokenCount(tokenCount);
-    }
-    return empty();
-  }
   if (options.isPartial) return textCell('Patching', undefined, theme);
-  return new Text(theme.fg(failed ? 'warning' : 'dim', truncateOneLine(text, 180)), 0, 0);
+  if (!failed) {
+    const tokenCount = formatTokenCount(numberValue(asRecord(result.details).original_token_count));
+    const status = `Applied${tokenCount ? ` · ${tokenCount}` : ''}`;
+    return new Text(theme.fg('success', status), 0, 0);
+  }
+  return new Text(theme.fg('warning', truncateOneLine(text, 180) || 'Failed'), 0, 0);
 }
 
 export function renderViewImageCall(args: unknown, theme: RenderTheme): Text {
