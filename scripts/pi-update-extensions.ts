@@ -7,6 +7,8 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -222,6 +224,118 @@ export function buildPiCodingAgentResolverReplacement(): string {
   ].join('\n');
 }
 
+// ---------------------------------------------------------------------------
+// pi-coding-agent transcript prefix cache patch
+//
+// Patches the installed interactive mode at the point where it owns the chat
+// container. Completed transcript components are rendered into one bounded,
+// width-aware prefix cache while a conservative recent tail stays live. This
+// avoids extension-startup monkeypatching and keeps streaming/tool components
+// responsive. PI_TRANSCRIPT_CACHE_DISABLED=1 restores the upstream Container.
+// ---------------------------------------------------------------------------
+
+const PI_CODING_AGENT_INTERACTIVE_MODE_RELATIVE_PATH = 'dist/modes/interactive/interactive-mode.js';
+const PI_CODING_AGENT_TRANSCRIPT_CACHE_PATCH_MARKER =
+  '__pi_update_extensions:transcript-prefix-cache__';
+const PI_CODING_AGENT_TRANSCRIPT_CACHE_INSERTION_TARGET = 'function isCustomSessionEntry(item) {';
+const PI_CODING_AGENT_TRANSCRIPT_CACHE_CONSTRUCTOR_TARGET =
+  '        this.chatContainer = new Container();';
+const PI_CODING_AGENT_TRANSCRIPT_CACHE_CONSTRUCTOR_REPLACEMENT = [
+  '        this.chatContainer = process.env.PI_TRANSCRIPT_CACHE_DISABLED === "1"',
+  '            ? new Container()',
+  '            : new TranscriptContainer();',
+].join('\n');
+const PI_CODING_AGENT_TRANSCRIPT_CACHE_HIDDEN_LABEL_TARGET = [
+  '        if (this.streamingComponent) {',
+  '            this.streamingComponent.setHiddenThinkingLabel(this.hiddenThinkingLabel);',
+  '        }',
+  '        this.ui.requestRender();',
+].join('\n');
+const PI_CODING_AGENT_TRANSCRIPT_CACHE_HIDDEN_LABEL_REPLACEMENT = [
+  '        if (this.streamingComponent) {',
+  '            this.streamingComponent.setHiddenThinkingLabel(this.hiddenThinkingLabel);',
+  '        }',
+  '        this.chatContainer.invalidateRenderCache?.();',
+  '        this.ui.requestRender();',
+].join('\n');
+const PI_CODING_AGENT_TRANSCRIPT_CACHE_EXPANSION_TARGET = [
+  '        for (const container of [this.loadedResourcesContainer, this.chatContainer]) {',
+  '            for (const child of container.children) {',
+  '                if (isExpandable(child)) {',
+  '                    child.setExpanded(expanded);',
+  '                }',
+  '            }',
+  '        }',
+  '        this.ui.requestRender();',
+].join('\n');
+const PI_CODING_AGENT_TRANSCRIPT_CACHE_EXPANSION_REPLACEMENT = [
+  '        for (const container of [this.loadedResourcesContainer, this.chatContainer]) {',
+  '            for (const child of container.children) {',
+  '                if (isExpandable(child)) {',
+  '                    child.setExpanded(expanded);',
+  '                }',
+  '            }',
+  '        }',
+  '        this.chatContainer.invalidateRenderCache?.();',
+  '        this.ui.requestRender();',
+].join('\n');
+
+export function buildPiCodingAgentTranscriptCacheInsertion(): string {
+  return `// ${PI_CODING_AGENT_TRANSCRIPT_CACHE_PATCH_MARKER}
+const TRANSCRIPT_LIVE_TAIL_COMPONENTS = 64;
+class TranscriptContainer extends Container {
+    cachedWidth;
+    cachedPrefixChildren = [];
+    cachedPrefixLines = [];
+    invalidateRenderCache() {
+        this.cachedWidth = undefined;
+        this.cachedPrefixChildren = [];
+        this.cachedPrefixLines = [];
+    }
+    removeChild(component) {
+        super.removeChild(component);
+        this.invalidateRenderCache();
+    }
+    clear() {
+        super.clear();
+        this.invalidateRenderCache();
+    }
+    invalidate() {
+        this.invalidateRenderCache();
+        super.invalidate();
+    }
+    hasReusablePrefix(width, prefixEnd) {
+        if (this.cachedWidth !== width || this.cachedPrefixChildren.length > prefixEnd) {
+            return false;
+        }
+        for (let index = 0; index < this.cachedPrefixChildren.length; index++) {
+            if (this.cachedPrefixChildren[index] !== this.children[index]) {
+                return false;
+            }
+        }
+        return true;
+    }
+    render(width) {
+        const prefixEnd = Math.max(0, this.children.length - TRANSCRIPT_LIVE_TAIL_COMPONENTS);
+        if (!this.hasReusablePrefix(width, prefixEnd)) {
+            this.cachedWidth = width;
+            this.cachedPrefixChildren = [];
+            this.cachedPrefixLines = [];
+        }
+        for (let index = this.cachedPrefixChildren.length; index < prefixEnd; index++) {
+            const child = this.children[index];
+            this.cachedPrefixChildren.push(child);
+            this.cachedPrefixLines.push(...child.render(width));
+        }
+        const lines = this.cachedPrefixLines.slice();
+        for (let index = prefixEnd; index < this.children.length; index++) {
+            lines.push(...this.children[index].render(width));
+        }
+        return lines;
+    }
+}`;
+}
+
 function getDefaultPiSettingsPath(): string {
   return join(homedir(), '.pi', 'agent', 'settings.json');
 }
@@ -397,23 +511,55 @@ export function detectPiInstallPackageManagerFromPath(path: string): PiInstallPa
   return 'unknown';
 }
 
+function findPiExecutablePath(): string | undefined {
+  try {
+    const piPaths = execFileSync('which', ['-a', 'pi'], { encoding: 'utf8' })
+      .split(/\r?\n/)
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+    return (
+      piPaths.find((entry) => !entry.startsWith(join(REPO_ROOT, 'node_modules', '.bin'))) ??
+      piPaths[0]
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+export function findPiCodingAgentRootFromExecutable(
+  options: { piPath?: string } = {},
+): string | undefined {
+  const piPath = options.piPath ?? findPiExecutablePath();
+  if (!piPath || !existsSync(piPath)) return undefined;
+
+  const candidates: string[] = [];
+  try {
+    const shim = readFileSync(piPath, 'utf8');
+    const target = shim.match(/^# cmd-shim-target=(.+\/dist\/cli\.js)$/m)?.[1];
+    if (target) candidates.push(dirname(dirname(target)));
+  } catch {
+    // A native executable or unreadable shim can still use the fallback below.
+  }
+
+  try {
+    const resolved = realpathSync(piPath);
+    if (resolved.endsWith('/dist/cli.js')) candidates.push(dirname(dirname(resolved)));
+  } catch {
+    // Try any shim-derived candidate.
+  }
+
+  for (const candidate of candidates) {
+    if (readPackageName(candidate) === PI_CODING_AGENT_PACKAGE_NAME) {
+      return realpathSync(candidate);
+    }
+  }
+  return undefined;
+}
+
 export function detectPiInstallPackageManager(
   options: { piPath?: string } = {},
 ): PiInstallPackageManager {
-  let piPath = options.piPath;
-  if (!piPath) {
-    try {
-      const piPaths = execFileSync('which', ['-a', 'pi'], { encoding: 'utf8' })
-        .split(/\r?\n/)
-        .map((entry) => entry.trim())
-        .filter(Boolean);
-      piPath =
-        piPaths.find((entry) => !entry.startsWith(join(REPO_ROOT, 'node_modules', '.bin'))) ??
-        piPaths[0];
-    } catch {
-      return 'unknown';
-    }
-  }
+  const piPath = options.piPath ?? findPiExecutablePath();
   if (!piPath) return 'unknown';
 
   const candidates = [piPath];
@@ -632,6 +778,7 @@ export async function applyPiCodingAgentResolverPatch(
 ): Promise<ApplyPatchResult> {
   const packageRoot =
     options.packageRoot ??
+    findPiCodingAgentRootFromExecutable() ??
     findGlobalPackagePath(PI_CODING_AGENT_PACKAGE_NAME, { cwd: options.cwd });
   if (!packageRoot) {
     throw new Error(
@@ -667,6 +814,85 @@ export async function applyPiCodingAgentResolverPatch(
     buildPiCodingAgentResolverReplacement(),
   );
   writeFileSync(filePath, patched);
+  return { status: 'applied', packageRoot, version, patchPath: filePath };
+}
+
+function writeJavaScriptPatchAtomically(filePath: string, content: string): void {
+  const temporaryPath = `${filePath}.pi-update-${process.pid}.mjs`;
+  writeFileSync(temporaryPath, content);
+  try {
+    execFileSync(process.execPath, ['--check', temporaryPath], { stdio: 'pipe' });
+    renameSync(temporaryPath, filePath);
+  } finally {
+    rmSync(temporaryPath, { force: true });
+  }
+}
+
+export function isPiCodingAgentTranscriptCachePatchApplied(packageRoot: string): boolean {
+  const filePath = join(packageRoot, PI_CODING_AGENT_INTERACTIVE_MODE_RELATIVE_PATH);
+  if (!existsSync(filePath)) return false;
+  return readFileSync(filePath, 'utf8').includes(PI_CODING_AGENT_TRANSCRIPT_CACHE_PATCH_MARKER);
+}
+
+export async function applyPiCodingAgentTranscriptCachePatch(
+  options: { dryRun?: boolean; packageRoot?: string; cwd?: string } = {},
+): Promise<ApplyPatchResult> {
+  const packageRoot =
+    options.packageRoot ??
+    findPiCodingAgentRootFromExecutable() ??
+    findGlobalPackagePath(PI_CODING_AGENT_PACKAGE_NAME, { cwd: options.cwd });
+  if (!packageRoot) {
+    throw new Error(
+      `Could not locate installed ${PI_CODING_AGENT_PACKAGE_NAME} via configured package manager, aube, or pnpm`,
+    );
+  }
+
+  const version = getPackageVersion(packageRoot) ?? 'unknown';
+  const filePath = join(packageRoot, PI_CODING_AGENT_INTERACTIVE_MODE_RELATIVE_PATH);
+  if (!existsSync(filePath)) {
+    throw new Error(`pi-coding-agent@${version}: interactive mode not found at ${filePath}`);
+  }
+
+  if (isPiCodingAgentTranscriptCachePatchApplied(packageRoot)) {
+    return { status: 'already-applied', packageRoot, version, patchPath: filePath };
+  }
+
+  const content = readFileSync(filePath, 'utf8');
+  const requiredTargets = [
+    PI_CODING_AGENT_TRANSCRIPT_CACHE_INSERTION_TARGET,
+    PI_CODING_AGENT_TRANSCRIPT_CACHE_CONSTRUCTOR_TARGET,
+    PI_CODING_AGENT_TRANSCRIPT_CACHE_HIDDEN_LABEL_TARGET,
+    PI_CODING_AGENT_TRANSCRIPT_CACHE_EXPANSION_TARGET,
+  ];
+  const missingTarget = requiredTargets.find((target) => !content.includes(target));
+  if (missingTarget) {
+    throw new Error(
+      `pi-coding-agent@${version}: transcript cache target not found at ${filePath}. ` +
+        `Expected exact text: ${JSON.stringify(missingTarget)}. ` +
+        `Upstream may have changed; update pi-update-extensions.ts.`,
+    );
+  }
+
+  if (options.dryRun) {
+    return { status: 'would-apply', packageRoot, version, patchPath: filePath };
+  }
+
+  const insertion = `${buildPiCodingAgentTranscriptCacheInsertion()}\n${PI_CODING_AGENT_TRANSCRIPT_CACHE_INSERTION_TARGET}`;
+  const patched = content
+    .replace(PI_CODING_AGENT_TRANSCRIPT_CACHE_INSERTION_TARGET, insertion)
+    .replace(
+      PI_CODING_AGENT_TRANSCRIPT_CACHE_CONSTRUCTOR_TARGET,
+      PI_CODING_AGENT_TRANSCRIPT_CACHE_CONSTRUCTOR_REPLACEMENT,
+    )
+    .replace(
+      PI_CODING_AGENT_TRANSCRIPT_CACHE_HIDDEN_LABEL_TARGET,
+      PI_CODING_AGENT_TRANSCRIPT_CACHE_HIDDEN_LABEL_REPLACEMENT,
+    )
+    .replace(
+      PI_CODING_AGENT_TRANSCRIPT_CACHE_EXPANSION_TARGET,
+      PI_CODING_AGENT_TRANSCRIPT_CACHE_EXPANSION_REPLACEMENT,
+    );
+  writeJavaScriptPatchAtomically(filePath, patched);
   return { status: 'applied', packageRoot, version, patchPath: filePath };
 }
 
@@ -2364,7 +2590,8 @@ function readGlobalPiCodingAgentPackageJson(): {
   path: string;
   json: { dependencies?: Record<string, string>; peerDependencies?: Record<string, string> };
 } {
-  const packageRoot = findGlobalPackagePath(PI_CODING_AGENT_PACKAGE_NAME);
+  const packageRoot =
+    findPiCodingAgentRootFromExecutable() ?? findGlobalPackagePath(PI_CODING_AGENT_PACKAGE_NAME);
   if (!packageRoot) {
     throw new Error(
       `Could not locate globally installed ${PI_CODING_AGENT_PACKAGE_NAME} via configured package manager, aube, or pnpm.`,
@@ -2578,6 +2805,24 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     } catch (error) {
       console.error(
         `Skipped pi-coding-agent resolver patch: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    try {
+      const transcriptCacheResult = await applyPiCodingAgentTranscriptCachePatch({
+        dryRun,
+        cwd: REPO_ROOT,
+      });
+      const label =
+        transcriptCacheResult.status === 'already-applied'
+          ? `Already applied: pi-coding-agent transcript cache patch (${transcriptCacheResult.version})`
+          : transcriptCacheResult.status === 'would-apply'
+            ? `Would apply: pi-coding-agent transcript cache patch (${transcriptCacheResult.version})`
+            : `${transcriptCacheResult.status}: pi-coding-agent transcript cache patch (${transcriptCacheResult.version}) via ${transcriptCacheResult.patchPath}`;
+      console.log(label);
+    } catch (error) {
+      console.error(
+        `Skipped pi-coding-agent transcript cache patch: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
 

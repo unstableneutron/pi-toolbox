@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -7,6 +7,7 @@ import {
   applyAmasterPiComputerUseAnalyzeScreenshotPatch,
   applyPiCodexGoalPostCompactionUserFollowupPatch,
   applyPiCodingAgentResolverPatch,
+  applyPiCodingAgentTranscriptCachePatch,
   applyPiContinuousLearningPatch,
   applyPiHerdrPromptGuidancePatch,
   applyPiAiBedrockApiKeyBearerPatch,
@@ -19,16 +20,19 @@ import {
   buildPiAiOpenAICodexHeaderReplacement,
   buildPiHerdrPromptGuidanceReplacement,
   buildPiCodingAgentResolverReplacement,
+  buildPiCodingAgentTranscriptCacheInsertion,
   buildPiApproveBuildsCommand,
   buildPiSelfUpdateCommand,
   compareVersions,
   detectPiInstallPackageManagerFromPath,
   ensureAubeTrustPolicyExcludes,
   findInstalledNpmPackagePath,
+  findPiCodingAgentRootFromExecutable,
   formatPackageManagerCommand,
   getPackageManagerCommandCandidates,
   isPiCodexGoalPostCompactionUserFollowupPatchApplied,
   isPiCodingAgentResolverPatchApplied,
+  isPiCodingAgentTranscriptCachePatchApplied,
   isPiContinuousLearningPatchApplied,
   isPiHerdrPromptGuidancePatchApplied,
   isPiAiBedrockApiKeyBearerPatchApplied,
@@ -225,6 +229,25 @@ describe('pi self-update package manager detection', () => {
         '/Users/me/.cache/aube/virtual-store/@earendil-works+pi-coding-agent@0.79.10-hash/node_modules/@earendil-works/pi-coding-agent/dist/cli.js',
       ),
     ).toBe('aube');
+  });
+
+  it('resolves the coding-agent package used by the active pi shim', () => {
+    const packageRoot = makeTempDir('active-pi-package-');
+    mkdirSync(join(packageRoot, 'dist'), { recursive: true });
+    writeFileSync(
+      join(packageRoot, 'package.json'),
+      JSON.stringify({ name: '@earendil-works/pi-coding-agent', version: '9.9.9' }),
+    );
+    writeFileSync(join(packageRoot, 'dist', 'cli.js'), 'export {};\n');
+    const shimPath = join(makeTempDir('active-pi-shim-'), 'pi');
+    writeFileSync(
+      shimPath,
+      `#!/bin/sh\n# cmd-shim-target=${join(packageRoot, 'dist', 'cli.js')}\n`,
+    );
+
+    expect(findPiCodingAgentRootFromExecutable({ piPath: shimPath })).toBe(
+      realpathSync(packageRoot),
+    );
   });
 
   it('builds an aube global update command for pi', () => {
@@ -1248,6 +1271,113 @@ describe('pi-coding-agent resolver patching', () => {
     expect(replacement).toContain('__pi_update_extensions:model-resolver-uses-available__');
     expect(replacement).toContain('modelRegistry.getAvailable()');
     expect(replacement).toContain('modelRegistry.getAll()');
+  });
+});
+
+describe('pi-coding-agent transcript cache patching', () => {
+  const FIXTURE_CONTENT = [
+    'class ExpandableText {}',
+    'function isCustomSessionEntry(item) {',
+    '    return "type" in item && item.type === "custom";',
+    '}',
+    'export class InteractiveMode {',
+    '    constructor() {',
+    '        this.chatContainer = new Container();',
+    '    }',
+    '    setHiddenThinkingLabel(label) {',
+    '        if (this.streamingComponent) {',
+    '            this.streamingComponent.setHiddenThinkingLabel(this.hiddenThinkingLabel);',
+    '        }',
+    '        this.ui.requestRender();',
+    '    }',
+    '    setToolsExpanded(expanded) {',
+    '        for (const container of [this.loadedResourcesContainer, this.chatContainer]) {',
+    '            for (const child of container.children) {',
+    '                if (isExpandable(child)) {',
+    '                    child.setExpanded(expanded);',
+    '                }',
+    '            }',
+    '        }',
+    '        this.ui.requestRender();',
+    '    }',
+    '}',
+    '',
+  ].join('\n');
+
+  function setupFakePackage(version: string, interactiveMode = FIXTURE_CONTENT): string {
+    const packageRoot = makeTempDir('pi-coding-agent-transcript-');
+    writeFileSync(
+      join(packageRoot, 'package.json'),
+      JSON.stringify({ name: '@earendil-works/pi-coding-agent', version }, null, 2),
+    );
+    mkdirSync(join(packageRoot, 'dist', 'modes', 'interactive'), { recursive: true });
+    writeFileSync(
+      join(packageRoot, 'dist', 'modes', 'interactive', 'interactive-mode.js'),
+      interactiveMode,
+    );
+    return packageRoot;
+  }
+
+  it('applies a version-guarded transcript prefix cache', async () => {
+    const packageRoot = setupFakePackage('0.80.7');
+    expect(isPiCodingAgentTranscriptCachePatchApplied(packageRoot)).toBe(false);
+
+    const result = await applyPiCodingAgentTranscriptCachePatch({ packageRoot });
+    const patched = readFileSync(
+      join(packageRoot, 'dist', 'modes', 'interactive', 'interactive-mode.js'),
+      'utf8',
+    );
+
+    expect(result).toMatchObject({ status: 'applied', packageRoot, version: '0.80.7' });
+    expect(patched).toContain('__pi_update_extensions:transcript-prefix-cache__');
+    expect(patched).toContain('class TranscriptContainer extends Container');
+    expect(patched).toContain('TRANSCRIPT_LIVE_TAIL_COMPONENTS = 64');
+    expect(patched).toContain('PI_TRANSCRIPT_CACHE_DISABLED === "1"');
+    expect(patched.match(/invalidateRenderCache\?\.\(\)/g)).toHaveLength(2);
+    expect(isPiCodingAgentTranscriptCachePatchApplied(packageRoot)).toBe(true);
+  });
+
+  it('is idempotent after patching', async () => {
+    const packageRoot = setupFakePackage('0.80.7');
+    await applyPiCodingAgentTranscriptCachePatch({ packageRoot });
+
+    await expect(applyPiCodingAgentTranscriptCachePatch({ packageRoot })).resolves.toMatchObject({
+      status: 'already-applied',
+      packageRoot,
+      version: '0.80.7',
+    });
+  });
+
+  it('supports dry-run without mutating interactive mode', async () => {
+    const packageRoot = setupFakePackage('0.80.7');
+    const interactiveModePath = join(
+      packageRoot,
+      'dist',
+      'modes',
+      'interactive',
+      'interactive-mode.js',
+    );
+
+    await expect(
+      applyPiCodingAgentTranscriptCachePatch({ packageRoot, dryRun: true }),
+    ).resolves.toMatchObject({ status: 'would-apply', packageRoot, version: '0.80.7' });
+    expect(readFileSync(interactiveModePath, 'utf8')).toBe(FIXTURE_CONTENT);
+  });
+
+  it('fails closed when upstream interactive mode changes', async () => {
+    const packageRoot = setupFakePackage('0.81.0', 'export class InteractiveMode {}\n');
+
+    await expect(applyPiCodingAgentTranscriptCachePatch({ packageRoot })).rejects.toThrow(
+      /transcript cache target not found/i,
+    );
+  });
+
+  it('builds a bounded prefix cache with a live tail', () => {
+    const insertion = buildPiCodingAgentTranscriptCacheInsertion();
+    expect(insertion).toContain('cachedPrefixChildren = []');
+    expect(insertion).toContain('cachedPrefixLines = []');
+    expect(insertion).toContain('TRANSCRIPT_LIVE_TAIL_COMPONENTS');
+    expect(insertion).not.toContain('new Map');
   });
 });
 
