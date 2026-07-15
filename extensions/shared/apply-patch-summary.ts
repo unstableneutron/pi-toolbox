@@ -187,6 +187,8 @@ function renderRows(
 }
 
 class ApplyPatchSummaryComponent implements Component {
+  private cache: { width: number; lines: string[] } | undefined;
+
   constructor(
     private rows: PatchSummaryRow[],
     private theme: SummaryTheme,
@@ -195,13 +197,19 @@ class ApplyPatchSummaryComponent implements Component {
   ) {}
 
   render(width: number): string[] {
-    if (this.rows.length === 1) {
-      return renderOperationRow(this.rows[0]!, this.theme, width, !this.includeHeader, this.cwd);
-    }
-    return renderRows(this.rows, this.theme, width, this.includeHeader, this.cwd);
+    if (this.cache?.width === width) return this.cache.lines;
+
+    const lines =
+      this.rows.length === 1
+        ? renderOperationRow(this.rows[0]!, this.theme, width, !this.includeHeader, this.cwd)
+        : renderRows(this.rows, this.theme, width, this.includeHeader, this.cwd);
+    this.cache = { width, lines };
+    return lines;
   }
 
-  invalidate(): void {}
+  invalidate(): void {
+    this.cache = undefined;
+  }
 }
 
 export function renderApplyPatchSummary(
