@@ -708,12 +708,23 @@ function styleResultText(text: string, theme: { fg: (...args: any[]) => string }
     .join('\n');
 }
 
-function createWidthAwareText(renderForWidth: (width: number) => string): Component {
+export function createWidthAwareText(renderForWidth: (width: number) => string): Component {
+  let cachedWidth: number | undefined;
+  let cachedLines: string[] | undefined;
+
   return {
     render(width: number): string[] {
-      return new Text(renderForWidth(width), 0, 0).render(width);
+      if (cachedWidth === width && cachedLines) return cachedLines;
+
+      const lines = new Text(renderForWidth(width), 0, 0).render(width);
+      cachedWidth = width;
+      cachedLines = lines;
+      return lines;
     },
-    invalidate() {},
+    invalidate() {
+      cachedWidth = undefined;
+      cachedLines = undefined;
+    },
   };
 }
 

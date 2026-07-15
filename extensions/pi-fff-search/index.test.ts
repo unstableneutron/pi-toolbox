@@ -10,6 +10,7 @@ import {
 
 import createPiFffSearchExtensionDefault, {
   createPiFffSearchExtension,
+  createWidthAwareText,
   forwardToolCall,
 } from './index';
 import { runLocalFallback } from './fallback';
@@ -106,6 +107,36 @@ function renderTextTrimmed(component: unknown, width = 120): string {
     .map((line) => line.trimEnd())
     .join('\n');
 }
+
+describe('createWidthAwareText', () => {
+  test('reuses same-width output and keeps only the latest width entry', () => {
+    const renderForWidth = vi.fn((width: number) => `width:${width}`);
+    const component = createWidthAwareText(renderForWidth);
+
+    const first = component.render(40);
+    expect(component.render(40)).toBe(first);
+    expect(renderForWidth).toHaveBeenCalledTimes(1);
+
+    const secondWidth = component.render(80);
+    expect(component.render(80)).toBe(secondWidth);
+    expect(renderForWidth).toHaveBeenCalledTimes(2);
+
+    expect(component.render(40)).not.toBe(first);
+    expect(renderForWidth).toHaveBeenCalledTimes(3);
+  });
+
+  test('recomputes same-width output after invalidation', () => {
+    const renderForWidth = vi.fn((width: number) => `width:${width}`);
+    const component = createWidthAwareText(renderForWidth);
+
+    const first = component.render(40);
+    component.invalidate();
+
+    expect(component.render(40)).not.toBe(first);
+    expect(renderForWidth).toHaveBeenCalledTimes(2);
+    expect(renderTextTrimmed(component, 40)).toBe('width:40');
+  });
+});
 
 describe('pi-fff-search rendering helpers', () => {
   test('formats find-files collapsed summary with top paths', () => {
