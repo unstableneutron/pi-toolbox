@@ -1014,6 +1014,43 @@ describe('body and continuation helpers', () => {
     });
   });
 
+  it('downgrades image-only tool results for text-only Responses models', () => {
+    const body = buildResponsesBody(makeModel({ input: ['text'] }), {
+      messages: [
+        {
+          role: 'assistant',
+          content: [
+            {
+              type: 'toolCall',
+              id: 'call_img|fc_img',
+              name: 'view_image',
+              arguments: { path: 'scene.png' },
+            },
+          ],
+          timestamp: 1,
+          stopReason: 'toolUse',
+          provider: 'facade',
+          model: 'gpt-5.5-nomoderation',
+          api: 'openai-websocket-responses',
+        } as any,
+        {
+          role: 'toolResult',
+          toolCallId: 'call_img|fc_img',
+          toolName: 'view_image',
+          content: [{ type: 'image', mimeType: 'image/png', data: 'abc123' }],
+          isError: false,
+          timestamp: 2,
+        },
+      ],
+    });
+
+    expect(body.input).toContainEqual({
+      type: 'function_call_output',
+      call_id: 'call_img',
+      output: '(see attached image)',
+    });
+  });
+
   it('uses Pi 0.80.7 native tool search when models.json enables supportsToolSearch', () => {
     const searchTools = {
       name: 'search_tools',
@@ -1404,6 +1441,71 @@ describe('Responses adapter and retrieve recovery', () => {
       reasoningItem,
       expect.objectContaining({ type: 'message', id: 'msg_1' }),
     ]);
+  });
+
+  it('backfills Azure encrypted reasoning from the terminal response', async () => {
+    const model = makeModel();
+    const output = makeAssistantMessage(model);
+    const stream = createAssistantMessageEventStream();
+    const doneItem = { type: 'reasoning', id: 'rs_backfill', summary: [] };
+
+    await processResponsesEvents(
+      events(
+        { type: 'response.output_item.added', output_index: 0, item: doneItem },
+        { type: 'response.output_item.done', output_index: 0, item: doneItem },
+        {
+          type: 'response.completed',
+          response: {
+            id: 'resp_backfill',
+            status: 'completed',
+            output: [{ ...doneItem, encrypted_content: 'encrypted-terminal-payload' }],
+          },
+        },
+      ),
+      output,
+      stream,
+      model,
+    );
+
+    expect(JSON.parse((output.content[0] as any).thinkingSignature)).toMatchObject({
+      type: 'reasoning',
+      id: 'rs_backfill',
+      encrypted_content: 'encrypted-terminal-payload',
+    });
+  });
+
+  it('records cache writes and reasoning tokens from terminal usage', async () => {
+    const model = makeModel();
+    const output = makeAssistantMessage(model);
+
+    await processResponsesEvents(
+      events({
+        type: 'response.completed',
+        response: {
+          id: 'resp_usage',
+          status: 'completed',
+          usage: {
+            input_tokens: 20,
+            output_tokens: 8,
+            total_tokens: 28,
+            input_tokens_details: { cached_tokens: 5, cache_write_tokens: 3 },
+            output_tokens_details: { reasoning_tokens: 6 },
+          },
+        },
+      }),
+      output,
+      createAssistantMessageEventStream(),
+      model,
+    );
+
+    expect(output.usage).toMatchObject({
+      input: 12,
+      output: 8,
+      cacheRead: 5,
+      cacheWrite: 3,
+      reasoning: 6,
+      totalTokens: 28,
+    });
   });
 
   it('preserves completed native web search calls across replay', async () => {

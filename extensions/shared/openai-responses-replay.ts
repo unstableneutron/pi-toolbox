@@ -3,9 +3,15 @@ import { createHash } from 'node:crypto';
 type ResponsesInputItem = Record<string, any>;
 
 const OPENAI_RESPONSES_ITEM_ID_MAX_LENGTH = 64;
+const OPENAI_RESPONSES_ITEM_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 function stableShortResponsesItemId(id: string, prefix: string): string {
-  if (Array.from(id).length <= OPENAI_RESPONSES_ITEM_ID_MAX_LENGTH) return id;
+  if (
+    Array.from(id).length <= OPENAI_RESPONSES_ITEM_ID_MAX_LENGTH &&
+    OPENAI_RESPONSES_ITEM_ID_PATTERN.test(id)
+  ) {
+    return id;
+  }
   return `${prefix}_${createHash('sha256').update(id).digest('hex').slice(0, 32)}`;
 }
 
@@ -88,7 +94,7 @@ export function responsesDependentItemId(
 
 export function splitResponsesToolCallId(id: string): { callId: string; itemId?: string } {
   const [callId, itemId] = id.split('|');
-  return { callId: callId || id, itemId };
+  return { callId: stableShortResponsesItemId(callId || id, 'call_pi_sig'), itemId };
 }
 
 export function responsesFunctionCallInput(

@@ -81,6 +81,19 @@ describe('shared OpenAI Responses replay helpers', () => {
     expect(responsesTextSignatureItemId('legacy_msg')).toBeUndefined();
   });
 
+  test('normalizes foreign Responses tool-call ids to bounded safe ids', () => {
+    expect(
+      responsesFunctionCallInput({
+        id: `${'call/'.repeat(20)}|foreign/item+id`,
+        name: 'read',
+        arguments: { path: 'README.md' },
+      }),
+    ).toMatchObject({
+      id: expect.stringMatching(/^fc_pi_sig_[a-f0-9]{32}$/),
+      call_id: expect.stringMatching(/^call_pi_sig_[a-f0-9]{32}$/),
+    });
+  });
+
   test('maps long dependent message and function-call item ids to stable short ids', () => {
     const state = createResponsesReplayState();
     const longMessageId = `msg_${'x'.repeat(100)}`;

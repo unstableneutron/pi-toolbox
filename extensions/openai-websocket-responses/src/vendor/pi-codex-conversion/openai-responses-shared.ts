@@ -132,12 +132,16 @@ function textFromContent(content: string | (TextContent | ImageContent)[]): stri
     .join('\n');
 }
 
-function inputPartsFromContent(
-  content: string | (TextContent | ImageContent)[],
+function toolResultOutput(
+  content: (TextContent | ImageContent)[],
+  supportsImages: boolean,
 ): string | ResponsesInputItem[] {
-  if (typeof content === 'string') return sanitizeResponsesText(content);
+  const text = sanitizeResponsesText(textFromContent(content));
+  const hasText = text.length > 0;
   const hasImages = content.some((item) => item.type === 'image');
-  if (!hasImages) return sanitizeResponsesText(textFromContent(content));
+  if (!hasImages || !supportsImages) {
+    return hasText ? text : hasImages ? '(see attached image)' : '(no tool output)';
+  }
 
   return content.map((item) =>
     item.type === 'text'
@@ -173,12 +177,15 @@ export function isFinalizedTextBlock(block: TextContent): boolean {
   return !!responsesTextSignatureItemId(block.textSignature);
 }
 
-function toolResultInput(message: Extract<Message, { role: 'toolResult' }>): ResponsesInputItem {
+function toolResultInput<TApi extends Api>(
+  message: Extract<Message, { role: 'toolResult' }>,
+  model: Model<TApi>,
+): ResponsesInputItem {
   const { callId } = splitResponsesToolCallId(message.toolCallId);
   return {
     type: 'function_call_output',
     call_id: callId,
-    output: inputPartsFromContent(message.content),
+    output: toolResultOutput(message.content, model.input.includes('image')),
   };
 }
 
@@ -259,8 +266,9 @@ export function buildResponsesInput<TApi extends Api>(
 
   const instructions = buildResponsesInstructions(context);
   if (instructions && options.includeSystemPrompt !== false) {
+    const compat = model.compat as { supportsDeveloperRole?: boolean } | undefined;
     input.push({
-      role: model.reasoning ? 'developer' : 'system',
+      role: model.reasoning && compat?.supportsDeveloperRole !== false ? 'developer' : 'system',
       content: instructions,
     });
   }
@@ -306,7 +314,7 @@ export function buildResponsesInput<TApi extends Api>(
     if (message.role === 'toolResult') {
       if (pendingToolCalls.some((toolCall) => toolCall.id === message.toolCallId)) {
         existingToolResultIds.add(message.toolCallId);
-        input.push(toolResultInput(message));
+        input.push(toolResultInput(message, model));
 
         const addedTools: Tool[] = [];
         for (const name of message.addedToolNames ?? []) {
@@ -410,9 +418,12 @@ function applyResponseUsage<TApi extends Api>(
 ): void {
   if (!usage) return;
   const cachedTokens = usage.input_tokens_details?.cached_tokens ?? 0;
-  output.usage.input = (usage.input_tokens ?? 0) - cachedTokens;
+  const cacheWriteTokens = usage.input_tokens_details?.cache_write_tokens ?? 0;
+  output.usage.input = Math.max(0, (usage.input_tokens ?? 0) - cachedTokens - cacheWriteTokens);
   output.usage.output = usage.output_tokens ?? 0;
   output.usage.cacheRead = cachedTokens;
+  output.usage.cacheWrite = cacheWriteTokens;
+  output.usage.reasoning = usage.output_tokens_details?.reasoning_tokens ?? 0;
   output.usage.totalTokens = usage.total_tokens ?? 0;
   output.usage.cost = calculateCost(model, output.usage);
 }
@@ -501,6 +512,7 @@ export function createResponsesEventProcessor<TApi extends Api>(
   model: Model<TApi>,
 ): { apply(event: ResponsesEvent): void } {
   const states = new Map<number, OutputState>();
+  const reasoningBlocksById = new Map<string, ThinkingBlock>();
   let nextImplicitOutputIndex = 0;
   let lastOutputIndex = 0;
 
@@ -553,6 +565,23 @@ export function createResponsesEventProcessor<TApi extends Api>(
     states.set(index, state);
     stream.push({ type: 'toolcall_start', contentIndex: state.blockIndex, partial: output });
     return state;
+  };
+
+  const backfillReasoningSignatures = (responseOutput: unknown): void => {
+    if (!Array.isArray(responseOutput)) return;
+    for (const candidate of responseOutput) {
+      const item = parsedObject(candidate);
+      if (item.type !== 'reasoning' || typeof item.id !== 'string') continue;
+      if (typeof item.encrypted_content !== 'string' || !item.encrypted_content) continue;
+      const block = reasoningBlocksById.get(item.id);
+      if (!block?.thinkingSignature) continue;
+      const storedItem = parseResponsesJsonObject(block.thinkingSignature);
+      if (storedItem.encrypted_content) continue;
+      block.thinkingSignature = JSON.stringify({
+        ...storedItem,
+        encrypted_content: item.encrypted_content,
+      });
+    }
   };
 
   const apply = (event: ResponsesEvent): void => {
@@ -703,6 +732,7 @@ export function createResponsesEventProcessor<TApi extends Api>(
             : createReasoningState(index);
         state.block.thinking = reasoningItemText(item) || state.block.thinking;
         state.block.thinkingSignature = JSON.stringify(item);
+        if (typeof item.id === 'string') reasoningBlocksById.set(item.id, state.block);
         stream.push({
           type: 'thinking_end',
           contentIndex: state.blockIndex,
@@ -757,6 +787,7 @@ export function createResponsesEventProcessor<TApi extends Api>(
       type === 'response.done' ||
       type === 'response.incomplete'
     ) {
+      backfillReasoningSignatures(event.response?.output);
       applyCompletedResponse(output, model, {
         ...event.response,
         status:
