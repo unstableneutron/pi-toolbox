@@ -1014,6 +1014,128 @@ describe('body and continuation helpers', () => {
     });
   });
 
+  it('uses Pi 0.80.7 native tool search when models.json enables supportsToolSearch', () => {
+    const searchTools = {
+      name: 'search_tools',
+      description: 'Search for and enable tools',
+      parameters: { type: 'object', properties: { query: { type: 'string' } } },
+    };
+    const viewImage = {
+      name: 'view_image',
+      description: 'View an image',
+      parameters: { type: 'object', properties: { path: { type: 'string' } } },
+    };
+    const body = buildResponsesBody(
+      makeModel({
+        api: 'openai-websocket-responses',
+        compat: { supportsToolSearch: true },
+      }),
+      {
+        tools: [searchTools, viewImage],
+        messages: [
+          {
+            role: 'assistant',
+            content: [
+              {
+                type: 'toolCall',
+                id: 'call_search|fc_search',
+                name: 'search_tools',
+                arguments: { query: 'image' },
+              },
+            ],
+            timestamp: 1,
+            stopReason: 'toolUse',
+            provider: 'facade',
+            model: 'gpt-5.5-nomoderation',
+            api: 'openai-websocket-responses',
+          },
+          {
+            role: 'toolResult',
+            toolCallId: 'call_search|fc_search',
+            toolName: 'search_tools',
+            content: [{ type: 'text', text: 'Loaded tools: view_image' }],
+            addedToolNames: ['view_image'],
+            isError: false,
+            timestamp: 2,
+          },
+        ],
+      } as any,
+    );
+
+    expect((body.tools as any[]).map((tool) => tool.name)).toEqual(['search_tools']);
+    const searchCall = body.input.find((item: any) => item.type === 'tool_search_call') as any;
+    const searchOutput = body.input.find((item: any) => item.type === 'tool_search_output') as any;
+    expect(searchCall).toMatchObject({
+      call_id: expect.stringMatching(/^pi_tool_load_[a-f0-9]{12}$/),
+      execution: 'client',
+      status: 'completed',
+      arguments: { query: 'view_image', limit: 1 },
+    });
+    expect(searchOutput).toMatchObject({
+      call_id: searchCall.call_id,
+      execution: 'client',
+      status: 'completed',
+      tools: [
+        {
+          type: 'function',
+          name: 'view_image',
+          description: 'View an image',
+          defer_loading: true,
+          strict: false,
+        },
+      ],
+    });
+  });
+
+  it('keeps the normal active tool list when supportsToolSearch is disabled', () => {
+    const tools = [
+      {
+        name: 'search_tools',
+        description: 'Search for and enable tools',
+        parameters: { type: 'object', properties: {} },
+      },
+      {
+        name: 'view_image',
+        description: 'View an image',
+        parameters: { type: 'object', properties: {} },
+      },
+    ];
+    const body = buildResponsesBody(makeModel(), {
+      tools,
+      messages: [
+        {
+          role: 'assistant',
+          content: [
+            {
+              type: 'toolCall',
+              id: 'call_search|fc_search',
+              name: 'search_tools',
+              arguments: { query: 'image' },
+            },
+          ],
+          timestamp: 1,
+          stopReason: 'toolUse',
+          provider: 'facade',
+          model: 'gpt-5.5-nomoderation',
+          api: 'openai-responses',
+        },
+        {
+          role: 'toolResult',
+          toolCallId: 'call_search|fc_search',
+          toolName: 'search_tools',
+          content: [{ type: 'text', text: 'Loaded tools: view_image' }],
+          addedToolNames: ['view_image'],
+          isError: false,
+          timestamp: 2,
+        },
+      ],
+    } as any);
+
+    expect((body.tools as any[]).map((tool) => tool.name)).toEqual(['search_tools', 'view_image']);
+    expect(body.input.some((item: any) => item.type === 'tool_search_call')).toBe(false);
+    expect(body.input.some((item: any) => item.type === 'tool_search_output')).toBe(false);
+  });
+
   it('uses previous_response_id and delta input only when the request prefix matches', () => {
     const previous = buildResponsesBody(makeModel(), {
       messages: [{ role: 'user', content: 'first', timestamp: 1 }],

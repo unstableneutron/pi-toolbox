@@ -27,6 +27,7 @@ import type {
   ToolCall,
 } from '@earendil-works/pi-ai/compat';
 
+import { shortHash } from '../../debug.ts';
 import { parsePartialJson } from '../../partial-json.ts';
 
 type Usage = AssistantMessage['usage'];
@@ -66,7 +67,14 @@ export { isRetryableEmptyResponseFailure };
 type ResponsesEvent = Record<string, any>;
 type ResponsesInputItem = Record<string, any>;
 type Message = Context['messages'][number];
-type BuildResponsesInputOptions = { includeSystemPrompt?: boolean };
+type BuildResponsesInputOptions = {
+  includeSystemPrompt?: boolean;
+  deferredTools?: ReadonlyMap<string, Tool>;
+};
+
+type BuildResponsesToolsOptions = {
+  deferLoading?: boolean;
+};
 type ThinkingBlock = Record<string, any> & {
   type: 'thinking';
   thinking: string;
@@ -260,6 +268,7 @@ export function buildResponsesInput<TApi extends Api>(
   let assistantIndex = 0;
   let pendingToolCalls: ToolCall[] = [];
   let existingToolResultIds = new Set<string>();
+  const loadedToolNames = new Set<string>();
 
   const insertSyntheticToolResults = () => {
     if (pendingToolCalls.length === 0) return;
@@ -298,6 +307,34 @@ export function buildResponsesInput<TApi extends Api>(
       if (pendingToolCalls.some((toolCall) => toolCall.id === message.toolCallId)) {
         existingToolResultIds.add(message.toolCallId);
         input.push(toolResultInput(message));
+
+        const addedTools: Tool[] = [];
+        for (const name of message.addedToolNames ?? []) {
+          const tool = options.deferredTools?.get(name);
+          if (!tool || loadedToolNames.has(name)) continue;
+          loadedToolNames.add(name);
+          addedTools.push(tool);
+        }
+        if (addedTools.length > 0) {
+          const names = addedTools.map((tool) => tool.name);
+          const searchCallId = `pi_tool_load_${shortHash(
+            `${message.toolCallId}:${names.join(',')}`,
+          )}`;
+          input.push({
+            type: 'tool_search_call',
+            call_id: searchCallId,
+            execution: 'client',
+            status: 'completed',
+            arguments: { query: names.join(' '), limit: names.length },
+          });
+          input.push({
+            type: 'tool_search_output',
+            call_id: searchCallId,
+            execution: 'client',
+            status: 'completed',
+            tools: buildResponsesTools(addedTools, { deferLoading: true }),
+          });
+        }
       }
     }
   }
@@ -306,7 +343,10 @@ export function buildResponsesInput<TApi extends Api>(
   return input;
 }
 
-export function buildResponsesTools(tools: Tool[] | undefined): unknown[] | undefined {
+export function buildResponsesTools(
+  tools: readonly Tool[] | undefined,
+  options: BuildResponsesToolsOptions = {},
+): unknown[] | undefined {
   if (!tools || tools.length === 0) return undefined;
   return tools.map((tool) => ({
     type: 'function',
@@ -314,6 +354,7 @@ export function buildResponsesTools(tools: Tool[] | undefined): unknown[] | unde
     description: tool.description,
     parameters: tool.parameters,
     strict: false,
+    ...(options.deferLoading ? { defer_loading: true } : {}),
   }));
 }
 

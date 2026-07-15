@@ -3,6 +3,7 @@ import {
   type Context,
   type Model,
   type SimpleStreamOptions,
+  type Tool,
 } from '@earendil-works/pi-ai/compat';
 
 import {
@@ -163,6 +164,45 @@ function mapThinkingEffort(model: ThinkingCompatModel, effort: ThinkingLevel): s
   return model.thinking?.effortMap?.[effort] ?? effort;
 }
 
+function supportsToolSearch(model: Model<Api>): boolean {
+  return (
+    (model.compat as { supportsToolSearch?: boolean } | undefined)?.supportsToolSearch === true
+  );
+}
+
+function splitDeferredTools(
+  context: Context,
+  enabled: boolean,
+): { immediate: Tool[]; deferred: Map<string, Tool> } {
+  const uniqueTools = new Map<string, Tool>();
+  for (const tool of context.tools ?? []) uniqueTools.set(tool.name, tool);
+  if (!enabled) return { immediate: [...uniqueTools.values()], deferred: new Map() };
+
+  const deferredNames = new Set<string>();
+  const usedNames = new Set<string>();
+  for (const message of context.messages) {
+    if (message.role === 'assistant') {
+      for (const block of message.content) {
+        if (block.type === 'toolCall') usedNames.add(block.name);
+      }
+      continue;
+    }
+    if (message.role === 'toolResult') {
+      for (const name of message.addedToolNames ?? []) {
+        if (!usedNames.has(name)) deferredNames.add(name);
+      }
+    }
+  }
+
+  const immediate: Tool[] = [];
+  const deferred = new Map<string, Tool>();
+  for (const [name, tool] of uniqueTools) {
+    if (deferredNames.has(name)) deferred.set(name, tool);
+    else immediate.push(tool);
+  }
+  return { immediate, deferred };
+}
+
 export function buildResponsesBody(
   model: Model<Api>,
   context: Context,
@@ -173,14 +213,18 @@ export function buildResponsesBody(
   const compatModel = model as ThinkingCompatModel;
   const clampedReasoning = clampThinkingLevelCompat(compatModel, options?.reasoning);
   const effort = clampedReasoning ? mapThinkingEffort(compatModel, clampedReasoning) : undefined;
-  const tools = buildResponsesTools(context.tools);
+  const toolPlacement = splitDeferredTools(context, supportsToolSearch(model));
+  const tools = buildResponsesTools(toolPlacement.immediate);
   const promptCacheKey =
     options?.cacheRetention === 'none' && shouldHonorCacheDisabled(profile)
       ? undefined
       : clampOpenAIPromptCacheKey(options?.sessionId);
   const body: ResponsesBody = {
     model: model.headers?.['x-azure-deployment'] ?? model.id,
-    input: buildResponsesInput(model, context, { includeSystemPrompt: false }),
+    input: buildResponsesInput(model, context, {
+      includeSystemPrompt: false,
+      deferredTools: toolPlacement.deferred,
+    }),
     instructions: buildResponsesInstructions(context) ?? 'You are a helpful assistant.',
     store: resolveStore(model, profile, storeSettings),
     text: { verbosity: resolveTextVerbosity(options) },

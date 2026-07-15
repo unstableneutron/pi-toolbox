@@ -144,6 +144,13 @@ match Pi's Codex Responses path where Azure supports them:
   be replayed safely across stateless turns.
 - Reasoning requests include `reasoning.summary: "auto"` by default.
 - `tool_choice: "auto"` and `parallel_tool_calls: true` are sent by default.
+- With Pi 0.80.7 or newer, models configured with
+  `compat.supportsToolSearch: true` use native deferred tool loading. Initially
+  inactive definitions are omitted from top-level `tools`; when a loader
+  activates them, the next request replays completed client `tool_search_call`
+  and `tool_search_output` items at
+  that tool result. Models without the flag keep Pi's normal full active-tool
+  fallback.
 - When `sessionId` is present, it is sent as a 64-character-clamped
   `prompt_cache_key`. Azure/generic profiles omit it for `cacheRetention:
 "none"`; Codex matches Codex behavior and still sends the key when a
@@ -159,6 +166,44 @@ Profile-specific differences:
   Azure's published Responses schema does not include it.
 - `codex` resolves backend API URLs to `/codex/responses` and sets Codex WSS
   headers such as `OpenAI-Beta: responses_websockets=2026-02-06`.
+
+## Native dynamic tool loading
+
+Pi 0.80.7 accepts `supportsToolSearch` at either provider or model `compat`
+level in `~/.pi/agent/models.json`. For example:
+
+```json
+{
+  "providers": {
+    "facade": {
+      "api": "openai-websocket-responses",
+      "baseUrl": "https://proxy.example.com/openai/v1",
+      "apiKey": "$FACADE_API_KEY",
+      "compat": {
+        "supportsToolSearch": true
+      },
+      "models": [
+        {
+          "id": "gpt-5.4",
+          "name": "GPT-5.4",
+          "reasoning": true,
+          "input": ["text", "image"],
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+          "contextWindow": 272000,
+          "maxTokens": 128000
+        }
+      ]
+    }
+  }
+}
+```
+
+The same flag also works when a model keeps `api: "openai-responses"` and this
+extension transparently patches its transport. Enable it only after verifying
+that the endpoint and model accept OpenAI's native `tool_search_call`,
+`tool_search_output`, and `defer_loading` protocol. Dynamic activation still
+works without the flag, but Pi sends the complete active tool list on the next
+request instead.
 
 ## Recovery behavior
 

@@ -23,6 +23,9 @@ conversion and stream-processing logic from `@howaboua/pi-codex-conversion`.
   same reasoning-item and partial-JSON parsing rules.
 - Optional top-level `instructions` extraction while preserving legacy
   system/developer input-item replay for callers that need it.
+- Pi 0.80.7 native deferred tool loading via completed client
+  `tool_search_call`/`tool_search_output` input items and `defer_loading` tool
+  definitions.
 
 ## What was intentionally not ported
 
