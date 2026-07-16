@@ -6,7 +6,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   applyAmasterPiComputerUseAnalyzeScreenshotPatch,
-  applyPiCodexGoalPostCompactionUserFollowupPatch,
   applyPiCodingAgentResolverPatch,
   applyPiCodingAgentTranscriptCachePatch,
   applyPiContinuousLearningPatch,
@@ -15,7 +14,6 @@ import {
   applyPiAiOpenAICodexAuthHeaderPatch,
   applyPiMermaidPatch,
   applyPiSubagentsApplyPatchToolPatch,
-  applyPiSubagentsIntercomDetachPatch,
   buildPiAiBedrockApiKeyBearerReplacement,
   buildPiAiOpenAICodexAccountIdReplacement,
   buildPiAiOpenAICodexHeaderReplacement,
@@ -32,7 +30,6 @@ import {
   formatPackageManagerCommand,
   getPackageManagerCommandCandidates,
   getPnpmWorkspaceOverrideChanges,
-  isPiCodexGoalPostCompactionUserFollowupPatchApplied,
   isPiCodingAgentResolverPatchApplied,
   isPiCodingAgentTranscriptCachePatchApplied,
   isPiContinuousLearningPatchApplied,
@@ -42,7 +39,6 @@ import {
   isAmasterPiComputerUseAnalyzeScreenshotPatchApplied,
   isPiMermaidPatchApplied,
   isPiSubagentsApplyPatchToolPatchApplied,
-  isPiSubagentsIntercomDetachPatchApplied,
   parsePiListOutput,
   parseCliArgs,
   readConfiguredNpmCommand,
@@ -494,13 +490,27 @@ describe('@amaster.ai/pi-computer-use analyze_screenshot patching', () => {
 });
 
 describe('pi-herdr prompt guidance patching', () => {
+  const TARGET_GUIDELINE =
+    '\t\t\t"Use friendly aliases such as `server`, `reviewer`, or `tests` for panes created by pane_split, tab_create, or workspace_create.",';
+  const BASH_ROUTING_GUIDELINE =
+    'When Herdr is explicitly requested, use `bash` for quick one-shot commands and `herdr` for work that needs a real pane: prompts, user input, sudo, persistent cwd/env, logs, sentinels, or follow-up commands.';
+  const SUDO_SENTINEL_GUIDELINE =
+    'For sudo/user-input flows: split a fresh pane down (`pane_split`, `direction: "down"`), set `focus: true` only when the user must type now, verify readiness, run `sudo -v` with `SUDO_READY:<id>`, keep dependent commands in that pane (sudo auth is per pane/TTY), end with `TASK_DONE:<id>`, `watch` both exact sentinels, read final output, then `stop` one-off panes.';
   const FIXTURE_CONTENT = [
     'export default function extension(pi) {',
     '\tpi.registerTool({',
     '\t\tname: "herdr",',
     '\t\tpromptGuidelines: [',
-    '\t\t\t"Use `herdr` run for long-running processes in other panes instead of `bash`.",',
-    '\t\t\t"When you want to submit a line or prompt to a pane, prefer `run` over `send` + `Enter` so text and Enter happen atomically.",',
+    '\t\t\t"Use `herdr` only when the user explicitly mentions Herdr or asks to inspect or control Herdr contexts. Do not invoke it merely because background work or delegation might help.",',
+    '\t\t\t"When the user asks to use Herdr, default to a sibling pane in the current tab and cwd. Create another tab, workspace, or cwd only when the user requests that topology.",',
+    '\t\t\t"Preserve the current UI focus by default. Set focus only when the user explicitly asks to switch context.",',
+    '\t\t\t"Use `herdr` run to submit a command or agent prompt because text and Enter are sent atomically. Use `herdr` send only for literal text or key injection without command submission semantics.",',
+    '\t\t\t"Use `herdr` watch for normal command output and `herdr` wait_agent only for recognized coding agents.",',
+    '\t\t\t"Treat both `idle` and `done` as completed agent states when inspecting status. `done` means the completed result is unseen; `idle` means it is seen.",',
+    '\t\t\t"Use `recent-unwrapped` for logs and transcripts, and `detection` only when agent-detection evidence is needed.",',
+    '\t\t\t"Pane actions target friendly aliases or opaque pane ids, never tab ids. Read ids from Herdr responses instead of constructing them.",',
+    '\t\t\t"When pane_split omits direction, the `herdr` tool chooses right or down from the source pane geometry.",',
+    TARGET_GUIDELINE,
     '\t\t],',
     '\t});',
     '}',
@@ -517,26 +527,27 @@ describe('pi-herdr prompt guidance patching', () => {
     return packageRoot;
   }
 
-  it('reports unpatched fixture as not yet patched', () => {
-    const packageRoot = setupFakePackage('0.2.5');
+  it('reports the current upstream fixture as not yet patched', () => {
+    const packageRoot = setupFakePackage('0.3.0');
     expect(isPiHerdrPromptGuidancePatchApplied(packageRoot)).toBe(false);
   });
 
-  it('adds concise bash/herdr and sudo sentinel guidance', async () => {
-    const packageRoot = setupFakePackage('0.2.5');
+  it('adds scoped bash/herdr routing and sudo sentinel guidance', async () => {
+    const packageRoot = setupFakePackage('0.3.0');
     const result = await applyPiHerdrPromptGuidancePatch({ packageRoot });
 
     expect(result).toMatchObject({
       status: 'applied',
       packageRoot,
-      version: '0.2.5',
+      version: '0.3.0',
     });
     expect(result.patchPath).toBe(join(packageRoot, 'index.ts'));
 
     const patched = readFileSync(join(packageRoot, 'index.ts'), 'utf8');
     expect(patched).toContain('__pi_update_extensions:pi-herdr-prompt-guidance__');
-    expect(patched).toContain('Use `bash` for quick one-shot commands');
-    expect(patched).toContain('use `herdr` when a task needs a real pane');
+    expect(patched).toContain('Use `herdr` only when the user explicitly mentions Herdr');
+    expect(patched).toContain(JSON.stringify(BASH_ROUTING_GUIDELINE));
+    expect(patched).toContain(JSON.stringify(SUDO_SENTINEL_GUIDELINE));
     expect(patched).toContain('split a fresh pane down');
     expect(patched).toContain('`SUDO_READY:<id>`');
     expect(patched).toContain('`TASK_DONE:<id>`');
@@ -546,20 +557,39 @@ describe('pi-herdr prompt guidance patching', () => {
     expect(isPiHerdrPromptGuidancePatchApplied(packageRoot)).toBe(true);
   });
 
+  it('recognizes markerless semantic guidance as already applied', async () => {
+    const semanticContent = FIXTURE_CONTENT.replace(
+      TARGET_GUIDELINE,
+      [
+        TARGET_GUIDELINE,
+        `\t\t\t${JSON.stringify(BASH_ROUTING_GUIDELINE)},`,
+        `\t\t\t${JSON.stringify(SUDO_SENTINEL_GUIDELINE)},`,
+      ].join('\n'),
+    );
+    const packageRoot = setupFakePackage('0.3.0', semanticContent);
+
+    expect(isPiHerdrPromptGuidancePatchApplied(packageRoot)).toBe(true);
+    await expect(applyPiHerdrPromptGuidancePatch({ packageRoot })).resolves.toMatchObject({
+      status: 'already-applied',
+      packageRoot,
+      version: '0.3.0',
+    });
+  });
+
   it('is idempotent after patching', async () => {
-    const packageRoot = setupFakePackage('0.2.5');
+    const packageRoot = setupFakePackage('0.3.0');
     await applyPiHerdrPromptGuidancePatch({ packageRoot });
     const second = await applyPiHerdrPromptGuidancePatch({ packageRoot });
 
     expect(second).toMatchObject({
       status: 'already-applied',
       packageRoot,
-      version: '0.2.5',
+      version: '0.3.0',
     });
   });
 
   it('supports dry-run without mutating pi-herdr', async () => {
-    const packageRoot = setupFakePackage('0.2.5');
+    const packageRoot = setupFakePackage('0.3.0');
     const indexPath = join(packageRoot, 'index.ts');
     const original = readFileSync(indexPath, 'utf8');
 
@@ -567,7 +597,7 @@ describe('pi-herdr prompt guidance patching', () => {
     expect(result).toMatchObject({
       status: 'would-apply',
       packageRoot,
-      version: '0.2.5',
+      version: '0.3.0',
     });
     expect(readFileSync(indexPath, 'utf8')).toBe(original);
     expect(isPiHerdrPromptGuidancePatchApplied(packageRoot)).toBe(false);
@@ -580,10 +610,10 @@ describe('pi-herdr prompt guidance patching', () => {
     );
   });
 
-  it('builds concise guidance without mentioning unavailable interactive shell', () => {
+  it('builds scoped guidance without mentioning unavailable interactive shell', () => {
     const replacement = buildPiHerdrPromptGuidanceReplacement();
     expect(replacement).toContain('__pi_update_extensions:pi-herdr-prompt-guidance__');
-    expect(replacement).toContain('Use `bash` for quick one-shot commands');
+    expect(replacement).toContain(BASH_ROUTING_GUIDELINE);
     expect(replacement).toContain('`watch` both exact sentinels');
     expect(replacement).not.toContain('interactive_shell');
   });
@@ -842,112 +872,6 @@ describe('pi-continuous-learning patching', () => {
   });
 });
 
-describe('pi-subagents intercom detach patching', () => {
-  const FIXTURE_CONTENT = [
-    'function runSingleAttempt(options) {',
-    '		let detached = false;',
-    '		let intercomStarted = false;',
-    '		let assistantError: string | undefined;',
-    '',
-    '	const processLine = (line) => {',
-    '			let evt: { type?: string; message?: Message; toolName?: string; args?: unknown };',
-    '			try {',
-    '				evt = JSON.parse(line) as { type?: string; message?: Message; toolName?: string; args?: unknown };',
-    '			} catch {',
-    '				return;',
-    '			}',
-    '',
-    '			if (evt.type === "tool_execution_start") {',
-    '				const toolArgs = evt.args && typeof evt.args === "object" && !Array.isArray(evt.args)',
-    '					? evt.args as Record<string, unknown>',
-    '					: {};',
-    '				if (options.allowIntercomDetach && (evt.toolName === "intercom" || evt.toolName === "contact_supervisor")) {',
-    '					intercomStarted = true;',
-    '				}',
-    '			}',
-    '',
-    '			if (evt.type === "tool_result_end" && evt.message) {',
-    '				result.messages.push(evt.message);',
-    '			}',
-    '	};',
-    '}',
-    '',
-  ].join('\n');
-
-  function setupFakePackage(version: string, executionContent = FIXTURE_CONTENT): string {
-    const packageRoot = makeTempDir('pi-subagents-');
-    writeFileSync(
-      join(packageRoot, 'package.json'),
-      JSON.stringify({ name: 'pi-subagents', version }, null, 2),
-    );
-    mkdirSync(join(packageRoot, 'src', 'runs', 'foreground'), { recursive: true });
-    writeFileSync(join(packageRoot, 'src', 'runs', 'foreground', 'execution.ts'), executionContent);
-    return packageRoot;
-  }
-
-  it('reports unpatched fixture as not yet patched', () => {
-    const packageRoot = setupFakePackage('0.27.0');
-    expect(isPiSubagentsIntercomDetachPatchApplied(packageRoot)).toBe(false);
-  });
-
-  it('patches foreground sync runs to detach after blocking supervisor asks are sent', async () => {
-    const packageRoot = setupFakePackage('0.27.0');
-    const result = await applyPiSubagentsIntercomDetachPatch({ packageRoot });
-
-    expect(result).toMatchObject({
-      status: 'applied',
-      packageRoot,
-      version: '0.27.0',
-    });
-    expect(result.patchPath).toBe(join(packageRoot, 'src', 'runs', 'foreground', 'execution.ts'));
-
-    const patched = readFileSync(
-      join(packageRoot, 'src', 'runs', 'foreground', 'execution.ts'),
-      'utf8',
-    );
-    expect(patched).toContain('__pi_update_extensions:pi-subagents-blocking-intercom-detach__');
-    expect(patched).toContain('let blockingIntercomStarted = false;');
-    expect(patched).toContain('evt.customType === "intercom_sent"');
-    expect(patched).toContain('toolArgs.reason !== "progress_update"');
-    expect(patched).toContain('blockingIntercomStarted = false;');
-    expect(isPiSubagentsIntercomDetachPatchApplied(packageRoot)).toBe(true);
-  });
-
-  it('is idempotent after patching', async () => {
-    const packageRoot = setupFakePackage('0.27.0');
-    await applyPiSubagentsIntercomDetachPatch({ packageRoot });
-    const second = await applyPiSubagentsIntercomDetachPatch({ packageRoot });
-
-    expect(second).toMatchObject({
-      status: 'already-applied',
-      packageRoot,
-      version: '0.27.0',
-    });
-  });
-
-  it('supports dry-run without mutating the file', async () => {
-    const packageRoot = setupFakePackage('0.27.0');
-    const executionPath = join(packageRoot, 'src', 'runs', 'foreground', 'execution.ts');
-    const original = readFileSync(executionPath, 'utf8');
-
-    const result = await applyPiSubagentsIntercomDetachPatch({ packageRoot, dryRun: true });
-    expect(result).toMatchObject({
-      status: 'would-apply',
-      packageRoot,
-      version: '0.27.0',
-    });
-    expect(readFileSync(executionPath, 'utf8')).toBe(original);
-    expect(isPiSubagentsIntercomDetachPatchApplied(packageRoot)).toBe(false);
-  });
-
-  it('throws a descriptive error when the target text is missing', async () => {
-    const packageRoot = setupFakePackage('1.0.0', 'export function changedUpstream() {}\n');
-    await expect(applyPiSubagentsIntercomDetachPatch({ packageRoot })).rejects.toThrow(
-      /target text for pi-subagents intercom detach patch not found/i,
-    );
-  });
-});
-
 describe('pi-subagents apply_patch agent tool patching', () => {
   function setupFakePackage(
     version: string,
@@ -1059,165 +983,6 @@ describe('pi-subagents apply_patch agent tool patching', () => {
   });
 });
 
-describe('pi-codex-goal post-compaction continuation patching', () => {
-  const FIXTURE_CONTENT = [
-    'import type {',
-    '  ExtensionContext,',
-    '  ExtensionHandler,',
-    '  SessionBeforeCompactEvent,',
-    '  SessionCompactEvent,',
-    '  SessionShutdownEvent,',
-    '  SessionStartEvent,',
-    '  SessionTreeEvent,',
-    '} from "@earendil-works/pi-coding-agent";',
-    '',
-    'import { compactContinuationPrompt } from "./prompts.js";',
-    'import { recoveryPhaseBlocksContinuation } from "./recovery-machine.js";',
-    'import { isRecoveryPendingAttention, reasonFromRecoveryPendingAttention } from "./recovery.js";',
-    'import { applyStaleQueuedWorkEffects, runStaleQueuedWorkPlan } from "./goal-runtime-event-utils.js";',
-    'import type { GoalRuntimeSessionHandlerContext } from "./goal-runtime-event-handler-types.js";',
-    '',
-    'export function createSessionEventHandlers(deps: GoalRuntimeSessionHandlerContext) {',
-    '  const {',
-    '    pi,',
-    '    runtimeState,',
-    '    stateController,',
-    '    continuation,',
-    '    goalAccounting,',
-    '    recoveryRuntime,',
-    '    status,',
-    '    resetErrorRecovery,',
-    '  } = deps;',
-    '',
-    '  return {',
-    '    onSessionCompact: (async (_event, ctx) => {',
-    '      if (runStaleQueuedWorkPlan(runtimeState.staleQueuedWorkGuard.planSessionCompact(), ctx, deps)) {',
-    '        return;',
-    '      }',
-    '',
-    '      stateController.flushGoalPersistence("runtime");',
-    '      recoveryRuntime.onSessionCompact();',
-    '      status.refreshUi(ctx);',
-    '      if (!recoveryPhaseBlocksContinuation(runtimeState.recoveryState.phase)) {',
-    '        continuation.maybeContinueAfterCurrentEvent(ctx);',
-    '      }',
-    '    }) satisfies ExtensionHandler<SessionCompactEvent>,',
-    '  };',
-    '}',
-    '',
-  ].join('\n');
-
-  const UPSTREAM_FALLBACK_CONTENT = [
-    'const schedulePostCompactContinuationFallback = (ctx, options) => {',
-    '  if (options.clearHostOverflowRecovery) {',
-    '    clearActiveHostOverflowRecovery(runtimeState.recoveryState);',
-    '  }',
-    '};',
-    'schedulePostCompactContinuationFallback(ctx, {',
-    '  clearHostOverflowRecovery: wasRecoveringFromHostOverflow,',
-    '});',
-    '',
-  ].join('\n');
-
-  function setupFakePackage(version: string, handlerContent = FIXTURE_CONTENT): string {
-    const packageRoot = makeTempDir('pi-codex-goal-');
-    writeFileSync(
-      join(packageRoot, 'package.json'),
-      JSON.stringify({ name: 'pi-codex-goal', version }, null, 2),
-    );
-    mkdirSync(join(packageRoot, 'src'), { recursive: true });
-    writeFileSync(join(packageRoot, 'src', 'goal-runtime-session-handlers.ts'), handlerContent);
-    return packageRoot;
-  }
-
-  it('reports unpatched fixture as not yet patched', () => {
-    const packageRoot = setupFakePackage('0.1.21');
-    expect(isPiCodexGoalPostCompactionUserFollowupPatchApplied(packageRoot)).toBe(false);
-  });
-
-  it('queues a user follow-up after host-overflow compaction before hidden continuation gating', async () => {
-    const packageRoot = setupFakePackage('0.1.21');
-    const result = await applyPiCodexGoalPostCompactionUserFollowupPatch({ packageRoot });
-
-    expect(result).toMatchObject({
-      status: 'applied',
-      packageRoot,
-      version: '0.1.21',
-    });
-    expect(result.patchPath).toBe(join(packageRoot, 'src', 'goal-runtime-session-handlers.ts'));
-
-    const patched = readFileSync(
-      join(packageRoot, 'src', 'goal-runtime-session-handlers.ts'),
-      'utf8',
-    );
-    expect(patched).toContain(
-      '__pi_update_extensions:pi-codex-goal-post-compaction-user-followup__',
-    );
-    expect(patched).toContain('const postCompactionGoal = stateController.getGoal();');
-    expect(patched).toContain(
-      'runtimeState.recoveryState.phase.kind === "hostOverflowRecoveringNeedsUserStart"',
-    );
-    expect(patched).toContain(
-      'pi.sendUserMessage(compactContinuationPrompt(postCompactionGoal), {',
-    );
-    expect(patched).toContain('deliverAs: "followUp"');
-    expect(patched.indexOf('pi.sendUserMessage')).toBeLessThan(
-      patched.indexOf('continuation.maybeContinueAfterCurrentEvent(ctx);'),
-    );
-    expect(isPiCodexGoalPostCompactionUserFollowupPatchApplied(packageRoot)).toBe(true);
-  });
-
-  it('recognizes the upstream post-compaction fallback', async () => {
-    const packageRoot = setupFakePackage('0.1.35', UPSTREAM_FALLBACK_CONTENT);
-
-    expect(isPiCodexGoalPostCompactionUserFollowupPatchApplied(packageRoot)).toBe(true);
-    await expect(
-      applyPiCodexGoalPostCompactionUserFollowupPatch({ packageRoot }),
-    ).resolves.toMatchObject({
-      status: 'already-applied',
-      packageRoot,
-      version: '0.1.35',
-    });
-  });
-
-  it('is idempotent after patching', async () => {
-    const packageRoot = setupFakePackage('0.1.21');
-    await applyPiCodexGoalPostCompactionUserFollowupPatch({ packageRoot });
-    const second = await applyPiCodexGoalPostCompactionUserFollowupPatch({ packageRoot });
-
-    expect(second).toMatchObject({
-      status: 'already-applied',
-      packageRoot,
-      version: '0.1.21',
-    });
-  });
-
-  it('supports dry-run without mutating the extension', async () => {
-    const packageRoot = setupFakePackage('0.1.21');
-    const handlerPath = join(packageRoot, 'src', 'goal-runtime-session-handlers.ts');
-    const original = readFileSync(handlerPath, 'utf8');
-
-    const result = await applyPiCodexGoalPostCompactionUserFollowupPatch({
-      packageRoot,
-      dryRun: true,
-    });
-    expect(result).toMatchObject({
-      status: 'would-apply',
-      packageRoot,
-      version: '0.1.21',
-    });
-    expect(readFileSync(handlerPath, 'utf8')).toBe(original);
-    expect(isPiCodexGoalPostCompactionUserFollowupPatchApplied(packageRoot)).toBe(false);
-  });
-
-  it('throws a descriptive error when the target text is missing', async () => {
-    const packageRoot = setupFakePackage('1.0.0', 'export function changedUpstream() {}\n');
-    await expect(applyPiCodexGoalPostCompactionUserFollowupPatch({ packageRoot })).rejects.toThrow(
-      /target text for pi-codex-goal post-compaction user follow-up patch not found/i,
-    );
-  });
-});
-
 describe('pi-coding-agent resolver patching', () => {
   const FIXTURE_CONTENT = [
     'export function resolveCliModel(options) {',
@@ -1227,6 +992,22 @@ describe('pi-coding-agent resolver patching', () => {
     '    // This allows "--api-key" to be used for first-time setup.',
     '    const availableModels = modelRegistry.getAll();',
     '    return availableModels;',
+    '}',
+    '',
+  ].join('\n');
+  const CURRENT_UPSTREAM_CONTENT = [
+    'export function resolveCliModel(options) {',
+    '    const { cliModel, modelRuntime } = options;',
+    '    const availableModels = [...modelRuntime.getModels()];',
+    '    const model = availableModels[0];',
+    '    const rawExactMatches = availableModels.slice(1);',
+    '    if (rawExactMatches.length > 0 && !modelRuntime.hasConfiguredAuth(model.provider)) {',
+    '            const authenticatedRawMatches = rawExactMatches.filter((m) => modelRuntime.hasConfiguredAuth(m.provider));',
+    '                if (authenticatedRawMatches.length === 1) {',
+    '            return { model: authenticatedRawMatches[0] };',
+    '        }',
+    '    }',
+    '    return { model };',
     '}',
     '',
   ].join('\n');
@@ -1245,6 +1026,17 @@ describe('pi-coding-agent resolver patching', () => {
   it('reports unpatched fixture as not yet patched', () => {
     const packageRoot = setupFakePackage('0.67.6');
     expect(isPiCodingAgentResolverPatchApplied(packageRoot)).toBe(false);
+  });
+
+  it('recognizes the current upstream authenticated disambiguation', async () => {
+    const packageRoot = setupFakePackage('0.80.8', CURRENT_UPSTREAM_CONTENT);
+
+    expect(isPiCodingAgentResolverPatchApplied(packageRoot)).toBe(true);
+    await expect(applyPiCodingAgentResolverPatch({ packageRoot })).resolves.toMatchObject({
+      status: 'already-applied',
+      packageRoot,
+      version: '0.80.8',
+    });
   });
 
   it('applies the resolver patch and marks it as applied', async () => {

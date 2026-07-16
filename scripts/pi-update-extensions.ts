@@ -193,6 +193,13 @@ const PI_CODING_AGENT_RESOLVER_RELATIVE_PATH = 'dist/core/model-resolver.js';
 const PI_CODING_AGENT_RESOLVER_PATCH_MARKER =
   '__pi_update_extensions:model-resolver-uses-available__';
 const PI_CODING_AGENT_RESOLVER_PATCH_TARGET = '    const availableModels = modelRegistry.getAll();';
+// Current modelRuntime-based releases perform authenticated disambiguation
+// directly, so the old modelRegistry rewrite is no longer applicable.
+const PI_CODING_AGENT_RESOLVER_UPSTREAM_SEMANTIC_TARGETS = [
+  '    const availableModels = [...modelRuntime.getModels()];',
+  '            const authenticatedRawMatches = rawExactMatches.filter((m) => modelRuntime.hasConfiguredAuth(m.provider));',
+  '                if (authenticatedRawMatches.length === 1) {',
+] as const;
 
 export function buildPiCodingAgentResolverReplacement(): string {
   return [
@@ -838,7 +845,11 @@ function findPackagePathInPiExtensionTempWorkspaces(packageName: string): string
 export function isPiCodingAgentResolverPatchApplied(packageRoot: string): boolean {
   const filePath = join(packageRoot, PI_CODING_AGENT_RESOLVER_RELATIVE_PATH);
   if (!existsSync(filePath)) return false;
-  return readFileSync(filePath, 'utf8').includes(PI_CODING_AGENT_RESOLVER_PATCH_MARKER);
+  const content = readFileSync(filePath, 'utf8');
+  return (
+    content.includes(PI_CODING_AGENT_RESOLVER_PATCH_MARKER) ||
+    PI_CODING_AGENT_RESOLVER_UPSTREAM_SEMANTIC_TARGETS.every((target) => content.includes(target))
+  );
 }
 
 export async function applyPiCodingAgentResolverPatch(
@@ -1525,10 +1536,10 @@ const PI_HERDR_PACKAGE_NAME = '@ogulcancelik/pi-herdr';
 const PI_HERDR_INDEX_RELATIVE_PATH = 'index.ts';
 const PI_HERDR_PROMPT_GUIDANCE_PATCH_MARKER = '__pi_update_extensions:pi-herdr-prompt-guidance__';
 const PI_HERDR_PROMPT_GUIDANCE_TARGET =
-  '\t\t\t"Use `herdr` run for long-running processes in other panes instead of `bash`.",';
+  '\t\t\t"Use friendly aliases such as `server`, `reviewer`, or `tests` for panes created by pane_split, tab_create, or workspace_create.",';
 
 const PI_HERDR_BASH_ROUTING_GUIDELINE =
-  'Use `bash` for quick one-shot commands; use `herdr` when a task needs a real pane: prompts, user input, sudo, persistent cwd/env, logs, sentinels, or follow-up commands.';
+  'When Herdr is explicitly requested, use `bash` for quick one-shot commands and `herdr` for work that needs a real pane: prompts, user input, sudo, persistent cwd/env, logs, sentinels, or follow-up commands.';
 const PI_HERDR_SUDO_SENTINEL_GUIDELINE =
   'For sudo/user-input flows: split a fresh pane down (`pane_split`, `direction: "down"`), set `focus: true` only when the user must type now, verify readiness, run `sudo -v` with `SUDO_READY:<id>`, keep dependent commands in that pane (sudo auth is per pane/TTY), end with `TASK_DONE:<id>`, `watch` both exact sentinels, read final output, then `stop` one-off panes.';
 
@@ -1543,8 +1554,8 @@ export function buildPiHerdrPromptGuidanceReplacement(): string {
 
 function isPiHerdrPromptGuidanceSemanticallyPatched(content: string): boolean {
   return (
-    content.includes(PI_HERDR_BASH_ROUTING_GUIDELINE) &&
-    content.includes(PI_HERDR_SUDO_SENTINEL_GUIDELINE)
+    content.includes(JSON.stringify(PI_HERDR_BASH_ROUTING_GUIDELINE)) &&
+    content.includes(JSON.stringify(PI_HERDR_SUDO_SENTINEL_GUIDELINE))
   );
 }
 
@@ -1832,163 +1843,6 @@ export async function applyPiContinuousLearningPatch(
 }
 
 // ---------------------------------------------------------------------------
-// pi-subagents foreground intercom detach patch
-//
-// pi-subagents@0.27.0 handles blocking child `contact_supervisor` asks by
-// waiting for a separate `pi-intercom:detach-request` event before returning
-// control to the parent foreground `subagent(...)` call. pi-intercom@0.6.0 does
-// not emit that event, so the parent can remain blocked and hide the supervisor
-// ask until manual interrupt/termination. Detach once the child has actually
-// emitted `intercom_sent` for a blocking ask, leaving the child alive to receive
-// the reply.
-// ---------------------------------------------------------------------------
-
-const PI_SUBAGENTS_PACKAGE_NAME = 'pi-subagents';
-const PI_SUBAGENTS_AGENTS_RELATIVE_PATH = 'agents';
-const PI_SUBAGENTS_APPLY_PATCH_TOOL_NAME = 'apply_patch';
-const PI_SUBAGENTS_EXECUTION_RELATIVE_PATH = 'src/runs/foreground/execution.ts';
-const PI_SUBAGENTS_INTERCOM_DETACH_PATCH_MARKER =
-  '__pi_update_extensions:pi-subagents-blocking-intercom-detach__';
-const PI_SUBAGENTS_INTERCOM_DETACH_VARS_TARGET = [
-  '\t\tlet detached = false;',
-  '\t\tlet intercomStarted = false;',
-  '\t\tlet assistantError: string | undefined;',
-].join('\n');
-const PI_SUBAGENTS_INTERCOM_DETACH_EVENT_TYPE_TARGET = [
-  '\t\t\tlet evt: { type?: string; message?: Message; toolName?: string; args?: unknown };',
-  '\t\t\ttry {',
-  '\t\t\t\tevt = JSON.parse(line) as { type?: string; message?: Message; toolName?: string; args?: unknown };',
-].join('\n');
-const PI_SUBAGENTS_INTERCOM_DETACH_TOOL_START_TARGET = [
-  '\t\t\tif (evt.type === "tool_execution_start") {',
-  '\t\t\t\tconst toolArgs = evt.args && typeof evt.args === "object" && !Array.isArray(evt.args)',
-  '\t\t\t\t\t? evt.args as Record<string, unknown>',
-  '\t\t\t\t\t: {};',
-  '\t\t\t\tif (options.allowIntercomDetach && (evt.toolName === "intercom" || evt.toolName === "contact_supervisor")) {',
-  '\t\t\t\t\tintercomStarted = true;',
-  '\t\t\t\t}',
-].join('\n');
-const PI_SUBAGENTS_INTERCOM_DETACH_TOOL_RESULT_TARGET = [
-  '\t\t\tif (evt.type === "tool_result_end" && evt.message) {',
-  '\t\t\t\tresult.messages.push(evt.message);',
-].join('\n');
-
-function buildPiSubagentsVarsReplacement(): string {
-  return [
-    '\t\tlet detached = false;',
-    '\t\tlet intercomStarted = false;',
-    `\t\t// ${PI_SUBAGENTS_INTERCOM_DETACH_PATCH_MARKER}`,
-    '\t\tlet blockingIntercomStarted = false;',
-    '\t\tlet assistantError: string | undefined;',
-  ].join('\n');
-}
-
-function buildPiSubagentsEventTypeReplacement(): string {
-  return [
-    '\t\t\tlet evt: { type?: string; message?: Message; toolName?: string; args?: unknown; customType?: string; data?: unknown };',
-    '\t\t\ttry {',
-    '\t\t\t\tevt = JSON.parse(line) as { type?: string; message?: Message; toolName?: string; args?: unknown; customType?: string; data?: unknown };',
-  ].join('\n');
-}
-
-function buildPiSubagentsToolStartReplacement(): string {
-  return [
-    '\t\t\tif (options.allowIntercomDetach && intercomStarted && blockingIntercomStarted && evt.type === "custom" && evt.customType === "intercom_sent") {',
-    '\t\t\t\tdetachForIntercom();',
-    '\t\t\t\treturn;',
-    '\t\t\t}',
-    '',
-    '\t\t\tif (evt.type === "tool_execution_start") {',
-    '\t\t\t\tconst toolArgs = evt.args && typeof evt.args === "object" && !Array.isArray(evt.args)',
-    '\t\t\t\t\t? evt.args as Record<string, unknown>',
-    '\t\t\t\t\t: {};',
-    '\t\t\t\tif (options.allowIntercomDetach && (evt.toolName === "intercom" || evt.toolName === "contact_supervisor")) {',
-    '\t\t\t\t\tintercomStarted = true;',
-    '\t\t\t\t\tblockingIntercomStarted ||= (evt.toolName === "intercom" && toolArgs.action === "ask")',
-    '\t\t\t\t\t\t|| (evt.toolName === "contact_supervisor" && toolArgs.reason !== "progress_update");',
-    '\t\t\t\t}',
-  ].join('\n');
-}
-
-function buildPiSubagentsToolResultReplacement(): string {
-  return [
-    '\t\t\tif (evt.type === "tool_result_end" && evt.message) {',
-    '\t\t\t\tblockingIntercomStarted = false;',
-    '\t\t\t\tresult.messages.push(evt.message);',
-  ].join('\n');
-}
-
-function isPiSubagentsSemanticallyPatched(content: string): boolean {
-  return (
-    content.includes('let blockingIntercomStarted = false;') &&
-    content.includes('evt.customType === "intercom_sent"') &&
-    content.includes('toolArgs.reason !== "progress_update"') &&
-    content.includes('blockingIntercomStarted = false;')
-  );
-}
-
-export function isPiSubagentsIntercomDetachPatchApplied(packageRoot: string): boolean {
-  const filePath = join(packageRoot, PI_SUBAGENTS_EXECUTION_RELATIVE_PATH);
-  if (!existsSync(filePath)) return false;
-  const content = readFileSync(filePath, 'utf8');
-  return (
-    content.includes(PI_SUBAGENTS_INTERCOM_DETACH_PATCH_MARKER) ||
-    isPiSubagentsSemanticallyPatched(content)
-  );
-}
-
-export async function applyPiSubagentsIntercomDetachPatch(
-  options: { dryRun?: boolean; packageRoot?: string; cwd?: string } = {},
-): Promise<ApplyPatchResult> {
-  const packageRoot =
-    options.packageRoot ?? findGlobalPackagePath(PI_SUBAGENTS_PACKAGE_NAME, { cwd: options.cwd });
-  if (!packageRoot) {
-    throw new Error(
-      `Could not locate installed ${PI_SUBAGENTS_PACKAGE_NAME} via configured package manager, aube, or pnpm`,
-    );
-  }
-
-  const version = getPackageVersion(packageRoot) ?? 'unknown';
-  const filePath = join(packageRoot, PI_SUBAGENTS_EXECUTION_RELATIVE_PATH);
-  if (!existsSync(filePath)) {
-    throw new Error(`pi-subagents@${version}: execution file not found at ${filePath}`);
-  }
-
-  if (isPiSubagentsIntercomDetachPatchApplied(packageRoot)) {
-    return { status: 'already-applied', packageRoot, version, patchPath: filePath };
-  }
-
-  const content = readFileSync(filePath, 'utf8');
-  const missingTargets = [
-    PI_SUBAGENTS_INTERCOM_DETACH_VARS_TARGET,
-    PI_SUBAGENTS_INTERCOM_DETACH_EVENT_TYPE_TARGET,
-    PI_SUBAGENTS_INTERCOM_DETACH_TOOL_START_TARGET,
-    PI_SUBAGENTS_INTERCOM_DETACH_TOOL_RESULT_TARGET,
-  ].filter((target) => !content.includes(target));
-  if (missingTargets.length > 0) {
-    throw new Error(
-      `pi-subagents@${version}: target text for pi-subagents intercom detach patch not found at ${filePath}. ` +
-        `Missing ${missingTargets.length} target(s). Upstream may have changed; update pi-update-extensions.ts.`,
-    );
-  }
-
-  if (options.dryRun) {
-    return { status: 'would-apply', packageRoot, version, patchPath: filePath };
-  }
-
-  const patched = content
-    .replace(PI_SUBAGENTS_INTERCOM_DETACH_VARS_TARGET, buildPiSubagentsVarsReplacement())
-    .replace(PI_SUBAGENTS_INTERCOM_DETACH_EVENT_TYPE_TARGET, buildPiSubagentsEventTypeReplacement())
-    .replace(PI_SUBAGENTS_INTERCOM_DETACH_TOOL_START_TARGET, buildPiSubagentsToolStartReplacement())
-    .replace(
-      PI_SUBAGENTS_INTERCOM_DETACH_TOOL_RESULT_TARGET,
-      buildPiSubagentsToolResultReplacement(),
-    );
-  writeFileSync(filePath, patched);
-  return { status: 'applied', packageRoot, version, patchPath: filePath };
-}
-
-// ---------------------------------------------------------------------------
 // pi-subagents built-in agent apply_patch tool patch
 //
 // Built-in pi-subagents agent definitions predate this toolbox's apply_patch
@@ -1997,6 +1851,10 @@ export async function applyPiSubagentsIntercomDetachPatch(
 // those tools. Scan the package's agent markdown dynamically instead of naming
 // specific agents so new writable built-ins get patched automatically.
 // ---------------------------------------------------------------------------
+
+const PI_SUBAGENTS_PACKAGE_NAME = 'pi-subagents';
+const PI_SUBAGENTS_AGENTS_RELATIVE_PATH = 'agents';
+const PI_SUBAGENTS_APPLY_PATCH_TOOL_NAME = 'apply_patch';
 
 type AgentToolLinePatch = {
   changed: boolean;
@@ -2099,119 +1957,6 @@ export async function applyPiSubagentsApplyPatchToolPatch(
     writeFileSync(filePath, patch.content);
   }
   return { status: 'applied', packageRoot, version, patchPath: agentsDir };
-}
-
-// ---------------------------------------------------------------------------
-// pi-codex-goal post-compaction continuation patch
-//
-// pi-codex-goal@0.1.21 can enter host-overflow recovery after a large
-// assistant(stop) turn, let the host auto-compact, and then block its normal
-// hidden continuation because the recovery phase requires a user-started turn.
-// If no user-like follow-up is queued after compaction, Pi may attempt a bare
-// agent.continue() from an assistant tail and fail with
-// "Cannot continue from message role: assistant".
-//
-// The hotfix queues the active goal continuation as a user follow-up after
-// host-overflow compaction, before the normal hidden-continuation gate.
-// ---------------------------------------------------------------------------
-
-const PI_CODEX_GOAL_PACKAGE_NAME = 'pi-codex-goal';
-const PI_CODEX_GOAL_SESSION_HANDLERS_RELATIVE_PATH = 'src/goal-runtime-session-handlers.ts';
-const PI_CODEX_GOAL_POST_COMPACTION_USER_FOLLOWUP_PATCH_MARKER =
-  '__pi_update_extensions:pi-codex-goal-post-compaction-user-followup__';
-const PI_CODEX_GOAL_POST_COMPACTION_USER_FOLLOWUP_TARGET = [
-  '      recoveryRuntime.onSessionCompact();',
-  '      status.refreshUi(ctx);',
-  '      if (!recoveryPhaseBlocksContinuation(runtimeState.recoveryState.phase)) {',
-  '        continuation.maybeContinueAfterCurrentEvent(ctx);',
-  '      }',
-].join('\n');
-
-function buildPiCodexGoalPostCompactionUserFollowupReplacement(): string {
-  return [
-    '      recoveryRuntime.onSessionCompact();',
-    '      status.refreshUi(ctx);',
-    `      // ${PI_CODEX_GOAL_POST_COMPACTION_USER_FOLLOWUP_PATCH_MARKER}`,
-    '      const postCompactionGoal = stateController.getGoal();',
-    '      if (',
-    '        postCompactionGoal?.status === "active" &&',
-    '        runtimeState.recoveryState.phase.kind === "hostOverflowRecoveringNeedsUserStart"',
-    '      ) {',
-    '        pi.sendUserMessage(compactContinuationPrompt(postCompactionGoal), {',
-    '          deliverAs: "followUp",',
-    '        });',
-    '        return;',
-    '      }',
-    '      if (!recoveryPhaseBlocksContinuation(runtimeState.recoveryState.phase)) {',
-    '        continuation.maybeContinueAfterCurrentEvent(ctx);',
-    '      }',
-  ].join('\n');
-}
-
-function isPiCodexGoalPostCompactionUserFollowupSemanticallyPatched(content: string): boolean {
-  const hasLegacyUserFollowup =
-    content.includes('const postCompactionGoal = stateController.getGoal();') &&
-    content.includes(
-      'runtimeState.recoveryState.phase.kind === "hostOverflowRecoveringNeedsUserStart"',
-    ) &&
-    content.includes('pi.sendUserMessage(compactContinuationPrompt(postCompactionGoal), {') &&
-    content.includes('deliverAs: "followUp"');
-  const hasUpstreamFallback =
-    content.includes('const schedulePostCompactContinuationFallback = (') &&
-    content.includes('clearActiveHostOverflowRecovery(runtimeState.recoveryState);') &&
-    content.includes('clearHostOverflowRecovery: wasRecoveringFromHostOverflow');
-  return hasLegacyUserFollowup || hasUpstreamFallback;
-}
-
-export function isPiCodexGoalPostCompactionUserFollowupPatchApplied(packageRoot: string): boolean {
-  const filePath = join(packageRoot, PI_CODEX_GOAL_SESSION_HANDLERS_RELATIVE_PATH);
-  if (!existsSync(filePath)) return false;
-  const content = readFileSync(filePath, 'utf8');
-  return (
-    content.includes(PI_CODEX_GOAL_POST_COMPACTION_USER_FOLLOWUP_PATCH_MARKER) ||
-    isPiCodexGoalPostCompactionUserFollowupSemanticallyPatched(content)
-  );
-}
-
-export async function applyPiCodexGoalPostCompactionUserFollowupPatch(
-  options: { dryRun?: boolean; packageRoot?: string; cwd?: string } = {},
-): Promise<ApplyPatchResult> {
-  const packageRoot =
-    options.packageRoot ?? findGlobalPackagePath(PI_CODEX_GOAL_PACKAGE_NAME, { cwd: options.cwd });
-  if (!packageRoot) {
-    throw new Error(
-      `Could not locate installed ${PI_CODEX_GOAL_PACKAGE_NAME} via configured package manager, aube, or pnpm`,
-    );
-  }
-
-  const version = getPackageVersion(packageRoot) ?? 'unknown';
-  const filePath = join(packageRoot, PI_CODEX_GOAL_SESSION_HANDLERS_RELATIVE_PATH);
-  if (!existsSync(filePath)) {
-    throw new Error(`pi-codex-goal@${version}: session handler file not found at ${filePath}`);
-  }
-
-  if (isPiCodexGoalPostCompactionUserFollowupPatchApplied(packageRoot)) {
-    return { status: 'already-applied', packageRoot, version, patchPath: filePath };
-  }
-
-  const content = readFileSync(filePath, 'utf8');
-  if (!content.includes(PI_CODEX_GOAL_POST_COMPACTION_USER_FOLLOWUP_TARGET)) {
-    throw new Error(
-      `pi-codex-goal@${version}: target text for pi-codex-goal post-compaction user follow-up patch not found at ${filePath}. ` +
-        'Upstream may have changed; update pi-update-extensions.ts.',
-    );
-  }
-
-  if (options.dryRun) {
-    return { status: 'would-apply', packageRoot, version, patchPath: filePath };
-  }
-
-  const patched = content.replace(
-    PI_CODEX_GOAL_POST_COMPACTION_USER_FOLLOWUP_TARGET,
-    buildPiCodexGoalPostCompactionUserFollowupReplacement(),
-  );
-  writeFileSync(filePath, patched);
-  return { status: 'applied', packageRoot, version, patchPath: filePath };
 }
 
 export function findInstalledNpmPackagePath(
@@ -3060,44 +2805,6 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     } catch (error) {
       console.error(
         `Skipped pi-continuous-learning compatibility patch: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-
-    try {
-      const codexGoalResult = await applyPiCodexGoalPostCompactionUserFollowupPatch({
-        dryRun,
-        cwd: REPO_ROOT,
-        packageRoot: findInstalledNpmPackagePath(installedPackages, 'pi-codex-goal'),
-      });
-      const label =
-        codexGoalResult.status === 'already-applied'
-          ? `Already applied: pi-codex-goal post-compaction continuation patch (${codexGoalResult.version})`
-          : codexGoalResult.status === 'would-apply'
-            ? `Would apply: pi-codex-goal post-compaction continuation patch (${codexGoalResult.version})`
-            : `${codexGoalResult.status}: pi-codex-goal post-compaction continuation patch (${codexGoalResult.version}) via ${codexGoalResult.patchPath}`;
-      console.log(label);
-    } catch (error) {
-      console.error(
-        `Skipped pi-codex-goal post-compaction continuation patch: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-
-    try {
-      const subagentsResult = await applyPiSubagentsIntercomDetachPatch({
-        dryRun,
-        cwd: REPO_ROOT,
-        packageRoot: findInstalledNpmPackagePath(installedPackages, 'pi-subagents'),
-      });
-      const label =
-        subagentsResult.status === 'already-applied'
-          ? `Already applied: pi-subagents intercom detach patch (${subagentsResult.version})`
-          : subagentsResult.status === 'would-apply'
-            ? `Would apply: pi-subagents intercom detach patch (${subagentsResult.version})`
-            : `${subagentsResult.status}: pi-subagents intercom detach patch (${subagentsResult.version}) via ${subagentsResult.patchPath}`;
-      console.log(label);
-    } catch (error) {
-      console.error(
-        `Skipped pi-subagents intercom detach patch: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
 
