@@ -506,12 +506,18 @@ export function reconcileCompletedResponse<TApi extends Api>(
   stream: AssistantMessageEventStream,
   model: Model<TApi>,
 ): void {
+  const hadStreamedContent = output.content.length > 0;
   appendRecoveredReasoningItems(response, output, stream);
   appendTerminalText(response, output, stream);
   appendRecoveredFunctionCalls(response, output, stream);
   applyCompletedResponse(output, model, response);
 
-  if (output.stopReason === 'stop' && !hasActionableAssistantOutput(output)) {
+  if (
+    !hadStreamedContent &&
+    Array.isArray(response.output) &&
+    output.stopReason === 'stop' &&
+    !hasActionableAssistantOutput(output)
+  ) {
     throw new Error(
       'Model produced invalid content: response.completed contained no assistant text or function calls',
     );
