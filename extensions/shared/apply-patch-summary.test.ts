@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'vitest';
 
-import { type PatchSummaryRow, renderApplyPatchRows } from './apply-patch-summary';
+import {
+  type PatchSummaryRow,
+  renderApplyPatchRows,
+  renderApplyPatchRowsAtWidth,
+} from './apply-patch-summary';
 
 const theme = {
   bold: (text: string) => text,
@@ -20,6 +24,12 @@ const rows: PatchSummaryRow[] = [
 ];
 
 describe('apply-patch summary render cache', () => {
+  test('exposes uncached row rendering for already-cached parents', () => {
+    expect(renderApplyPatchRowsAtWidth(rows, theme, 80)).toEqual(
+      renderApplyPatchRows(rows, theme).render(80),
+    );
+  });
+
   test('reuses the cached line array at the same width', () => {
     const component = renderApplyPatchRows(rows, theme);
     const first = component.render(80);

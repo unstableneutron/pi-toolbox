@@ -13,8 +13,9 @@ import {
   tryRewriteBashReadOperations,
   type BashReadOperation,
 } from '../../bash-rewrite/bash-rewrite';
-import { renderApplyPatchRows } from '../../shared/apply-patch-summary';
+import { renderApplyPatchRowsAtWidth } from '../../shared/apply-patch-summary';
 import { shortenDisplayPath, truncatePathLikeToWidth } from '../../shared/paths';
+import { WidthRenderCache } from '../../shared/width-render-cache';
 import {
   clampRenderedLineToWidth,
   sanitizeRenderableText,
@@ -40,31 +41,6 @@ interface RenderContext {
   lastComponent?: Component | undefined;
   expanded?: boolean | undefined;
   isError?: boolean | undefined;
-}
-
-class WidthCachedComponent implements Component {
-  private cachedWidth: number | undefined;
-  private cachedLines: string[] | undefined;
-
-  constructor(private readonly component: Component) {}
-
-  render(width: number): string[] {
-    if (this.cachedWidth === width && this.cachedLines) return this.cachedLines;
-    const lines = this.component.render(width);
-    this.cachedWidth = width;
-    this.cachedLines = lines;
-    return lines;
-  }
-
-  invalidate(): void {
-    this.cachedWidth = undefined;
-    this.cachedLines = undefined;
-    this.component.invalidate();
-  }
-}
-
-function cached(component: Component): Component {
-  return new WidthCachedComponent(component);
 }
 
 const COLLAPSED_EXEC_PREVIEW_LINES = 3;
@@ -331,29 +307,37 @@ function expandedOutputLines(output: string, theme: RenderTheme): string[] {
 }
 
 class ExecResultComponent implements Component {
+  private readonly cache = new WidthRenderCache();
+
   constructor(
     private lines: string[],
     private expanded: boolean,
   ) {}
 
   render(width: number): string[] {
-    const safeWidth = Math.max(1, width);
-    if (this.expanded) {
-      const lines = this.lines.flatMap((line) =>
-        visibleWidth(line) <= safeWidth ? [line] : wrapTextWithAnsi(line, safeWidth),
+    return this.cache.render(width, () => {
+      const safeWidth = Math.max(1, width);
+      if (this.expanded) {
+        const lines = this.lines.flatMap((line) =>
+          visibleWidth(line) <= safeWidth ? [line] : wrapTextWithAnsi(line, safeWidth),
+        );
+        return clampRenderLines(lines, safeWidth);
+      }
+      return clampRenderLines(
+        this.lines.map((line) => truncateWithStyledEllipsis(line, safeWidth)),
+        safeWidth,
       );
-      return clampRenderLines(lines, safeWidth);
-    }
-    return clampRenderLines(
-      this.lines.map((line) => truncateWithStyledEllipsis(line, safeWidth)),
-      safeWidth,
-    );
+    });
   }
 
-  invalidate(): void {}
+  invalidate(): void {
+    this.cache.clear();
+  }
 }
 
 class ExecCommandCallComponent implements Component {
+  private readonly cache = new WidthRenderCache();
+
   constructor(
     private commandText: string,
     private yieldLimit: string | undefined,
@@ -361,23 +345,27 @@ class ExecCommandCallComponent implements Component {
   ) {}
 
   render(width: number): string[] {
-    const safeWidth = Math.max(1, width);
-    const title = (text: string) => this.theme.fg('toolTitle', this.theme.bold(text));
-    const originalSuffix = this.yieldLimit ? this.theme.fg('muted', ` (${this.yieldLimit})`) : '';
+    return this.cache.render(width, () => {
+      const safeWidth = Math.max(1, width);
+      const title = (text: string) => this.theme.fg('toolTitle', this.theme.bold(text));
+      const originalSuffix = this.yieldLimit ? this.theme.fg('muted', ` (${this.yieldLimit})`) : '';
 
-    if (!this.commandText.includes('\n')) {
-      return [title(this.commandText) + originalSuffix].map((line) =>
-        clampRenderLine(line, safeWidth),
+      if (!this.commandText.includes('\n')) {
+        return [title(this.commandText) + originalSuffix].map((line) =>
+          clampRenderLine(line, safeWidth),
+        );
+      }
+
+      return clampRenderLines(
+        this.commandText.split('\n').map((line) => title(line)),
+        safeWidth,
       );
-    }
-
-    return clampRenderLines(
-      this.commandText.split('\n').map((line) => title(line)),
-      safeWidth,
-    );
+    });
   }
 
-  invalidate(): void {}
+  invalidate(): void {
+    this.cache.clear();
+  }
 }
 
 function tryExecReadOperations(command: string | undefined, cwd?: string) {
@@ -405,6 +393,8 @@ function formatReadPathAndMetric(
 }
 
 class ExecReadOperationsComponent implements Component {
+  private readonly cache = new WidthRenderCache();
+
   constructor(
     private operations: BashReadOperation[],
     private theme: RenderTheme,
@@ -412,20 +402,22 @@ class ExecReadOperationsComponent implements Component {
   ) {}
 
   render(width: number): string[] {
-    const count = this.operations.length;
-    if (count === 1)
-      return clampRenderLines([this.renderOperation(this.operations[0]!, width, false)], width);
+    return this.cache.render(width, () => {
+      const count = this.operations.length;
+      if (count === 1)
+        return clampRenderLines([this.renderOperation(this.operations[0]!, width, false)], width);
 
-    const metric = `${count} operations`;
-    const lines = [
-      `${this.theme.fg('toolTitle', this.theme.bold('exec'))} ${this.theme.fg('muted', metric)}`,
-    ];
+      const metric = `${count} operations`;
+      const lines = [
+        `${this.theme.fg('toolTitle', this.theme.bold('exec'))} ${this.theme.fg('muted', metric)}`,
+      ];
 
-    for (const operation of this.operations) {
-      lines.push(this.renderOperation(operation, width, true));
-    }
+      for (const operation of this.operations) {
+        lines.push(this.renderOperation(operation, width, true));
+      }
 
-    return clampRenderLines(lines, width);
+      return clampRenderLines(lines, width);
+    });
   }
 
   private renderOperation(operation: BashReadOperation, width: number, bullet: boolean): string {
@@ -440,28 +432,36 @@ class ExecReadOperationsComponent implements Component {
     return `${prefix}${renderedPath}${suffix}`;
   }
 
-  invalidate(): void {}
+  invalidate(): void {
+    this.cache.clear();
+  }
 }
 
 class ApplyPatchCallComponent implements Component {
+  private readonly cache = new WidthRenderCache();
+
   constructor(
     private rows: ReturnType<typeof parsePatchStreaming>['operations'],
     private theme: RenderTheme,
   ) {}
 
   render(width: number): string[] {
-    const count = this.rows.length;
-    const metric = `${count} operation${count === 1 ? '' : 's'}`;
-    return clampRenderLines(
-      [
-        `${this.theme.fg('toolTitle', this.theme.bold('apply_patch'))} ${this.theme.fg('muted', metric)}`,
-        ...renderApplyPatchRows(this.rows, this.theme).render(width),
-      ],
-      width,
-    );
+    return this.cache.render(width, () => {
+      const count = this.rows.length;
+      const metric = `${count} operation${count === 1 ? '' : 's'}`;
+      return clampRenderLines(
+        [
+          `${this.theme.fg('toolTitle', this.theme.bold('apply_patch'))} ${this.theme.fg('muted', metric)}`,
+          ...renderApplyPatchRowsAtWidth(this.rows, this.theme, width),
+        ],
+        width,
+      );
+    });
   }
 
-  invalidate(): void {}
+  invalidate(): void {
+    this.cache.clear();
+  }
 }
 
 export function renderExecCommandCall(
@@ -482,8 +482,10 @@ export function renderExecCommandCall(
     stringValue(record.workdir) ?? stringValue(record.cwd) ?? stringValue(record.working_directory);
   const readOperations = tryExecReadOperations(command, cwd);
   if (!context?.expanded && readOperations) {
-    return cached(
-      new ExecReadOperationsComponent(readOperations.operations, theme, readOperations.cwd ?? cwd),
+    return new ExecReadOperationsComponent(
+      readOperations.operations,
+      theme,
+      readOperations.cwd ?? cwd,
     );
   }
   const compact =
@@ -492,7 +494,7 @@ export function renderExecCommandCall(
       : context?.expanded
         ? fullCommandInput(commandDisplay)
         : compactCommandInput(commandDisplay);
-  return cached(new ExecCommandCallComponent(compact, yieldLimit, theme));
+  return new ExecCommandCallComponent(compact, yieldLimit, theme);
 }
 
 export function renderExecCommandResult(
@@ -514,7 +516,7 @@ export function renderExecCommandResult(
 
   if (!options.expanded) {
     if (!options.isPartial && !running && details?.exit_code === 0 && readOperations) {
-      return cached(new ExecResultComponent([theme.fg('muted', status)], false));
+      return new ExecResultComponent([theme.fg('muted', status)], false);
     }
     if (!hasOutput) {
       const lines = [
@@ -523,7 +525,7 @@ export function renderExecCommandResult(
           : []),
         theme.fg('muted', status),
       ];
-      return cached(new ExecResultComponent(lines, false));
+      return new ExecResultComponent(lines, false);
     }
     const { lines, skipped } = previewOutputLines(output || '(no output)');
     const rendered = lines.map((line) => theme.fg('toolOutput', line));
@@ -533,29 +535,25 @@ export function renderExecCommandResult(
     const truncation = details?.truncation?.truncated
       ? theme.fg('warning', formatOutputTruncationNotice(details.truncation))
       : undefined;
-    return cached(
-      new ExecResultComponent(
-        [
-          ...leadingSeparator,
-          ...prefix,
-          ...rendered,
-          ...(truncation ? [truncation] : []),
-          '',
-          theme.fg('muted', status),
-        ],
-        false,
-      ),
+    return new ExecResultComponent(
+      [
+        ...leadingSeparator,
+        ...prefix,
+        ...rendered,
+        ...(truncation ? [truncation] : []),
+        '',
+        theme.fg('muted', status),
+      ],
+      false,
     );
   }
 
   const lines = expandedOutputLines(output, theme);
   if (details?.truncation?.truncated) lines.push(formatOutputTruncationNotice(details.truncation));
   lines.push(status);
-  return cached(
-    new ExecResultComponent(
-      lines.map((line) => theme.fg('dim', line)),
-      true,
-    ),
+  return new ExecResultComponent(
+    lines.map((line) => theme.fg('dim', line)),
+    true,
   );
 }
 
@@ -591,7 +589,7 @@ export function renderApplyPatchCall(
   try {
     const rows = parsePatchStreaming(patch).operations;
     if (rows.length > 0) {
-      return cached(new ApplyPatchCallComponent(rows, theme));
+      return new ApplyPatchCallComponent(rows, theme);
     }
   } catch {
     // Fall back to a tiny summary for incomplete or malformed patch text.

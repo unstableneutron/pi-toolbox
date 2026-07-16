@@ -2,6 +2,7 @@ import type { Component } from '@earendil-works/pi-tui';
 import { truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
 
 import { shortenDisplayPath, truncateDisplayPath, truncateMiddleToWidth } from './paths';
+import { WidthRenderCache } from './width-render-cache';
 
 export type PatchSummaryRow =
   | {
@@ -186,8 +187,29 @@ function renderRows(
   return lines;
 }
 
+function renderApplyPatchSummaryAtWidth(
+  rows: PatchSummaryRow[],
+  theme: SummaryTheme,
+  width: number,
+  includeHeader: boolean,
+  cwd?: string,
+): string[] {
+  return rows.length === 1
+    ? renderOperationRow(rows[0]!, theme, width, !includeHeader, cwd)
+    : renderRows(rows, theme, width, includeHeader, cwd);
+}
+
+export function renderApplyPatchRowsAtWidth(
+  rows: PatchSummaryRow[],
+  theme: SummaryTheme,
+  width: number,
+  cwd?: string,
+): string[] {
+  return renderApplyPatchSummaryAtWidth(rows, theme, width, false, cwd);
+}
+
 class ApplyPatchSummaryComponent implements Component {
-  private cache: { width: number; lines: string[] } | undefined;
+  private readonly cache = new WidthRenderCache();
 
   constructor(
     private rows: PatchSummaryRow[],
@@ -197,18 +219,13 @@ class ApplyPatchSummaryComponent implements Component {
   ) {}
 
   render(width: number): string[] {
-    if (this.cache?.width === width) return this.cache.lines;
-
-    const lines =
-      this.rows.length === 1
-        ? renderOperationRow(this.rows[0]!, this.theme, width, !this.includeHeader, this.cwd)
-        : renderRows(this.rows, this.theme, width, this.includeHeader, this.cwd);
-    this.cache = { width, lines };
-    return lines;
+    return this.cache.render(width, () =>
+      renderApplyPatchSummaryAtWidth(this.rows, this.theme, width, this.includeHeader, this.cwd),
+    );
   }
 
   invalidate(): void {
-    this.cache = undefined;
+    this.cache.clear();
   }
 }
 

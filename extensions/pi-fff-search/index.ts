@@ -13,6 +13,7 @@ import {
 } from '@earendil-works/pi-coding-agent';
 import { clampMatchText } from './match-heuristics';
 import { DEFAULT_EXPAND_HINT_SUFFIXES, chooseOptionalSuffix } from '../shared/tui-width';
+import { WidthRenderCache } from '../shared/width-render-cache';
 import { TOOL_REWRITE_ARROW } from '../shared/rewrite-label';
 import {
   type FallbackSpillInfo,
@@ -709,22 +710,12 @@ function styleResultText(text: string, theme: { fg: (...args: any[]) => string }
 }
 
 export function createWidthAwareText(renderForWidth: (width: number) => string): Component {
-  let cachedWidth: number | undefined;
-  let cachedLines: string[] | undefined;
+  const cache = new WidthRenderCache();
 
   return {
-    render(width: number): string[] {
-      if (cachedWidth === width && cachedLines) return cachedLines;
-
-      const lines = new Text(renderForWidth(width), 0, 0).render(width);
-      cachedWidth = width;
-      cachedLines = lines;
-      return lines;
-    },
-    invalidate() {
-      cachedWidth = undefined;
-      cachedLines = undefined;
-    },
+    render: (width) =>
+      cache.render(width, () => new Text(renderForWidth(width), 0, 0).render(width)),
+    invalidate: () => cache.clear(),
   };
 }
 
