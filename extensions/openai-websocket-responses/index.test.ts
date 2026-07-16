@@ -4,8 +4,10 @@ import { join } from 'node:path';
 
 import {
   createAssistantMessageEventStream,
+  getApiProvider,
   type AssistantMessage,
   type Model,
+  unregisterApiProviders,
 } from '@earendil-works/pi-ai/compat';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -5728,18 +5730,34 @@ describe('provider transport diagnostics', () => {
 });
 
 describe('transparent provider patching', () => {
-  it('registers the explicit websocket API through pi.registerProvider', () => {
+  it('registers the explicit websocket API in the global API registry', () => {
     const streamSimple = vi.fn();
-    const pi = {
-      registerProvider: vi.fn(),
-    } as any;
+    const registerApi = vi.fn();
 
-    registerOpenAIWebSocketResponsesApiProvider(pi, streamSimple as any);
+    registerOpenAIWebSocketResponsesApiProvider(streamSimple as any, registerApi);
 
-    expect(pi.registerProvider).toHaveBeenCalledWith('openai-websocket-responses', {
-      api: 'openai-websocket-responses',
-      streamSimple,
-    });
+    expect(registerApi).toHaveBeenCalledWith(
+      {
+        api: 'openai-websocket-responses',
+        stream: expect.any(Function),
+        streamSimple,
+      },
+      'provider:openai-websocket-responses',
+    );
+  });
+
+  it('makes the explicit API available to models owned by other providers', () => {
+    const streamSimple = vi.fn();
+
+    try {
+      registerOpenAIWebSocketResponsesApiProvider(streamSimple as any);
+
+      expect(getApiProvider('openai-websocket-responses' as any)?.streamSimple).toBeTypeOf(
+        'function',
+      );
+    } finally {
+      unregisterApiProviders('provider:openai-websocket-responses');
+    }
   });
 
   it('installs the transparent websocket patch and Codex transport metadata patch together', () => {

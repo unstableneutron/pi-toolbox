@@ -1,9 +1,10 @@
-import type {
-  Api,
-  AssistantMessageEventStream,
-  Context,
-  Model,
-  SimpleStreamOptions,
+import {
+  type Api,
+  type AssistantMessageEventStream,
+  type Context,
+  type Model,
+  registerApiProvider,
+  type SimpleStreamOptions,
 } from '@earendil-works/pi-ai/compat';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 
@@ -47,13 +48,20 @@ type WebSocketStreamSimple = (
 ) => AssistantMessageEventStream;
 
 export function registerOpenAIWebSocketResponsesApiProvider(
-  pi: Pick<ExtensionAPI, 'registerProvider'>,
   streamWebSocket: WebSocketStreamSimple,
+  register = registerApiProvider,
 ): void {
-  pi.registerProvider(API, {
-    api: API,
-    streamSimple: streamWebSocket,
-  });
+  // Pi 0.80.8 scopes ExtensionAPI.registerProvider streams to the named model
+  // provider. Register this reusable API directly because models.json may use it
+  // from providers such as devai or facade.
+  register(
+    {
+      api: API,
+      stream: (model, context, options) => streamWebSocket(model, context, options),
+      streamSimple: streamWebSocket,
+    },
+    `provider:${API}`,
+  );
 }
 
 export function installOpenAIWebSocketResponsesApiPatches(
@@ -318,13 +326,13 @@ export default function (pi: ExtensionAPI) {
     installOpenAIWebSocketResponsesPatch(settingsProvider, streamWebSocket, onLifecycleEvent);
   };
   const installApiPatches = () => {
+    registerOpenAIWebSocketResponsesApiProvider(streamWebSocket);
     installOpenAIWebSocketResponsesApiPatches(
       installOpenAICodexTransportMetadataPatch,
       installTransparentPatch,
     );
   };
 
-  registerOpenAIWebSocketResponsesApiProvider(pi, streamWebSocket);
   installApiPatches();
   registerOpenAIWebSocketResponsesPatchRefreshHooks(pi, installApiPatches);
 
