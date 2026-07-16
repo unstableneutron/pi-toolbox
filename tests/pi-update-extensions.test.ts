@@ -1,7 +1,8 @@
 import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { pathToFileURL } from 'node:url';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   applyAmasterPiComputerUseAnalyzeScreenshotPatch,
@@ -1276,12 +1277,29 @@ describe('pi-coding-agent resolver patching', () => {
 
 describe('pi-coding-agent transcript cache patching', () => {
   const FIXTURE_CONTENT = [
+    'class Container {',
+    '    children = [];',
+    '    addChild(component) { this.children.push(component); }',
+    '    removeChild(component) { this.children = this.children.filter((child) => child !== component); }',
+    '    clear() { this.children = []; }',
+    '    invalidate() { for (const child of this.children) child.invalidate(); }',
+    '    render(width) { return this.children.flatMap((child) => child.render(width)); }',
+    '}',
     'class ExpandableText {}',
+    'class ToolExecutionComponent {}',
+    'class AssistantMessageComponent {}',
+    'class UserMessageComponent {}',
+    'function isExpandable(component) { return typeof component.setExpanded === "function"; }',
     'function isCustomSessionEntry(item) {',
     '    return "type" in item && item.type === "custom";',
     '}',
     'export class InteractiveMode {',
     '    constructor() {',
+    '        this.streamingComponent = undefined;',
+    '        this.bashComponent = undefined;',
+    '        this.pendingTools = new Map();',
+    '        this.loadedResourcesContainer = new Container();',
+    '        this.ui = { requestRender() {} };',
     '        this.chatContainer = new Container();',
     '    }',
     '    setHiddenThinkingLabel(label) {',
@@ -1299,6 +1317,43 @@ describe('pi-coding-agent transcript cache patching', () => {
     '            }',
     '        }',
     '        this.ui.requestRender();',
+    '    }',
+    '    settingsHandlers() {',
+    '        return {',
+    '                onShowImagesChange: (enabled) => {',
+    '                    this.settingsManager.setShowImages(enabled);',
+    '                    for (const child of this.chatContainer.children) {',
+    '                        if (child instanceof ToolExecutionComponent) {',
+    '                            child.setShowImages(enabled);',
+    '                        }',
+    '                    }',
+    '                },',
+    '                onImageWidthCellsChange: (width) => {',
+    '                    this.settingsManager.setImageWidthCells(width);',
+    '                    for (const child of this.chatContainer.children) {',
+    '                        if (child instanceof ToolExecutionComponent) {',
+    '                            child.setImageWidthCells(width);',
+    '                        }',
+    '                    }',
+    '                },',
+    '                onOutputPadChange: (padding) => {',
+    '                    this.settingsManager.setOutputPad(padding);',
+    '                    this.outputPad = padding;',
+    '                    if (this.streamingComponent || this.session.isStreaming) {',
+    '                        for (const child of this.chatContainer.children) {',
+    '                            if (child instanceof AssistantMessageComponent || child instanceof UserMessageComponent) {',
+    '                                child.setOutputPad(padding);',
+    '                            }',
+    '                        }',
+    '                        if (this.streamingComponent) {',
+    '                            this.streamingComponent.setOutputPad(padding);',
+    '                        }',
+    '                        this.ui.requestRender();',
+    '                        return;',
+    '                    }',
+    '                    this.rebuildChatFromMessages();',
+    '                },',
+    '        };',
     '    }',
     '}',
     '',
@@ -1329,12 +1384,95 @@ describe('pi-coding-agent transcript cache patching', () => {
     );
 
     expect(result).toMatchObject({ status: 'applied', packageRoot, version: '0.80.7' });
-    expect(patched).toContain('__pi_update_extensions:transcript-prefix-cache__');
+    expect(patched).toContain('__pi_update_extensions:transcript-prefix-cache-v2__');
     expect(patched).toContain('class TranscriptContainer extends Container');
     expect(patched).toContain('TRANSCRIPT_LIVE_TAIL_COMPONENTS = 64');
     expect(patched).toContain('PI_TRANSCRIPT_CACHE_DISABLED === "1"');
-    expect(patched.match(/invalidateRenderCache\?\.\(\)/g)).toHaveLength(2);
+    expect(patched).toContain('...this.pendingTools.values()');
+    expect(patched).toContain('getDynamicChildren');
+    expect(patched.match(/invalidateRenderCache\?\.\(\)/g)).toHaveLength(5);
     expect(isPiCodingAgentTranscriptCachePatchApplied(packageRoot)).toBe(true);
+  });
+
+  it('keeps pending components live after they move beyond the fixed tail', async () => {
+    const packageRoot = setupFakePackage('0.80.7');
+    const result = await applyPiCodingAgentTranscriptCachePatch({ packageRoot });
+    if (!result.patchPath) throw new Error('Expected transcript patch path');
+    const module = (await import(`${pathToFileURL(result.patchPath).href}?${Date.now()}`)) as {
+      InteractiveMode: new () => {
+        chatContainer: {
+          addChild(component: unknown): void;
+          render(width: number): string[];
+          invalidate(): void;
+        };
+        pendingTools: Map<string, unknown>;
+      };
+    };
+    const mode = new module.InteractiveMode();
+    let firstText = 'initial';
+    const first = {
+      render: vi.fn(() => [firstText]),
+      invalidate: vi.fn(),
+    };
+    mode.chatContainer.addChild(first);
+    for (let index = 1; index < 70; index++) {
+      mode.chatContainer.addChild({
+        render: vi.fn(() => [`child:${index}`]),
+        invalidate: vi.fn(),
+      });
+    }
+
+    expect(mode.chatContainer.render(80)[0]).toBe('initial');
+    expect(first.render).toHaveBeenCalledTimes(1);
+
+    firstText = 'running';
+    mode.pendingTools.set('old-tool', first);
+    expect(mode.chatContainer.render(80)[0]).toBe('running');
+    expect(first.render).toHaveBeenCalledTimes(2);
+
+    firstText = 'complete';
+    mode.pendingTools.delete('old-tool');
+    expect(mode.chatContainer.render(80)[0]).toBe('complete');
+    expect(first.render).toHaveBeenCalledTimes(3);
+    mode.chatContainer.render(80);
+    expect(first.render).toHaveBeenCalledTimes(3);
+  });
+
+  it('rebuilds the prefix after parent invalidation such as a theme change', async () => {
+    const packageRoot = setupFakePackage('0.80.7');
+    const result = await applyPiCodingAgentTranscriptCachePatch({ packageRoot });
+    if (!result.patchPath) throw new Error('Expected transcript patch path');
+    const module = (await import(
+      `${pathToFileURL(result.patchPath).href}?theme=${Date.now()}`
+    )) as {
+      InteractiveMode: new () => {
+        chatContainer: {
+          addChild(component: unknown): void;
+          render(width: number): string[];
+          invalidate(): void;
+        };
+      };
+    };
+    const mode = new module.InteractiveMode();
+    let themedText = 'dark';
+    const first = {
+      render: vi.fn(() => [themedText]),
+      invalidate: vi.fn(),
+    };
+    mode.chatContainer.addChild(first);
+    for (let index = 1; index < 70; index++) {
+      mode.chatContainer.addChild({
+        render: vi.fn(() => [`child:${index}`]),
+        invalidate: vi.fn(),
+      });
+    }
+
+    expect(mode.chatContainer.render(80)[0]).toBe('dark');
+    themedText = 'light';
+    mode.chatContainer.invalidate();
+
+    expect(mode.chatContainer.render(80)[0]).toBe('light');
+    expect(first.invalidate).toHaveBeenCalledTimes(1);
   });
 
   it('is idempotent after patching', async () => {
@@ -1372,11 +1510,13 @@ describe('pi-coding-agent transcript cache patching', () => {
     );
   });
 
-  it('builds a bounded prefix cache with a live tail', () => {
+  it('builds a bounded prefix cache with a dynamic live boundary', () => {
     const insertion = buildPiCodingAgentTranscriptCacheInsertion();
     expect(insertion).toContain('cachedPrefixChildren = []');
     expect(insertion).toContain('cachedPrefixLines = []');
     expect(insertion).toContain('TRANSCRIPT_LIVE_TAIL_COMPONENTS');
+    expect(insertion).toContain('getDynamicChildren');
+    expect(insertion).toContain('prefixEnd = Math.min(prefixEnd, index)');
     expect(insertion).not.toContain('new Map');
   });
 });

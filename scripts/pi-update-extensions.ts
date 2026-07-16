@@ -236,14 +236,18 @@ export function buildPiCodingAgentResolverReplacement(): string {
 
 const PI_CODING_AGENT_INTERACTIVE_MODE_RELATIVE_PATH = 'dist/modes/interactive/interactive-mode.js';
 const PI_CODING_AGENT_TRANSCRIPT_CACHE_PATCH_MARKER =
-  '__pi_update_extensions:transcript-prefix-cache__';
+  '__pi_update_extensions:transcript-prefix-cache-v2__';
 const PI_CODING_AGENT_TRANSCRIPT_CACHE_INSERTION_TARGET = 'function isCustomSessionEntry(item) {';
 const PI_CODING_AGENT_TRANSCRIPT_CACHE_CONSTRUCTOR_TARGET =
   '        this.chatContainer = new Container();';
 const PI_CODING_AGENT_TRANSCRIPT_CACHE_CONSTRUCTOR_REPLACEMENT = [
   '        this.chatContainer = process.env.PI_TRANSCRIPT_CACHE_DISABLED === "1"',
   '            ? new Container()',
-  '            : new TranscriptContainer();',
+  '            : new TranscriptContainer(() => [',
+  '                this.streamingComponent,',
+  '                this.bashComponent,',
+  '                ...this.pendingTools.values(),',
+  '            ].filter(Boolean));',
 ].join('\n');
 const PI_CODING_AGENT_TRANSCRIPT_CACHE_HIDDEN_LABEL_TARGET = [
   '        if (this.streamingComponent) {',
@@ -279,6 +283,63 @@ const PI_CODING_AGENT_TRANSCRIPT_CACHE_EXPANSION_REPLACEMENT = [
   '        this.chatContainer.invalidateRenderCache?.();',
   '        this.ui.requestRender();',
 ].join('\n');
+const PI_CODING_AGENT_TRANSCRIPT_CACHE_SHOW_IMAGES_TARGET = [
+  '                onShowImagesChange: (enabled) => {',
+  '                    this.settingsManager.setShowImages(enabled);',
+  '                    for (const child of this.chatContainer.children) {',
+  '                        if (child instanceof ToolExecutionComponent) {',
+  '                            child.setShowImages(enabled);',
+  '                        }',
+  '                    }',
+  '                },',
+].join('\n');
+const PI_CODING_AGENT_TRANSCRIPT_CACHE_SHOW_IMAGES_REPLACEMENT = [
+  '                onShowImagesChange: (enabled) => {',
+  '                    this.settingsManager.setShowImages(enabled);',
+  '                    for (const child of this.chatContainer.children) {',
+  '                        if (child instanceof ToolExecutionComponent) {',
+  '                            child.setShowImages(enabled);',
+  '                        }',
+  '                    }',
+  '                    this.chatContainer.invalidateRenderCache?.();',
+  '                },',
+].join('\n');
+const PI_CODING_AGENT_TRANSCRIPT_CACHE_IMAGE_WIDTH_TARGET = [
+  '                onImageWidthCellsChange: (width) => {',
+  '                    this.settingsManager.setImageWidthCells(width);',
+  '                    for (const child of this.chatContainer.children) {',
+  '                        if (child instanceof ToolExecutionComponent) {',
+  '                            child.setImageWidthCells(width);',
+  '                        }',
+  '                    }',
+  '                },',
+].join('\n');
+const PI_CODING_AGENT_TRANSCRIPT_CACHE_IMAGE_WIDTH_REPLACEMENT = [
+  '                onImageWidthCellsChange: (width) => {',
+  '                    this.settingsManager.setImageWidthCells(width);',
+  '                    for (const child of this.chatContainer.children) {',
+  '                        if (child instanceof ToolExecutionComponent) {',
+  '                            child.setImageWidthCells(width);',
+  '                        }',
+  '                    }',
+  '                    this.chatContainer.invalidateRenderCache?.();',
+  '                },',
+].join('\n');
+const PI_CODING_AGENT_TRANSCRIPT_CACHE_OUTPUT_PAD_TARGET = [
+  '                        if (this.streamingComponent) {',
+  '                            this.streamingComponent.setOutputPad(padding);',
+  '                        }',
+  '                        this.ui.requestRender();',
+  '                        return;',
+].join('\n');
+const PI_CODING_AGENT_TRANSCRIPT_CACHE_OUTPUT_PAD_REPLACEMENT = [
+  '                        if (this.streamingComponent) {',
+  '                            this.streamingComponent.setOutputPad(padding);',
+  '                        }',
+  '                        this.chatContainer.invalidateRenderCache?.();',
+  '                        this.ui.requestRender();',
+  '                        return;',
+].join('\n');
 
 export function buildPiCodingAgentTranscriptCacheInsertion(): string {
   return `// ${PI_CODING_AGENT_TRANSCRIPT_CACHE_PATCH_MARKER}
@@ -287,6 +348,11 @@ class TranscriptContainer extends Container {
     cachedWidth;
     cachedPrefixChildren = [];
     cachedPrefixLines = [];
+    getDynamicChildren;
+    constructor(getDynamicChildren = () => []) {
+        super();
+        this.getDynamicChildren = getDynamicChildren;
+    }
     invalidateRenderCache() {
         this.cachedWidth = undefined;
         this.cachedPrefixChildren = [];
@@ -315,8 +381,16 @@ class TranscriptContainer extends Container {
         }
         return true;
     }
+    getPrefixEnd() {
+        let prefixEnd = Math.max(0, this.children.length - TRANSCRIPT_LIVE_TAIL_COMPONENTS);
+        for (const component of this.getDynamicChildren()) {
+            const index = this.children.indexOf(component);
+            if (index >= 0) prefixEnd = Math.min(prefixEnd, index);
+        }
+        return prefixEnd;
+    }
     render(width) {
-        const prefixEnd = Math.max(0, this.children.length - TRANSCRIPT_LIVE_TAIL_COMPONENTS);
+        const prefixEnd = this.getPrefixEnd();
         if (!this.hasReusablePrefix(width, prefixEnd)) {
             this.cachedWidth = width;
             this.cachedPrefixChildren = [];
@@ -863,6 +937,9 @@ export async function applyPiCodingAgentTranscriptCachePatch(
     PI_CODING_AGENT_TRANSCRIPT_CACHE_CONSTRUCTOR_TARGET,
     PI_CODING_AGENT_TRANSCRIPT_CACHE_HIDDEN_LABEL_TARGET,
     PI_CODING_AGENT_TRANSCRIPT_CACHE_EXPANSION_TARGET,
+    PI_CODING_AGENT_TRANSCRIPT_CACHE_SHOW_IMAGES_TARGET,
+    PI_CODING_AGENT_TRANSCRIPT_CACHE_IMAGE_WIDTH_TARGET,
+    PI_CODING_AGENT_TRANSCRIPT_CACHE_OUTPUT_PAD_TARGET,
   ];
   const missingTarget = requiredTargets.find((target) => !content.includes(target));
   if (missingTarget) {
@@ -891,6 +968,18 @@ export async function applyPiCodingAgentTranscriptCachePatch(
     .replace(
       PI_CODING_AGENT_TRANSCRIPT_CACHE_EXPANSION_TARGET,
       PI_CODING_AGENT_TRANSCRIPT_CACHE_EXPANSION_REPLACEMENT,
+    )
+    .replace(
+      PI_CODING_AGENT_TRANSCRIPT_CACHE_SHOW_IMAGES_TARGET,
+      PI_CODING_AGENT_TRANSCRIPT_CACHE_SHOW_IMAGES_REPLACEMENT,
+    )
+    .replace(
+      PI_CODING_AGENT_TRANSCRIPT_CACHE_IMAGE_WIDTH_TARGET,
+      PI_CODING_AGENT_TRANSCRIPT_CACHE_IMAGE_WIDTH_REPLACEMENT,
+    )
+    .replace(
+      PI_CODING_AGENT_TRANSCRIPT_CACHE_OUTPUT_PAD_TARGET,
+      PI_CODING_AGENT_TRANSCRIPT_CACHE_OUTPUT_PAD_REPLACEMENT,
     );
   writeJavaScriptPatchAtomically(filePath, patched);
   return { status: 'applied', packageRoot, version, patchPath: filePath };
