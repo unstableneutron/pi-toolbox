@@ -6,9 +6,9 @@ import type {
 import type { Api, Model } from '@earendil-works/pi-ai/compat';
 import { modelRef, normalizeModelRef } from './model';
 
-export const FAST_MODE_SERVICE_TIER = 'priority';
+const FAST_MODE_SERVICE_TIER = 'priority';
 
-export const PRIORITY_CAPABLE_MODEL_REFS = [
+const PRIORITY_CAPABLE_MODEL_REFS = [
   'openai-codex/gpt-5.3-codex-spark',
   'openai-codex/gpt-5.5',
   'openai-codex/gpt-5.6-sol',
@@ -66,11 +66,7 @@ export function registerFastCommand(pi: ExtensionAPI, state: FastModeState): voi
   });
 }
 
-export function applyFastCommand(
-  args: string,
-  ctx: ExtensionCommandContext,
-  state: FastModeState,
-): void {
+function applyFastCommand(args: string, ctx: ExtensionCommandContext, state: FastModeState): void {
   const action = parseFastModeAction(args);
 
   if (!action) {

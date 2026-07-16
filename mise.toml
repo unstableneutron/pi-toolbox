@@ -19,7 +19,7 @@ description = "Diff subagent definitions in agents/ against ~/.pi/agent/agents/;
 run = "bun run scripts/sync-agents.ts"
 
 [tasks.pi-update]
-description = "Keep the workspace in lockstep with the globally installed pi: run `pi update`, pin pi-* sibling packages to the CLI's exact versions, apply local compatibility patches, and refresh gitchamber sources."
+description = "Update the pnpm-managed global pi, pin pi-* sibling packages to its exact versions, apply local compatibility patches, and refresh gitchamber sources."
 run = "bun run scripts/pi-update-extensions.ts"
 
 [tasks.pi-update-dry-run]

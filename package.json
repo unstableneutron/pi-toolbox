@@ -1,16 +1,12 @@
 {
   "name": "pi-toolbox",
-  "version": "0.79.10",
+  "version": "0.80.9",
   "private": true,
   "description": "My own pi-toolbox of extensions, skills, prompts, and subagent templates.",
   "license": "MIT",
   "bin": {
     "roundtable-review": "./packages/roundtable-review/bin/roundtable-review.js"
   },
-  "workspaces": [
-    "extensions/*",
-    "packages/*"
-  ],
   "type": "module",
   "scripts": {
     "check": "oxlint -c .oxlintrc.json --type-aware --type-check --fix --fix-suggestions --fix-dangerously --deny-warnings . && oxfmt -c .oxfmtrc.json . && knip",
@@ -49,7 +45,7 @@
   "engines": {
     "node": ">=22.19.0"
   },
-  "packageManager": "pnpm@10.33.0+sha512.10568bb4a6afb58c9eb3630da90cc9516417abebd3fabbe6739f0ae795728da1491e9db5a544c76ad8eb7570f5c4bb3d6c637b2cb41bfdcdb47fa823c8649319",
+  "packageManager": "pnpm@11.12.0",
   "omp": {
     "extensions": [
       "./extensions/openai-websocket-responses/omp.ts",

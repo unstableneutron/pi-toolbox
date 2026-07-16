@@ -9,9 +9,13 @@ overrides:
   '@earendil-works/pi-coding-agent': 0.80.9
   '@earendil-works/pi-tui': 0.80.9
 
-onlyBuiltDependencies:
-  - '@google/genai'
-  - esbuild
-  - fff-router
-  - koffi
-  - protobufjs
+minimumReleaseAgeExclude:
+  - '@earendil-works/pi-*'
+
+allowBuilds:
+  '@google/genai': true
+  esbuild: true
+  fff-router: true
+  fff-router@https://codeload.github.com/unstableneutron/fff-router/tar.gz/599ee0409d113573c003d419c3702ffc3b0d3a1f: true
+  koffi: true
+  protobufjs: true

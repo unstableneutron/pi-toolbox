@@ -27,6 +27,7 @@ import {
   detectPiInstallPackageManagerFromPaths,
   findInstalledNpmPackagePath,
   findPiCodingAgentRootFromExecutable,
+  findPiExecutablePath,
   formatPackageManagerCommand,
   getPackageManagerCommandCandidates,
   getPnpmWorkspaceOverrideChanges,
@@ -254,7 +255,55 @@ describe('pi self-update package manager detection', () => {
     );
   });
 
+  it('resolves a pnpm 10 shim without cmd-shim-target metadata', () => {
+    const shimDir = makeTempDir('pnpm-10-pi-shim-');
+    const packageRoot = join(
+      shimDir,
+      'global',
+      '5',
+      '.pnpm',
+      '@earendil-works+pi-coding-agent@9.9.9',
+      'node_modules',
+      '@earendil-works',
+      'pi-coding-agent',
+    );
+    mkdirSync(join(packageRoot, 'dist'), { recursive: true });
+    writeFileSync(
+      join(packageRoot, 'package.json'),
+      JSON.stringify({ name: '@earendil-works/pi-coding-agent', version: '9.9.9' }),
+    );
+    writeFileSync(join(packageRoot, 'dist', 'cli.js'), 'export {};\n');
+    const shimPath = join(shimDir, 'pi');
+    writeFileSync(
+      shimPath,
+      '#!/bin/sh\nbasedir=$(dirname "$0")\nexec node "$basedir/global/5/.pnpm/@earendil-works+pi-coding-agent@9.9.9/node_modules/@earendil-works/pi-coding-agent/dist/cli.js" "$@"\n',
+    );
+
+    expect(findPiCodingAgentRootFromExecutable({ piPath: shimPath })).toBe(
+      realpathSync(packageRoot),
+    );
+  });
+
   it('checks later PATH entries when a shell wrapper appears first', () => {
+    const packageRoot = makeTempDir('wrapped-pi-package-');
+    mkdirSync(join(packageRoot, 'dist'), { recursive: true });
+    writeFileSync(
+      join(packageRoot, 'package.json'),
+      JSON.stringify({ name: '@earendil-works/pi-coding-agent', version: '9.9.9' }),
+    );
+    writeFileSync(join(packageRoot, 'dist', 'cli.js'), 'export {};\n');
+    const wrapperPath = join(makeTempDir('pi-wrapper-'), 'pi');
+    writeFileSync(wrapperPath, '#!/bin/sh\nexec pi "$@"\n');
+    const shimPath = join(makeTempDir('wrapped-pi-shim-'), 'pi');
+    writeFileSync(
+      shimPath,
+      `#!/bin/sh\n# cmd-shim-target=${join(packageRoot, 'dist', 'cli.js')}\n`,
+    );
+
+    expect(findPiCodingAgentRootFromExecutable({ piPaths: [wrapperPath, shimPath] })).toBe(
+      realpathSync(packageRoot),
+    );
+    expect(findPiExecutablePath({ piPaths: [wrapperPath, shimPath] })).toBe(shimPath);
     expect(
       detectPiInstallPackageManagerFromPaths([
         '/Users/me/.dotfiles/bin/pi',
@@ -262,11 +311,25 @@ describe('pi self-update package manager detection', () => {
       ]),
     ).toBe('aube');
   });
+
   it('builds an aube global update command for pi', () => {
     expect(buildPiSelfUpdateCommand('aube')).toEqual({
       packageManager: 'aube',
       command: 'aube',
       args: ['add', '-g', '@earendil-works/pi-coding-agent@latest'],
+    });
+  });
+
+  it('builds a pnpm update that honors the latest tag immediately', () => {
+    expect(buildPiSelfUpdateCommand('pnpm')).toEqual({
+      packageManager: 'pnpm',
+      command: 'pnpm',
+      args: [
+        'add',
+        '-g',
+        '@earendil-works/pi-coding-agent@latest',
+        '--config.minimum-release-age=0',
+      ],
     });
   });
 
@@ -284,6 +347,7 @@ describe('pi self-update package manager detection', () => {
     const logs: string[] = [];
 
     await runPiUpdate({
+      piCommand: 'pi',
       piPath:
         '/Users/me/.cache/aube/virtual-store/@earendil-works+pi-coding-agent@0.79.10-hash/node_modules/@earendil-works/pi-coding-agent/dist/cli.js',
       execFile: ((command: string, args: string[]) => {
@@ -312,6 +376,7 @@ describe('pi self-update package manager detection', () => {
 
     await runPiUpdate({
       approve: true,
+      piCommand: 'pi',
       piPath:
         '/Users/me/.cache/aube/virtual-store/@earendil-works+pi-coding-agent@0.79.10-hash/node_modules/@earendil-works/pi-coding-agent/dist/cli.js',
       execFile: ((command: string, args: string[]) => {

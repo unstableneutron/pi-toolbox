@@ -24,7 +24,7 @@ async function applyDirective(
   return applyModelDirective(directive.value, pi, ctx);
 }
 
-export async function applyDirectives(
+async function applyDirectives(
   parsed: ParsedEditorShortcut,
   pi: ExtensionAPI,
   ctx: ExtensionContext,

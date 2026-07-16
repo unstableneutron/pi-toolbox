@@ -547,25 +547,29 @@ function getPiExecutablePaths(): string[] {
   }
 }
 
-function findPiExecutablePath(): string | undefined {
-  const piPaths = getPiExecutablePaths();
-  return (
-    piPaths.find((entry) => !entry.startsWith(join(REPO_ROOT, 'node_modules', '.bin'))) ??
-    piPaths[0]
-  );
+function preferExternalPiPaths(piPaths: readonly string[]): string[] {
+  const workspaceBin = join(REPO_ROOT, 'node_modules', '.bin');
+  const externalPaths = piPaths.filter((entry) => !entry.startsWith(workspaceBin));
+  return externalPaths.length > 0 ? externalPaths : [...piPaths];
 }
 
-export function findPiCodingAgentRootFromExecutable(
-  options: { piPath?: string } = {},
-): string | undefined {
-  const piPath = options.piPath ?? findPiExecutablePath();
-  if (!piPath || !existsSync(piPath)) return undefined;
+function findPiCodingAgentRootFromPath(piPath: string): string | undefined {
+  if (!existsSync(piPath)) return undefined;
 
   const candidates: string[] = [];
   try {
     const shim = readFileSync(piPath, 'utf8');
     const target = shim.match(/^# cmd-shim-target=(.+\/dist\/cli\.js)$/m)?.[1];
     if (target) candidates.push(dirname(dirname(target)));
+
+    // pnpm 10 shims predate cmd-shim-target. Resolve their $basedir-relative
+    // CLI path so an older shim can still identify its owning package.
+    for (const match of shim.matchAll(/\$(?:basedir|basedir_win)\/([^"'\r\n]*\/dist\/cli\.js)/g)) {
+      const relativeTarget = match[1];
+      if (relativeTarget) {
+        candidates.push(dirname(dirname(resolve(dirname(piPath), relativeTarget))));
+      }
+    }
   } catch {
     // A native executable or unreadable shim can still use the fallback below.
   }
@@ -581,6 +585,26 @@ export function findPiCodingAgentRootFromExecutable(
     if (readPackageName(candidate) === PI_CODING_AGENT_PACKAGE_NAME) {
       return realpathSync(candidate);
     }
+  }
+  return undefined;
+}
+
+export function findPiExecutablePath(
+  options: { piPaths?: readonly string[] } = {},
+): string | undefined {
+  const piPaths = preferExternalPiPaths(options.piPaths ?? getPiExecutablePaths());
+  return piPaths.find((piPath) => findPiCodingAgentRootFromPath(piPath) !== undefined);
+}
+
+export function findPiCodingAgentRootFromExecutable(
+  options: { piPath?: string; piPaths?: readonly string[] } = {},
+): string | undefined {
+  const piPaths = options.piPath
+    ? [options.piPath]
+    : preferExternalPiPaths(options.piPaths ?? getPiExecutablePaths());
+  for (const piPath of piPaths) {
+    const packageRoot = findPiCodingAgentRootFromPath(piPath);
+    if (packageRoot) return packageRoot;
   }
   return undefined;
 }
@@ -609,7 +633,18 @@ export function buildPiSelfUpdateCommand(
     case 'aube':
       return { packageManager, command: 'aube', args: ['add', '-g', `${packageName}@latest`] };
     case 'pnpm':
-      return { packageManager, command: 'pnpm', args: ['update', '-g', '--latest', packageName] };
+      return {
+        packageManager,
+        command: 'pnpm',
+        args: [
+          'add',
+          '-g',
+          `${packageName}@latest`,
+          // pnpm 11 delays newly published versions by default. Pi's explicit
+          // update command should honor the registry's latest tag immediately.
+          '--config.minimum-release-age=0',
+        ],
+      };
     case 'npm':
       return { packageManager, command: 'npm', args: ['update', '-g', packageName] };
     case 'yarn':
@@ -657,15 +692,16 @@ function findContainingPackageRoot(filePath: string, packageName: string): strin
 }
 
 function findPackagePathFromActivePi(packageName: string): string | undefined {
-  for (const piPath of getPiExecutablePaths()) {
-    let realPiPath: string;
-    try {
-      realPiPath = realpathSync(piPath);
-    } catch {
-      continue;
-    }
-
-    const piPackageRoot = findContainingPackageRoot(realPiPath, PI_CODING_AGENT_PACKAGE_NAME);
+  for (const piPath of preferExternalPiPaths(getPiExecutablePaths())) {
+    const piPackageRoot =
+      findPiCodingAgentRootFromPath(piPath) ??
+      (() => {
+        try {
+          return findContainingPackageRoot(realpathSync(piPath), PI_CODING_AGENT_PACKAGE_NAME);
+        } catch {
+          return undefined;
+        }
+      })();
     if (!piPackageRoot) continue;
     if (packageName === PI_CODING_AGENT_PACKAGE_NAME) return piPackageRoot;
 
@@ -2337,6 +2373,7 @@ export async function runPiUpdate(
     dryRun?: boolean;
     approve?: boolean;
     piPath?: string;
+    piCommand?: string;
     execFile?: typeof execFileSync;
     log?: (message: string) => void;
   } = {},
@@ -2380,7 +2417,11 @@ export async function runPiUpdate(
     return;
   }
 
-  execFile('pi', ['update', '--extensions'], { stdio: 'inherit' });
+  // Bun prepends the workspace's node_modules/.bin to PATH for scripts. Run
+  // the package-manager-owned executable directly so extension updates use
+  // the CLI that the self-update step just installed.
+  const piExecutable = options.piCommand ?? findPiExecutablePath() ?? options.piPath ?? 'pi';
+  execFile(piExecutable, ['update', '--extensions'], { stdio: 'inherit' });
   log('Ran: pi update --extensions');
 }
 

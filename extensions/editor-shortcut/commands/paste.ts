@@ -171,7 +171,7 @@ export function restorePasteExpansions(ctx: ExtensionContext, state: PasteShortc
   }
 }
 
-export function expandPastePlaceholdersInText(text: string, state: PasteShortcutState): string {
+function expandPastePlaceholdersInText(text: string, state: PasteShortcutState): string {
   let result = text;
   for (const [placeholder, contextText] of state.expansions) {
     result = result.split(placeholder).join(contextText);

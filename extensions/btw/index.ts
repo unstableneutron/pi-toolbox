@@ -75,6 +75,18 @@ type SideSessionRuntime = {
   unsubscribe: () => void;
 };
 
+type ModelRegistryWithRuntime = {
+  runtime?: AgentSession['modelRuntime'];
+};
+
+function getSessionModelRuntime(ctx: ExtensionContext): AgentSession['modelRuntime'] {
+  const runtime = (ctx.modelRegistry as unknown as ModelRegistryWithRuntime).runtime;
+  if (!runtime) {
+    throw new Error('Pi model runtime is unavailable for the BTW side session.');
+  }
+  return runtime;
+}
+
 type ToolCallInfo = {
   toolCallId: string;
   toolName: string;
@@ -597,7 +609,7 @@ export default function (pi: ExtensionAPI) {
     const { session } = await createAgentSession({
       sessionManager: SessionManager.inMemory(),
       model: ctx.model,
-      modelRegistry: ctx.modelRegistry as AgentSession['modelRegistry'],
+      modelRuntime: getSessionModelRuntime(ctx),
       thinkingLevel: pi.getThinkingLevel() as SessionThinkingLevel,
       // 0.68.0+: createAgentSession expects tool-name allowlist, not Tool[].
       // This mirrors the previous `codingTools` export: [read, bash, edit, write].
@@ -795,7 +807,7 @@ export default function (pi: ExtensionAPI) {
     const { session } = await createAgentSession({
       sessionManager: SessionManager.inMemory(),
       model,
-      modelRegistry: ctx.modelRegistry as AgentSession['modelRegistry'],
+      modelRuntime: getSessionModelRuntime(ctx),
       thinkingLevel: 'off',
       tools: [],
       resourceLoader: createBtwResourceLoader(ctx, [BTW_SUMMARY_PROMPT]),

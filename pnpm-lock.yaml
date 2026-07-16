@@ -18,13 +18,13 @@ importers:
         version: 3.1088.0
       '@earendil-works/pi-agent-core':
         specifier: 0.80.9
-        version: 0.80.9
+        version: 0.80.9(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@earendil-works/pi-ai':
         specifier: 0.80.9
-        version: 0.80.9
+        version: 0.80.9(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@earendil-works/pi-coding-agent':
         specifier: 0.80.9
-        version: 0.80.9
+        version: 0.80.9(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@earendil-works/pi-tui':
         specifier: 0.80.9
         version: 0.80.9
@@ -39,7 +39,7 @@ importers:
         version: 0.44.0
       oxlint:
         specifier: ^1.59.0
-        version: 1.74.0
+        version: 1.74.0(oxlint-tsgolint@0.20.0)
       oxlint-tsgolint:
         specifier: ^0.20.0
         version: 0.20.0
@@ -54,7 +54,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^3.2.4
-        version: 3.2.7(@types/node@24.13.3)
+        version: 3.2.7(@types/node@24.13.3)(jiti@2.7.0)(tsx@4.23.1)(yaml@2.9.0)
 
   extensions/bash-rewrite:
     dependencies:
@@ -63,10 +63,10 @@ importers:
         version: 1.10.0
     devDependencies:
       '@earendil-works/pi-coding-agent':
-        specifier: ^0.79.0
-        version: 0.80.9
+        specifier: 0.80.9
+        version: 0.80.9(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@earendil-works/pi-tui':
-        specifier: ^0.79.0
+        specifier: 0.80.9
         version: 0.80.9
       '@types/node':
         specifier: ^24.3.0
@@ -76,7 +76,7 @@ importers:
         version: 0.44.0
       oxlint:
         specifier: ^1.59.0
-        version: 1.74.0
+        version: 1.74.0(oxlint-tsgolint@0.20.0)
       oxlint-tsgolint:
         specifier: ^0.20.0
         version: 0.20.0
@@ -85,7 +85,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^3.2.4
-        version: 3.2.7(@types/node@24.13.3)
+        version: 3.2.7(@types/node@24.13.3)(jiti@2.7.0)(tsx@4.23.1)(yaml@2.9.0)
 
   extensions/multi-edit:
     dependencies:
@@ -94,10 +94,10 @@ importers:
         version: 9.0.0
     devDependencies:
       '@earendil-works/pi-coding-agent':
-        specifier: ^0.79.0
-        version: 0.80.9
+        specifier: 0.80.9
+        version: 0.80.9(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@earendil-works/pi-tui':
-        specifier: ^0.79.0
+        specifier: 0.80.9
         version: 0.80.9
       '@types/node':
         specifier: ^24.3.0
@@ -110,7 +110,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^3.2.4
-        version: 3.2.7(@types/node@24.13.3)
+        version: 3.2.7(@types/node@24.13.3)(jiti@2.7.0)(tsx@4.23.1)(yaml@2.9.0)
 
   extensions/openai-websocket-responses:
     dependencies:
@@ -119,11 +119,11 @@ importers:
         version: 8.21.1
     devDependencies:
       '@earendil-works/pi-ai':
-        specifier: ^0.80.7
-        version: 0.80.9
+        specifier: 0.80.9
+        version: 0.80.9(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@earendil-works/pi-coding-agent':
-        specifier: ^0.80.7
-        version: 0.80.9
+        specifier: 0.80.9
+        version: 0.80.9(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@types/node':
         specifier: ^24.3.0
         version: 24.13.3
@@ -135,7 +135,7 @@ importers:
         version: 0.44.0
       oxlint:
         specifier: ^1.59.0
-        version: 1.74.0
+        version: 1.74.0(oxlint-tsgolint@0.20.0)
       oxlint-tsgolint:
         specifier: ^0.20.0
         version: 0.20.0
@@ -144,16 +144,16 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^3.2.4
-        version: 3.2.7(@types/node@24.13.3)
+        version: 3.2.7(@types/node@24.13.3)(jiti@2.7.0)(tsx@4.23.1)(yaml@2.9.0)
 
   extensions/pi-codex-app-server-use:
     devDependencies:
       '@earendil-works/pi-ai':
-        specifier: ^0.79.0
-        version: 0.80.9
+        specifier: 0.80.9
+        version: 0.80.9(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@earendil-works/pi-coding-agent':
-        specifier: ^0.79.0
-        version: 0.80.9
+        specifier: 0.80.9
+        version: 0.80.9(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@types/node':
         specifier: ^24.3.0
         version: 24.13.3
@@ -162,7 +162,7 @@ importers:
         version: 0.44.0
       oxlint:
         specifier: ^1.59.0
-        version: 1.74.0
+        version: 1.74.0(oxlint-tsgolint@0.20.0)
       oxlint-tsgolint:
         specifier: ^0.20.0
         version: 0.20.0
@@ -174,7 +174,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^3.2.4
-        version: 3.2.7(@types/node@24.13.3)
+        version: 3.2.7(@types/node@24.13.3)(jiti@2.7.0)(tsx@4.23.1)(yaml@2.9.0)
 
   extensions/pi-codex-browser:
     devDependencies:
@@ -186,7 +186,7 @@ importers:
         version: 0.44.0
       oxlint:
         specifier: ^1.59.0
-        version: 1.74.0
+        version: 1.74.0(oxlint-tsgolint@0.20.0)
       oxlint-tsgolint:
         specifier: ^0.20.0
         version: 0.20.0
@@ -195,13 +195,13 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^3.2.4
-        version: 3.2.7(@types/node@24.13.3)
+        version: 3.2.7(@types/node@24.13.3)(jiti@2.7.0)(tsx@4.23.1)(yaml@2.9.0)
 
   extensions/pi-conditional-context:
     devDependencies:
       '@earendil-works/pi-coding-agent':
-        specifier: ^0.79.0
-        version: 0.80.9
+        specifier: 0.80.9
+        version: 0.80.9(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@types/node':
         specifier: ^24.3.0
         version: 24.13.3
@@ -210,10 +210,13 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^3.2.4
-        version: 3.2.7(@types/node@24.13.3)
+        version: 3.2.7(@types/node@24.13.3)(jiti@2.7.0)(tsx@4.23.1)(yaml@2.9.0)
 
   extensions/pi-fff-search:
     dependencies:
+      '@earendil-works/pi-ai':
+        specifier: 0.80.9
+        version: 0.80.9(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       fff-router:
         specifier: github:unstableneutron/fff-router#semver:>=0.8.0
         version: https://codeload.github.com/unstableneutron/fff-router/tar.gz/599ee0409d113573c003d419c3702ffc3b0d3a1f
@@ -223,12 +226,12 @@ importers:
     devDependencies:
       '@earendil-works/pi-agent-core':
         specifier: ^0.79.0
-        version: 0.79.10
+        version: 0.79.10(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@earendil-works/pi-coding-agent':
-        specifier: ^0.79.0
-        version: 0.80.9
+        specifier: 0.80.9
+        version: 0.80.9(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@earendil-works/pi-tui':
-        specifier: ^0.79.0
+        specifier: 0.80.9
         version: 0.80.9
       '@types/node':
         specifier: ^24.3.0
@@ -241,7 +244,7 @@ importers:
         version: 0.44.0
       oxlint:
         specifier: ^1.59.0
-        version: 1.74.0
+        version: 1.74.0(oxlint-tsgolint@0.20.0)
       oxlint-tsgolint:
         specifier: ^0.20.0
         version: 0.20.0
@@ -253,16 +256,16 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^3.2.4
-        version: 3.2.7(@types/node@24.13.3)
+        version: 3.2.7(@types/node@24.13.3)(jiti@2.7.0)(tsx@4.23.1)(yaml@2.9.0)
 
   extensions/pi-native-split:
     devDependencies:
       '@earendil-works/pi-ai':
-        specifier: ^0.79.0
-        version: 0.80.9
+        specifier: 0.80.9
+        version: 0.80.9(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@earendil-works/pi-coding-agent':
-        specifier: ^0.79.0
-        version: 0.80.9
+        specifier: 0.80.9
+        version: 0.80.9(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@types/node':
         specifier: ^24.3.0
         version: 24.13.3
@@ -271,7 +274,7 @@ importers:
         version: 0.44.0
       oxlint:
         specifier: ^1.59.0
-        version: 1.74.0
+        version: 1.74.0(oxlint-tsgolint@0.20.0)
       oxlint-tsgolint:
         specifier: ^0.20.0
         version: 0.20.0
@@ -280,15 +283,15 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^3.2.4
-        version: 3.2.7(@types/node@24.13.3)
+        version: 3.2.7(@types/node@24.13.3)(jiti@2.7.0)(tsx@4.23.1)(yaml@2.9.0)
 
   extensions/pi-render-gate:
     devDependencies:
       '@earendil-works/pi-coding-agent':
-        specifier: ^0.79.0
-        version: 0.80.9
+        specifier: 0.80.9
+        version: 0.80.9(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@earendil-works/pi-tui':
-        specifier: ^0.79.0
+        specifier: 0.80.9
         version: 0.80.9
       '@types/node':
         specifier: ^24.3.0
@@ -298,7 +301,7 @@ importers:
         version: 0.44.0
       oxlint:
         specifier: ^1.59.0
-        version: 1.74.0
+        version: 1.74.0(oxlint-tsgolint@0.20.0)
       oxlint-tsgolint:
         specifier: ^0.20.0
         version: 0.20.0
@@ -307,16 +310,16 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^3.2.4
-        version: 3.2.7(@types/node@24.13.3)
+        version: 3.2.7(@types/node@24.13.3)(jiti@2.7.0)(tsx@4.23.1)(yaml@2.9.0)
 
   extensions/pi-retry:
     devDependencies:
       '@earendil-works/pi-ai':
-        specifier: ^0.79.0
-        version: 0.80.9
+        specifier: 0.80.9
+        version: 0.80.9(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@earendil-works/pi-coding-agent':
-        specifier: ^0.79.0
-        version: 0.80.9
+        specifier: 0.80.9
+        version: 0.80.9(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@types/node':
         specifier: ^24.3.0
         version: 24.13.3
@@ -325,7 +328,7 @@ importers:
         version: 0.44.0
       oxlint:
         specifier: ^1.59.0
-        version: 1.74.0
+        version: 1.74.0(oxlint-tsgolint@0.20.0)
       oxlint-tsgolint:
         specifier: ^0.20.0
         version: 0.20.0
@@ -334,7 +337,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^3.2.4
-        version: 3.2.7(@types/node@24.13.3)
+        version: 3.2.7(@types/node@24.13.3)(jiti@2.7.0)(tsx@4.23.1)(yaml@2.9.0)
 
   extensions/web-search:
     dependencies:
@@ -343,10 +346,10 @@ importers:
         version: 0.3.2
     devDependencies:
       '@earendil-works/pi-coding-agent':
-        specifier: ^0.79.0
-        version: 0.80.9
+        specifier: 0.80.9
+        version: 0.80.9(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@earendil-works/pi-tui':
-        specifier: ^0.79.0
+        specifier: 0.80.9
         version: 0.80.9
       '@types/node':
         specifier: ^24.3.0
@@ -359,13 +362,13 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^3.2.4
-        version: 3.2.7(@types/node@24.13.3)
+        version: 3.2.7(@types/node@24.13.3)(jiti@2.7.0)(tsx@4.23.1)(yaml@2.9.0)
 
   packages/roundtable-review:
     dependencies:
       '@earendil-works/pi-coding-agent':
-        specifier: 0.79.10
-        version: 0.80.9
+        specifier: 0.80.9
+        version: 0.80.9(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
 
 packages:
 
@@ -829,7 +832,6 @@ packages:
     peerDependenciesMeta:
       '@cfworker/json-schema':
         optional: true
-      zod: {}
 
   '@napi-rs/wasm-runtime@1.1.6':
     resolution: {integrity: sha512-ZLv/JdUfkvOy9eCnnBaGfiO+XimbjebAeO+MRQqD/B+FR1tnRN0tpKSJHRbE8sFfS6aqsXZ67TQjfwfsxULVbg==}
@@ -1912,6 +1914,8 @@ packages:
   fff-router@https://codeload.github.com/unstableneutron/fff-router/tar.gz/599ee0409d113573c003d419c3702ffc3b0d3a1f:
     resolution: {gitHosted: true, integrity: sha512-pAZ1QlfyfoUOp/dNj4KFpv5LkmKJEor0BzuDrNFS6FnqKErkuMZKqltfMzhp73HePmy7tVx1FhNLKjIYqQb/5w==, tarball: https://codeload.github.com/unstableneutron/fff-router/tar.gz/599ee0409d113573c003d419c3702ffc3b0d3a1f}
     version: 0.8.2
+    engines: {node: '>=20.6.0'}
+    hasBin: true
 
   ffi-rs@1.3.2:
     resolution: {integrity: sha512-4s8dX9VbBw/jd5NOuE3EJRqXaIVdjMyiumeeDzrOhtjQRwp6Bz2za7iksWXTnvTQKV/tTdm1s1w7mObe92zPjQ==}
@@ -2571,9 +2575,11 @@ packages:
 
 snapshots:
 
-  '@anthropic-ai/sdk@0.91.1':
+  '@anthropic-ai/sdk@0.91.1(zod@4.4.3)':
     dependencies:
       json-schema-to-ts: 3.1.1
+    optionalDependencies:
+      zod: 4.4.3
 
   '@aws-crypto/sha256-browser@5.2.0':
     dependencies:
@@ -2806,9 +2812,9 @@ snapshots:
 
   '@babel/runtime@7.29.7': {}
 
-  '@earendil-works/pi-agent-core@0.79.10':
+  '@earendil-works/pi-agent-core@0.79.10(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)':
     dependencies:
-      '@earendil-works/pi-ai': 0.80.9
+      '@earendil-works/pi-ai': 0.80.9(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       ignore: 7.0.5
       typebox: 1.1.38
       yaml: 2.9.0
@@ -2820,9 +2826,9 @@ snapshots:
       - ws
       - zod
 
-  '@earendil-works/pi-agent-core@0.80.9':
+  '@earendil-works/pi-agent-core@0.80.9(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)':
     dependencies:
-      '@earendil-works/pi-ai': 0.80.9
+      '@earendil-works/pi-ai': 0.80.9(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       ignore: 7.0.5
       typebox: 1.1.38
       yaml: 2.9.0
@@ -2834,17 +2840,17 @@ snapshots:
       - ws
       - zod
 
-  '@earendil-works/pi-ai@0.80.9':
+  '@earendil-works/pi-ai@0.80.9(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)':
     dependencies:
-      '@anthropic-ai/sdk': 0.91.1
+      '@anthropic-ai/sdk': 0.91.1(zod@4.4.3)
       '@aws-sdk/client-bedrock-runtime': 3.1048.0
-      '@google/genai': 1.52.0
+      '@google/genai': 1.52.0(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))
       '@mistralai/mistralai': 2.2.6(@opentelemetry/api@1.9.0)
       '@opentelemetry/api': 1.9.0
       '@smithy/node-http-handler': 4.7.3
       http-proxy-agent: 7.0.2
       https-proxy-agent: 7.0.6
-      openai: 6.26.0
+      openai: 6.26.0(ws@8.21.1)(zod@4.4.3)
       partial-json: 0.1.7
       typebox: 1.1.38
     transitivePeerDependencies:
@@ -2855,10 +2861,10 @@ snapshots:
       - ws
       - zod
 
-  '@earendil-works/pi-coding-agent@0.80.9':
+  '@earendil-works/pi-coding-agent@0.80.9(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)':
     dependencies:
-      '@earendil-works/pi-agent-core': 0.80.9
-      '@earendil-works/pi-ai': 0.80.9
+      '@earendil-works/pi-agent-core': 0.80.9(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
+      '@earendil-works/pi-ai': 0.80.9(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@earendil-works/pi-tui': 0.80.9
       '@silvia-odwyer/photon-node': 0.3.4
       chalk: 5.6.2
@@ -3032,12 +3038,14 @@ snapshots:
       '@ff-labs/fff-bin-win32-arm64': 0.5.2
       '@ff-labs/fff-bin-win32-x64': 0.5.2
 
-  '@google/genai@1.52.0':
+  '@google/genai@1.52.0(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))':
     dependencies:
       google-auth-library: 10.9.0
       p-retry: 4.6.2
       protobufjs: 7.6.5
       ws: 8.21.1
+    optionalDependencies:
+      '@modelcontextprotocol/sdk': 1.29.0(zod@4.4.3)
     transitivePeerDependencies:
       - bufferutil
       - supports-color
@@ -3095,11 +3103,12 @@ snapshots:
 
   '@mistralai/mistralai@2.2.6(@opentelemetry/api@1.9.0)':
     dependencies:
-      '@opentelemetry/api': 1.9.0
       '@opentelemetry/semantic-conventions': 1.43.0
       ws: 8.21.1
       zod: 4.4.3
       zod-to-json-schema: 3.25.2(zod@4.4.3)
+    optionalDependencies:
+      '@opentelemetry/api': 1.9.0
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
@@ -3589,12 +3598,13 @@ snapshots:
       chai: 5.3.3
       tinyrainbow: 2.0.0
 
-  '@vitest/mocker@3.2.7(vite@7.3.6(@types/node@24.13.3)(tsx@4.23.1))':
+  '@vitest/mocker@3.2.7(vite@7.3.6(@types/node@24.13.3)(jiti@2.7.0)(tsx@4.23.1)(yaml@2.9.0))':
     dependencies:
       '@vitest/spy': 3.2.7
       estree-walker: 3.0.3
       magic-string: 0.30.21
-      vite: 7.3.6(@types/node@24.13.3)(tsx@4.23.1)
+    optionalDependencies:
+      vite: 7.3.6(@types/node@24.13.3)(jiti@2.7.0)(tsx@4.23.1)(yaml@2.9.0)
 
   '@vitest/pretty-format@3.2.7':
     dependencies:
@@ -3663,7 +3673,7 @@ snapshots:
   agent-base@7.1.4: {}
 
   ajv-formats@3.0.1(ajv@8.20.0):
-    dependencies:
+    optionalDependencies:
       ajv: 8.20.0
 
   ajv@8.20.0:
@@ -3882,7 +3892,7 @@ snapshots:
       walk-up-path: 4.0.0
 
   fdir@6.5.0(picomatch@4.0.5):
-    dependencies:
+    optionalDependencies:
       picomatch: 4.0.5
 
   fetch-blob@3.2.0:
@@ -4160,7 +4170,10 @@ snapshots:
     dependencies:
       wrappy: 1.0.2
 
-  openai@6.26.0: {}
+  openai@6.26.0(ws@8.21.1)(zod@4.4.3):
+    optionalDependencies:
+      ws: 8.21.1
+      zod: 4.4.3
 
   oxc-parser@0.137.0:
     dependencies:
@@ -4242,7 +4255,7 @@ snapshots:
       '@oxlint-tsgolint/win32-arm64': 0.20.0
       '@oxlint-tsgolint/win32-x64': 0.20.0
 
-  oxlint@1.74.0:
+  oxlint@1.74.0(oxlint-tsgolint@0.20.0):
     optionalDependencies:
       '@oxlint/binding-android-arm-eabi': 1.74.0
       '@oxlint/binding-android-arm64': 1.74.0
@@ -4263,6 +4276,7 @@ snapshots:
       '@oxlint/binding-win32-arm64-msvc': 1.74.0
       '@oxlint/binding-win32-ia32-msvc': 1.74.0
       '@oxlint/binding-win32-x64-msvc': 1.74.0
+      oxlint-tsgolint: 0.20.0
 
   p-retry@4.6.2:
     dependencies:
@@ -4528,14 +4542,15 @@ snapshots:
 
   vary@1.1.2: {}
 
-  vite-node@3.2.4(@types/node@24.13.3)(tsx@4.23.1):
+  vite-node@3.2.4(@types/node@24.13.3)(jiti@2.7.0)(tsx@4.23.1)(yaml@2.9.0):
     dependencies:
       cac: 6.7.14
       debug: 4.4.3
       es-module-lexer: 1.7.0
       pathe: 2.0.3
-      vite: 7.3.6(@types/node@24.13.3)(tsx@4.23.1)
+      vite: 7.3.6(@types/node@24.13.3)(jiti@2.7.0)(tsx@4.23.1)(yaml@2.9.0)
     transitivePeerDependencies:
+      - '@types/node'
       - jiti
       - less
       - lightningcss
@@ -4545,27 +4560,29 @@ snapshots:
       - sugarss
       - supports-color
       - terser
+      - tsx
       - yaml
 
-  vite@7.3.6(@types/node@24.13.3)(tsx@4.23.1):
+  vite@7.3.6(@types/node@24.13.3)(jiti@2.7.0)(tsx@4.23.1)(yaml@2.9.0):
     dependencies:
-      '@types/node': 24.13.3
       esbuild: 0.28.1
       fdir: 6.5.0(picomatch@4.0.5)
       picomatch: 4.0.5
       postcss: 8.5.19
       rollup: 4.62.2
       tinyglobby: 0.2.17
-      tsx: 4.23.1
     optionalDependencies:
+      '@types/node': 24.13.3
       fsevents: 2.3.3
+      jiti: 2.7.0
+      tsx: 4.23.1
+      yaml: 2.9.0
 
-  vitest@3.2.7(@types/node@24.13.3):
+  vitest@3.2.7(@types/node@24.13.3)(jiti@2.7.0)(tsx@4.23.1)(yaml@2.9.0):
     dependencies:
       '@types/chai': 5.2.3
-      '@types/node': 24.13.3
       '@vitest/expect': 3.2.7
-      '@vitest/mocker': 3.2.7(vite@7.3.6(@types/node@24.13.3)(tsx@4.23.1))
+      '@vitest/mocker': 3.2.7(vite@7.3.6(@types/node@24.13.3)(jiti@2.7.0)(tsx@4.23.1)(yaml@2.9.0))
       '@vitest/pretty-format': 3.2.7
       '@vitest/runner': 3.2.7
       '@vitest/snapshot': 3.2.7
@@ -4583,9 +4600,11 @@ snapshots:
       tinyglobby: 0.2.17
       tinypool: 1.1.1
       tinyrainbow: 2.0.0
-      vite: 7.3.6(@types/node@24.13.3)(tsx@4.23.1)
-      vite-node: 3.2.4(@types/node@24.13.3)(tsx@4.23.1)
+      vite: 7.3.6(@types/node@24.13.3)(jiti@2.7.0)(tsx@4.23.1)(yaml@2.9.0)
+      vite-node: 3.2.4(@types/node@24.13.3)(jiti@2.7.0)(tsx@4.23.1)(yaml@2.9.0)
       why-is-node-running: 2.3.0
+    optionalDependencies:
+      '@types/node': 24.13.3
     transitivePeerDependencies:
       - jiti
       - less
@@ -4597,6 +4616,7 @@ snapshots:
       - sugarss
       - supports-color
       - terser
+      - tsx
       - yaml
 
   walk-up-path@4.0.0: {}
