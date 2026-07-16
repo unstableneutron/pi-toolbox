@@ -194,6 +194,7 @@ export function classifyOpenAIResponsesFailure(
   }
 
   if (
+    status === 408 ||
     status === 500 ||
     status === 502 ||
     status === 503 ||
@@ -201,6 +202,7 @@ export function classifyOpenAIResponsesFailure(
     text.includes('server_error') ||
     text.includes('internal_server_error') ||
     text.includes('internal server') ||
+    text.includes('stream closed before response.completed') ||
     text.includes('unexpected eof') ||
     text.includes('abnormal closure') ||
     text.includes('close 1006')

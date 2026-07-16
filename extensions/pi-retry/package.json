@@ -1,6 +1,6 @@
 {
   "name": "pi-retry",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Pi package for retryable terminal-leaf recovery, including refusals, empty stops, stranded tool results, retryable errors, and manual /retry",
   "keywords": [
     "aborted",

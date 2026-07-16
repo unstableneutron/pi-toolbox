@@ -129,9 +129,21 @@ export class WebSocketMidstreamError extends Error {
 }
 
 class RetryableResponseError extends Error {
-  constructor(message: string) {
+  readonly failureReason?: string;
+  readonly failureCategory?: string;
+  readonly retryable?: boolean;
+
+  constructor(
+    message: string,
+    readonly event: Record<string, any>,
+  ) {
     super(message);
     this.name = 'RetryableResponseError';
+    const status = typeof event.status === 'number' ? event.status : event.error?.status;
+    const classification = classifyOpenAIResponsesFailure({ status, event });
+    this.failureReason = classification?.reason;
+    this.failureCategory = classification?.category;
+    this.retryable = classification?.retryable;
   }
 }
 
@@ -1205,7 +1217,12 @@ export async function runWebSocketResponse(
         ): { replayUnsafeEvent: boolean; terminalEvent: boolean } => {
           const previousResponseError = options.partial
             ? undefined
-            : previousResponseNotFoundMessage(parsed);
+            : previousResponseNotFoundMessage(
+                parsed,
+                typeof request.body.previous_response_id === 'string'
+                  ? request.body.previous_response_id
+                  : undefined,
+              );
           if (previousResponseError) throw new PreviousResponseNotFoundError(previousResponseError);
           if (eventCount === 0) {
             clearFirstEventTimer();
@@ -1228,12 +1245,23 @@ export async function runWebSocketResponse(
           } else {
             responseId = nextResponseId ?? responseId;
           }
-          if (!options.partial && responseId && isRetryableResponsesErrorFrame(parsed)) {
-            throw new RetryableResponseError(responsesErrorFrameMessage(parsed));
-          }
           if (!options.partial && parsed.type === 'error') {
             const status = typeof parsed.status === 'number' ? parsed.status : parsed.error?.status;
             const classification = classifyOpenAIResponsesFailure({ status, event: parsed });
+            request.diagnostics?.set({
+              failureReason: classification?.reason,
+              failureCategory: classification?.category,
+              retryable: classification?.retryable,
+              responseErrorStatus: typeof status === 'number' ? status : undefined,
+              responseErrorType:
+                typeof parsed.error?.type === 'string' ? parsed.error.type : undefined,
+              responseErrorCode:
+                typeof parsed.error?.code === 'string' ? parsed.error.code : undefined,
+              responseErrorMessage: responsesErrorFrameMessage(parsed),
+            });
+            if (isRetryableResponsesErrorFrame(parsed)) {
+              throw new RetryableResponseError(responsesErrorFrameMessage(parsed), parsed);
+            }
             if (classification?.retryable === false) {
               throw new TerminalResponseErrorFrame(responsesErrorFrameMessage(parsed), parsed);
             }

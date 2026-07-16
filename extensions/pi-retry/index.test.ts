@@ -187,6 +187,14 @@ describe('pi-retry extra provider classification', () => {
     ).toBe('providerServerError');
   });
 
+  test('classifies proxy stream-close timeouts as retryable provider errors', () => {
+    const errorMessage =
+      '{"type":"error","status":408,"error":{"message":"stream closed before response.completed","type":"invalid_request_error"}}';
+
+    expect(classifyRetryableProviderError(errorMessage)).toBe('providerServerError');
+    expect(isExtraRetryableAssistantError(makeAssistantErrorMessage(errorMessage))).toBe(true);
+  });
+
   test('does not classify unrelated generic 404 text as retryable', () => {
     expect(classifyRetryableProviderError('404 Resource not found')).toBeUndefined();
   });

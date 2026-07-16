@@ -10,7 +10,7 @@ import type {
   Usage,
 } from '@earendil-works/pi-ai/compat';
 
-import { buildResponsesBody } from './body.ts';
+import { buildResponsesBody, type ResponsesBody } from './body.ts';
 import { shortHash, writeDebugLog } from './debug.ts';
 import {
   buildContinuationRequestBody,
@@ -101,6 +101,18 @@ function emptyUsage(): Usage {
     totalTokens: 0,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
   };
+}
+
+export function summarizeResponsesInputItemIds(body: Pick<ResponsesBody, 'input'>): {
+  count: number;
+  hash?: string;
+} {
+  const ids = body.input.flatMap((item) => {
+    if (!item || typeof item !== 'object') return [];
+    const id = (item as Record<string, unknown>).id;
+    return typeof id === 'string' && id.length > 0 ? [id] : [];
+  });
+  return { count: ids.length, hash: shortHash(ids.join('\u0000')) };
 }
 
 function createOutput(model: Model<Api>): AssistantMessage {
@@ -325,6 +337,8 @@ export function createOpenAIWebSocketResponsesStream(
         const body = continuationRequest.body;
         const fullInputItems = fullBody.input?.length ?? 0;
         const sentInputItems = body.input?.length ?? 0;
+        const fullInputItemIds = summarizeResponsesInputItemIds(fullBody);
+        const sentInputItemIds = summarizeResponsesInputItemIds(body);
         transportDiagnostics = createTransportDiagnostics({
           configuredTransport: options?.transport ?? 'auto',
           previousResponseId:
@@ -336,9 +350,13 @@ export function createOpenAIWebSocketResponsesStream(
         transportDiagnostics.set({
           continuation: continuationRequest.decision,
           sentInputItems,
+          sentInputItemIds: sentInputItemIds.count,
+          sentInputItemIdsHash: sentInputItemIds.hash,
           ...(continuationRequest.decision === 'delta'
             ? {
                 fullInputItems,
+                fullInputItemIds: fullInputItemIds.count,
+                fullInputItemIdsHash: fullInputItemIds.hash,
                 fullBytes: responseCreatePayloadBytes(fullBody),
               }
             : {}),
@@ -348,6 +366,10 @@ export function createOpenAIWebSocketResponsesStream(
           decision: continuationRequest.decision,
           fullInputItems: fullBody.input?.length ?? 0,
           sentInputItems: body.input?.length ?? 0,
+          fullInputItemIds: fullInputItemIds.count,
+          fullInputItemIdsHash: fullInputItemIds.hash,
+          sentInputItemIds: sentInputItemIds.count,
+          sentInputItemIdsHash: sentInputItemIds.hash,
           hasPreviousResponseId: typeof body.previous_response_id === 'string',
           logicalTraceId: logicalTrace?.traceId,
         });
@@ -398,6 +420,10 @@ export function createOpenAIWebSocketResponsesStream(
                 : undefined,
             },
             async (event, connection) => {
+              if (event.type === 'error') {
+                processor.apply(event);
+                return;
+              }
               await start(connection);
               processor.apply(event);
             },
@@ -413,6 +439,8 @@ export function createOpenAIWebSocketResponsesStream(
                   ? 'empty_response_failed_without_details'
                   : 'previous_response_not_found',
               sentInputItems: fullInputItems,
+              sentInputItemIds: fullInputItemIds.count,
+              sentInputItemIdsHash: fullInputItemIds.hash,
             });
             if (websocketResult.fallbackReason === 'empty_response_failed_without_details') {
               transportDiagnostics?.record('empty_response_failed_full_fallback', {

@@ -227,9 +227,11 @@ request instead.
 `websocket.retries` applies only before response state exists: connection
 failure, send failure, or close before any response event. In `"auto"` mode, a
 WebSocket failure before the stream starts falls back to the extension's SSE
-transport, which feeds the same Responses event processor. Explicit
-`transport: "websocket"` and `transport: "websocket-cached"` requests stay on
-WebSocket and report the failure.
+transport, which feeds the same Responses event processor. A terminal error as
+the first WebSocket frame is classified before `start`, so transient 408/5xx
+frames can take this SSE fallback path instead of committing the WebSocket
+stream. Explicit `transport: "websocket"` and `transport: "websocket-cached"`
+requests stay on WebSocket and report the failure.
 
 When an exact route reports deterministic WebSocket incompatibility, the
 extension remembers that provider/model/base-URL route for the current session
@@ -252,11 +254,13 @@ retrieve reaches `completed`, the recovered response id becomes the next
 continuation checkpoint.
 
 The next real model turn opens or reuses a WebSocket and sends only the new
-input with `previous_response_id`. If Azure reports `previous_response_not_found`
-before any response events are processed, the extension clears the stale
-continuation and retries once without `previous_response_id` using the full Pi
-model context for that turn. That pays the full-context penalty once and creates
-a fresh response id for later delta turns.
+input with `previous_response_id`. If the provider reports either the canonical
+`previous_response_not_found` code or a message such as
+`Response with id=... not found` before any response events are processed, the
+extension clears the stale continuation and retries once without
+`previous_response_id` using the full Pi model context for that turn. That pays
+the full-context penalty once and creates a fresh response id for later delta
+turns.
 
 Both transports reconcile `response.completed.response.output` against streamed
 items. Missing terminal text and function calls are emitted exactly once; output
@@ -305,12 +309,15 @@ Diagnostics also include a compact continuation summary so session analysis can
 distinguish full-context sends from previous-response-id deltas without reading
 debug logs. `continuation` records the continuation decision such as `delta` or
 `no_continuation`; `sentInputItems` records the number of Responses API input
-items sent on the actual request. For `delta` sends, `fullInputItems` and
+items sent on the actual request. Redacted `sentInputItemIds` and
+`sentInputItemIdsHash` fields reveal whether provider item ids were replayed
+without recording those ids. For `delta` sends, matching `fullInput*` fields and
 `fullBytes` estimate the full-context request that was avoided; the existing
 `requestBytes` field remains the actual payload size sent over the WebSocket.
-When a `previous_response_not_found` recovery retries with full context, the
-diagnostic sets `fallback: "previous_response_not_found"` and updates
-`sentInputItems` to the full-context item count.
+When a previous-response recovery retries with full context, the diagnostic sets
+`fallback: "previous_response_not_found"` and updates the sent-input summary to
+the full-context values. Terminal error frames also retain bounded status,
+type, code, message, classification, and retryability fields.
 
 When transparent `transport: "auto"` falls back to SSE before the stream starts,
 the WebSocket failure diagnostic is copied onto the final SSE assistant message

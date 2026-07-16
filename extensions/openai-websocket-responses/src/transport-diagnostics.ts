@@ -85,6 +85,10 @@ export interface TransportDiagnosticFields {
   fallback?: 'previous_response_not_found' | 'empty_response_failed_without_details';
   fullInputItems?: number;
   sentInputItems?: number;
+  fullInputItemIds?: number;
+  fullInputItemIdsHash?: string;
+  sentInputItemIds?: number;
+  sentInputItemIdsHash?: string;
   fullBytes?: number;
   firstEventMs?: number;
   responseCreatedMs?: number;
@@ -106,6 +110,13 @@ export interface TransportDiagnosticFields {
   authHeadersHash?: string;
   recoveryPath?: 'delta_retry' | 'delta_retry_full_replay' | 'full_replay';
   recoveryAttemptCount?: number;
+  failureReason?: string;
+  failureCategory?: string;
+  retryable?: boolean;
+  responseErrorStatus?: number;
+  responseErrorType?: string;
+  responseErrorCode?: string;
+  responseErrorMessage?: string;
   finalAttemptMode?: string;
 }
 

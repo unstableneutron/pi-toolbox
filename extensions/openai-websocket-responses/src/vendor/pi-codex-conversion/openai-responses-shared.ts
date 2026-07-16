@@ -48,6 +48,7 @@ function calculateCost<TApi extends Api>(model: Model<TApi>, usage: Usage): Usag
 import {
   TerminalResponseError,
   isRetryableEmptyResponseFailure,
+  responsesErrorFrameMessage,
 } from '../../../../shared/openai-responses-terminal';
 import {
   analyzeResponsesReasoningSignature,
@@ -882,7 +883,7 @@ export function createResponsesEventProcessor<TApi extends Api>(
       return;
     }
 
-    if (type === 'error') throw new Error(event.message || event.code || JSON.stringify(event));
+    if (type === 'error') throw new Error(responsesErrorFrameMessage(event));
     if (type === 'response.failed' || type === 'response.cancelled') {
       const response = event.response ?? {};
       throw new TerminalResponseError(type, response);

@@ -59,11 +59,48 @@ describe('shared OpenAI Responses terminal/error helpers', () => {
       }),
     ).toBe(true);
     expect(
+      isRetryableResponsesErrorFrame({
+        type: 'error',
+        status: 408,
+        error: {
+          type: 'invalid_request_error',
+          message: 'stream closed before response.completed',
+        },
+      }),
+    ).toBe(true);
+    expect(
       previousResponseNotFoundMessage({
         type: 'error',
         error: { code: 'previous_response_not_found', message: 'previous response missing' },
       }),
     ).toBe('previous response missing');
+    const xaiPreviousResponseError = {
+      type: 'error',
+      status: 500,
+      error: {
+        type: 'api_error',
+        message:
+          'gRPC error: Response with id=25a6b917-9417-9fa4-a21a-1e097d64a96b-xai-13 not found',
+      },
+    };
+    expect(previousResponseNotFoundMessage(xaiPreviousResponseError)).toContain(
+      '25a6b917-9417-9fa4-a21a-1e097d64a96b-xai-13',
+    );
+    expect(
+      previousResponseNotFoundMessage(
+        xaiPreviousResponseError,
+        '25a6b917-9417-9fa4-a21a-1e097d64a96b-xai-13',
+      ),
+    ).toContain('25a6b917-9417-9fa4-a21a-1e097d64a96b-xai-13');
+    expect(
+      previousResponseNotFoundMessage(xaiPreviousResponseError, 'different-response-id'),
+    ).toBeUndefined();
+    expect(
+      previousResponseNotFoundMessage({
+        type: 'error',
+        error: { message: 'The response body was not found in the cache.' },
+      }),
+    ).toBeUndefined();
     expect(previousResponseNotFoundMessage({ type: 'response.created' })).toBeUndefined();
     expect(responsesErrorFrameMessage({ type: 'error', message: 'boom' })).toBe('boom');
     expect(responsesErrorFrameMessage({ type: 'error', error: { code: 'server_error' } })).toBe(

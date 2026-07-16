@@ -228,6 +228,28 @@ describe('shared provider error classification', () => {
         'The system is currently experiencing high demand during peak load. For improved capacity reliability, consider switching to Provisioned Throughput.',
       ),
     ).toBe('providerServerError');
+
+    expect(
+      classifyRetryableProviderError(
+        '{"type":"error","status":408,"error":{"message":"stream closed before response.completed","type":"invalid_request_error"}}',
+      ),
+    ).toBe('providerServerError');
+    expect(
+      classifyOpenAIResponsesFailure({
+        status: 408,
+        event: {
+          type: 'error',
+          error: {
+            type: 'invalid_request_error',
+            message: 'stream closed before response.completed',
+          },
+        },
+      }),
+    ).toMatchObject({
+      reason: 'providerServerError',
+      retryable: true,
+      category: 'transient_retryable',
+    });
   });
 
   test('identifies retryable reasons that require session repair before retry', () => {

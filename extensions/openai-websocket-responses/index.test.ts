@@ -56,6 +56,7 @@ import { resolveRequestProfile } from './src/profile.ts';
 import {
   buildWebSocketResponseHeaders,
   createOpenAIWebSocketResponsesStream,
+  summarizeResponsesInputItemIds,
 } from './src/provider.ts';
 import {
   clearWebSocketCapabilityCache,
@@ -5056,6 +5057,73 @@ describe('WebSocket transport', () => {
     expect(seen).toEqual(['response.created', 'response.completed']);
   });
 
+  it('falls back to a full body for an xAI message-only previous-response miss', async () => {
+    const previousResponseId = '25a6b917-9417-9fa4-a21a-1e097d64a96b-xai-13';
+    const { WebSocketCtor, instances } = makeWebSocketCtor([
+      (socket) => {
+        socket.emit('message', {
+          data: JSON.stringify({
+            type: 'error',
+            status: 500,
+            error: {
+              type: 'api_error',
+              message: `gRPC error: Response with id=${previousResponseId} not found`,
+            },
+          }),
+        });
+      },
+      (socket) => {
+        socket.emit('message', {
+          data: JSON.stringify({ type: 'response.created', response: { id: 'resp_xai_replay' } }),
+        });
+        socket.emit('message', {
+          data: JSON.stringify({
+            type: 'response.completed',
+            response: { id: 'resp_xai_replay', status: 'completed' },
+          }),
+        });
+      },
+    ]);
+    const fullBody = {
+      model: 'gpt',
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'full' }] }],
+    };
+    const seen: string[] = [];
+
+    const result = await runWebSocketResponse(
+      {
+        url: 'wss://example.test/responses',
+        headers: new Headers(),
+        body: {
+          ...fullBody,
+          previous_response_id: previousResponseId,
+          input: [
+            { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'next' }] },
+          ],
+        },
+        fallbackBodyOnPreviousResponseNotFound: fullBody,
+        settings: normalizeSettings({ websocket: { retries: 0 } }),
+        WebSocketCtor,
+      },
+      (event) => {
+        seen.push(event.type);
+      },
+    );
+
+    expect(result).toMatchObject({
+      responseId: 'resp_xai_replay',
+      fallbackUsed: true,
+      fallbackReason: 'previous_response_not_found',
+    });
+    expect(instances).toHaveLength(2);
+    expect(JSON.parse(instances[0].sent[0])).toHaveProperty(
+      'previous_response_id',
+      previousResponseId,
+    );
+    expect(JSON.parse(instances[1].sent[0])).not.toHaveProperty('previous_response_id');
+    expect(seen).toEqual(['response.created', 'response.completed']);
+  });
+
   it('falls back to a full body when empty response.failed repeats after retry', async () => {
     const { WebSocketCtor, instances } = makeWebSocketCtor([
       (socket) => {
@@ -5230,6 +5298,23 @@ function responseCreateBytes(body: Record<string, any>): number {
 }
 
 describe('provider transport diagnostics', () => {
+  it('summarizes replayed provider item ids without exposing them', () => {
+    const summary = summarizeResponsesInputItemIds({
+      input: [
+        { type: 'reasoning', id: 'rs_private-xai-13' },
+        { type: 'message', id: 'msg_private-xai-13' },
+        { type: 'message', role: 'user' },
+      ],
+    });
+
+    expect(summary).toEqual({ count: 2, hash: expect.stringMatching(/^[0-9a-f]{12}$/) });
+    expect(JSON.stringify(summary)).not.toContain('private');
+    expect(summarizeResponsesInputItemIds({ input: [{ role: 'user' }] })).toEqual({
+      count: 0,
+      hash: undefined,
+    });
+  });
+
   it('adds compact continuation diagnostics for full-context websocket requests', async () => {
     class FakeWebSocket {
       readyState = 1;
@@ -5300,6 +5385,7 @@ describe('provider transport diagnostics', () => {
       expect(diagnostic?.details).toMatchObject({
         continuation: 'no_continuation',
         sentInputItems: 1,
+        sentInputItemIds: 0,
         headersHash: shortHash(headersFingerprint(websocketHeaders)),
         authHeaders: ['authorization'],
         authHeadersHash: expect.any(String),
@@ -5412,6 +5498,8 @@ describe('provider transport diagnostics', () => {
         continuation: 'delta',
         fullInputItems: 2,
         sentInputItems: 1,
+        fullInputItemIds: 0,
+        sentInputItemIds: 0,
         fullBytes: responseCreateBytes(fullBody),
       });
       expect(Number(diagnostic?.details?.requestBytes)).toBeLessThan(
@@ -5421,6 +5509,82 @@ describe('provider transport diagnostics', () => {
       vi.doUnmock('ws');
       closeAllCachedWebSockets();
       clearAllContinuations();
+    }
+  });
+
+  it('preserves and classifies a first nested 408 error without emitting start', async () => {
+    class FakeWebSocket {
+      readyState = 1;
+      listeners = new Map<string, Set<(event: any) => void>>();
+
+      constructor() {
+        queueMicrotask(() => this.emit('open', {}));
+      }
+
+      send() {
+        queueMicrotask(() =>
+          this.emit('message', {
+            data: JSON.stringify({
+              type: 'error',
+              status: 408,
+              error: {
+                type: 'invalid_request_error',
+                message: 'stream closed before response.completed',
+              },
+            }),
+          }),
+        );
+      }
+
+      close() {
+        this.readyState = 3;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void) {
+        const listeners = this.listeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      removeEventListener(type: string, listener: (event: any) => void) {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      emit(type: string, event: any) {
+        for (const listener of this.listeners.get(type) ?? []) listener(event);
+      }
+    }
+
+    vi.doMock('ws', () => ({ WebSocket: FakeWebSocket, default: FakeWebSocket }));
+    try {
+      const settings = normalizeSettings({ websocket: { retries: 0 } });
+      const streamFactory = createOpenAIWebSocketResponsesStream(() => settings);
+      const events = await collectStreamEvents(
+        streamFactory(makeModel(), { messages: [] }, {
+          apiKey: 'test-token',
+          transport: 'websocket',
+        } as any),
+      );
+      const error = events.find((event) => event.type === 'error')?.error as AssistantMessage;
+      const [diagnostic] = extractTransportDiagnostics(error);
+
+      expect(events.map((event) => event.type)).toEqual(['error']);
+      expect(error.errorMessage).toBe('stream closed before response.completed');
+      expect(diagnostic?.details).toMatchObject({
+        finalTransport: 'websocket',
+        outcome: 'transport_error',
+        failureReason: 'providerServerError',
+        failureCategory: 'transient_retryable',
+        retryable: true,
+        responseErrorStatus: 408,
+        responseErrorType: 'invalid_request_error',
+        responseErrorMessage: 'stream closed before response.completed',
+        replayUnsafeEventSeen: false,
+        responseIdSeen: false,
+      });
+    } finally {
+      vi.doUnmock('ws');
+      closeAllCachedWebSockets();
     }
   });
 
@@ -5504,7 +5668,14 @@ describe('provider transport diagnostics', () => {
       const error = events.find((event) => event.type === 'error')?.error as AssistantMessage;
 
       expect(sentPayloads[0]).toMatchObject({ previous_response_id: 'resp_previous' });
-      expect(error.errorMessage).toContain('invalid_encrypted_content');
+      expect(error.errorMessage).toContain(
+        'encrypted content for item rs_123 could not be verified',
+      );
+      expect(extractTransportDiagnostics(error)[0]?.details).toMatchObject({
+        responseErrorStatus: 400,
+        responseErrorType: 'invalid_request_error',
+        responseErrorCode: 'invalid_encrypted_content',
+      });
       expect(getContinuation(cacheKey)).toBeUndefined();
     } finally {
       clearAllContinuations();
@@ -6468,6 +6639,94 @@ describe('transparent provider patching', () => {
     expect(events.map((event) => event.type)).toEqual(['start', 'error']);
   });
 
+  it('falls back to SSE when the first WebSocket frame is a terminal 408 error', async () => {
+    const settings = normalizeSettings({
+      patch: { enabled: true, providerModels: ['facade/gpt-5*'] },
+      websocket: { retries: 0, firstEventTimeoutMs: 0 },
+    });
+    class FakeWebSocket {
+      readyState = 1;
+      listeners = new Map<string, Set<(event: any) => void>>();
+
+      constructor() {
+        queueMicrotask(() => this.emit('open', {}));
+      }
+
+      send() {
+        queueMicrotask(() =>
+          this.emit('message', {
+            data: JSON.stringify({
+              type: 'error',
+              status: 408,
+              error: {
+                type: 'invalid_request_error',
+                message: 'stream closed before response.completed',
+              },
+            }),
+          }),
+        );
+      }
+
+      close() {
+        this.readyState = 3;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void) {
+        const listeners = this.listeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      removeEventListener(type: string, listener: (event: any) => void) {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      emit(type: string, event: any) {
+        for (const listener of this.listeners.get(type) ?? []) listener(event);
+      }
+    }
+    vi.doMock('ws', () => ({ WebSocket: FakeWebSocket, default: FakeWebSocket }));
+    const originalMessage = makeAssistantMessage(makeModel({ id: 'gpt-5.5' }));
+    const originalStreamSimple = vi.fn((_model: Model<any>, _context: any, _options?: any) =>
+      streamFromEvents(
+        { type: 'start', partial: originalMessage },
+        { type: 'done', reason: 'stop', message: originalMessage },
+      ),
+    );
+    const provider = wrapProviderForWebSocketResponses(
+      {
+        api: 'openai-responses',
+        stream: originalStreamSimple as any,
+        streamSimple: originalStreamSimple,
+      },
+      () => settings,
+      createOpenAIWebSocketResponsesStream(() => settings),
+    );
+
+    try {
+      const events = await collectStreamEvents(
+        provider.streamSimple(makeModel({ id: 'gpt-5.5' }), { messages: [] }, {
+          apiKey: 'test-token',
+          transport: 'auto',
+        } as any),
+      );
+
+      expect(originalStreamSimple).toHaveBeenCalledTimes(1);
+      expect(events.map((event) => event.type)).toEqual(['start', 'done']);
+      expect(extractTransportDiagnostics(events[1]?.message)[0]?.details).toMatchObject({
+        fallbackTransport: 'sse',
+        finalTransport: 'sse',
+        outcome: 'sse_fallback_after_websocket_failure',
+        failureReason: 'providerServerError',
+        retryable: true,
+        responseErrorStatus: 408,
+      });
+    } finally {
+      vi.doUnmock('ws');
+      closeAllCachedWebSockets();
+    }
+  });
+
   it('falls back to SSE when auto WebSocket closes after response.created before output', async () => {
     const settings = normalizeSettings({
       patch: { enabled: true, providerModels: ['facade/gpt-5*'] },
@@ -6508,7 +6767,7 @@ describe('transparent provider patching', () => {
         for (const listener of this.listeners.get(type) ?? []) listener(event);
       }
     }
-    wsModuleMock.WebSocketCtor = FakeWebSocket as any;
+    vi.doMock('ws', () => ({ WebSocket: FakeWebSocket, default: FakeWebSocket }));
     const originalMessage = makeAssistantMessage(makeModel({ id: 'gpt-5.5' }));
     const originalStreamSimple = vi.fn((_model: Model<any>, _context: any, _options?: any) =>
       streamFromEvents(
@@ -6538,7 +6797,7 @@ describe('transparent provider patching', () => {
       expect(originalStreamSimple).toHaveBeenCalledTimes(1);
       expect(events.map((event) => event.type)).toEqual(['start', 'done']);
     } finally {
-      wsModuleMock.WebSocketCtor = undefined;
+      vi.doUnmock('ws');
       closeAllCachedWebSockets();
     }
   });

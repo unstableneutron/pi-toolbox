@@ -131,7 +131,9 @@ Recovery is limited to one attempt so a model that gives up again cannot create 
 
 ### Retryable terminal error
 
-Assistant terminal error whose `errorMessage` matches the retryable provider classifier.
+Assistant terminal error whose `errorMessage` matches the retryable provider classifier. This
+includes transient Responses stream failures such as a 408
+`stream closed before response.completed` frame after transport-level recovery is exhausted.
 
 ### Length-truncated response after compaction
 

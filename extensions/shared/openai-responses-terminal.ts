@@ -88,10 +88,20 @@ export function isRetryableEmptyResponseFailure(error: unknown): error is Termin
   );
 }
 
-export function previousResponseNotFoundMessage(event: Record<string, any>): string | undefined {
+export function previousResponseNotFoundMessage(
+  event: Record<string, any>,
+  expectedPreviousResponseId?: string,
+): string | undefined {
+  if (event.type !== 'error') return undefined;
   const error = event.error ?? {};
-  if (event.type !== 'error' || error.code !== 'previous_response_not_found') return undefined;
-  return typeof error.message === 'string' ? error.message : JSON.stringify(event);
+  const message = responsesErrorFrameMessage(event);
+  if (error.code === 'previous_response_not_found') return message;
+  if (!/\b(?:previous\s+)?response\s+with\s+id\b[^\r\n]*\bnot\s+found\b/i.test(message)) {
+    return undefined;
+  }
+  return expectedPreviousResponseId && !message.includes(expectedPreviousResponseId)
+    ? undefined
+    : message;
 }
 
 export function responsesErrorFrameMessage(event: Record<string, any>): string {
@@ -104,7 +114,8 @@ export function isRetryableResponsesErrorFrame(event: Record<string, any>): bool
   const status = typeof event.status === 'number' ? event.status : event.error?.status;
   const classification = classifyOpenAIResponsesFailure({ status, event });
   if (classification) return classification.retryable;
-  if (status === 500 || status === 502 || status === 503 || status === 504) return true;
+  if (status === 408 || status === 500 || status === 502 || status === 503 || status === 504)
+    return true;
 
   const text = [event.error?.type, event.error?.code, event.error?.message, event.message]
     .filter((value): value is string => typeof value === 'string')
