@@ -367,7 +367,7 @@ async function generatePasteTag(content: string, ctx: ExtensionContext): Promise
   if (!model) return null;
 
   const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-  if (!auth.ok || !auth.apiKey) return null;
+  if (!auth.ok) return null;
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), TAG_GENERATION_TIMEOUT_MS);
@@ -390,6 +390,7 @@ async function generatePasteTag(content: string, ctx: ExtensionContext): Promise
       {
         apiKey: auth.apiKey,
         headers: auth.headers,
+        env: auth.env,
         maxTokens: TAG_GENERATION_MAX_TOKENS,
         reasoning: model.reasoning ? 'low' : undefined,
         signal: controller.signal,
@@ -416,7 +417,7 @@ async function selectTagGenerationModel(ctx: ExtensionContext): Promise<Model<Ap
     if (!model) continue;
 
     const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-    if (auth.ok && auth.apiKey) return model;
+    if (auth.ok) return model;
   }
 
   return null;

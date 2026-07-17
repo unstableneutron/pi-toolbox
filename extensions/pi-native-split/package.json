@@ -1,6 +1,6 @@
 {
   "name": "pi-native-split",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Pi package for terminal-native split/window variants of fork, resume, and handoff workflows",
   "keywords": [
     "fork",
@@ -23,8 +23,8 @@
     "test": "vitest run"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "^0.79.0",
-    "@earendil-works/pi-coding-agent": "^0.79.0",
+    "@earendil-works/pi-ai": "^0.80.10",
+    "@earendil-works/pi-coding-agent": "^0.80.10",
     "@types/node": "^24.3.0",
     "oxfmt": "^0.44.0",
     "oxlint": "^1.59.0",

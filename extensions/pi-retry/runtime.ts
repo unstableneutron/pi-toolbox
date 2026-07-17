@@ -120,6 +120,7 @@ export interface ReviewModelAuth {
   ok: boolean;
   apiKey?: string;
   headers?: { [key: string]: string };
+  env?: { [key: string]: string };
   error?: string;
 }
 
@@ -1362,8 +1363,9 @@ export async function handleRefusalRecovery(input: {
   patchedSession: PatchedSessionLike;
   reviewRewrite: (args: {
     model: Model<any>;
-    apiKey: string;
+    apiKey?: string;
     headers?: { [key: string]: string };
+    env?: { [key: string]: string };
     transcriptText: string;
     signal?: AbortSignal;
   }) => Promise<{ reason: string; rewrite: string } | undefined>;
@@ -1705,22 +1707,13 @@ export async function handleRefusalRecovery(input: {
       continue;
     }
 
-    if (!auth.apiKey) {
-      appendRefusalReviewFailure(input.patchedSession, {
-        attempt: nextRewriteAttempt,
-        reviewModelId: reviewModel.id,
-        failureKind: 'auth',
-        error: 'Missing API key',
-      });
-      continue;
-    }
-
     let review: { reason: string; rewrite: string } | undefined;
     try {
       review = await input.reviewRewrite({
         model: reviewModel,
         apiKey: auth.apiKey,
         headers: auth.headers,
+        env: auth.env,
         transcriptText,
         signal: input.ctx.signal,
       });

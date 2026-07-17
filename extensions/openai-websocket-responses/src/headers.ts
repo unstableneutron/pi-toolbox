@@ -79,14 +79,49 @@ function applyCodexBaseHeaders(
   headers.set('user-agent', codexUserAgent());
 }
 
+function resolveSessionAffinityFormat(
+  model: Model<Api>,
+): 'openai' | 'openai-nosession' | 'openrouter' {
+  const configured = (
+    model.compat as
+      | { sessionAffinityFormat?: 'openai' | 'openai-nosession' | 'openrouter' }
+      | undefined
+  )?.sessionAffinityFormat;
+  if (configured) return configured;
+  return model.provider === 'openrouter' || model.baseUrl.includes('openrouter.ai')
+    ? 'openrouter'
+    : 'openai';
+}
+
+function applySessionAffinityHeaders(
+  headers: Headers,
+  model: Model<Api>,
+  options: OpenAIWebSocketResponsesHeaderOptions | undefined,
+  profile: ResolvedRequestProfile,
+): void {
+  const sessionId = options?.cacheRetention === 'none' ? undefined : options?.sessionId;
+  if (!sessionId || profile === 'codex') return;
+
+  const format = resolveSessionAffinityFormat(model);
+  if (format === 'openrouter') {
+    headers.set('x-session-id', sessionId);
+    return;
+  }
+
+  if (format === 'openai') headers.set('session_id', sessionId);
+  headers.set('x-client-request-id', sessionId);
+}
+
 export function buildRequestHeaders(
   model: Model<Api>,
   options?: OpenAIWebSocketResponsesHeaderOptions,
   profile: ResolvedRequestProfile = resolveRequestProfile(model),
 ): Headers {
   const headers = new Headers(model.headers ?? {});
+  applySessionAffinityHeaders(headers, model, options, profile);
   for (const [key, value] of Object.entries(options?.headers ?? {})) {
-    if (value !== null) headers.set(key, value);
+    if (value === null) headers.delete(key);
+    else headers.set(key, value);
   }
   if (!headers.has('authorization') && options?.apiKey) {
     headers.set('authorization', `Bearer ${options.apiKey}`);

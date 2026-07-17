@@ -811,6 +811,55 @@ describe('URL and header helpers', () => {
     expect(websocketHeaders.get('accept')).toBeNull();
   });
 
+  it('applies OpenAI Responses session-affinity formats to custom transports', () => {
+    const openai = buildRequestHeaders(makeModel(), { sessionId: 'session-123' }, 'azure');
+    expect(openai.get('session_id')).toBe('session-123');
+    expect(openai.get('x-client-request-id')).toBe('session-123');
+    expect(openai.get('x-session-id')).toBeNull();
+
+    const noSession = buildRequestHeaders(
+      makeModel({ compat: { sessionAffinityFormat: 'openai-nosession' } }),
+      { sessionId: 'session-123' },
+      'azure',
+    );
+    expect(noSession.get('session_id')).toBeNull();
+    expect(noSession.get('x-client-request-id')).toBe('session-123');
+
+    const openrouter = buildRequestHeaders(
+      makeModel({ compat: { sessionAffinityFormat: 'openrouter' } }),
+      { sessionId: 'session-123' },
+      'generic',
+    );
+    expect(openrouter.get('x-session-id')).toBe('session-123');
+    expect(openrouter.get('session_id')).toBeNull();
+    expect(openrouter.get('x-client-request-id')).toBeNull();
+
+    const disabled = buildRequestHeaders(
+      makeModel(),
+      { cacheRetention: 'none', sessionId: 'session-123' },
+      'azure',
+    );
+    expect(disabled.get('session_id')).toBeNull();
+    expect(disabled.get('x-client-request-id')).toBeNull();
+  });
+
+  it('lets explicit request headers override generated session-affinity headers', () => {
+    const headers = buildRequestHeaders(makeModel(), {
+      sessionId: 'session-123',
+      headers: { session_id: 'override', 'x-client-request-id': 'request-override' },
+    });
+
+    expect(headers.get('session_id')).toBe('override');
+    expect(headers.get('x-client-request-id')).toBe('request-override');
+
+    const suppressed = buildRequestHeaders(makeModel(), {
+      sessionId: 'session-123',
+      headers: { session_id: null, 'x-client-request-id': null },
+    });
+    expect(suppressed.get('session_id')).toBeNull();
+    expect(suppressed.get('x-client-request-id')).toBeNull();
+  });
+
   it('merges request headers and strips only WSS transport headers', () => {
     const model = makeModel({
       headers: { accept: 'application/json', 'x-azure-deployment': 'gpt-5.5' },

@@ -3,6 +3,7 @@ import {
   createAgentSession,
   createExtensionRuntime,
   getMarkdownTheme,
+  ModelRuntime,
   SessionManager,
   type AgentSession,
   type AgentSessionEvent,
@@ -74,18 +75,6 @@ type SideSessionRuntime = {
   modelKey: string;
   unsubscribe: () => void;
 };
-
-type ModelRegistryWithRuntime = {
-  runtime?: AgentSession['modelRuntime'];
-};
-
-function getSessionModelRuntime(ctx: ExtensionContext): AgentSession['modelRuntime'] {
-  const runtime = (ctx.modelRegistry as unknown as ModelRegistryWithRuntime).runtime;
-  if (!runtime) {
-    throw new Error('Pi model runtime is unavailable for the BTW side session.');
-  }
-  return runtime;
-}
 
 type ToolCallInfo = {
   toolCallId: string;
@@ -355,9 +344,44 @@ export default function (pi: ExtensionAPI) {
   let overlayDraft = '';
   let overlayRuntime: OverlayRuntime | null = null;
   let activeSideSession: SideSessionRuntime | null = null;
+  let sideModelRuntimePromise: Promise<ModelRuntime> | null = null;
   let overlayRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
   const mdTheme = getMarkdownTheme();
+
+  async function getSideModelRuntime(): Promise<ModelRuntime> {
+    // ExtensionContext intentionally exposes ModelRegistry, not the parent
+    // session's ModelRuntime. Create a public SDK runtime for this independent
+    // in-process session instead of reaching into ModelRegistry internals.
+    sideModelRuntimePromise ??= ModelRuntime.create({ allowModelNetwork: false });
+    try {
+      return await sideModelRuntimePromise;
+    } catch (error) {
+      sideModelRuntimePromise = null;
+      throw error;
+    }
+  }
+
+  async function resolveSideSessionModel(ctx: ExtensionContext): Promise<{
+    model: NonNullable<ExtensionContext['model']>;
+    modelRuntime: ModelRuntime;
+  }> {
+    const selectedModel = ctx.model;
+    if (!selectedModel) {
+      throw new Error('No active model selected.');
+    }
+
+    const modelRuntime = await getSideModelRuntime();
+    const model = modelRuntime.getModel(selectedModel.provider, selectedModel.id);
+    if (!model) {
+      throw new Error(
+        `BTW cannot create a standalone side session for ${selectedModel.provider}/${selectedModel.id}. ` +
+          'Configure the model in models.json or use a built-in provider.',
+      );
+    }
+
+    return { model, modelRuntime };
+  }
 
   function getModelKey(ctx: ExtensionContext): string {
     const model = ctx.model;
@@ -606,10 +630,11 @@ export default function (pi: ExtensionAPI) {
       return null;
     }
 
+    const { model, modelRuntime } = await resolveSideSessionModel(ctx);
     const { session } = await createAgentSession({
       sessionManager: SessionManager.inMemory(),
-      model: ctx.model,
-      modelRuntime: getSessionModelRuntime(ctx),
+      model,
+      modelRuntime,
       thinkingLevel: pi.getThinkingLevel() as SessionThinkingLevel,
       // 0.68.0+: createAgentSession expects tool-name allowlist, not Tool[].
       // This mirrors the previous `codingTools` export: [read, bash, edit, write].
@@ -804,10 +829,11 @@ export default function (pi: ExtensionAPI) {
       throw new Error(auth.error);
     }
 
+    const sideSessionModel = await resolveSideSessionModel(ctx);
     const { session } = await createAgentSession({
       sessionManager: SessionManager.inMemory(),
-      model,
-      modelRuntime: getSessionModelRuntime(ctx),
+      model: sideSessionModel.model,
+      modelRuntime: sideSessionModel.modelRuntime,
       thinkingLevel: 'off',
       tools: [],
       resourceLoader: createBtwResourceLoader(ctx, [BTW_SUMMARY_PROMPT]),

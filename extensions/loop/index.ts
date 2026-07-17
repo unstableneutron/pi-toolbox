@@ -86,9 +86,12 @@ function getConditionText(mode: LoopMode, condition?: string): string {
   }
 }
 
-async function selectSummaryModel(
-  ctx: ExtensionContext,
-): Promise<{ model: Model<Api>; apiKey?: string; headers?: Record<string, string> } | null> {
+async function selectSummaryModel(ctx: ExtensionContext): Promise<{
+  model: Model<Api>;
+  apiKey?: string;
+  headers?: Record<string, string>;
+  env?: Record<string, string>;
+} | null> {
   if (!ctx.model) return null;
 
   if (ctx.model.provider === 'anthropic') {
@@ -96,14 +99,14 @@ async function selectSummaryModel(
     if (haikuModel) {
       const auth = await ctx.modelRegistry.getApiKeyAndHeaders(haikuModel);
       if (auth.ok) {
-        return { model: haikuModel, apiKey: auth.apiKey, headers: auth.headers };
+        return { model: haikuModel, apiKey: auth.apiKey, headers: auth.headers, env: auth.env };
       }
     }
   }
 
   const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
   if (!auth.ok) return null;
-  return { model: ctx.model, apiKey: auth.apiKey, headers: auth.headers };
+  return { model: ctx.model, apiKey: auth.apiKey, headers: auth.headers, env: auth.env };
 }
 
 async function summarizeBreakoutCondition(
@@ -125,7 +128,7 @@ async function summarizeBreakoutCondition(
   const response = await complete(
     selection.model,
     { systemPrompt: SUMMARY_SYSTEM_PROMPT, messages: [userMessage] },
-    { apiKey: selection.apiKey, headers: selection.headers },
+    { apiKey: selection.apiKey, headers: selection.headers, env: selection.env },
   );
 
   if (response.stopReason === 'aborted' || response.stopReason === 'error') {

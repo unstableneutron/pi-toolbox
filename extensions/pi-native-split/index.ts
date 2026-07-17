@@ -682,8 +682,8 @@ export async function generateHandoffPrompt(
 
     const doGenerate = async (): Promise<string | null> => {
       const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model!);
-      if (!auth.ok || !auth.apiKey) {
-        throw new Error(auth.ok ? `No API key for ${ctx.model!.provider}` : auth.error);
+      if (!auth.ok) {
+        throw new Error(auth.error);
       }
 
       const userMessage: Message = {
@@ -700,7 +700,7 @@ export async function generateHandoffPrompt(
       const response = await complete(
         ctx.model!,
         { systemPrompt: HANDOFF_SYSTEM_PROMPT, messages: [userMessage] },
-        { apiKey: auth.apiKey, headers: auth.headers, signal: loader.signal },
+        { apiKey: auth.apiKey, headers: auth.headers, env: auth.env, signal: loader.signal },
       );
 
       if (response.stopReason === 'aborted') {

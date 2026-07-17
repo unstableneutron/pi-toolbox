@@ -236,6 +236,7 @@ describe('requestRefusalRewrite', () => {
       model: { provider: 'gust', id: 'gpt-5.4', api: 'openai-responses' } as any,
       apiKey: 'test-key',
       headers: { 'x-test': '1' },
+      env: { PROVIDER_REGION: 'test-region' },
       transcriptText: '<user>original ask</user>',
     });
 
@@ -250,7 +251,12 @@ describe('requestRefusalRewrite', () => {
       expect.objectContaining({
         systemPrompt: expect.stringContaining('Return exactly this format'),
       }),
-      expect.objectContaining({ apiKey: 'test-key', reasoning: 'high', maxTokens: 512 }),
+      expect.objectContaining({
+        apiKey: 'test-key',
+        env: { PROVIDER_REGION: 'test-region' },
+        reasoning: 'high',
+        maxTokens: 512,
+      }),
     );
   });
 

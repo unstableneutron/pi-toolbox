@@ -805,9 +805,8 @@ async function createSessionRunner({
   verbose = false,
 }) {
   const {
-    AuthStorage,
     DefaultResourceLoader,
-    ModelRegistry,
+    ModelRuntime,
     SessionManager,
     SettingsManager,
     createAgentSession,
@@ -815,9 +814,8 @@ async function createSessionRunner({
   } = await loadPiCodingAgentSdk();
 
   const agentDir = getAgentDir();
-  const authStorage = AuthStorage.create();
-  const modelRegistry = ModelRegistry.create(authStorage);
-  const resolved = resolveModel(modelRegistry, modelSpec);
+  const modelRuntime = await ModelRuntime.create();
+  const resolved = resolveModel(modelRuntime, modelSpec);
   const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: approve });
   const resourceLoader = new DefaultResourceLoader({
     cwd,
@@ -849,8 +847,7 @@ async function createSessionRunner({
 
   const { session } = await createAgentSession({
     cwd,
-    authStorage,
-    modelRegistry,
+    modelRuntime,
     model: resolved.model,
     thinkingLevel: resolved.thinkingLevel,
     tools,
@@ -917,22 +914,21 @@ async function findActivePiSdkPath() {
   }
 }
 
-function resolveModel(modelRegistry, modelSpec) {
+function resolveModel(modelRuntime, modelSpec) {
   const normalized = normalizeModelSpec(modelSpec);
-  const model = modelRegistry.find(normalized.provider, normalized.modelId);
+  const model = modelRuntime.getModel(normalized.provider, normalized.modelId);
   if (!model) throw new Error(`Model not found: ${normalized.provider}/${normalized.modelId}`);
   return { ...normalized, model };
 }
 
 async function validateModelSpecs(modelSpecs) {
-  const { AuthStorage, ModelRegistry } = await loadPiCodingAgentSdk();
-  const authStorage = AuthStorage.create();
-  const modelRegistry = ModelRegistry.create(authStorage);
+  const { ModelRuntime } = await loadPiCodingAgentSdk();
+  const modelRuntime = await ModelRuntime.create();
   const errors = [];
 
   for (const modelSpec of new Set(modelSpecs)) {
     try {
-      resolveModel(modelRegistry, modelSpec);
+      resolveModel(modelRuntime, modelSpec);
     } catch (error) {
       const spec = String(modelSpec);
       const message = error instanceof Error ? error.message : String(error);

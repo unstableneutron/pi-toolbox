@@ -1,6 +1,6 @@
 {
   "name": "openai-websocket-responses",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Pi package providing shared SSE and WebSocket transports for OpenAI Responses APIs",
   "keywords": [
     "azure-openai",
@@ -23,8 +23,8 @@
     "ws": "^8.18.3"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "^0.80.7",
-    "@earendil-works/pi-coding-agent": "^0.80.7",
+    "@earendil-works/pi-ai": "^0.80.10",
+    "@earendil-works/pi-coding-agent": "^0.80.10",
     "@types/node": "^24.3.0",
     "@types/ws": "^8.18.1",
     "oxfmt": "^0.44.0",

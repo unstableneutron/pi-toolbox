@@ -172,6 +172,11 @@ also match Pi's Codex Responses path where Azure supports them:
   `prompt_cache_key`. Azure/generic profiles omit it for `cacheRetention:
 "none"`; Codex matches Codex behavior and still sends the key when a
   `sessionId` is present.
+- Azure/generic HTTP and WebSocket requests honor Pi's
+  `compat.sessionAffinityFormat`: `openai` sends `session_id` and
+  `x-client-request-id`, `openai-nosession` sends only `x-client-request-id`,
+  and `openrouter` sends `x-session-id`. Explicit request headers override
+  generated affinity values.
 
 Profile-specific differences:
 

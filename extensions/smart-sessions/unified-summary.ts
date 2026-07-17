@@ -185,6 +185,7 @@ export async function generateRollingSummary(
         {
           apiKey: auth.apiKey,
           headers: auth.headers,
+          env: auth.env,
           maxTokens: SUMMARIZE_MAX_TOKENS,
           signal: controller.signal,
         },

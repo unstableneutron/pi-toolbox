@@ -60,22 +60,11 @@ const MAX_ROUTING_DEPTH = 8;
  * (which would layer closures and multiply per-request overhead on
  * every refresh event).
  *
- * We need this because pi-coding-agent's `ModelRegistry.refresh()` —
- * invoked from the interactive model picker on open, among other
- * places — calls `resetApiProviders()` from `@earendil-works/pi-ai`,
- * wiping every `registerApiProvider` entry. `refresh()` then only
- * re-applies providers registered through
- * `modelRegistry.registerProvider(name, config)` (the
- * `pi.registerProvider` extension API). This extension registers
- * *API-level* wrappers (one per Api, not per named provider) by
- * calling `registerApiProvider` directly from pi-ai, so those
- * registrations are not tracked by ModelRegistry and do not survive
- * `refresh()`.
- *
- * To stay correct across refreshes we re-register our wrappers on
- * every lifecycle event in `bindRuntimeState`. The marker lets us
- * no-op when the current provider in pi-ai's registry is already
- * ours.
+ * This extension registers API-level wrappers (one per Api, not per
+ * named provider) directly in pi-ai's compatibility registry. Another
+ * extension can replace those global slots later in startup, so we
+ * verify the wrappers again at lifecycle boundaries. The marker lets
+ * us no-op when the current provider is already ours.
  */
 const WRAPPED_MARKER: unique symbol = Symbol.for('pi.proxied-providers.wrapped');
 
@@ -434,6 +423,7 @@ function buildConfiguredStream(
         ...options,
         apiKey: auth.apiKey,
         headers: auth.headers,
+        env: auth.env,
         __proxiedProviderVisited: [...visited, resolvedRoute.visitedKey],
       } as StreamOptions & SimpleStreamOptions & Record<string, unknown>);
 
@@ -544,8 +534,8 @@ function registerWrappedApi<TApi extends Api>(options: {
  * Install our wrappers over every API we care about. Idempotent: each
  * `registerWrappedApi` call is a no-op when the wrapper is already in
  * pi-ai's registry. Called once at extension load and again from
- * `bindRuntimeState` on every lifecycle event so we recover from
- * `ModelRegistry.refresh()` blowing away the registry.
+ * `bindRuntimeState` on every lifecycle event so we recover if another
+ * API-level registration replaced a wrapper.
  */
 function registerAllWrappedApis(): void {
   registerWrappedApi({
@@ -568,9 +558,8 @@ function registerAllWrappedApis(): void {
 
 function bindRuntimeState(_event: unknown, ctx: ExtensionContext): void {
   refreshRuntimeState(ctx);
-  // Re-install wrappers in case pi-ai's api-provider registry has been
-  // reset since the last lifecycle event (e.g. by the model picker
-  // calling ModelRegistry.refresh()).
+  // Re-install wrappers if another API-level registration replaced one
+  // since the last lifecycle event.
   registerAllWrappedApis();
 }
 

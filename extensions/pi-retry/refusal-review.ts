@@ -4,8 +4,9 @@ type CompleteSimple = (
   model: Model<any>,
   context: { systemPrompt: string; messages: UserMessage[] },
   options: {
-    apiKey: string;
+    apiKey?: string;
     headers?: { [key: string]: string };
+    env?: { [key: string]: string };
     reasoning: 'high';
     maxTokens: number;
     signal?: AbortSignal;
@@ -60,8 +61,9 @@ REWRITE:
 
 interface ReviewCallInput {
   model: Model<any>;
-  apiKey: string;
+  apiKey?: string;
   headers?: { [key: string]: string };
+  env?: { [key: string]: string };
   transcriptText: string;
   signal?: AbortSignal;
 }
@@ -246,6 +248,7 @@ export async function requestRefusalRewrite(
     {
       apiKey: input.apiKey,
       headers: input.headers,
+      env: input.env,
       reasoning: 'high',
       maxTokens: 512,
       signal: input.signal,
