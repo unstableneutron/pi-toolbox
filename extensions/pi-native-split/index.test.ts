@@ -873,6 +873,13 @@ exit 0
     await expect(generateHandoffPrompt('continue implementation', ctx)).resolves.toBe(
       'Generated handoff prompt',
     );
+
+    const handoffMessage = vi.mocked(complete).mock.calls[0]?.[1]?.messages[0];
+    expect(handoffMessage?.content).toEqual([
+      expect.objectContaining({
+        text: expect.stringContaining('[Assistant]: Previous response'),
+      }),
+    ]);
   });
 });
 

@@ -654,6 +654,21 @@ export async function selectResumeSession(ctx: ExtensionCommandContext): Promise
   });
 }
 
+function normalizeHandoffMessages(messages: Message[]): Message[] {
+  return messages.map((message) => {
+    const content = (message as { content?: unknown }).content;
+
+    if (message.role === 'user' || Array.isArray(content)) {
+      return content == null ? { ...message, content: [] } : message;
+    }
+
+    return {
+      ...message,
+      content: typeof content === 'string' ? [{ type: 'text', text: content }] : [],
+    } as Message;
+  });
+}
+
 export async function generateHandoffPrompt(
   goal: string,
   ctx: ExtensionCommandContext,
@@ -673,7 +688,7 @@ export async function generateHandoffPrompt(
     return null;
   }
 
-  const llmMessages = convertToLlm(messages);
+  const llmMessages = normalizeHandoffMessages(convertToLlm(messages));
   const conversationText = serializeConversation(llmMessages);
 
   const result = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {

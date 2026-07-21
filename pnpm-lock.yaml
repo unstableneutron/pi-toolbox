@@ -1,13 +1,14 @@
 lockfileVersion: '9.0'
 
 settings:
-  autoInstallPeers: false
+  autoInstallPeers: true
   excludeLinksFromLockfile: false
 
 overrides:
-  '@earendil-works/pi-ai': 0.80.10
-  '@earendil-works/pi-coding-agent': 0.80.10
-  '@earendil-works/pi-tui': 0.80.10
+  '@earendil-works/pi-agent-core': 0.81.1
+  '@earendil-works/pi-ai': 0.81.1
+  '@earendil-works/pi-coding-agent': 0.81.1
+  '@earendil-works/pi-tui': 0.81.1
 
 importers:
 
@@ -17,17 +18,17 @@ importers:
         specifier: ^3.1027.0
         version: 3.1088.0
       '@earendil-works/pi-agent-core':
-        specifier: 0.80.10
-        version: 0.80.10(@modelcontextprotocol/sdk@1.29.0)(ws@8.21.1)(zod@4.4.3)
+        specifier: 0.81.1
+        version: 0.81.1(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@earendil-works/pi-ai':
-        specifier: 0.80.10
-        version: 0.80.10(@modelcontextprotocol/sdk@1.29.0)(ws@8.21.1)(zod@4.4.3)
+        specifier: 0.81.1
+        version: 0.81.1(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@earendil-works/pi-coding-agent':
-        specifier: 0.80.10
-        version: 0.80.10(@modelcontextprotocol/sdk@1.29.0)(ws@8.21.1)(zod@4.4.3)
+        specifier: 0.81.1
+        version: 0.81.1(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@earendil-works/pi-tui':
-        specifier: 0.80.10
-        version: 0.80.10
+        specifier: 0.81.1
+        version: 0.81.1
       '@types/node':
         specifier: ^24.3.0
         version: 24.13.3
@@ -63,11 +64,11 @@ importers:
         version: 1.10.0
     devDependencies:
       '@earendil-works/pi-coding-agent':
-        specifier: 0.80.10
-        version: 0.80.10(@modelcontextprotocol/sdk@1.29.0)(ws@8.21.1)(zod@4.4.3)
+        specifier: 0.81.1
+        version: 0.81.1(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@earendil-works/pi-tui':
-        specifier: 0.80.10
-        version: 0.80.10
+        specifier: 0.81.1
+        version: 0.81.1
       '@types/node':
         specifier: ^24.3.0
         version: 24.13.3
@@ -94,11 +95,11 @@ importers:
         version: 9.0.0
     devDependencies:
       '@earendil-works/pi-coding-agent':
-        specifier: 0.80.10
-        version: 0.80.10(@modelcontextprotocol/sdk@1.29.0)(ws@8.21.1)(zod@4.4.3)
+        specifier: 0.81.1
+        version: 0.81.1(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@earendil-works/pi-tui':
-        specifier: 0.80.10
-        version: 0.80.10
+        specifier: 0.81.1
+        version: 0.81.1
       '@types/node':
         specifier: ^24.3.0
         version: 24.13.3
@@ -119,11 +120,11 @@ importers:
         version: 8.21.1
     devDependencies:
       '@earendil-works/pi-ai':
-        specifier: 0.80.10
-        version: 0.80.10(@modelcontextprotocol/sdk@1.29.0)(ws@8.21.1)(zod@4.4.3)
+        specifier: 0.81.1
+        version: 0.81.1(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@earendil-works/pi-coding-agent':
-        specifier: 0.80.10
-        version: 0.80.10(@modelcontextprotocol/sdk@1.29.0)(ws@8.21.1)(zod@4.4.3)
+        specifier: 0.81.1
+        version: 0.81.1(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@types/node':
         specifier: ^24.3.0
         version: 24.13.3
@@ -149,11 +150,11 @@ importers:
   extensions/pi-codex-app-server-use:
     devDependencies:
       '@earendil-works/pi-ai':
-        specifier: 0.80.10
-        version: 0.80.10(@modelcontextprotocol/sdk@1.29.0)(ws@8.21.1)(zod@4.4.3)
+        specifier: 0.81.1
+        version: 0.81.1(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@earendil-works/pi-coding-agent':
-        specifier: 0.80.10
-        version: 0.80.10(@modelcontextprotocol/sdk@1.29.0)(ws@8.21.1)(zod@4.4.3)
+        specifier: 0.81.1
+        version: 0.81.1(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@types/node':
         specifier: ^24.3.0
         version: 24.13.3
@@ -200,8 +201,8 @@ importers:
   extensions/pi-conditional-context:
     devDependencies:
       '@earendil-works/pi-coding-agent':
-        specifier: 0.80.10
-        version: 0.80.10(@modelcontextprotocol/sdk@1.29.0)(ws@8.21.1)(zod@4.4.3)
+        specifier: 0.81.1
+        version: 0.81.1(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@types/node':
         specifier: ^24.3.0
         version: 24.13.3
@@ -214,6 +215,9 @@ importers:
 
   extensions/pi-fff-search:
     dependencies:
+      '@earendil-works/pi-ai':
+        specifier: 0.81.1
+        version: 0.81.1(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       fff-router:
         specifier: github:unstableneutron/fff-router#semver:>=0.8.0
         version: https://codeload.github.com/unstableneutron/fff-router/tar.gz/599ee0409d113573c003d419c3702ffc3b0d3a1f
@@ -222,14 +226,14 @@ importers:
         version: 4.0.5
     devDependencies:
       '@earendil-works/pi-agent-core':
-        specifier: ^0.79.0
-        version: 0.79.10(@modelcontextprotocol/sdk@1.29.0)(ws@8.21.1)(zod@4.4.3)
+        specifier: 0.81.1
+        version: 0.81.1(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@earendil-works/pi-coding-agent':
-        specifier: 0.80.10
-        version: 0.80.10(@modelcontextprotocol/sdk@1.29.0)(ws@8.21.1)(zod@4.4.3)
+        specifier: 0.81.1
+        version: 0.81.1(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@earendil-works/pi-tui':
-        specifier: 0.80.10
-        version: 0.80.10
+        specifier: 0.81.1
+        version: 0.81.1
       '@types/node':
         specifier: ^24.3.0
         version: 24.13.3
@@ -258,11 +262,11 @@ importers:
   extensions/pi-native-split:
     devDependencies:
       '@earendil-works/pi-ai':
-        specifier: 0.80.10
-        version: 0.80.10(@modelcontextprotocol/sdk@1.29.0)(ws@8.21.1)(zod@4.4.3)
+        specifier: 0.81.1
+        version: 0.81.1(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@earendil-works/pi-coding-agent':
-        specifier: 0.80.10
-        version: 0.80.10(@modelcontextprotocol/sdk@1.29.0)(ws@8.21.1)(zod@4.4.3)
+        specifier: 0.81.1
+        version: 0.81.1(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@types/node':
         specifier: ^24.3.0
         version: 24.13.3
@@ -285,11 +289,11 @@ importers:
   extensions/pi-render-gate:
     devDependencies:
       '@earendil-works/pi-coding-agent':
-        specifier: 0.80.10
-        version: 0.80.10(@modelcontextprotocol/sdk@1.29.0)(ws@8.21.1)(zod@4.4.3)
+        specifier: 0.81.1
+        version: 0.81.1(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@earendil-works/pi-tui':
-        specifier: 0.80.10
-        version: 0.80.10
+        specifier: 0.81.1
+        version: 0.81.1
       '@types/node':
         specifier: ^24.3.0
         version: 24.13.3
@@ -312,11 +316,11 @@ importers:
   extensions/pi-retry:
     devDependencies:
       '@earendil-works/pi-ai':
-        specifier: 0.80.10
-        version: 0.80.10(@modelcontextprotocol/sdk@1.29.0)(ws@8.21.1)(zod@4.4.3)
+        specifier: 0.81.1
+        version: 0.81.1(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@earendil-works/pi-coding-agent':
-        specifier: 0.80.10
-        version: 0.80.10(@modelcontextprotocol/sdk@1.29.0)(ws@8.21.1)(zod@4.4.3)
+        specifier: 0.81.1
+        version: 0.81.1(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@types/node':
         specifier: ^24.3.0
         version: 24.13.3
@@ -343,11 +347,11 @@ importers:
         version: 0.3.2
     devDependencies:
       '@earendil-works/pi-coding-agent':
-        specifier: 0.80.10
-        version: 0.80.10(@modelcontextprotocol/sdk@1.29.0)(ws@8.21.1)(zod@4.4.3)
+        specifier: 0.81.1
+        version: 0.81.1(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       '@earendil-works/pi-tui':
-        specifier: 0.80.10
-        version: 0.80.10
+        specifier: 0.81.1
+        version: 0.81.1
       '@types/node':
         specifier: ^24.3.0
         version: 24.13.3
@@ -364,8 +368,8 @@ importers:
   packages/roundtable-review:
     dependencies:
       '@earendil-works/pi-coding-agent':
-        specifier: 0.80.10
-        version: 0.80.10(@modelcontextprotocol/sdk@1.29.0)(ws@8.21.1)(zod@4.4.3)
+        specifier: 0.81.1
+        version: 0.81.1(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
 
 packages:
 
@@ -483,26 +487,22 @@ packages:
     resolution: {integrity: sha512-Nq8OhGWiZIZGV6hLHoyAKLLcJihP/xFeBMGJoUrxTX2psI8dCifzLhZISFb+VWS3wFMRDmCGw5R+dOySCqPLhw==}
     engines: {node: '>=6.9.0'}
 
-  '@earendil-works/pi-agent-core@0.79.10':
-    resolution: {integrity: sha512-XKxgdjhcPuyjrthCOFSgfzT3xZ1uBrJ1IMVDxci1to6hIN6BIg9J5iY8q0pGXK1DLgATLP23da+1UyZLwA360Q==}
+  '@earendil-works/pi-agent-core@0.81.1':
+    resolution: {integrity: sha512-yqbh68CyhqxMov/jUogFJfMqlu2Gd37GAki+tr59YCmAPHfomiCA5ESzusXtpGzABeiZFC/OrRdQ4GwCCOMIHA==}
     engines: {node: '>=22.19.0'}
 
-  '@earendil-works/pi-agent-core@0.80.10':
-    resolution: {integrity: sha512-nwnOR3SuLYGRFfyQm8ri4Nj5VGVAvAM9GuqQd3u7BUQj0d6hmD2F8w7OHAAjThE3CuySIdM+v8E22QJG6/RfCg==}
-    engines: {node: '>=22.19.0'}
-
-  '@earendil-works/pi-ai@0.80.10':
-    resolution: {integrity: sha512-Moe/H8c87yacDGK9dPbWphZNjVsrb3nTrIHycOQJAkFEnY9PYxOOd74+ny44kATfPU9Dm7aTHefar3pZF+UKUA==}
+  '@earendil-works/pi-ai@0.81.1':
+    resolution: {integrity: sha512-hzHE7Z8l5mgJk+ke67Lge0rwS2+wbKJrFKl9o5M1R1rh33+cCT7D1AHz1OAtX5wFs90E1/BTGhyJRTUHaMxGvQ==}
     engines: {node: '>=22.19.0'}
     hasBin: true
 
-  '@earendil-works/pi-coding-agent@0.80.10':
-    resolution: {integrity: sha512-aL4apbupCHiVLSXASXvRzH4Q2vmtfrDa+0s909CJuVu/GgGylbDzr7oyF1mPmip5E+VxYYxKWmph4hV04wUcQg==}
+  '@earendil-works/pi-coding-agent@0.81.1':
+    resolution: {integrity: sha512-r6ovAsZOgAqbC/aU6s+/dPnv/sGZBuWyZNvi3pXjpbuX5wvp3XvGkQI7/VLvX2o9XpmpFaPUxKNym1WfkN/P8A==}
     engines: {node: '>=22.19.0'}
     hasBin: true
 
-  '@earendil-works/pi-tui@0.80.10':
-    resolution: {integrity: sha512-c2JO29PbhKPEQ6fgHQKAl0WhwuFqzWfzspMmP+8B5tpDuP+0mvarRbKKg8gq4b+pQx/QX+6aVS4ko7deoyjQjg==}
+  '@earendil-works/pi-tui@0.81.1':
+    resolution: {integrity: sha512-OMEe+Zt8oQYi/rCq3upxsTlIScWL0FPhXwQus34TbQb3EmTx88S7Uzx32JxvQiEeWOw8eDCdJf2PBUBE9r6wIg==}
     engines: {node: '>=22.19.0'}
 
   '@emnapi/core@1.11.0':
@@ -825,6 +825,7 @@ packages:
     engines: {node: '>=18'}
     peerDependencies:
       '@cfworker/json-schema': ^4.1.1
+      zod: ^3.25 || ^4.0
     peerDependenciesMeta:
       '@cfworker/json-schema':
         optional: true
@@ -1694,6 +1695,11 @@ packages:
 
   ajv-formats@3.0.1:
     resolution: {integrity: sha512-8iUql50EUR+uUcdRQ3HDqa6EVyo3docL8g5WJ3FNcWmu62IbkGUue/pEyLBW8VGKKucTPgqeks4fIU1DA4yowQ==}
+    peerDependencies:
+      ajv: ^8.0.0
+    peerDependenciesMeta:
+      ajv:
+        optional: true
 
   ajv@8.20.0:
     resolution: {integrity: sha512-Thbli+OlOj+iMPYFBVBfJ3OmCAnaSyNn4M1vz9T6Gka5Jt9ba/HIR56joy65tY6kx/FCF5VXNB819Y7/GUrBGA==}
@@ -2803,9 +2809,9 @@ snapshots:
 
   '@babel/runtime@7.29.7': {}
 
-  '@earendil-works/pi-agent-core@0.79.10(@modelcontextprotocol/sdk@1.29.0)(ws@8.21.1)(zod@4.4.3)':
+  '@earendil-works/pi-agent-core@0.81.1(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)':
     dependencies:
-      '@earendil-works/pi-ai': 0.80.10(@modelcontextprotocol/sdk@1.29.0)(ws@8.21.1)(zod@4.4.3)
+      '@earendil-works/pi-ai': 0.81.1(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       ignore: 7.0.5
       typebox: 1.1.38
       yaml: 2.9.0
@@ -2817,25 +2823,11 @@ snapshots:
       - ws
       - zod
 
-  '@earendil-works/pi-agent-core@0.80.10(@modelcontextprotocol/sdk@1.29.0)(ws@8.21.1)(zod@4.4.3)':
-    dependencies:
-      '@earendil-works/pi-ai': 0.80.10(@modelcontextprotocol/sdk@1.29.0)(ws@8.21.1)(zod@4.4.3)
-      ignore: 7.0.5
-      typebox: 1.1.38
-      yaml: 2.9.0
-    transitivePeerDependencies:
-      - '@modelcontextprotocol/sdk'
-      - bufferutil
-      - supports-color
-      - utf-8-validate
-      - ws
-      - zod
-
-  '@earendil-works/pi-ai@0.80.10(@modelcontextprotocol/sdk@1.29.0)(ws@8.21.1)(zod@4.4.3)':
+  '@earendil-works/pi-ai@0.81.1(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)':
     dependencies:
       '@anthropic-ai/sdk': 0.91.1(zod@4.4.3)
       '@aws-sdk/client-bedrock-runtime': 3.1048.0
-      '@google/genai': 1.52.0(@modelcontextprotocol/sdk@1.29.0)
+      '@google/genai': 1.52.0(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))
       '@mistralai/mistralai': 2.2.6(@opentelemetry/api@1.9.0)
       '@opentelemetry/api': 1.9.0
       '@smithy/node-http-handler': 4.7.3
@@ -2852,11 +2844,11 @@ snapshots:
       - ws
       - zod
 
-  '@earendil-works/pi-coding-agent@0.80.10(@modelcontextprotocol/sdk@1.29.0)(ws@8.21.1)(zod@4.4.3)':
+  '@earendil-works/pi-coding-agent@0.81.1(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)':
     dependencies:
-      '@earendil-works/pi-agent-core': 0.80.10(@modelcontextprotocol/sdk@1.29.0)(ws@8.21.1)(zod@4.4.3)
-      '@earendil-works/pi-ai': 0.80.10(@modelcontextprotocol/sdk@1.29.0)(ws@8.21.1)(zod@4.4.3)
-      '@earendil-works/pi-tui': 0.80.10
+      '@earendil-works/pi-agent-core': 0.81.1(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
+      '@earendil-works/pi-ai': 0.81.1(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
+      '@earendil-works/pi-tui': 0.81.1
       '@silvia-odwyer/photon-node': 0.3.4
       chalk: 5.6.2
       cross-spawn: 7.0.6
@@ -2882,7 +2874,7 @@ snapshots:
       - ws
       - zod
 
-  '@earendil-works/pi-tui@0.80.10':
+  '@earendil-works/pi-tui@0.81.1':
     dependencies:
       get-east-asian-width: 1.6.0
       marked: 18.0.5
@@ -3029,14 +3021,14 @@ snapshots:
       '@ff-labs/fff-bin-win32-arm64': 0.5.2
       '@ff-labs/fff-bin-win32-x64': 0.5.2
 
-  '@google/genai@1.52.0(@modelcontextprotocol/sdk@1.29.0)':
+  '@google/genai@1.52.0(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))':
     dependencies:
       google-auth-library: 10.9.0
       p-retry: 4.6.2
       protobufjs: 7.6.5
       ws: 8.21.1
     optionalDependencies:
-      '@modelcontextprotocol/sdk': 1.29.0
+      '@modelcontextprotocol/sdk': 1.29.0(zod@4.4.3)
     transitivePeerDependencies:
       - bufferutil
       - supports-color
@@ -3104,11 +3096,11 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
-  '@modelcontextprotocol/sdk@1.29.0':
+  '@modelcontextprotocol/sdk@1.29.0(zod@4.4.3)':
     dependencies:
       '@hono/node-server': 1.19.14(hono@4.12.30)
       ajv: 8.20.0
-      ajv-formats: 3.0.1
+      ajv-formats: 3.0.1(ajv@8.20.0)
       content-type: 1.0.5
       cors: 2.8.6
       cross-spawn: 7.0.6
@@ -3663,8 +3655,8 @@ snapshots:
 
   agent-base@7.1.4: {}
 
-  ajv-formats@3.0.1:
-    dependencies:
+  ajv-formats@3.0.1(ajv@8.20.0):
+    optionalDependencies:
       ajv: 8.20.0
 
   ajv@8.20.0:
@@ -3894,7 +3886,7 @@ snapshots:
   fff-router@https://codeload.github.com/unstableneutron/fff-router/tar.gz/599ee0409d113573c003d419c3702ffc3b0d3a1f:
     dependencies:
       '@ff-labs/fff-node': 0.5.2
-      '@modelcontextprotocol/sdk': 1.29.0
+      '@modelcontextprotocol/sdk': 1.29.0(zod@4.4.3)
       '@sinclair/typebox': 0.34.52
       picomatch: 4.0.5
       zod: 4.4.3
