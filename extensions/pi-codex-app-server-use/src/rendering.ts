@@ -3,6 +3,7 @@ import {
   Image,
   Spacer,
   Text,
+  truncateToWidth,
   visibleWidth,
   wrapTextWithAnsi,
   type Component,
@@ -47,12 +48,9 @@ const COLLAPSED_EXEC_PREVIEW_LINES = 3;
 const EXPANDED_EXEC_HEAD_LINES = 80;
 const EXPANDED_EXEC_TAIL_LINES = 80;
 const DISPLAY_TAB = '   ';
-const ANSI_CODE_PATTERN = String.raw`(?:\u001B\[[0-?]*[ -/]*[@-~]|\u001B\][^\u0007]*(?:\u0007|\u001B\\)|\u001B[@-Z\\-_])`;
-const TRAILING_ANSI_CODES = new RegExp(`${ANSI_CODE_PATTERN}+$`, 'u');
-const LEADING_ANSI_CODES = new RegExp(`^${ANSI_CODE_PATTERN}+`, 'u');
 const RENDER_WIDTH_OPS: WidthMeasurementOps = {
   measure: visibleWidth,
-  truncate: (text, maxWidth) => truncateWithStyledEllipsis(text, maxWidth),
+  truncate: (text, maxWidth) => truncateToWidth(text, maxWidth, '…'),
 };
 
 type ImageContent = { type: 'image'; data: string; mimeType: string };
@@ -107,39 +105,6 @@ function clampRenderLine(text: string, width: number): string {
 
 function clampRenderLines(lines: string[], width: number): string[] {
   return lines.map((line) => clampRenderLine(line, width));
-}
-
-function trailingAnsiCodes(text: string): string {
-  return TRAILING_ANSI_CODES.exec(text)?.[0] ?? '';
-}
-
-function leadingAnsiCodes(text: string): string {
-  return LEADING_ANSI_CODES.exec(text)?.[0] ?? '';
-}
-
-function truncateWithStyledEllipsis(text: string, maxWidth: number, ellipsis = '…'): string {
-  if (maxWidth <= 0 || text.length === 0) return '';
-  if (visibleWidth(text) <= maxWidth) return text;
-
-  const ellipsisWidth = visibleWidth(ellipsis);
-  const trailingAnsi = trailingAnsiCodes(text);
-  if (ellipsisWidth >= maxWidth) {
-    return `${leadingAnsiCodes(text)}${truncateVisiblePrefix(ellipsis, maxWidth)}${trailingAnsi}`;
-  }
-
-  const prefix = truncateVisiblePrefix(text, maxWidth - ellipsisWidth);
-  return `${prefix}${ellipsis}${trailingAnsi}`;
-}
-
-function truncateVisiblePrefix(text: string, maxWidth: number): string {
-  if (maxWidth <= 0) return '';
-  let result = '';
-  for (const char of text) {
-    const next = `${result}${char}`;
-    if (visibleWidth(next) > maxWidth) break;
-    result = next;
-  }
-  return result;
 }
 
 function compactCommandInput(command: string, headLines = 3, tailLines = 3): string {
@@ -323,10 +288,7 @@ class ExecResultComponent implements Component {
         );
         return clampRenderLines(lines, safeWidth);
       }
-      return clampRenderLines(
-        this.lines.map((line) => truncateWithStyledEllipsis(line, safeWidth)),
-        safeWidth,
-      );
+      return clampRenderLines(this.lines, safeWidth);
     });
   }
 

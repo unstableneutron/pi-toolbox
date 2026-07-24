@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { accessSync, constants } from 'node:fs';
 import path from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 
 import {
   formatSize,
@@ -12,7 +13,7 @@ import {
 import { Type } from 'typebox';
 
 import { executeApplyPatchPayload } from '../../multi-edit';
-import { sanitizeBinaryOutput, stripTerminalControlSequences } from '../../shared/tui-width';
+import { sanitizeBinaryOutput } from '../../shared/tui-width';
 import { CodexAppServerWebSocketClient } from './app-server';
 import { CODEX_APP_SERVER_ORIGIN, getCodexAppServerControlSocketPath } from './app-server-control';
 import type { CodexAppServerExecModels } from './config';
@@ -144,6 +145,7 @@ interface ExecSession {
   processId: string;
   command: string;
   output: ExecOutputAccumulator;
+  outputDecoder: StreamingExecOutputDecoder;
   emittedCursor: number;
   exitCode: number | undefined;
   startedAt: number;
@@ -202,15 +204,135 @@ function generateChunkId(): string {
   return crypto.randomBytes(3).toString('hex');
 }
 
+type TerminalControlState =
+  | 'text'
+  | 'escape'
+  | 'csi'
+  | 'osc'
+  | 'oscEscape'
+  | 'string'
+  | 'stringEscape';
+
+class StreamingExecOutputDecoder {
+  private readonly utf8 = new StringDecoder('utf8');
+  private terminalState: TerminalControlState = 'text';
+  private pendingCarriageReturn = false;
+  private byteStreamFinished = false;
+
+  writeBase64(value: string): string {
+    if (this.byteStreamFinished) return '';
+    return this.consume(this.utf8.write(Buffer.from(value, 'base64')));
+  }
+
+  writeText(text: string): string {
+    return this.consume(text);
+  }
+
+  finishBytes(): string {
+    if (this.byteStreamFinished) return '';
+    this.byteStreamFinished = true;
+    return this.consume(this.utf8.end());
+  }
+
+  finish(): string {
+    return this.finishBytes() + this.consume('', true);
+  }
+
+  private consume(text: string, final = false): string {
+    const output: string[] = [];
+
+    for (const char of text) {
+      let reprocess = true;
+      while (reprocess) {
+        reprocess = false;
+        const code = char.codePointAt(0) ?? 0;
+
+        switch (this.terminalState) {
+          case 'text':
+            if (char === '\u001b') this.terminalState = 'escape';
+            else if (char === '\u009b') this.terminalState = 'csi';
+            else if (char === '\u009d') this.terminalState = 'osc';
+            else if ('\u0090\u0098\u009e\u009f'.includes(char)) this.terminalState = 'string';
+            else this.appendTextCharacter(char, output);
+            break;
+          case 'escape':
+            if (char === '[') this.terminalState = 'csi';
+            else if (char === ']') this.terminalState = 'osc';
+            else if ('P_X^'.includes(char)) this.terminalState = 'string';
+            else if (char === '\u001b') this.terminalState = 'escape';
+            else if (code >= 0x20 && code <= 0x2f) this.terminalState = 'escape';
+            else if (code >= 0x40 && code <= 0x7e) this.terminalState = 'text';
+            else {
+              this.terminalState = 'text';
+              reprocess = true;
+            }
+            break;
+          case 'csi':
+            if (char === '\u001b') this.terminalState = 'escape';
+            else if (code >= 0x40 && code <= 0x7e) this.terminalState = 'text';
+            break;
+          case 'osc':
+            if (char === '\u0007' || char === '\u009c') this.terminalState = 'text';
+            else if (char === '\u001b') this.terminalState = 'oscEscape';
+            break;
+          case 'oscEscape':
+            if (char === '\\') this.terminalState = 'text';
+            else if (char !== '\u001b') this.terminalState = 'osc';
+            break;
+          case 'string':
+            if (char === '\u009c') this.terminalState = 'text';
+            else if (char === '\u001b') this.terminalState = 'stringEscape';
+            break;
+          case 'stringEscape':
+            if (char === '\\') this.terminalState = 'text';
+            else if (char !== '\u001b') this.terminalState = 'string';
+            break;
+        }
+      }
+    }
+
+    if (final) {
+      if (this.pendingCarriageReturn) output.push('\n');
+      this.pendingCarriageReturn = false;
+      this.terminalState = 'text';
+    }
+
+    return sanitizeBinaryOutput(output.join(''));
+  }
+
+  private appendTextCharacter(char: string, output: string[]): void {
+    if (this.pendingCarriageReturn) {
+      output.push('\n');
+      this.pendingCarriageReturn = false;
+      if (char === '\n') return;
+    }
+    if (char === '\r') {
+      this.pendingCarriageReturn = true;
+      return;
+    }
+    output.push(char);
+  }
+}
+
 function normalizePipeOutput(text: string): string {
-  return sanitizeBinaryOutput(stripTerminalControlSequences(text))
-    .replace(/\r\n/g, '\n')
-    .replace(/\r/g, '\n');
+  const decoder = new StreamingExecOutputDecoder();
+  return decoder.writeText(text) + decoder.finish();
+}
+
+function appendNormalizedOutput(session: ExecSession, text: string): void {
+  if (text) session.output.append(text);
 }
 
 function appendOutput(session: ExecSession, text: string): void {
-  if (!text) return;
-  session.output.append(normalizePipeOutput(text));
+  appendNormalizedOutput(session, normalizePipeOutput(text));
+}
+
+function appendOutputDelta(session: ExecSession, deltaBase64: string): void {
+  appendNormalizedOutput(session, session.outputDecoder.writeBase64(deltaBase64));
+}
+
+function finishOutputDeltas(session: ExecSession): void {
+  appendNormalizedOutput(session, session.outputDecoder.finish());
 }
 
 function consumeOutput(session: ExecSession, maxOutputTokens?: number): ExecOutputSnapshot {
@@ -297,10 +419,6 @@ async function waitForExitOrTimeout(
 
 function normalizeExitCode(response: CommandExecResponse): number {
   return typeof response.exitCode === 'number' ? response.exitCode : (response.exit_code ?? 1);
-}
-
-function decodeBase64Text(value: string): string {
-  return Buffer.from(value, 'base64').toString('utf8');
 }
 
 function parseExecCommandParams(params: unknown): ExecCommandParams {
@@ -615,11 +733,13 @@ export class CodexAppServerExecSessionManager {
     void client
       .callRpc('command/exec', request, LONG_RUNNING_RPC_TIMEOUT_MS)
       .then((response: CommandExecResponse) => {
+        finishOutputDeltas(session);
         if (typeof response.stdout === 'string') appendOutput(session, response.stdout);
         if (typeof response.stderr === 'string') appendOutput(session, response.stderr);
         session.exitCode = normalizeExitCode(response);
       })
       .catch((error: unknown) => {
+        finishOutputDeltas(session);
         appendOutput(session, `${error instanceof Error ? error.message : String(error)}\n`);
         session.exitCode = 1;
       });
@@ -762,6 +882,7 @@ export class CodexAppServerExecSessionManager {
       output: new ExecOutputAccumulator({
         fileStem: toolCallId ? `exec_${toolCallId}` : `exec_session-${id}`,
       }),
+      outputDecoder: new StreamingExecOutputDecoder(),
       emittedCursor: 0,
       exitCode: undefined,
       startedAt: Date.now(),
@@ -794,7 +915,7 @@ export class CodexAppServerExecSessionManager {
     if (!processId || !deltaBase64) return;
     const session = this.sessionsByProcessId.get(processId);
     if (!session) return;
-    appendOutput(session, decodeBase64Text(deltaBase64));
+    appendOutputDelta(session, deltaBase64);
   }
 
   private async deleteSession(session: ExecSession): Promise<void> {

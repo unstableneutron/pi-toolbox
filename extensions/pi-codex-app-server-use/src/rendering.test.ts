@@ -21,6 +21,20 @@ function renderLines(component: { render(width: number): string[] }): string[] {
   return component.render(120).map((line) => line.trimEnd());
 }
 
+const ANSI_CSI_PATTERN = new RegExp(String.raw`\u001B\[[0-?]*[ -/]*[@-~]`, 'g');
+
+function stripCompleteAnsi(text: string): string {
+  return text.replace(ANSI_CSI_PATTERN, '');
+}
+
+function expectRenderSafe(lines: string[], width: number): void {
+  for (const line of lines) {
+    expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+    expect(stripCompleteAnsi(line)).not.toContain('\u001b');
+    expect(line).not.toContain('\ufffd');
+  }
+}
+
 describe('tool renderers', () => {
   test('renders compact exec command calls and collapsed output previews', () => {
     expect(renderLines(renderExecCommandCall({ cmd: 'rg --files src | head' }, theme))).toEqual([
@@ -365,7 +379,7 @@ describe('tool renderers', () => {
     expect(visibleWidth(outputLine)).toBeLessThanOrEqual(80);
   });
 
-  test('keeps collapsed exec ellipsis inside output styling', () => {
+  test('resets output styling around a collapsed exec ellipsis', () => {
     const red = '\u001b[31m';
     const reset = '\u001b[0m';
     const ansiTheme = {
@@ -388,9 +402,8 @@ describe('tool renderers', () => {
     ).render(5);
 
     const outputLine = rendered.find((line) => line.includes('abcd'));
-    expect(outputLine).toBe(`${red}abcd…${reset}`);
-    expect(outputLine).not.toContain(`${reset}…`);
-    expect(visibleWidth(outputLine ?? '')).toBe(5);
+    expect(outputLine).toBe(`${red}abcd${reset}…${reset}`);
+    expectRenderSafe(rendered, 5);
   });
 
   test('caps expanded exec output rendering and shows a cutoff hint', () => {
@@ -821,7 +834,7 @@ sed -n '1,160p' src/workspace/git/discovery.rs`;
     expect(rendered.every((line) => visibleWidth(line) <= 112)).toBe(true);
   });
 
-  test('keeps command truncation ellipsis inside title styling', () => {
+  test('terminates command truncation styling before the ellipsis', () => {
     const reset = '\u001b[0m';
     const styledTheme = {
       bold: (text: string) => text,
@@ -829,24 +842,185 @@ sed -n '1,160p' src/workspace/git/discovery.rs`;
         role === 'toolTitle' ? `\u001b[42m${text}${reset}` : text,
     };
 
-    const [line] = renderExecCommandCall(
+    const rendered = renderExecCommandCall(
       { cmd: `env PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH" cargo test` },
       styledTheme,
     ).render(64);
+    const [line] = rendered;
 
-    expect(line).toContain('…');
-    expect(line).not.toContain(`${reset}…`);
-    expect(visibleWidth(line ?? '')).toBeLessThanOrEqual(64);
+    expect(line).toContain(`${reset}…${reset}`);
+    expectRenderSafe(rendered, 64);
   });
 
-  test('strips terminal controls from raw exec commands before rendering', () => {
+  test('strips raw terminal controls without emitting incomplete generated ANSI', () => {
     const rendered = renderExecCommandCall(
       { cmd: `printf '\u001b]0;title\u0007\u001b[31m${'x'.repeat(80)}'` },
       theme,
     ).render(40);
+    const plain = stripCompleteAnsi(rendered.join('\n'));
 
-    expect(rendered.join('\n')).not.toContain('\u001b');
-    expect(rendered.every((line) => visibleWidth(line) <= 40)).toBe(true);
+    expect(plain).not.toContain('\u001b');
+    expect(plain).not.toContain('title');
+    expect(plain).not.toContain('[31m');
+    expectRenderSafe(rendered, 40);
+  });
+
+  test('renders the reported long commands and truncation summaries without control artifacts', () => {
+    const reset = '\u001b[0m';
+    const ansiTheme = {
+      bold: (text: string) => `\u001b[1m${text}${reset}`,
+      fg: (role: string, text: string) => {
+        const color = role === 'toolTitle' ? 36 : role === 'toolOutput' ? 35 : 90;
+        return `\u001b[${color}m${text}${reset}`;
+      },
+    };
+    const examples = [
+      {
+        command:
+          "nl -ba extensions/openai-websocket-responses/src/vendor/pi-ai-constrained-sampling.ts | sed -n '118,134p'\ufffd\ufffd",
+        lineCount: 17,
+        skipped: 14,
+        sessionId: 151,
+        tokens: 181,
+      },
+      {
+        command:
+          "jq . knip.json; jq '.scripts,.devDependencies.knip,.version' package.json; sed -n '1,40p' mise.toml\ufffd\ufffd",
+        lineCount: 137,
+        skipped: 134,
+        sessionId: 206,
+        tokens: 883,
+      },
+    ];
+
+    for (const example of examples) {
+      const callLines = renderExecCommandCall({ cmd: example.command }, ansiTheme).render(72);
+      const plainCall = stripCompleteAnsi(callLines.join('\n'));
+      expect(plainCall).toMatch(/^\$ /);
+      expect(plainCall).not.toContain('\ufffd');
+      expectRenderSafe(callLines, 72);
+
+      const output = Array.from(
+        { length: example.lineCount },
+        (_unused, index) => `line ${index + 1}`,
+      ).join('\n');
+      const resultLines = renderExecCommandResult(
+        {
+          content: [{ type: 'text', text: 'unused formatted result' }],
+          details: {
+            chunk_id: 'abc123',
+            wall_time_seconds: 0.2,
+            exec_session_id: example.sessionId,
+            output,
+            original_token_count: example.tokens,
+            exit_code: 0,
+          },
+        },
+        { expanded: false, isPartial: false },
+        ansiTheme,
+      ).render(72);
+      const plainResult = resultLines.map(stripCompleteAnsi);
+
+      expect(plainResult[0]).toBe('');
+      expect(plainResult[1]).toBe(`... (${example.skipped} earlier lines, Ctrl+O to expand)`);
+      expect(plainResult.at(-2)).toBe('');
+      expect(plainResult.at(-1)).toBe(
+        `Exec #${example.sessionId} exited 0 · Took 0.2s · ${example.tokens} tokens`,
+      );
+      expectRenderSafe(resultLines, 72);
+    }
+  });
+
+  test('keeps partial, truncated, and final result transitions line-safe', () => {
+    const reset = '\u001b[0m';
+    const ansiTheme = {
+      bold: (text: string) => `\u001b[1m${text}${reset}`,
+      fg: (_role: string, text: string) => `\u001b[34m${text}${reset}`,
+    };
+    const partial = renderExecCommandResult(
+      {
+        content: [{ type: 'text', text: 'unused' }],
+        details: {
+          chunk_id: 'partial',
+          wall_time_seconds: 0.5,
+          exec_session_id: 9,
+          session_id: 9,
+          output: ['starting', '界🙂', '50%'].join('\n'),
+        },
+      },
+      { expanded: false, isPartial: true },
+      ansiTheme,
+    );
+    const partialLines = partial.render(34);
+    expect(stripCompleteAnsi(partialLines.at(-1) ?? '')).toBe('Exec #9 elapsed 0.5s');
+    expectRenderSafe(partialLines, 34);
+
+    const final = renderExecCommandResult(
+      {
+        content: [{ type: 'text', text: 'unused' }],
+        details: {
+          chunk_id: 'final',
+          wall_time_seconds: 0.8,
+          exec_session_id: 9,
+          output: Array.from({ length: 14 }, (_unused, index) => `row ${index + 1} 界🙂`).join(
+            '\n',
+          ),
+          original_token_count: 200,
+          exit_code: 0,
+          truncation: {
+            content: '',
+            truncated: true,
+            truncatedBy: 'lines',
+            totalLines: 20,
+            outputLines: 14,
+            totalBytes: 400,
+            outputBytes: 280,
+            lastLinePartial: false,
+            firstLineExceedsLimit: false,
+            maxLines: 14,
+            maxBytes: 400,
+          },
+        },
+      },
+      { expanded: false, isPartial: false },
+      ansiTheme,
+      { lastComponent: partial },
+    );
+    const finalLines = final.render(34);
+    const plainFinal = finalLines.map(stripCompleteAnsi);
+
+    expect(plainFinal[1]).toBe('... (11 earlier lines, Ctrl+O to …');
+    expect(plainFinal.at(-2)).toBe('');
+    expect(plainFinal.at(-1)).toBe('Exec #9 exited 0 · Took 0.8s · 20…');
+    expectRenderSafe(finalLines, 34);
+  });
+
+  test('truncates and wraps wide streaming Unicode on grapheme boundaries', () => {
+    const commandLines = renderExecCommandCall(
+      { cmd: `printf '${'界🙂e\u0301🇨'.repeat(20)}'\ufffd` },
+      {
+        bold: (text: string) => `\u001b[1m${text}\u001b[0m`,
+        fg: (_role: string, text: string) => `\u001b[36m${text}\u001b[0m`,
+      },
+    ).render(24);
+    expect(stripCompleteAnsi(commandLines[0] ?? '')).toMatch(/^\$ .*…$/u);
+    expectRenderSafe(commandLines, 24);
+
+    const resultLines = renderExecCommandResult(
+      {
+        content: [{ type: 'text', text: 'unused' }],
+        details: {
+          chunk_id: 'wide',
+          wall_time_seconds: 0.2,
+          output: `${'界🙂e\u0301🇨'.repeat(20)}\ncomplete`,
+          exit_code: 0,
+        },
+      },
+      { expanded: true, isPartial: false },
+      theme,
+    ).render(18);
+    expect(resultLines.some((line) => stripCompleteAnsi(line) === 'complete')).toBe(true);
+    expectRenderSafe(resultLines, 18);
   });
 
   test('renders explicit successful apply_patch status and shows failures', () => {

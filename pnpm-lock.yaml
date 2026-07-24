@@ -155,6 +155,9 @@ importers:
       '@earendil-works/pi-coding-agent':
         specifier: 0.82.0
         version: 0.82.0(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
+      '@earendil-works/pi-tui':
+        specifier: 0.82.0
+        version: 0.82.0
       '@types/node':
         specifier: ^24.3.0
         version: 24.13.3

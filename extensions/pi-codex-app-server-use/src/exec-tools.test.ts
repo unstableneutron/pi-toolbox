@@ -73,6 +73,38 @@ function createResolvingClient(response: unknown) {
   };
 }
 
+function createControlledClient() {
+  let notificationHandler: ((message: { method?: string; params?: unknown }) => void) | undefined;
+  let resolveExec: ((response: unknown) => void) | undefined;
+  const calls: Array<{ method: string; params: unknown }> = [];
+  return {
+    calls,
+    emit(message: { method?: string; params?: unknown }) {
+      notificationHandler?.(message);
+    },
+    resolve(response: unknown) {
+      if (!resolveExec) throw new Error('command/exec has not started');
+      resolveExec(response);
+    },
+    client: {
+      init: async () => undefined,
+      close: () => undefined,
+      onNotification(handler: (message: { method?: string; params?: unknown }) => void) {
+        notificationHandler = handler;
+        return () => {
+          notificationHandler = undefined;
+        };
+      },
+      callRpc(method: string, params: unknown) {
+        calls.push({ method, params });
+        return new Promise((resolve) => {
+          resolveExec = resolve;
+        });
+      },
+    },
+  };
+}
+
 describe('AppServer exec tool helpers', () => {
   function createFakeApplyPatchBin(): string {
     const bin = mkdtempSync(path.join(tmpdir(), 'pi-apply-patch-bin-'));
@@ -547,6 +579,51 @@ describe('AppServer exec tool helpers', () => {
     vi.useRealTimers();
   });
 
+  test('decodes split UTF-8 and terminal controls consistently in partial and final TTY output', async () => {
+    vi.useFakeTimers();
+    const fake = createControlledClient();
+    const sessions = new CodexAppServerExecSessionManager({
+      clientFactory: () => fake.client as any,
+    });
+    const updates: any[] = [];
+    const pending = sessions.exec(
+      { cmd: 'stream-wide-output', tty: true, yield_time_ms: 1_000 },
+      '/repo',
+      undefined,
+      (update) => updates.push(update),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+
+    const execCall = fake.calls.find((call) => call.method === 'command/exec')!;
+    const processId = (execCall.params as { processId: string }).processId;
+    const emit = (bytes: Buffer) =>
+      fake.emit({
+        method: 'command/exec/outputDelta',
+        params: { processId, deltaBase64: bytes.toString('base64') },
+      });
+    const wide = Buffer.from('界🙂', 'utf8');
+    emit(Buffer.from('start '));
+    emit(wide.subarray(0, 2));
+    emit(wide.subarray(2, 5));
+    emit(wide.subarray(5));
+    emit(Buffer.from('\n\u001b[3'));
+    emit(Buffer.from('1mred\u001b]0;ti'));
+    emit(Buffer.from('tle\u0007done\ufffd\r'));
+    emit(Buffer.from('\n\u009b32mgreen\u009b0mtail\u001b[31'));
+
+    await vi.advanceTimersByTimeAsync(250);
+    const expected = 'start 界🙂\nreddone\ngreentail';
+    expect(updates.at(-1)?.output).toBe(expected);
+
+    fake.resolve({ exitCode: 0, stdout: '', stderr: '' });
+    await Promise.resolve();
+    emit(Buffer.from('late output after the final response'));
+    await vi.advanceTimersByTimeAsync(50);
+    await expect(pending).resolves.toMatchObject({ output: expected, exit_code: 0 });
+    sessions.close();
+    vi.useRealTimers();
+  });
+
   test('write_stdin streams partial updates for new output since the poll baseline', async () => {
     vi.useFakeTimers();
     const fake = createPendingClient({ allowWrite: true });
@@ -657,7 +734,7 @@ describe('AppServer exec tool helpers', () => {
   test('strips binary/control bytes from non-tty exec output before returning it', async () => {
     const fake = createResolvingClient({
       exitCode: 0,
-      stdout: 'ok\u0000\u001b[31mred\u001b[0m\ufffd\u0085done\n',
+      stdout: 'ok\u0000\u001b[31mred\u001b[0m\ufffd\u0085done\n\u001b]unterminated',
       stderr: '',
     });
     const sessions = new CodexAppServerExecSessionManager({
@@ -673,7 +750,7 @@ describe('AppServer exec tool helpers', () => {
   test('strips binary/control bytes from tty exec output before returning it', async () => {
     const fake = createResolvingClient({
       exitCode: 0,
-      stdout: 'ok\u0000\u001b[31mred\u001b[0m\ufffd\u0085done\n',
+      stdout: 'ok\u0000\u001b[31mred\u001b[0m\ufffd\u0085done\n\u001b]unterminated',
       stderr: '',
     });
     const sessions = new CodexAppServerExecSessionManager({
