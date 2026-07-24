@@ -1,3 +1,4 @@
+import { getSupportedThinkingLevels, type Api, type Model } from '@earendil-works/pi-ai';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
 import { createEditorShortcutAutocompleteProvider } from './autocomplete';
@@ -27,6 +28,7 @@ export { processEditorShortcutSubmission } from './processor';
 export default function editorShortcut(pi: ExtensionAPI) {
   const fastMode = createFastModeState();
   const pasteState = createPasteShortcutState();
+  let selectedModel: Model<Api> | undefined;
 
   registerFastCommand(pi, fastMode);
 
@@ -35,6 +37,7 @@ export default function editorShortcut(pi: ExtensionAPI) {
   });
 
   pi.on('model_select', (event, ctx) => {
+    selectedModel = event.model;
     if (disableFastModeForUnsupportedModel(event.model, fastMode)) {
       ctx.ui.notify('Fast mode: off (current model does not support priority)', 'warning');
     }
@@ -46,6 +49,7 @@ export default function editorShortcut(pi: ExtensionAPI) {
   });
 
   pi.on('session_start', (_event, ctx) => {
+    selectedModel = ctx.model;
     restorePasteExpansions(ctx, pasteState);
 
     if (!hasTui(ctx)) return;
@@ -55,8 +59,9 @@ export default function editorShortcut(pi: ExtensionAPI) {
         current,
         () => getModelCandidates(ctx),
         () => fastMode.enabled,
-        () => isPriorityCapableModel(ctx.model as any),
+        () => isPriorityCapableModel(selectedModel as any),
         { ctx, state: pasteState },
+        () => (selectedModel ? getSupportedThinkingLevels(selectedModel) : ['off']),
       ),
     );
 

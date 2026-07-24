@@ -1,10 +1,13 @@
 import {
+  clampThinkingLevel,
   type Api,
   type Context,
   type Model,
+  type ModelThinkingLevel,
   type SimpleStreamOptions,
   type Tool,
 } from '@earendil-works/pi-ai/compat';
+import { createGrammarToolInputProperties } from './vendor/pi-ai-constrained-sampling.ts';
 
 import {
   buildResponsesInput,
@@ -16,11 +19,11 @@ import { resolveRequestProfile, type ResolvedRequestProfile } from './profile.ts
 const OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH = 64;
 const VALID_TEXT_VERBOSITIES = new Set(['low', 'medium', 'high']);
 const VALID_REASONING_SUMMARIES = new Set(['auto', 'concise', 'detailed']);
-const THINKING_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh'] as const;
+const THINKING_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 
 type TextVerbosity = 'low' | 'medium' | 'high';
 type ReasoningSummary = 'auto' | 'concise' | 'detailed';
-type ThinkingLevel = (typeof THINKING_LEVELS)[number];
+type ThinkingLevel = Exclude<ModelThinkingLevel, 'off'>;
 type OpenAIWebSocketResponsesStreamOptions = SimpleStreamOptions & {
   textVerbosity?: TextVerbosity;
   reasoningSummary?: ReasoningSummary;
@@ -135,27 +138,8 @@ function clampThinkingLevelCompat(
   requested: unknown,
 ): ThinkingLevel | undefined {
   if (!isThinkingLevel(requested) || !model.reasoning) return undefined;
-
-  const legacyMap = model.thinkingLevelMap;
-  if (legacyMap && requested in legacyMap) {
-    return legacyMap[requested] === null ? undefined : requested;
-  }
-
-  const supportedEfforts = model.thinking?.efforts;
-  if (supportedEfforts && supportedEfforts.length > 0) {
-    if (supportedEfforts.includes(requested)) return requested;
-    const requestedIndex = THINKING_LEVELS.indexOf(requested);
-    const supported = THINKING_LEVELS.filter((level) => supportedEfforts.includes(level));
-    if (supported.length === 0) return undefined;
-    return supported.reduce((best, level) =>
-      Math.abs(THINKING_LEVELS.indexOf(level) - requestedIndex) <
-      Math.abs(THINKING_LEVELS.indexOf(best) - requestedIndex)
-        ? level
-        : best,
-    );
-  }
-
-  return requested;
+  const clamped = clampThinkingLevel(model, requested);
+  return clamped === 'off' ? undefined : clamped;
 }
 
 function mapThinkingEffort(model: ThinkingCompatModel, effort: ThinkingLevel): string | undefined {
@@ -168,6 +152,23 @@ function supportsToolSearch(model: Model<Api>): boolean {
   return (
     (model.compat as { supportsToolSearch?: boolean } | undefined)?.supportsToolSearch === true
   );
+}
+
+function supportsStrictMode(model: Model<Api>): boolean {
+  const compat = model.compat as { supportsStrictMode?: boolean } | undefined;
+  return compat?.supportsStrictMode ?? false;
+}
+
+function supportsOpenAIGrammarTools(model: Model<Api>): boolean {
+  const compat = model.compat as { supportsOpenAIGrammarTools?: boolean } | undefined;
+  return compat?.supportsOpenAIGrammarTools === true;
+}
+
+export function getResponsesGrammarToolInputProperties(
+  model: Model<Api>,
+  context: Context,
+): ReadonlyMap<string, string> {
+  return createGrammarToolInputProperties(context.tools, supportsOpenAIGrammarTools(model));
 }
 
 function splitDeferredTools(
@@ -214,7 +215,12 @@ export function buildResponsesBody(
   const clampedReasoning = clampThinkingLevelCompat(compatModel, options?.reasoning);
   const effort = clampedReasoning ? mapThinkingEffort(compatModel, clampedReasoning) : undefined;
   const toolPlacement = splitDeferredTools(context, supportsToolSearch(model));
-  const tools = buildResponsesTools(toolPlacement.immediate);
+  const toolOptions = {
+    supportsStrictMode: supportsStrictMode(model),
+    supportsOpenAIGrammarTools: supportsOpenAIGrammarTools(model),
+  };
+  const grammarToolInputProperties = getResponsesGrammarToolInputProperties(model, context);
+  const tools = buildResponsesTools(toolPlacement.immediate, toolOptions);
   const promptCacheKey =
     options?.cacheRetention === 'none' && shouldHonorCacheDisabled(profile)
       ? undefined
@@ -224,6 +230,8 @@ export function buildResponsesBody(
     input: buildResponsesInput(model, context, {
       includeSystemPrompt: false,
       deferredTools: toolPlacement.deferred,
+      grammarToolInputProperties,
+      toolOptions,
     }),
     instructions: buildResponsesInstructions(context) ?? 'You are a helpful assistant.',
     store: resolveStore(model, profile, storeSettings),

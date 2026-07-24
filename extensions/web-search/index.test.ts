@@ -89,5 +89,11 @@ describe('web-search tool registration', () => {
     const tools = createWebSearchTools({ apiKey: undefined, modelName: 'test-model' });
 
     expect(tools.map((tool) => tool.name)).toEqual(['web_search', 'web_fetch']);
+    expect((tools[0]!.parameters as any).additionalProperties).toBe(false);
+    expect(tools[0]?.constrainedSampling).toEqual({
+      type: 'json_schema',
+      strict: 'prefer',
+    });
+    expect(tools[1]?.constrainedSampling).toBeUndefined();
   });
 });

@@ -276,11 +276,22 @@ describe('AppServer exec tool helpers', () => {
   });
 
   test('registers Codex-compatible exec tool descriptions and prompt snippets', () => {
-    const registeredTools: Array<{ name: string; description?: string; promptSnippet?: string }> =
-      [];
+    const registeredTools: Array<{
+      name: string;
+      description?: string;
+      promptSnippet?: string;
+      parameters?: Record<string, unknown>;
+      constrainedSampling?: unknown;
+    }> = [];
     registerAppServerExecTools(
       {
-        registerTool(tool: { name: string; description?: string; promptSnippet?: string }) {
+        registerTool(tool: {
+          name: string;
+          description?: string;
+          promptSnippet?: string;
+          parameters?: Record<string, unknown>;
+          constrainedSampling?: unknown;
+        }) {
           registeredTools.push(tool);
         },
       } as any,
@@ -302,6 +313,8 @@ describe('AppServer exec tool helpers', () => {
         name: 'apply_patch',
         description: 'Patch files.',
         promptSnippet: 'Edit files with patch.',
+        parameters: expect.objectContaining({ additionalProperties: false }),
+        constrainedSampling: { type: 'json_schema', strict: 'prefer' },
       },
     ]);
   });

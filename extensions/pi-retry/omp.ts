@@ -4,7 +4,7 @@ import { setRetrySettingsSource } from './settings';
 setRetrySettingsSource('omp');
 
 export default createPiRetryExtension({
-  // OMP's AgentSession retry/compaction helpers are private class methods, so the
+  // OMP's AgentSession retry and recovery helpers are private class methods, so the
   // Pi prototype patch layer is intentionally disabled. The public extension
   // events still provide terminal-leaf detection, hidden generic Continue dispatch,
   // visible premature-abandonment recovery, context filtering, status updates,

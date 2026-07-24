@@ -1,8 +1,17 @@
+import type { ModelThinkingLevel } from '@earendil-works/pi-ai';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 
-export type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+export type ThinkingLevel = ModelThinkingLevel;
 
-export const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'] as const;
+export const THINKING_LEVELS = [
+  'off',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+] as const satisfies readonly ModelThinkingLevel[];
 
 function isThinkingLevel(value: string): value is ThinkingLevel {
   return THINKING_LEVELS.includes(value as ThinkingLevel);

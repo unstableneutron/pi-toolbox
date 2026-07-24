@@ -27,6 +27,14 @@ import type {
   ToolCall,
 } from '@earendil-works/pi-ai/compat';
 
+import {
+  appendGrammarToolInputJsonDelta,
+  getGrammarToolInput,
+  resolveGrammarConstrainedSampling,
+  resolveJsonSchemaStrictSampling,
+  type GrammarToolInputJsonBuffer,
+} from '../pi-ai-constrained-sampling.ts';
+
 import { shortHash } from '../../debug.ts';
 import { parsePartialJson } from '../../partial-json.ts';
 
@@ -71,9 +79,14 @@ type Message = Context['messages'][number];
 type BuildResponsesInputOptions = {
   includeSystemPrompt?: boolean;
   deferredTools?: ReadonlyMap<string, Tool>;
+  grammarToolInputProperties?: ReadonlyMap<string, string>;
+  toolOptions?: BuildResponsesToolsOptions;
 };
 
 type BuildResponsesToolsOptions = {
+  strict?: boolean | null;
+  supportsStrictMode?: boolean;
+  supportsOpenAIGrammarTools?: boolean;
   deferLoading?: boolean;
 };
 type ThinkingBlock = Record<string, any> & {
@@ -81,7 +94,13 @@ type ThinkingBlock = Record<string, any> & {
   thinking: string;
   thinkingSignature?: string;
 };
-type ToolCallBlock = ToolCall & { partialJson?: string };
+type ToolCallBlock = ToolCall & {
+  partialJson?: string;
+  customInput?: {
+    property: string;
+    jsonBuffer: GrammarToolInputJsonBuffer;
+  };
+};
 type HiddenResponseItemBlock = { type: 'response_item'; item: ResponsesInputItem };
 type InternalAssistantContent = AssistantMessage['content'][number] | HiddenResponseItemBlock;
 
@@ -181,18 +200,30 @@ export function isFinalizedTextBlock(block: TextContent): boolean {
 function toolResultInput<TApi extends Api>(
   message: Extract<Message, { role: 'toolResult' }>,
   model: Model<TApi>,
+  grammarToolInputProperties: ReadonlyMap<string, string> | undefined,
 ): ResponsesInputItem {
   const { callId } = splitResponsesToolCallId(message.toolCallId);
   return {
-    type: 'function_call_output',
+    type: grammarToolInputProperties?.has(message.toolName)
+      ? 'custom_tool_call_output'
+      : 'function_call_output',
     call_id: callId,
     output: toolResultOutput(message.content, model.input.includes('image')),
   };
 }
 
-function syntheticToolResultInput(block: ToolCall): ResponsesInputItem {
+function syntheticToolResultInput(
+  block: ToolCall,
+  grammarToolInputProperties: ReadonlyMap<string, string> | undefined,
+): ResponsesInputItem {
   const { callId } = splitResponsesToolCallId(block.id);
-  return { type: 'function_call_output', call_id: callId, output: 'No result provided' };
+  return {
+    type: grammarToolInputProperties?.has(block.name)
+      ? 'custom_tool_call_output'
+      : 'function_call_output',
+    call_id: callId,
+    output: 'No result provided',
+  };
 }
 
 function userInput(message: Extract<Message, { role: 'user' }>): ResponsesInputItem | undefined {
@@ -215,6 +246,7 @@ function userInput(message: Extract<Message, { role: 'user' }>): ResponsesInputI
 function assistantMessageItems(
   message: Extract<Message, { role: 'assistant' }>,
   index: number,
+  grammarToolInputProperties: ReadonlyMap<string, string> | undefined,
 ): ResponsesInputItem[] {
   const output: ResponsesInputItem[] = [];
   let textBlockIndex = 0;
@@ -248,11 +280,23 @@ function assistantMessageItems(
       continue;
     }
     if (message.stopReason === 'toolUse' && block.type === 'toolCall') {
-      output.push(
-        responsesFunctionCallInput(block, {
-          includeItemId: !replayState.hasUnreplayableReasoningBeforeItem,
-        }),
-      );
+      const functionCall = responsesFunctionCallInput(block, {
+        includeItemId: !replayState.hasUnreplayableReasoningBeforeItem,
+      });
+      const inputProperty = grammarToolInputProperties?.get(block.name);
+      if (inputProperty) {
+        output.push({
+          type: 'custom_tool_call',
+          ...(functionCall.id ? { id: functionCall.id } : {}),
+          call_id: functionCall.call_id,
+          name: block.name,
+          input: sanitizeResponsesText(
+            getGrammarToolInput(block.name, block.arguments, inputProperty),
+          ),
+        });
+      } else {
+        output.push(functionCall);
+      }
     }
   }
   return output;
@@ -282,7 +326,9 @@ export function buildResponsesInput<TApi extends Api>(
   const insertSyntheticToolResults = () => {
     if (pendingToolCalls.length === 0) return;
     for (const toolCall of pendingToolCalls) {
-      if (!existingToolResultIds.has(toolCall.id)) input.push(syntheticToolResultInput(toolCall));
+      if (!existingToolResultIds.has(toolCall.id)) {
+        input.push(syntheticToolResultInput(toolCall, options.grammarToolInputProperties));
+      }
     }
     pendingToolCalls = [];
     existingToolResultIds = new Set();
@@ -302,7 +348,9 @@ export function buildResponsesInput<TApi extends Api>(
         assistantIndex++;
         continue;
       }
-      input.push(...assistantMessageItems(message, assistantIndex));
+      input.push(
+        ...assistantMessageItems(message, assistantIndex, options.grammarToolInputProperties),
+      );
       pendingToolCalls =
         message.stopReason === 'toolUse'
           ? message.content.filter((block): block is ToolCall => block.type === 'toolCall')
@@ -315,7 +363,7 @@ export function buildResponsesInput<TApi extends Api>(
     if (message.role === 'toolResult') {
       if (pendingToolCalls.some((toolCall) => toolCall.id === message.toolCallId)) {
         existingToolResultIds.add(message.toolCallId);
-        input.push(toolResultInput(message, model));
+        input.push(toolResultInput(message, model, options.grammarToolInputProperties));
 
         const addedTools: Tool[] = [];
         for (const name of message.addedToolNames ?? []) {
@@ -341,7 +389,10 @@ export function buildResponsesInput<TApi extends Api>(
             call_id: searchCallId,
             execution: 'client',
             status: 'completed',
-            tools: buildResponsesTools(addedTools, { deferLoading: true }),
+            tools: buildResponsesTools(addedTools, {
+              ...options.toolOptions,
+              deferLoading: true,
+            }),
           });
         }
       }
@@ -357,14 +408,39 @@ export function buildResponsesTools(
   options: BuildResponsesToolsOptions = {},
 ): unknown[] | undefined {
   if (!tools || tools.length === 0) return undefined;
-  return tools.map((tool) => ({
-    type: 'function',
-    name: tool.name,
-    description: tool.description,
-    parameters: tool.parameters,
-    strict: false,
-    ...(options.deferLoading ? { defer_loading: true } : {}),
-  }));
+  const supportsStrictMode = options.supportsStrictMode ?? false;
+  const supportsOpenAIGrammarTools = options.supportsOpenAIGrammarTools ?? false;
+  const defaultStrict = options.strict ?? false;
+
+  return tools.map((tool) => {
+    const grammar = resolveGrammarConstrainedSampling(tool, supportsOpenAIGrammarTools);
+    if (grammar) {
+      return {
+        type: 'custom',
+        name: tool.name,
+        description: tool.description,
+        format: {
+          type: 'grammar',
+          syntax: grammar.format,
+          definition: grammar.definition,
+        },
+        ...(options.deferLoading ? { defer_loading: true } : {}),
+      };
+    }
+
+    const constrainedStrict = resolveJsonSchemaStrictSampling(tool, supportsStrictMode);
+    const functionTool: Record<string, unknown> = {
+      type: 'function',
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters,
+      ...(options.deferLoading ? { defer_loading: true } : {}),
+    };
+    if (supportsStrictMode) {
+      functionTool.strict = constrainedStrict ?? defaultStrict;
+    }
+    return functionTool;
+  });
 }
 
 function mapStopReason(status: string | undefined): AssistantMessage['stopReason'] {
@@ -506,11 +582,12 @@ export function reconcileCompletedResponse<TApi extends Api>(
   output: AssistantMessage,
   stream: AssistantMessageEventStream,
   model: Model<TApi>,
+  grammarToolInputProperties?: ReadonlyMap<string, string>,
 ): void {
   const hadStreamedContent = output.content.length > 0;
   appendRecoveredReasoningItems(response, output, stream);
   appendTerminalText(response, output, stream);
-  appendRecoveredFunctionCalls(response, output, stream);
+  appendRecoveredFunctionCalls(response, output, stream, grammarToolInputProperties);
   applyCompletedResponse(output, model, response);
 
   if (
@@ -590,6 +667,7 @@ export function createResponsesEventProcessor<TApi extends Api>(
   output: AssistantMessage,
   stream: AssistantMessageEventStream,
   model: Model<TApi>,
+  grammarToolInputProperties?: ReadonlyMap<string, string>,
 ): { apply(event: ResponsesEvent): void } {
   const states = new Map<number, OutputState>();
   const reasoningBlocksById = new Map<string, ThinkingBlock>();
@@ -629,12 +707,22 @@ export function createResponsesEventProcessor<TApi extends Api>(
   };
 
   const createFunctionCallState = (index: number, item: Record<string, any>): FunctionCallState => {
+    const isCustom = item.type === 'custom_tool_call';
+    const inputProperty = grammarToolInputProperties?.get(item.name) ?? 'input';
+    const input = typeof item.input === 'string' ? item.input : '';
     const block: ToolCallBlock = {
       type: 'toolCall',
       id: `${item.call_id}|${item.id}`,
       name: item.name,
-      arguments: parseResponsesJsonObject(item.arguments),
-      partialJson: item.arguments || '',
+      arguments: isCustom ? { [inputProperty]: input } : parseResponsesJsonObject(item.arguments),
+      ...(isCustom
+        ? {
+            customInput: {
+              property: inputProperty,
+              jsonBuffer: { input: '', started: false, closed: false },
+            },
+          }
+        : { partialJson: item.arguments || '' }),
     };
     output.content.push(block);
     const state: FunctionCallState = {
@@ -645,6 +733,30 @@ export function createResponsesEventProcessor<TApi extends Api>(
     states.set(index, state);
     stream.push({ type: 'toolcall_start', contentIndex: state.blockIndex, partial: output });
     return state;
+  };
+
+  const appendCustomToolCallInput = (
+    state: FunctionCallState,
+    nextInput: string,
+    close: boolean,
+  ): void => {
+    const customInput = state.block.customInput;
+    if (!customInput) return;
+    state.block.arguments = { [customInput.property]: nextInput };
+    const delta = appendGrammarToolInputJsonDelta(
+      customInput.jsonBuffer,
+      customInput.property,
+      nextInput,
+      close,
+    );
+    if (delta) {
+      stream.push({
+        type: 'toolcall_delta',
+        contentIndex: state.blockIndex,
+        delta,
+        partial: output,
+      });
+    }
   };
 
   const backfillReasoningSignatures = (responseOutput: unknown): void => {
@@ -679,7 +791,9 @@ export function createResponsesEventProcessor<TApi extends Api>(
       const item = event.item ?? {};
       if (item.type === 'reasoning') createReasoningState(index);
       else if (item.type === 'message') createMessageState(index);
-      else if (item.type === 'function_call') createFunctionCallState(index, item);
+      else if (item.type === 'function_call' || item.type === 'custom_tool_call') {
+        createFunctionCallState(index, item);
+      }
       return;
     }
 
@@ -802,6 +916,23 @@ export function createResponsesEventProcessor<TApi extends Api>(
       return;
     }
 
+    if (type === 'response.custom_tool_call_input.delta') {
+      const state = states.get(outputIndex(event));
+      if (state?.kind === 'function_call' && state.block.customInput) {
+        const current = String(state.block.arguments[state.block.customInput.property] ?? '');
+        appendCustomToolCallInput(state, current + String(event.delta ?? ''), false);
+      }
+      return;
+    }
+
+    if (type === 'response.custom_tool_call_input.done') {
+      const state = states.get(outputIndex(event));
+      if (state?.kind === 'function_call' && state.block.customInput) {
+        appendCustomToolCallInput(state, String(event.input ?? ''), true);
+      }
+      return;
+    }
+
     if (type === 'response.output_item.done') {
       const index = outputIndex(event);
       const item = event.item ?? {};
@@ -849,6 +980,29 @@ export function createResponsesEventProcessor<TApi extends Api>(
           partial: output,
         });
         states.delete(index);
+      } else if (item.type === 'custom_tool_call') {
+        const existing = states.get(index);
+        const state =
+          existing?.kind === 'function_call' ? existing : createFunctionCallState(index, item);
+        appendCustomToolCallInput(
+          state,
+          typeof item.input === 'string'
+            ? item.input
+            : String(
+                state.block.customInput
+                  ? (state.block.arguments[state.block.customInput.property] ?? '')
+                  : '',
+              ),
+          true,
+        );
+        delete state.block.customInput;
+        stream.push({
+          type: 'toolcall_end',
+          contentIndex: state.blockIndex,
+          toolCall: state.block,
+          partial: output,
+        });
+        states.delete(index);
       } else {
         const hiddenItem = sanitizeHiddenResponseItem(item);
         if (hiddenItem) {
@@ -878,7 +1032,7 @@ export function createResponsesEventProcessor<TApi extends Api>(
       } else if (response.status === 'failed' || response.status === 'cancelled') {
         applyCompletedResponse(output, model, response);
       } else {
-        reconcileCompletedResponse(response, output, stream, model);
+        reconcileCompletedResponse(response, output, stream, model, grammarToolInputProperties);
       }
       return;
     }
@@ -898,8 +1052,14 @@ export async function processResponsesEvents<TApi extends Api>(
   output: AssistantMessage,
   stream: AssistantMessageEventStream,
   model: Model<TApi>,
+  grammarToolInputProperties?: ReadonlyMap<string, string>,
 ): Promise<void> {
-  const processor = createResponsesEventProcessor(output, stream, model);
+  const processor = createResponsesEventProcessor(
+    output,
+    stream,
+    model,
+    grammarToolInputProperties,
+  );
   for await (const event of events) processor.apply(event);
 }
 
@@ -956,6 +1116,7 @@ export function appendRecoveredFunctionCalls(
   response: Record<string, any>,
   output: AssistantMessage,
   stream: AssistantMessageEventStream,
+  grammarToolInputProperties?: ReadonlyMap<string, string>,
 ): void {
   const existing = new Map<string, { block: ToolCallBlock; index: number }>();
   output.content.forEach((block, index) => {
@@ -963,30 +1124,58 @@ export function appendRecoveredFunctionCalls(
   });
 
   for (const item of responseOutputItems(response)) {
-    if (item.type !== 'function_call') continue;
+    const isCustom = item.type === 'custom_tool_call';
+    if (!isCustom && item.type !== 'function_call') continue;
     const callId = typeof item.call_id === 'string' ? item.call_id : undefined;
     const itemId = typeof item.id === 'string' ? item.id : undefined;
     const name = typeof item.name === 'string' ? item.name : undefined;
     if (!callId || !itemId || !name) continue;
 
     const id = `${callId}|${itemId}`;
-    const argumentsJson = typeof item.arguments === 'string' ? item.arguments : '';
+    const inputProperty = grammarToolInputProperties?.get(name) ?? 'input';
+    const customInput = typeof item.input === 'string' ? item.input : '';
+    const argumentsJson = isCustom
+      ? JSON.stringify({ [inputProperty]: customInput })
+      : typeof item.arguments === 'string'
+        ? item.arguments
+        : '';
     const existingEntry = existing.get(id);
     if (existingEntry) {
       const toolCall = existingEntry.block;
-      if (toolCall.partialJson === undefined) continue;
-      if (argumentsJson.startsWith(toolCall.partialJson)) {
-        const delta = argumentsJson.slice(toolCall.partialJson.length);
-        if (delta)
+      if (isCustom) {
+        if (!toolCall.customInput) continue;
+        toolCall.arguments = { [inputProperty]: customInput };
+        const delta = appendGrammarToolInputJsonDelta(
+          toolCall.customInput.jsonBuffer,
+          inputProperty,
+          customInput,
+          true,
+        );
+        if (delta) {
           stream.push({
             type: 'toolcall_delta',
             contentIndex: existingEntry.index,
             delta,
             partial: output,
           });
+        }
+        delete toolCall.customInput;
+      } else {
+        if (toolCall.partialJson === undefined) continue;
+        if (argumentsJson.startsWith(toolCall.partialJson)) {
+          const delta = argumentsJson.slice(toolCall.partialJson.length);
+          if (delta) {
+            stream.push({
+              type: 'toolcall_delta',
+              contentIndex: existingEntry.index,
+              delta,
+              partial: output,
+            });
+          }
+        }
+        toolCall.arguments = parseResponsesJsonObject(argumentsJson);
+        delete toolCall.partialJson;
       }
-      toolCall.arguments = parseResponsesJsonObject(argumentsJson);
-      delete toolCall.partialJson;
       stream.push({
         type: 'toolcall_end',
         contentIndex: existingEntry.index,
@@ -1000,25 +1189,43 @@ export function appendRecoveredFunctionCalls(
       type: 'toolCall',
       id,
       name,
-      arguments: parseResponsesJsonObject(argumentsJson),
+      arguments: isCustom
+        ? { [inputProperty]: customInput }
+        : parseResponsesJsonObject(argumentsJson),
     };
     const contentIndex = output.content.length;
     output.content.push(toolCall);
     stream.push({ type: 'toolcall_start', contentIndex, partial: output });
-    const fullArgumentsJson = argumentsJson || JSON.stringify(toolCall.arguments);
-    if (fullArgumentsJson)
-      stream.push({
-        type: 'toolcall_delta',
-        contentIndex,
-        delta: fullArgumentsJson,
-        partial: output,
-      });
+    if (isCustom) {
+      const delta = appendGrammarToolInputJsonDelta(
+        { input: '', started: false, closed: false },
+        inputProperty,
+        customInput,
+        true,
+      );
+      if (delta) {
+        stream.push({ type: 'toolcall_delta', contentIndex, delta, partial: output });
+      }
+    } else {
+      const fullArgumentsJson = argumentsJson || JSON.stringify(toolCall.arguments);
+      if (fullArgumentsJson) {
+        stream.push({
+          type: 'toolcall_delta',
+          contentIndex,
+          delta: fullArgumentsJson,
+          partial: output,
+        });
+      }
+    }
     stream.push({ type: 'toolcall_end', contentIndex, toolCall, partial: output });
     existing.set(id, { block: toolCall, index: contentIndex });
   }
 }
 
-export function assistantMessageToResponseItems(output: AssistantMessage): unknown[] {
+export function assistantMessageToResponseItems(
+  output: AssistantMessage,
+  grammarToolInputProperties?: ReadonlyMap<string, string>,
+): unknown[] {
   const items: unknown[] = [];
   let textIndex = 0;
   const replayState = createResponsesReplayState();
@@ -1049,11 +1256,23 @@ export function assistantMessageToResponseItems(output: AssistantMessage): unkno
         ...(phase ? { phase } : {}),
       });
     } else if (output.stopReason === 'toolUse' && block.type === 'toolCall') {
-      items.push(
-        responsesFunctionCallInput(block, {
-          includeItemId: !replayState.hasUnreplayableReasoningBeforeItem,
-        }),
-      );
+      const functionCall = responsesFunctionCallInput(block, {
+        includeItemId: !replayState.hasUnreplayableReasoningBeforeItem,
+      });
+      const inputProperty = grammarToolInputProperties?.get(block.name);
+      if (inputProperty) {
+        items.push({
+          type: 'custom_tool_call',
+          ...(functionCall.id ? { id: functionCall.id } : {}),
+          call_id: functionCall.call_id,
+          name: block.name,
+          input: sanitizeResponsesText(
+            getGrammarToolInput(block.name, block.arguments, inputProperty),
+          ),
+        });
+      } else {
+        items.push(functionCall);
+      }
     }
   }
   return items;

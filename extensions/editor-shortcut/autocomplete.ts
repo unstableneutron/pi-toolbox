@@ -10,7 +10,7 @@ import {
   isGeneratedPasteValue,
   type PasteShortcutState,
 } from './commands/paste';
-import { THINKING_LEVELS } from './commands/thinking';
+import { THINKING_LEVELS, type ThinkingLevel } from './commands/thinking';
 
 function filterAutocompleteItems(items: AutocompleteItem[], query: string): AutocompleteItem[] {
   if (!query) return items;
@@ -26,6 +26,7 @@ function getDirectiveCommandSuggestions(
   fastModeEnabled: boolean,
   fastModeSupported: boolean,
   models: Model<Api>[],
+  thinkingLevels: readonly ThinkingLevel[],
   delegated: Awaited<ReturnType<AutocompleteProvider['getSuggestions']>>,
 ): Awaited<ReturnType<AutocompleteProvider['getSuggestions']>> {
   const fastModeDirective = getNextFastModeDirective(fastModeEnabled);
@@ -37,7 +38,7 @@ function getDirectiveCommandSuggestions(
       label: `model:${item.label}`,
     })),
     { value: 'thinking:', label: 'thinking:', description: 'Set thinking level for this prompt' },
-    ...THINKING_LEVELS.map((level) => ({
+    ...thinkingLevels.map((level) => ({
       value: `thinking:${level}`,
       label: `thinking:${level}`,
       description: `Set thinking level to ${level}`,
@@ -128,6 +129,7 @@ export function createEditorShortcutAutocompleteProvider(
   getFastModeEnabled: () => boolean = () => false,
   getFastModeSupported: () => boolean = () => true,
   pasteOptions?: PasteAutocompleteOptions,
+  getThinkingLevels: () => readonly ThinkingLevel[] = () => THINKING_LEVELS,
 ): AutocompleteProvider {
   return {
     triggerCharacters: [...new Set([...(current.triggerCharacters ?? []), '/', '$'])],
@@ -147,6 +149,7 @@ export function createEditorShortcutAutocompleteProvider(
           getFastModeEnabled(),
           getFastModeSupported(),
           getModels(),
+          getThinkingLevels(),
           delegated,
         );
       }
@@ -163,7 +166,7 @@ export function createEditorShortcutAutocompleteProvider(
 
       if (context.command === 'thinking') {
         const items = filterAutocompleteItems(
-          THINKING_LEVELS.map((level) => ({ value: level, label: level })),
+          getThinkingLevels().map((level) => ({ value: level, label: level })),
           context.argumentPrefix,
         );
         return items.length === 0 ? null : { items, prefix: context.argumentPrefix };

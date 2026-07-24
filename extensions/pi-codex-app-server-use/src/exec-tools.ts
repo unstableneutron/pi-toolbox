@@ -48,12 +48,15 @@ export const APP_SERVER_EXEC_CONTROL_TOOL_NAMES = ['exec_command', 'write_stdin'
 export const APP_SERVER_EXEC_TOOL_NAMES = [...APP_SERVER_EXEC_CONTROL_TOOL_NAMES, 'apply_patch'];
 export const REPLACED_PI_LOCAL_TOOL_NAMES = ['read', 'bash', 'edit', 'write'];
 
-const APPLY_PATCH_PARAMETERS = Type.Object({
-  input: Type.String({
-    description:
-      'Full patch text. Use *** Begin Patch / *** End Patch with Add/Update/Delete File sections.',
-  }),
-});
+const APPLY_PATCH_PARAMETERS = Type.Object(
+  {
+    input: Type.String({
+      description:
+        'Full patch text. Use *** Begin Patch / *** End Patch with Add/Update/Delete File sections.',
+    }),
+  },
+  { additionalProperties: false },
+);
 
 const EXEC_COMMAND_PARAMETERS = Type.Object({
   cmd: Type.String({ description: 'Shell command to execute.' }),
@@ -868,6 +871,7 @@ export function registerAppServerApplyPatchTool(
     description: 'Patch files.',
     promptSnippet: 'Edit files with patch.',
     parameters: APPLY_PATCH_PARAMETERS,
+    constrainedSampling: { type: 'json_schema', strict: 'prefer' },
     prepareArguments: prepareApplyPatchArguments as (args: unknown) => ApplyPatchParams,
     renderCall: renderApplyPatchCall,
     renderResult: renderApplyPatchResult,

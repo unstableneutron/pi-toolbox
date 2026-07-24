@@ -1844,6 +1844,7 @@ export default function multiEditExtension(
             'edit rejects empty oldText values.',
           ],
       parameters: isClassicShape ? classicEditSchema : multiEditSchema,
+      constrainedSampling: isClassicShape ? { type: 'json_schema', strict: 'prefer' } : undefined,
       prepareArguments: (isClassicShape
         ? prepareClassicEditArguments
         : prepareExtendedEditArguments) as any,
@@ -2008,6 +2009,7 @@ export default function multiEditExtension(
       'The patch value must be raw patch text only: no Markdown fences, no prose, no commentary.',
     ],
     parameters: applyPatchSchema,
+    constrainedSampling: { type: 'json_schema', strict: 'prefer' },
     prepareArguments: prepareApplyPatchArguments,
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const profile = getProfile(ctx.model);

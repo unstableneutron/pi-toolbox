@@ -2,7 +2,8 @@
 
 Experimental Pi extension providing a transport facade for OpenAI-compatible
 Responses APIs, with shared SSE/WebSocket parsing, Azure/LFM-friendly URL
-handling, terminal-output reconciliation, and midstream recovery.
+handling, terminal-output reconciliation, provider-side constrained sampling,
+and midstream recovery. Version 0.5 requires Pi 0.82 or newer.
 
 The extension provides two modes:
 
@@ -159,8 +160,18 @@ also match Pi's Codex Responses path where Azure supports them:
   `low`, `medium`, or `high`.
 - `include` starts with `["reasoning.encrypted_content"]` so reasoning items can
   be replayed safely across stateless turns.
-- Reasoning requests include `reasoning.summary: "auto"` by default.
+- Reasoning requests include `reasoning.summary: "auto"` by default. Requested
+  levels, including `max`, are clamped through Pi's provider-verified model
+  metadata before serialization.
 - `tool_choice: "auto"` and `parallel_tool_calls: true` are sent by default.
+- Tools using Pi 0.82's JSON-schema constrained sampling send `strict: true`
+  only when `compat.supportsStrictMode` is enabled. `strict: "require"` fails
+  before the request when strict tools are unavailable.
+- Models with `compat.supportsOpenAIGrammarTools: true` receive grammar tools as
+  OpenAI `custom` tools. Raw custom-tool input is converted back to the tool's
+  single required string argument across streaming, replay, continuation, and
+  retrieve recovery. Without that capability flag, grammar tools safely fall
+  back to ordinary function tools.
 - With Pi 0.80.7 or newer, models configured with
   `compat.supportsToolSearch: true` use native deferred tool loading. Initially
   inactive definitions are omitted from top-level `tools`; when a loader
@@ -254,9 +265,9 @@ GET /responses/{response_id}
 
 If the retrieved snapshot grows from already-emitted text, the extension emits
 synthetic text deltas for the missing suffix. If the snapshot completes with
-function calls, the extension emits each complete recovered tool call once. When
-retrieve reaches `completed`, the recovered response id becomes the next
-continuation checkpoint.
+function or custom grammar calls, the extension emits each complete recovered
+tool call once. When retrieve reaches `completed`, the recovered response id
+becomes the next continuation checkpoint.
 
 The next real model turn opens or reuses a WebSocket and sends only the new
 input with `previous_response_id`. If the provider reports either the canonical

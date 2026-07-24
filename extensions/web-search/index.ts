@@ -255,21 +255,25 @@ export function createWebSearchTools({
       description:
         'Perform web searches and return results in an LLM-friendly format with parameters tuned for LLMs.',
       promptSnippet: 'Search the web with a natural-language objective and keyword queries',
-      parameters: Type.Object({
-        objective: Type.String({
-          description:
-            'Natural-language description of what the web search is trying to find. ' +
-            'Try to make the search objective atomic, looking for a specific piece of information. ' +
-            'May include guidance about preferred sources or freshness.',
-        }),
-        search_queries: Type.Array(Type.String({ maxLength: 100 }), {
-          description:
-            'List of keyword search queries of 3-6 words, which may include search operators. ' +
-            'The search queries should be related to the objective. Limited to 3 entries of 100 characters each.',
-          minItems: 1,
-          maxItems: 3,
-        }),
-      }),
+      parameters: Type.Object(
+        {
+          objective: Type.String({
+            description:
+              'Natural-language description of what the web search is trying to find. ' +
+              'Try to make the search objective atomic, looking for a specific piece of information. ' +
+              'May include guidance about preferred sources or freshness.',
+          }),
+          search_queries: Type.Array(Type.String({ maxLength: 100 }), {
+            description:
+              'List of keyword search queries of 3-6 words, which may include search operators. ' +
+              'The search queries should be related to the objective. Limited to 3 entries of 100 characters each.',
+            minItems: 1,
+            maxItems: 3,
+          }),
+        },
+        { additionalProperties: false },
+      ),
+      constrainedSampling: { type: 'json_schema', strict: 'prefer' },
 
       async execute(_toolCallId, params, signal, onUpdate) {
         const { objective, search_queries } = params;

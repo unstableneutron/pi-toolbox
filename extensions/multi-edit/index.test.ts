@@ -71,9 +71,12 @@ describe('multi-edit extension', () => {
     expect(tools[0].parameters.properties.path).toBeDefined();
     expect(tools[0].parameters.properties.edits).toBeDefined();
     expect(tools[0].parameters.properties.patch).toBeDefined();
+    expect(tools[0].constrainedSampling).toBeUndefined();
 
     expect(tools[1].name).toBe('apply_patch');
     expect(tools[1].parameters.properties.patch).toBeDefined();
+    expect(tools[1].parameters.additionalProperties).toBe(false);
+    expect(tools[1].constrainedSampling).toEqual({ type: 'json_schema', strict: 'prefer' });
 
     const beforeAgentStart = handlers.get('before_agent_start')?.[0];
     expect(beforeAgentStart).toBeTypeOf('function');
@@ -355,6 +358,9 @@ describe('multi-edit extension', () => {
     expect(editTool.parameters.properties.patch).toBeUndefined();
     expect(editTool.parameters.properties.multi).toBeUndefined();
     expect(editTool.parameters.properties.oldText).toBeUndefined();
+    expect(editTool.parameters.additionalProperties).toBe(false);
+    expect(editTool.parameters.required).toEqual(['path', 'edits']);
+    expect(editTool.constrainedSampling).toEqual({ type: 'json_schema', strict: 'prefer' });
     expect(editTool.promptSnippet).toBe(
       'Make precise file edits with exact text replacement, including multiple disjoint edits in one call',
     );
@@ -421,6 +427,10 @@ describe('multi-edit extension', () => {
     expect(editTools).toHaveLength(2);
     expect(swappedEditTool.parameters.properties.patch).toBeUndefined();
     expect(swappedEditTool.parameters.properties.edits).toBeDefined();
+    expect(swappedEditTool.constrainedSampling).toEqual({
+      type: 'json_schema',
+      strict: 'prefer',
+    });
     expect(activeTools).toEqual(['read', 'edit', 'write']);
   });
 

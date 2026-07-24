@@ -20,7 +20,7 @@ function createHarness() {
   };
 
   loopExtension(pi as any);
-  return { appendEntry, commands, handlers, sendMessage };
+  return { appendEntry, commands, handlers, sendMessage, registerTool: pi.registerTool };
 }
 
 function createPrintCtx() {
@@ -34,6 +34,14 @@ function createPrintCtx() {
 }
 
 describe('loop command mode guards', () => {
+  test('registers a strict-preferred loop success tool', () => {
+    const { registerTool } = createHarness();
+    const tool = registerTool.mock.calls[0]?.[0];
+
+    expect(tool.parameters.additionalProperties).toBe(false);
+    expect(tool.constrainedSampling).toEqual({ type: 'json_schema', strict: 'prefer' });
+  });
+
   test('returns without opening the selector outside TUI mode', async () => {
     const { appendEntry, commands, sendMessage } = createHarness();
 

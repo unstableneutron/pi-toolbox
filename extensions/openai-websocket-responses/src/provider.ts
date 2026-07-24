@@ -10,7 +10,11 @@ import type {
   Usage,
 } from '@earendil-works/pi-ai/compat';
 
-import { buildResponsesBody, type ResponsesBody } from './body.ts';
+import {
+  buildResponsesBody,
+  getResponsesGrammarToolInputProperties,
+  type ResponsesBody,
+} from './body.ts';
 import { shortHash, writeDebugLog } from './debug.ts';
 import {
   buildContinuationRequestBody,
@@ -305,6 +309,7 @@ export function createOpenAIWebSocketResponsesStream(
           ? createTraceContext(optionHeader(options, 'traceparent'))
           : undefined;
         const profile = resolveRequestProfile(model, settings);
+        const grammarToolInputProperties = getResponsesGrammarToolInputProperties(model, context);
         const requestHeaders = buildRequestHeaders(model, options, profile);
         const websocketHeaders = buildWebSocketHeaders(model, options, profile);
         const url = resolveWebSocketResponsesUrl(model, settings, websocketHeaders, profile);
@@ -380,7 +385,12 @@ export function createOpenAIWebSocketResponsesStream(
           clearContinuation(cacheKey);
         }
 
-        const processor = createResponsesEventProcessor(output, stream, model);
+        const processor = createResponsesEventProcessor(
+          output,
+          stream,
+          model,
+          grammarToolInputProperties,
+        );
         let started = false;
         let transportOutcome: string | undefined;
         const start = async (connection: WebSocketConnectionMetadata) => {
@@ -492,6 +502,7 @@ export function createOpenAIWebSocketResponsesStream(
               stream,
               signal: options?.signal,
               profile,
+              grammarToolInputProperties,
             });
             transportOutcome = 'retrieve_recovered';
             transportDiagnostics?.record('retrieve_recovery_done', {
@@ -520,7 +531,7 @@ export function createOpenAIWebSocketResponsesStream(
           setContinuation(cacheKey, {
             lastRequestBody: fullBody,
             lastResponseId: output.responseId,
-            lastResponseItems: assistantMessageToResponseItems(output),
+            lastResponseItems: assistantMessageToResponseItems(output, grammarToolInputProperties),
           });
         } else {
           clearContinuation(cacheKey);

@@ -1,6 +1,6 @@
 {
   "name": "pi-conditional-context",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Pi extension that conditionally includes AGENTS.md/CLAUDE.md prompt blocks by model",
   "keywords": [
     "agents",

@@ -66,6 +66,7 @@ export async function recoverResponseByRetrieve(request: {
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
   profile?: ResolvedRequestProfile;
+  grammarToolInputProperties?: ReadonlyMap<string, string>;
 }): Promise<RetrieveRecoveryResult> {
   const fetchImpl = request.fetchImpl ?? fetch;
   const startedAt = Date.now();
@@ -121,7 +122,12 @@ export async function recoverResponseByRetrieve(request: {
           emittedSyntheticDeltas++;
         }
       }
-      appendRecoveredFunctionCalls(snapshot, request.output, request.stream);
+      appendRecoveredFunctionCalls(
+        snapshot,
+        request.output,
+        request.stream,
+        request.grammarToolInputProperties,
+      );
       if (snapshotText || request.output.content.some((block) => block.type === 'text')) {
         const { index, block } = ensureTextBlock(request.output, request.stream);
         const alreadyFinalized = isFinalizedTextBlock(block);
@@ -141,6 +147,7 @@ export async function recoverResponseByRetrieve(request: {
         request.output,
         request.stream,
         request.model,
+        request.grammarToolInputProperties,
       );
       return { response: snapshot, recoveredText: snapshotText, emittedSyntheticDeltas, polls };
     }

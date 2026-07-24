@@ -61,7 +61,6 @@ const SESSION_MANAGER_PATCHED = Symbol.for('pi-retry.session-manager.patched');
 const REFUSAL_DISABLE_ENV_VAR = 'PI_RETRY_REFUSAL_RECOVERY_DISABLED';
 const DEFAULT_CORE_RETRY_BASE_DELAY_MS = 2000;
 const DEFAULT_CORE_RETRY_MAX_RETRIES = 3;
-const DEFAULT_COMPACTION_EXTRA_RETRIES = 2;
 const LENGTH_TRUNCATION_MAX_RECOVERY_ATTEMPTS = 1;
 const PROMPT_RECOVERY_TIMEOUT_MS = 120_000;
 const RECOVERY_FALLBACK_QUIET_WINDOW_MS = 750;
@@ -176,7 +175,7 @@ function isCoreSafeExtraRetryableAssistantError(message: AssistantErrorLike): bo
 // this predicate in the `agent_end` handler to branch the failed leaf out
 // of the main path before the next attempt writes a sibling.
 const CORE_RETRYABLE_ERROR_PATTERN =
-  /overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|network.?error|connection.?error|connection.?refused|connection.?lost|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|ended without|http2 request did not get a response|timed? out|timeout|terminated|retry delay/i;
+  /overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|network.?error|connection.?error|connection.?refused|connection.?lost|other side closed|fetch failed|getaddrinfo|ENOTFOUND|EAI_AGAIN|upstream.?connect|reset before headers|socket hang up|ended without|http2 request did not get a response|timed? out|timeout|terminated|retry delay/i;
 
 function isLikelyCoreRetryableError(message: AssistantErrorLike): boolean {
   if (isNonRetryableAssistantProviderError(message)) return false;
@@ -245,29 +244,6 @@ function isLengthTruncatedAssistantMessage(message: unknown): boolean {
     candidate.role === 'assistant' &&
     candidate.stopReason === 'length' &&
     !hasAssistantToolCall(candidate.content),
-  );
-}
-
-type CompactionEndEventLike = {
-  type?: unknown;
-  result?: unknown;
-  aborted?: unknown;
-  errorMessage?: unknown;
-};
-
-function isCompactionEndEvent(event: unknown): event is CompactionEndEventLike {
-  return Boolean(
-    event && 'object' === typeof event && 'compaction_end' === (event as { type?: unknown }).type,
-  );
-}
-
-function isRetryableCompactionFailure(event: CompactionEndEventLike | undefined): boolean {
-  return Boolean(
-    event &&
-    true !== event.aborted &&
-    event.result === undefined &&
-    'string' === typeof event.errorMessage &&
-    classifyRetryableProviderError(event.errorMessage) !== undefined,
   );
 }
 
@@ -1002,7 +978,6 @@ export async function installAgentSessionPatch(
 
     const originalIsRetryableError = proto._isRetryableError;
     const originalPrompt = proto.prompt;
-    const originalRunAutoCompaction = proto._runAutoCompaction;
 
     if ('function' !== typeof originalIsRetryableError) {
       patchFailureReason = 'AgentSession._isRetryableError is not available';
@@ -1041,48 +1016,6 @@ export async function installAgentSessionPatch(
           }
 
           throw error;
-        }
-      };
-    }
-
-    if ('function' === typeof originalRunAutoCompaction) {
-      proto._runAutoCompaction = async function patchedRunAutoCompaction(...args: unknown[]) {
-        let retriesRemaining = DEFAULT_COMPACTION_EXTRA_RETRIES;
-
-        while (true) {
-          const originalEmit = this?._emit;
-          let compactionEndEvent: CompactionEndEventLike | undefined;
-
-          if ('function' === typeof originalEmit) {
-            this._emit = function patchedCompactionRetryEmit(
-              event: unknown,
-              ...emitArgs: unknown[]
-            ) {
-              if (isCompactionEndEvent(event)) {
-                compactionEndEvent = event;
-              }
-              return originalEmit.call(this, event, ...emitArgs);
-            };
-          }
-
-          let result;
-          try {
-            result = await originalRunAutoCompaction.apply(this, args);
-          } finally {
-            if ('function' === typeof originalEmit) {
-              this._emit = originalEmit;
-            }
-          }
-
-          if (
-            false !== result ||
-            retriesRemaining <= 0 ||
-            !isRetryableCompactionFailure(compactionEndEvent)
-          ) {
-            return result;
-          }
-
-          retriesRemaining -= 1;
         }
       };
     }

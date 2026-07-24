@@ -9,7 +9,7 @@ import {
   type Usage,
 } from '@earendil-works/pi-ai/compat';
 
-import { buildResponsesBody } from './body.ts';
+import { buildResponsesBody, getResponsesGrammarToolInputProperties } from './body.ts';
 import { buildRequestHeaders } from './headers.ts';
 import { resolveRequestProfile } from './profile.ts';
 import { createResponsesEventProcessor } from './responses-adapter.ts';
@@ -76,6 +76,7 @@ export function createOpenAISseResponsesStream(
       try {
         const settings = settingsProvider();
         const profile = resolveRequestProfile(model, settings);
+        const grammarToolInputProperties = getResponsesGrammarToolInputProperties(model, context);
         const headers = buildRequestHeaders(model, options, profile);
         headers.set('accept', 'text/event-stream');
         headers.set('content-type', 'application/json');
@@ -104,7 +105,12 @@ export function createOpenAISseResponsesStream(
         }
 
         stream.push({ type: 'start', partial: output });
-        const processor = createResponsesEventProcessor(output, stream, model);
+        const processor = createResponsesEventProcessor(
+          output,
+          stream,
+          model,
+          grammarToolInputProperties,
+        );
         let terminal = false;
         for await (const event of parseSseJson(response)) {
           if (isTerminalEvent(event.type)) terminal = true;

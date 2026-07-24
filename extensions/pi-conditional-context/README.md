@@ -13,6 +13,7 @@ the extension is not loaded:
 
 - Before a meaningful tool call, send one concise prose sentence describing the intent.
 - Do not echo raw commands or tool arguments as the preface.
+
 <!-- pi:endif -->
 ```
 

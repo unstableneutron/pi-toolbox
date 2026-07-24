@@ -73,25 +73,35 @@ function responseItemCallId(value: unknown): string | undefined {
   return typeof record?.call_id === 'string' && record.call_id.trim() ? record.call_id : undefined;
 }
 
-function pendingFunctionCallIds(items: unknown[]): string[] {
+function pendingToolCalls(
+  items: unknown[],
+): Array<{ callId: string; outputType: 'function_call_output' | 'custom_tool_call_output' }> {
   const seen = new Set<string>();
-  const ids: string[] = [];
+  const calls: Array<{
+    callId: string;
+    outputType: 'function_call_output' | 'custom_tool_call_output';
+  }> = [];
   for (const item of items) {
-    if (responseItemType(item) !== 'function_call') continue;
+    const itemType = responseItemType(item);
+    if (itemType !== 'function_call' && itemType !== 'custom_tool_call') continue;
     const callId = responseItemCallId(item);
     if (!callId || seen.has(callId)) continue;
     seen.add(callId);
-    ids.push(callId);
+    calls.push({
+      callId,
+      outputType:
+        itemType === 'custom_tool_call' ? 'custom_tool_call_output' : 'function_call_output',
+    });
   }
-  return ids;
+  return calls;
 }
 
 function buildCompleteToolOutputDelta(
   continuation: ContinuationState,
   body: ResponsesBody,
 ): unknown[] | undefined {
-  const pendingCallIds = pendingFunctionCallIds(continuation.lastResponseItems);
-  if (pendingCallIds.length === 0) return undefined;
+  const pendingCalls = pendingToolCalls(continuation.lastResponseItems);
+  if (pendingCalls.length === 0) return undefined;
 
   const previousInput = continuation.lastRequestBody.input ?? [];
   const currentInput = body.input ?? [];
@@ -99,14 +109,19 @@ function buildCompleteToolOutputDelta(
     return undefined;
   }
 
-  const pending = new Set(pendingCallIds);
+  const pendingByCallId = new Map(
+    pendingCalls.map(({ callId, outputType }) => [callId, outputType] as const),
+  );
   const outputsByCallId = new Map<string, unknown>();
   for (const item of currentInput.slice(previousInput.length)) {
     const itemType = responseItemType(item);
     const callId = responseItemCallId(item);
+    const expectedOutputType = callId ? pendingByCallId.get(callId) : undefined;
 
-    if (itemType === 'function_call_output') {
-      if (!callId || !pending.has(callId) || outputsByCallId.has(callId)) return undefined;
+    if (itemType === 'function_call_output' || itemType === 'custom_tool_call_output') {
+      if (!callId || itemType !== expectedOutputType || outputsByCallId.has(callId)) {
+        return undefined;
+      }
       outputsByCallId.set(callId, item);
       continue;
     }
@@ -114,8 +129,8 @@ function buildCompleteToolOutputDelta(
     if (responseItemRole(item) === 'user') return undefined;
   }
 
-  if (outputsByCallId.size !== pendingCallIds.length) return undefined;
-  return pendingCallIds.map((callId) => outputsByCallId.get(callId));
+  if (outputsByCallId.size !== pendingCalls.length) return undefined;
+  return pendingCalls.map(({ callId }) => outputsByCallId.get(callId));
 }
 
 export function buildContinuationRequestBody(

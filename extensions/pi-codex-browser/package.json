@@ -1,6 +1,6 @@
 {
   "name": "pi-codex-browser",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "POC CLI for driving Codex Browser Use Chrome/Brave backends",
   "bin": {
     "codex-browser": "./scripts/codex-browser.mjs"
@@ -12,9 +12,9 @@
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
-    "oxfmt": "^0.44.0",
-    "oxlint": "^1.59.0",
-    "oxlint-tsgolint": "^0.20.0",
+    "oxfmt": "^0.60.0",
+    "oxlint": "^1.75.0",
+    "oxlint-tsgolint": "^7.0.2001",
     "typescript": "^5.7.3",
     "vitest": "^3.2.4"
   },

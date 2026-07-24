@@ -100,6 +100,19 @@ function createAutocompleteOptions() {
 }
 
 describe('parseEditorShortcutText', () => {
+  test('parses max thinking directives', async () => {
+    const harness = createHarness();
+
+    const result = await processEditorShortcutSubmission(
+      '$thinking:max',
+      harness.pi as any,
+      harness.ctx as any,
+    );
+
+    expect(result).toEqual({ action: 'handled' });
+    expect(harness.setThinkingLevel).toHaveBeenCalledWith('max');
+  });
+
   test('parses leading model and thinking directives before prompt text', () => {
     expect(parseEditorShortcutText('$model:facade\n$thinking:high\nDo the work')).toEqual({
       directives: [
@@ -687,6 +700,40 @@ describe('editorShortcut extension', () => {
 
     expect(harness.addAutocompleteProvider).toHaveBeenCalledTimes(1);
     expect(harness.setEditorComponent).toHaveBeenCalledTimes(1);
+  });
+
+  test('autocomplete follows provider-verified thinking levels after model selection', async () => {
+    const harness = createHarness();
+    editorShortcut(harness.pi as any);
+    await harness.handlers.get('session_start')?.({}, harness.ctx);
+
+    const installProvider = harness.addAutocompleteProvider.mock.calls[0]?.[0];
+    expect(installProvider).toBeTypeOf('function');
+    const provider = installProvider(createDelegatingProvider());
+    const offOnly = await provider.getSuggestions(
+      ['$thinking:'],
+      0,
+      '$thinking:'.length,
+      createAutocompleteOptions(),
+    );
+    expect(offOnly?.items.map((item: any) => item.value)).toEqual(['off']);
+
+    const maxModel = {
+      ...models[0],
+      reasoning: true,
+      thinkingLevelMap: { max: 'max' },
+    };
+    await harness.handlers.get('model_select')?.({ model: maxModel }, harness.ctx);
+    const extended = await provider.getSuggestions(
+      ['$thinking:'],
+      0,
+      '$thinking:'.length,
+      createAutocompleteOptions(),
+    );
+    const values = extended?.items.map((item: any) => item.value) ?? [];
+    expect(values).toContain('high');
+    expect(values).toContain('max');
+    expect(values).not.toContain('xhigh');
   });
 
   test('session_start skips TUI-only wrappers outside TUI mode', async () => {

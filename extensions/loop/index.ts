@@ -324,7 +324,8 @@ export default function loopExtension(pi: ExtensionAPI): void {
     description:
       'Stop the active loop when the breakout condition is satisfied. Only call this tool when explicitly instructed to do so by the user, tool or system prompt.',
     promptSnippet: 'Signal that the active /loop breakout condition has been satisfied.',
-    parameters: Type.Object({}),
+    parameters: Type.Object({}, { additionalProperties: false }),
+    constrainedSampling: { type: 'json_schema', strict: 'prefer' },
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       if (!loopState.active) {
         return {

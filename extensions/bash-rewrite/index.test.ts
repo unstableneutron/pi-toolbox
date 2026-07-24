@@ -157,18 +157,31 @@ describe('bash-rewrite orchestrator', () => {
     expect(collectCount).toBe(0);
   });
 
-  test('passes through rewriteable commands when no provider for the target tool is loaded', async () => {
+  test('passes through commands with Pi 0.82 live session environment', async () => {
     const { tools } = createHarness(['bash', 'read', 'ls']);
 
     const result = await tools[0].execute(
       'tool-call',
-      { command: 'printf provider-absent' },
+      {
+        command:
+          'printf "%s|%s|%s|%s|%s" "$PI_SESSION_ID" "$PI_SESSION_FILE" "$PI_PROVIDER" "$PI_MODEL" "$PI_REASONING_LEVEL"',
+      },
       undefined,
       undefined,
-      { cwd: process.cwd() },
+      {
+        cwd: process.cwd(),
+        model: { provider: 'devai', id: 'gpt-5.6-sol' },
+        thinkingLevel: 'medium',
+        sessionManager: {
+          getSessionId: () => 'session-082',
+          getSessionFile: () => '/tmp/session-082.jsonl',
+        },
+      },
     );
 
-    expect(result.content[0].text).toContain('provider-absent');
+    expect(result.content[0].text).toContain(
+      'session-082|/tmp/session-082.jsonl|devai|gpt-5.6-sol|medium',
+    );
   });
 });
 

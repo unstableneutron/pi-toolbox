@@ -956,6 +956,157 @@ describe('body and continuation helpers', () => {
     expect(body.input).toEqual([expect.objectContaining({ role: 'user' })]);
   });
 
+  it('clamps max reasoning to provider metadata and sends max when advertised', () => {
+    const context = { messages: [{ role: 'user', content: 'Hi', timestamp: 1 }] } as any;
+
+    expect(buildResponsesBody(makeModel(), context, { reasoning: 'max' } as any).reasoning).toEqual(
+      {
+        effort: 'high',
+        summary: 'auto',
+      },
+    );
+    expect(
+      buildResponsesBody(
+        makeModel({
+          thinkingLevelMap: {
+            off: 'none',
+            low: 'low',
+            medium: 'medium',
+            high: 'high',
+            max: 'max',
+          },
+        }),
+        context,
+        { reasoning: 'max' } as any,
+      ).reasoning,
+    ).toEqual({ effort: 'max', summary: 'auto' });
+  });
+
+  it('serializes strict JSON-schema tools only when the model supports strict mode', () => {
+    const strictTool = {
+      name: 'apply_patch',
+      description: 'Apply a patch',
+      parameters: {
+        type: 'object',
+        properties: { patch: { type: 'string' } },
+        required: ['patch'],
+        additionalProperties: false,
+      },
+      constrainedSampling: { type: 'json_schema', strict: 'prefer' },
+    } as any;
+    const context = { tools: [strictTool], messages: [] } as any;
+
+    expect(
+      buildResponsesBody(
+        makeModel({ compat: { supportsStrictMode: true } }),
+        context,
+        undefined,
+        'generic',
+      ).tools,
+    ).toContainEqual(expect.objectContaining({ type: 'function', strict: true }));
+    expect(
+      buildResponsesBody(makeModel({ compat: { supportsStrictMode: false } }), context).tools,
+    ).toContainEqual(expect.not.objectContaining({ strict: expect.anything() }));
+  });
+
+  it('rejects required strict sampling when the model does not support strict mode', () => {
+    const context = {
+      tools: [
+        {
+          name: 'required_strict',
+          description: 'Requires strict mode',
+          parameters: {
+            type: 'object',
+            properties: { value: { type: 'string' } },
+            required: ['value'],
+            additionalProperties: false,
+          },
+          constrainedSampling: { type: 'json_schema', strict: 'require' },
+        },
+      ],
+      messages: [],
+    } as any;
+
+    expect(() =>
+      buildResponsesBody(
+        makeModel({ compat: { supportsStrictMode: false } }),
+        context,
+        undefined,
+        'generic',
+      ),
+    ).toThrow(/requires JSON-schema constrained sampling/i);
+  });
+
+  it('serializes and replays OpenAI grammar tools as custom tool calls', () => {
+    const patchTool = {
+      name: 'apply_patch',
+      description: 'Apply a patch',
+      parameters: {
+        type: 'object',
+        properties: { patch: { type: 'string' } },
+        required: ['patch'],
+        additionalProperties: false,
+      },
+      constrainedSampling: {
+        type: 'grammar',
+        variants: { openai_lark: 'start: "*** Begin Patch" /(.|\\n)*/' },
+      },
+    } as any;
+    const model = makeModel({ compat: { supportsOpenAIGrammarTools: true } });
+    const body = buildResponsesBody(model, {
+      tools: [patchTool],
+      messages: [
+        {
+          role: 'assistant',
+          content: [
+            {
+              type: 'toolCall',
+              id: 'call_patch|ctc_patch',
+              name: 'apply_patch',
+              arguments: { patch: '*** Begin Patch\n*** End Patch' },
+            },
+          ],
+          timestamp: 1,
+          stopReason: 'toolUse',
+          provider: model.provider,
+          model: model.id,
+          api: 'openai-websocket-responses',
+        },
+        {
+          role: 'toolResult',
+          toolCallId: 'call_patch|ctc_patch',
+          toolName: 'apply_patch',
+          content: [{ type: 'text', text: 'Done' }],
+          isError: false,
+          timestamp: 2,
+        },
+      ],
+    } as any);
+
+    expect(body.tools).toContainEqual({
+      type: 'custom',
+      name: 'apply_patch',
+      description: 'Apply a patch',
+      format: {
+        type: 'grammar',
+        syntax: 'lark',
+        definition: 'start: "*** Begin Patch" /(.|\\n)*/',
+      },
+    });
+    expect(body.input).toContainEqual({
+      type: 'custom_tool_call',
+      id: 'ctc_patch',
+      call_id: 'call_patch',
+      name: 'apply_patch',
+      input: '*** Begin Patch\n*** End Patch',
+    });
+    expect(body.input).toContainEqual({
+      type: 'custom_tool_call_output',
+      call_id: 'call_patch',
+      output: 'Done',
+    });
+  });
+
   it('ignores long non-Responses text signatures and uses fallback input item ids', () => {
     const legacyGeminiTextSignature = 'AY89a19o'.repeat(54);
     const body = buildResponsesBody(makeModel(), {
@@ -1199,7 +1350,6 @@ describe('body and continuation helpers', () => {
           name: 'view_image',
           description: 'View an image',
           defer_loading: true,
-          strict: false,
         },
       ],
     });
@@ -1384,6 +1534,42 @@ describe('body and continuation helpers', () => {
         ...next,
         previous_response_id: 'resp_parallel',
         input: [outputA, outputB],
+      },
+    });
+  });
+
+  it('uses custom tool output deltas for grammar-tool continuations', () => {
+    const previous = buildResponsesBody(makeModel(), {
+      messages: [{ role: 'user', content: 'apply the patch', timestamp: 1 }],
+    });
+    const call = {
+      type: 'custom_tool_call',
+      id: 'ctc_patch',
+      call_id: 'call_patch',
+      name: 'apply_patch',
+      input: '*** Begin Patch\n*** End Patch',
+    };
+    const output = {
+      type: 'custom_tool_call_output',
+      call_id: 'call_patch',
+      output: 'Done',
+    };
+    const next = {
+      ...previous,
+      input: [...previous.input, { ...call, input: 'drifted replay' }, output],
+    };
+    const continuation: ContinuationState = {
+      lastRequestBody: previous,
+      lastResponseId: 'resp_patch',
+      lastResponseItems: [call],
+    };
+
+    expect(buildContinuationRequestBody(continuation, next)).toEqual({
+      decision: 'delta',
+      body: {
+        ...next,
+        previous_response_id: 'resp_patch',
+        input: [output],
       },
     });
   });
@@ -2078,6 +2264,131 @@ describe('Responses adapter and retrieve recovery', () => {
         arguments: { path: 'a' },
       }),
     ]);
+  });
+
+  it('streams custom grammar tool input as JSON-shaped tool-call deltas', async () => {
+    const model = makeModel();
+    const output = makeAssistantMessage(model);
+    const stream = createAssistantMessageEventStream();
+    const streamedEvents: any[] = [];
+    const drain = (async () => {
+      for await (const event of stream) streamedEvents.push(event);
+    })();
+    const grammarToolInputProperties = new Map([['apply_patch', 'patch']]);
+
+    await processResponsesEvents(
+      events(
+        {
+          type: 'response.output_item.added',
+          output_index: 0,
+          item: {
+            type: 'custom_tool_call',
+            id: 'ctc_patch',
+            call_id: 'call_patch',
+            name: 'apply_patch',
+            input: '',
+          },
+        },
+        {
+          type: 'response.custom_tool_call_input.delta',
+          output_index: 0,
+          delta: '*** Begin Patch\n',
+        },
+        {
+          type: 'response.custom_tool_call_input.done',
+          output_index: 0,
+          input: '*** Begin Patch\n*** End Patch',
+        },
+        {
+          type: 'response.output_item.done',
+          output_index: 0,
+          item: {
+            type: 'custom_tool_call',
+            id: 'ctc_patch',
+            call_id: 'call_patch',
+            name: 'apply_patch',
+            input: '*** Begin Patch\n*** End Patch',
+          },
+        },
+        { type: 'response.completed', response: { id: 'resp_patch', status: 'completed' } },
+      ),
+      output,
+      stream,
+      model,
+      grammarToolInputProperties,
+    );
+    stream.end();
+    await drain;
+
+    expect(output.stopReason).toBe('toolUse');
+    expect(output.content).toContainEqual(
+      expect.objectContaining({
+        type: 'toolCall',
+        id: 'call_patch|ctc_patch',
+        name: 'apply_patch',
+        arguments: { patch: '*** Begin Patch\n*** End Patch' },
+      }),
+    );
+    const deltaJson = streamedEvents
+      .filter((event) => event.type === 'toolcall_delta')
+      .map((event) => event.delta)
+      .join('');
+    expect(JSON.parse(deltaJson)).toEqual({ patch: '*** Begin Patch\n*** End Patch' });
+    expect(assistantMessageToResponseItems(output, grammarToolInputProperties)).toContainEqual({
+      type: 'custom_tool_call',
+      id: 'ctc_patch',
+      call_id: 'call_patch',
+      name: 'apply_patch',
+      input: '*** Begin Patch\n*** End Patch',
+    });
+  });
+
+  it('recovers custom grammar tool calls from retrieve snapshots', async () => {
+    const model = makeModel();
+    const settings = normalizeSettings({ recovery: { pollIntervalMs: 1, timeoutMs: 20 } });
+    const output = makeAssistantMessage(model);
+    const stream = createAssistantMessageEventStream();
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            id: 'resp_custom_tool',
+            status: 'completed',
+            output: [
+              {
+                type: 'custom_tool_call',
+                id: 'ctc_patch',
+                call_id: 'call_patch',
+                name: 'apply_patch',
+                input: '*** Begin Patch\n*** End Patch',
+              },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+    );
+
+    await recoverResponseByRetrieve({
+      model,
+      settings,
+      responseId: 'resp_custom_tool',
+      headers: new Headers(),
+      emittedText: '',
+      output,
+      stream,
+      fetchImpl,
+      grammarToolInputProperties: new Map([['apply_patch', 'patch']]),
+    });
+
+    expect(output.stopReason).toBe('toolUse');
+    expect(output.content).toContainEqual(
+      expect.objectContaining({
+        type: 'toolCall',
+        id: 'call_patch|ctc_patch',
+        name: 'apply_patch',
+        arguments: { patch: '*** Begin Patch\n*** End Patch' },
+      }),
+    );
   });
 
   it('emits complete tool calls from retrieve snapshots without adding empty text', async () => {
