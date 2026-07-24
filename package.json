@@ -1,6 +1,6 @@
 {
   "name": "pi-toolbox",
-  "version": "0.82.0",
+  "version": "0.82.1",
   "private": true,
   "description": "My own pi-toolbox of extensions, skills, prompts, and subagent templates.",
   "license": "MIT",
@@ -24,7 +24,7 @@
     "@earendil-works/pi-coding-agent": "0.82.0",
     "@earendil-works/pi-tui": "0.82.0",
     "@types/node": "^24.3.0",
-    "knip": "^6.3.1",
+    "knip": "^6.29.0",
     "oxfmt": "^0.60.0",
     "oxlint": "^1.75.0",
     "oxlint-tsgolint": "^7.0.2001",

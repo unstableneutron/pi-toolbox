@@ -1,7 +1,7 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "tags": ["-lintignore"],
-  "ignoreBinaries": ["aube", "aubr", "duckdb", "gitchamber", "which"],
+  "ignoreBinaries": ["aube", "aubr", "duckdb", "gitchamber"],
   "ignoreDependencies": ["@earendil-works/pi-agent-core", "@aws-sdk/client-bedrock-runtime", "tsx"],
   "ignoreExportsUsedInFile": {
     "interface": true,
