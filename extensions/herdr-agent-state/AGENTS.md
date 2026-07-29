@@ -14,15 +14,18 @@ local changes surgical so future upstream refreshes are easy to diff and merge.
 - Related Herdr Pi tool package:
   `https://github.com/ogulcancelik/pi-extensions/tree/main/packages/pi-herdr`
 
-Before editing this extension, compare against the upstream Herdr asset. If the
-snapshot is missing or stale, run:
+Before editing this extension, compare against the upstream Herdr asset. The
+current local baseline is recorded at the top of `index.ts` (integration version
+7 at the time of this refresh). If the snapshot is missing or stale, run:
 
 ```bash
+gitchamber remove ogulcancelik/herdr
 gitchamber ogulcancelik/herdr#master
 ```
 
-Prefer checking the raw URL or gitchamber snapshot over ad hoc clones. Do not add
-a submodule unless the user explicitly asks for that maintenance model.
+Prefer checking the raw URL or a freshly fetched gitchamber snapshot over ad hoc
+clones. Do not add a submodule unless the user explicitly asks for that
+maintenance model.
 
 ## Local fork policy
 
@@ -55,3 +58,7 @@ Agent state IPC additionally requires Herdr's socket env:
 - `HERDR_SOCKET_PATH` is set
 
 Keep tests covering these gates whenever this extension changes.
+
+Follow upstream lifecycle ownership: use Pi's `agent_settled` event for the idle
+transition, and do not report `pane.release_agent` from `session_shutdown`.
+Current Herdr versions own known-agent exit through confirmed process exit.

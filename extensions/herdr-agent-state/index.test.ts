@@ -6,19 +6,17 @@ type Handler = (event?: any, ctx?: any) => Promise<void> | void;
 type Recording = {
   acceptedReports: Array<Record<string, any>>;
   requests: Array<Record<string, any>>;
-  dropNextWorking: boolean;
+  dropWorkingAttempts: number;
 };
 
 const { createConnectionMock, recording } = vi.hoisted(() => {
   const recording: Recording = {
     acceptedReports: [],
     requests: [],
-    dropNextWorking: false,
+    dropWorkingAttempts: 0,
   };
 
-  const createConnectionMock = vi.fn((socketPath: string) => {
-    expect(socketPath).toBe('/tmp/herdr-agent-state.sock');
-
+  const createConnectionMock = vi.fn((_socketPath: string) => {
     const socket = new EventEmitter() as EventEmitter & {
       destroy: () => void;
       write: (line: string) => void;
@@ -30,8 +28,8 @@ const { createConnectionMock, recording } = vi.hoisted(() => {
 
       if (request.method === 'pane.report_agent') {
         const params = request.params as Record<string, any>;
-        if (params.state === 'working' && recording.dropNextWorking) {
-          recording.dropNextWorking = false;
+        if (params.state === 'working' && recording.dropWorkingAttempts > 0) {
+          recording.dropWorkingAttempts -= 1;
           return;
         }
         recording.acceptedReports.push(params);
@@ -53,6 +51,7 @@ const { createConnectionMock, recording } = vi.hoisted(() => {
 });
 
 vi.mock('node:net', () => ({
+  default: { createConnection: createConnectionMock },
   createConnection: createConnectionMock,
 }));
 
@@ -92,6 +91,7 @@ class FakePi {
 function fakeContext(overrides: Record<string, any> = {}): any {
   return {
     hasUI: true,
+    isIdle: () => true,
     mode: 'tui',
     sessionManager: {
       getSessionFile: () => '/tmp/herdr-agent-state-test.jsonl',
@@ -104,7 +104,7 @@ function fakeContext(overrides: Record<string, any> = {}): any {
 function resetRecording(): void {
   recording.acceptedReports = [];
   recording.requests = [];
-  recording.dropNextWorking = false;
+  recording.dropWorkingAttempts = 0;
   createConnectionMock.mockClear();
 }
 
@@ -115,7 +115,6 @@ async function loadHarness(env: Record<string, string> = {}): Promise<FakePi> {
     HERDR_ENV: '1',
     HERDR_SOCKET_PATH: '/tmp/herdr-agent-state.sock',
     HERDR_PANE_ID: 'p_1',
-    HERDR_PI_IDLE_DEBOUNCE_MS: '20',
     HERDR_PI_ACTIVE_HEARTBEAT_MS: '0',
     ...env,
   });
@@ -149,9 +148,7 @@ afterEach(() => {
   delete process.env.PI_SUBAGENT_CHILD;
   delete process.env.HERDR_SOCKET_PATH;
   delete process.env.HERDR_PANE_ID;
-  delete process.env.HERDR_PI_IDLE_DEBOUNCE_MS;
   delete process.env.HERDR_PI_ACTIVE_HEARTBEAT_MS;
-  delete process.env.HERDR_PI_RETRY_GRACE_MS;
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
@@ -170,7 +167,9 @@ describe('herdr agent state extension', () => {
 
     expect(pi.handlers.get('session_start')).toHaveLength(1);
     expect(pi.handlers.get('agent_start')).toHaveLength(1);
-    expect(pi.handlers.get('agent_end')).toHaveLength(1);
+    expect(pi.handlers.get('agent_end')).toBeUndefined();
+    expect(pi.handlers.get('agent_settled')).toHaveLength(1);
+    expect(pi.handlers.get('session_shutdown')).toBeUndefined();
     expect(pi.busHandlers.get('herdr:blocked')).toHaveLength(1);
   });
 
@@ -203,7 +202,7 @@ describe('herdr agent state extension', () => {
     await flushSocketWork();
     await pi.emit('agent_start', {}, nonTuiContext);
     await flushSocketWork();
-    await pi.emit('agent_end', { messages: [] }, nonTuiContext);
+    await pi.emit('agent_settled', {}, nonTuiContext);
     await vi.advanceTimersByTimeAsync(20);
     await flushSocketWork();
 
@@ -211,10 +210,20 @@ describe('herdr agent state extension', () => {
     expect(recording.requests).toEqual([]);
   });
 
+  test('uses the upstream Windows named-pipe socket endpoint', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    const pi = await loadHarness({ HERDR_SOCKET_PATH: 'herdr-test' });
+
+    await pi.emit('session_start');
+    await flushSocketWork();
+
+    expect(createConnectionMock).toHaveBeenCalledWith('\\\\.\\pipe\\herdr-test');
+  });
+
   test('reports the active session to Herdr on session and agent start', async () => {
     const pi = await loadHarness();
 
-    await pi.emit('session_start');
+    await pi.emit('session_start', { reason: 'startup' });
     await flushSocketWork();
 
     expect(recording.requests).toContainEqual(
@@ -225,6 +234,7 @@ describe('herdr agent state extension', () => {
           source: 'herdr:pi',
           agent: 'pi',
           agent_session_path: '/tmp/herdr-agent-state-test.jsonl',
+          session_start_source: 'startup',
         }),
       }),
     );
@@ -247,71 +257,64 @@ describe('herdr agent state extension', () => {
     );
   });
 
-  test('does not release the agent on unqualified session shutdown', async () => {
+  test('retries a dropped state report with the upstream socket behavior', async () => {
     const pi = await loadHarness();
-
-    await pi.emit('session_start');
-    await flushSocketWork();
-    recording.requests = [];
-
-    await pi.emit('session_shutdown');
-    await flushSocketWork();
-
-    expect(recording.requests).not.toContainEqual(
-      expect.objectContaining({ method: 'pane.release_agent' }),
-    );
-  });
-
-  test('reasserts working after a dropped active report', async () => {
-    const pi = await loadHarness({ HERDR_PI_ACTIVE_HEARTBEAT_MS: '30' });
-    recording.dropNextWorking = true;
+    recording.dropWorkingAttempts = 1;
 
     await pi.emit('session_start');
     await flushSocketWork();
     await pi.emit('agent_start');
-    await vi.advanceTimersByTimeAsync(30);
     await vi.advanceTimersByTimeAsync(500);
     await flushSocketWork();
 
     expect(acceptedStates()).toContain('working');
   });
 
-  test('does not publish idle while a tool call is still active', async () => {
+  test('restores working state when a reload begins during an active run', async () => {
     const pi = await loadHarness();
 
-    await pi.emit('session_start');
-    await flushSocketWork();
-    await pi.emit('agent_start');
-    await flushSocketWork();
-    await pi.emit('tool_execution_start', { toolCallId: 'tool-1', toolName: 'bash', args: {} });
-    await flushSocketWork();
-    await pi.emit('agent_end', { messages: [] });
-    await vi.advanceTimersByTimeAsync(30);
+    await pi.emit('session_start', { reason: 'reload' }, fakeContext({ isIdle: () => false }));
     await flushSocketWork();
 
-    expect(acceptedStates().at(-1)).toBe('working');
+    expect(lastReport()).toMatchObject({ state: 'working', custom_status: '0s' });
+    expect(recording.requests).toContainEqual(
+      expect.objectContaining({
+        method: 'pane.report_agent_session',
+        params: expect.objectContaining({ session_start_source: 'reload' }),
+      }),
+    );
   });
 
-  test('publishes idle after the final active tool completes and debounce elapses', async () => {
+  test('reports idle only after the agent settles', async () => {
     const pi = await loadHarness();
 
     await pi.emit('session_start');
     await flushSocketWork();
     await pi.emit('agent_start');
     await flushSocketWork();
-    await pi.emit('tool_execution_start', { toolCallId: 'tool-1', toolName: 'bash', args: {} });
+
+    await pi.emit('agent_settled', {}, fakeContext({ isIdle: () => false }));
     await flushSocketWork();
-    await pi.emit('agent_end', { messages: [] });
+    expect(acceptedStates().at(-1)).toBe('working');
+
+    await pi.emit('agent_settled');
     await flushSocketWork();
-    await pi.emit('tool_execution_end', {
-      toolCallId: 'tool-1',
-      toolName: 'bash',
-      result: {},
-      isError: false,
-    });
-    await vi.advanceTimersByTimeAsync(20);
+    expect(acceptedStates().at(-1)).toBe('idle');
+  });
+
+  test('settlement preserves explicit blocked-state precedence', async () => {
+    const pi = await loadHarness();
+
+    await pi.emit('session_start');
+    await pi.emit('agent_start');
+    await pi.emitBus('herdr:blocked', { active: true, label: 'Needs input' });
+    await pi.emit('agent_settled');
     await flushSocketWork();
 
+    expect(lastReport()).toMatchObject({ state: 'blocked', message: 'Needs input' });
+
+    await pi.emitBus('herdr:blocked', { active: false });
+    await flushSocketWork();
     expect(acceptedStates().at(-1)).toBe('idle');
   });
 
@@ -362,47 +365,10 @@ describe('herdr agent state extension', () => {
     await pi.emit('agent_start');
     await flushSocketWork();
     await vi.advanceTimersByTimeAsync(311_000);
-    await pi.emit('agent_end', { messages: [] });
+    await pi.emit('agent_settled');
     await vi.advanceTimersByTimeAsync(20);
     await flushSocketWork();
 
     expect(lastReport()).toMatchObject({ state: 'idle', custom_status: 'took 5m11s' });
-  });
-
-  test('releases the agent on quit session shutdown', async () => {
-    const pi = await loadHarness();
-
-    await pi.emit('session_start');
-    await flushSocketWork();
-    recording.requests = [];
-
-    await pi.emit('session_shutdown', { reason: 'quit' });
-    await flushSocketWork();
-
-    expect(recording.requests).toContainEqual(
-      expect.objectContaining({
-        method: 'pane.release_agent',
-        params: expect.objectContaining({
-          pane_id: 'p_1',
-          source: 'herdr:pi',
-          agent: 'pi',
-        }),
-      }),
-    );
-  });
-
-  test('does not release the agent on extension reload shutdown', async () => {
-    const pi = await loadHarness();
-
-    await pi.emit('session_start');
-    await flushSocketWork();
-    recording.requests = [];
-
-    await pi.emit('session_shutdown', { reason: 'reload' });
-    await flushSocketWork();
-
-    expect(recording.requests).not.toContainEqual(
-      expect.objectContaining({ method: 'pane.release_agent' }),
-    );
   });
 });

@@ -1,14 +1,17 @@
 // Forked from Herdr's managed Pi integration:
 // https://github.com/ogulcancelik/herdr/blob/master/src/integration/assets/pi/herdr-agent-state.ts
+// Upstream baseline: HERDR_INTEGRATION_VERSION=7.
 // Keep changes surgical and close to upstream so future Herdr updates are easy to diff.
 
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
-import { createConnection } from 'node:net';
+import net from 'node:net';
 
 import { hasTui } from '../shared/ui-mode';
 
 const HERDR_ENV = process.env.HERDR_ENV;
 const socketPath = process.env.HERDR_SOCKET_PATH;
+const socketEndpoint =
+  process.platform === 'win32' && socketPath ? `\\\\.\\pipe\\${socketPath}` : socketPath;
 const paneId = process.env.HERDR_PANE_ID;
 const source = 'herdr:pi';
 
@@ -28,16 +31,16 @@ type StateSnapshot = {
   customStatus?: string;
 };
 
-type EventLike = {
-  messages?: unknown[];
-  toolCallId?: unknown;
-};
-
 type SessionContextLike = {
+  isIdle?: () => unknown;
   sessionManager?: {
     getSessionFile?: () => unknown;
     getSessionId?: () => unknown;
   };
+};
+
+type SessionStartEventLike = {
+  reason?: string;
 };
 
 type BlockedEventLike = {
@@ -45,17 +48,9 @@ type BlockedEventLike = {
   label?: string;
 };
 
-type SessionShutdownEventLike = {
-  reason?: unknown;
-};
-
-const idleDebounceMs = parseDurationEnv('HERDR_PI_IDLE_DEBOUNCE_MS', 250);
-const retryGraceMs = parseDurationEnv('HERDR_PI_RETRY_GRACE_MS', 2500);
-// Herdr reports are best-effort over a short-lived socket; reassert active
-// states so one dropped transition cannot leave a pane stuck on stale Idle.
+// Heartbeats refresh the local elapsed-time customization while upstream's
+// socket retry protects each individual report from transient delivery loss.
 const activeHeartbeatMs = parseDurationEnv('HERDR_PI_ACTIVE_HEARTBEAT_MS', 2000);
-const retryableErrorPattern =
-  /overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|network.?error|connection.?error|connection.?refused|connection.?lost|websocket.?closed|websocket.?error|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|ended without|http2 request did not get a response|timed? out|timeout|terminated|retry delay/i;
 
 let reportSeq = Date.now() * 1000;
 let currentAgentSessionId: string | undefined;
@@ -93,30 +88,41 @@ function parseDurationEnv(name: string, fallback: number): number {
   return parsed;
 }
 
-function sendRequest(request: unknown): Promise<void> {
+function sendRequestAttempt(request: unknown, timeoutMs: number): Promise<boolean> {
   if (!enabled()) {
-    return Promise.resolve();
+    return Promise.resolve(true);
   }
 
   return new Promise((resolve) => {
     let done = false;
-    const socket = createConnection(socketPath!);
-    const finish = () => {
+    let timeout: Timer | undefined;
+    const socket = net.createConnection(socketEndpoint!);
+    const finish = (delivered: boolean) => {
       if (done) {
         return;
       }
       done = true;
+      if (timeout) {
+        clearTimeout(timeout);
+      }
       socket.destroy();
-      resolve();
+      resolve(delivered);
     };
 
-    socket.on('error', finish);
+    socket.on('error', () => finish(false));
     socket.on('connect', () => socket.write(`${JSON.stringify(request)}\n`));
-    socket.on('data', finish);
-    socket.on('end', finish);
-    const timeout = setTimeout(finish, 500);
+    socket.on('data', () => finish(true));
+    socket.on('end', () => finish(false));
+    timeout = setTimeout(() => finish(false), timeoutMs);
     timeout.unref?.();
   });
+}
+
+async function sendRequest(request: unknown): Promise<void> {
+  if (await sendRequestAttempt(request, 500)) {
+    return;
+  }
+  await sendRequestAttempt(request, 1500);
 }
 
 function updateSessionRef(ctx: SessionContextLike | undefined): void {
@@ -171,7 +177,7 @@ function sendState(
   });
 }
 
-function reportSession(): Promise<void> {
+function reportSession(sessionStartSource?: string): Promise<void> {
   const sessionRef = currentSessionRef();
   if (!sessionRef) {
     return Promise.resolve();
@@ -185,6 +191,7 @@ function reportSession(): Promise<void> {
       source,
       agent: 'pi',
       seq: nextReportSeq(),
+      session_start_source: sessionStartSource,
       ...sessionRef,
     },
   });
@@ -217,61 +224,6 @@ async function drainStateQueue(): Promise<void> {
   }
 }
 
-function lastAssistantMessage(messages: unknown[]): Record<string, unknown> | undefined {
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const message = messages[i];
-    if (
-      message &&
-      typeof message === 'object' &&
-      (message as { role?: unknown }).role === 'assistant'
-    ) {
-      return message as Record<string, unknown>;
-    }
-  }
-  return undefined;
-}
-
-function retryableErrorMessage(event: EventLike): string | undefined {
-  const messages = Array.isArray(event?.messages) ? event.messages : [];
-  const assistant = lastAssistantMessage(messages);
-  if (assistant?.stopReason !== 'error') {
-    return undefined;
-  }
-
-  const errorMessage = typeof assistant.errorMessage === 'string' ? assistant.errorMessage : '';
-  if (!retryableErrorPattern.test(errorMessage)) {
-    return undefined;
-  }
-  return errorMessage || 'retryable provider error';
-}
-
-function releaseAgent(): Promise<void> {
-  return sendRequest({
-    id: `${source}:release:${Date.now()}:${Math.random().toString(36).slice(2)}`,
-    method: 'pane.release_agent',
-    params: {
-      pane_id: paneId,
-      source,
-      agent: 'pi',
-      seq: nextReportSeq(),
-    },
-  });
-}
-
-function shouldReleaseOnSessionShutdown(event: SessionShutdownEventLike | undefined): boolean {
-  // Pi tears down and rebinds extension runtimes for internal lifecycle actions
-  // such as /reload, /new, /resume, and /fork. Those do not mean the pane's
-  // agent process has exited, and releasing hook authority there can suppress
-  // legitimate reports from the replacement runtime. Only a user/process quit
-  // should release Herdr's full-lifecycle authority.
-  return event?.reason === 'quit';
-}
-
-function toolCallId(event: EventLike): string | undefined {
-  const id = event?.toolCallId;
-  return typeof id === 'string' && id.length > 0 ? id : undefined;
-}
-
 function formatDuration(ms: number): string {
   const totalSeconds = Math.max(0, Math.floor(ms / 1000));
   const seconds = totalSeconds % 60;
@@ -301,14 +253,8 @@ export default function herdrAgentState(pi: ExtensionAPI): void {
   }
 
   let agentActive = false;
-  let retryHoldActive = false;
-  let failureBlocked = false;
-  let failureMessage: string | undefined;
   let blockedCount = 0;
   let blockedMessage: string | undefined;
-  // Track tool execution independently so a late/duplicate agent_end cannot
-  // publish Idle while Pi is still running long-lived tool work.
-  const activeToolCalls = new Set<string>();
   let currentState: AgentState | undefined;
   let stateEnteredAt = Date.now();
   let activeRunStartedAt: number | undefined;
@@ -316,30 +262,14 @@ export default function herdrAgentState(pi: ExtensionAPI): void {
   let lastState: AgentState | undefined;
   let lastMessage: string | undefined;
   let lastCustomStatus: string | undefined;
-  let idleTimer: Timer | undefined;
-  let retryTimer: Timer | undefined;
   let activeHeartbeatTimer: Timer | undefined;
-  let stateReportingActive = false;
+  let rootSession = false;
 
-  function clearTimer(timer: Timer | undefined): void {
-    if (timer) {
-      clearTimeout(timer);
+  function clearActiveHeartbeat(): void {
+    if (activeHeartbeatTimer) {
+      clearTimeout(activeHeartbeatTimer);
+      activeHeartbeatTimer = undefined;
     }
-  }
-
-  function clearPendingTimers(): void {
-    clearTimer(idleTimer);
-    clearTimer(retryTimer);
-    clearTimer(activeHeartbeatTimer);
-    idleTimer = undefined;
-    retryTimer = undefined;
-    activeHeartbeatTimer = undefined;
-  }
-
-  function clearFailureState(): void {
-    retryHoldActive = false;
-    failureBlocked = false;
-    failureMessage = undefined;
   }
 
   function startActiveRun(): void {
@@ -359,10 +289,7 @@ export default function herdrAgentState(pi: ExtensionAPI): void {
     if (blockedCount > 0) {
       return { state: 'blocked', message: blockedMessage };
     }
-    if (failureBlocked) {
-      return { state: 'blocked', message: failureMessage };
-    }
-    if (agentActive || activeToolCalls.size > 0 || retryHoldActive) {
+    if (agentActive) {
       return { state: 'working' };
     }
     return { state: 'idle' };
@@ -398,8 +325,7 @@ export default function herdrAgentState(pi: ExtensionAPI): void {
   }
 
   function refreshActiveHeartbeat(state: AgentState): void {
-    clearTimer(activeHeartbeatTimer);
-    activeHeartbeatTimer = undefined;
+    clearActiveHeartbeat();
 
     if (state === 'idle' || activeHeartbeatMs <= 0) {
       return;
@@ -427,61 +353,8 @@ export default function herdrAgentState(pi: ExtensionAPI): void {
     refreshActiveHeartbeat(next.state);
   }
 
-  function scheduleIdle(): void {
-    clearPendingTimers();
-    clearFailureState();
-    if (desiredState().state !== 'idle') {
-      publishState(true);
-      return;
-    }
-    idleTimer = setTimeout(() => {
-      idleTimer = undefined;
-      publishState();
-    }, idleDebounceMs);
-    idleTimer.unref?.();
-  }
-
-  function holdForRetry(message: string): void {
-    clearPendingTimers();
-    startActiveRun();
-    retryHoldActive = true;
-    failureBlocked = false;
-    failureMessage = message;
-    publishState(true);
-
-    retryTimer = setTimeout(() => {
-      retryTimer = undefined;
-      retryHoldActive = false;
-      failureBlocked = true;
-      publishState();
-    }, retryGraceMs);
-    retryTimer.unref?.();
-  }
-
-  function publishOrScheduleIdleAfterActivity(): void {
-    if (desiredState().state === 'idle') {
-      scheduleIdle();
-      return;
-    }
-    publishState(true);
-  }
-
-  pi.on('session_start', (_event, ctx) => {
-    if (!hasTui(ctx)) {
-      stateReportingActive = false;
-      activeToolCalls.clear();
-      clearPendingTimers();
-      return;
-    }
-
-    stateReportingActive = true;
-    updateSessionRef(ctx as SessionContextLike | undefined);
-    void reportSession();
-    publishState(true);
-  });
-
   pi.events.on('herdr:blocked', (data: unknown) => {
-    if (!stateReportingActive) {
+    if (!rootSession) {
       return;
     }
 
@@ -495,89 +368,53 @@ export default function herdrAgentState(pi: ExtensionAPI): void {
       return;
     }
 
-    clearPendingTimers();
     startActiveRun();
     blockedCount += 1;
     blockedMessage = blocked.label;
     publishState(true);
   });
 
+  pi.on('session_start', async (event, ctx) => {
+    if (!hasTui(ctx)) {
+      rootSession = false;
+      clearActiveHeartbeat();
+      return;
+    }
+
+    rootSession = true;
+    updateSessionRef(ctx as SessionContextLike | undefined);
+    await reportSession((event as SessionStartEventLike | undefined)?.reason);
+
+    // A reload can replace this extension mid-run without another agent_start.
+    agentActive = (ctx as SessionContextLike | undefined)?.isIdle?.() === false;
+    if (agentActive) {
+      startActiveRun();
+    }
+    publishState(true);
+  });
+
   pi.on('agent_start', (_event, ctx) => {
-    if (!stateReportingActive || !hasTui(ctx)) {
+    if (!rootSession || !hasTui(ctx)) {
       return;
     }
 
     updateSessionRef(ctx as SessionContextLike | undefined);
     void reportSession();
-    clearPendingTimers();
-    clearFailureState();
     startActiveRun();
     agentActive = true;
     publishState(true);
   });
 
-  pi.on('tool_execution_start', (event, ctx) => {
-    if (!stateReportingActive || !hasTui(ctx)) {
-      return;
-    }
-
-    const id = toolCallId(event as EventLike);
-    if (id) {
-      activeToolCalls.add(id);
-    }
-    startActiveRun();
-    clearTimer(idleTimer);
-    idleTimer = undefined;
-    clearFailureState();
-    publishState(true);
-  });
-
-  pi.on('tool_execution_end', (event, ctx) => {
-    if (!stateReportingActive || !hasTui(ctx)) {
-      return;
-    }
-
-    const id = toolCallId(event as EventLike);
-    if (id) {
-      activeToolCalls.delete(id);
-    }
-    publishOrScheduleIdleAfterActivity();
-  });
-
-  pi.on('agent_end', (event, ctx) => {
-    if (!stateReportingActive || !hasTui(ctx)) {
-      return;
-    }
-
-    if (!agentActive) {
-      // Pi can emit duplicate/late end events while auto-retry is already
-      // holding the pane in Working. Do not let an unqualified duplicate end
-      // cancel the retry hold and publish a false Idle.
+  pi.on('agent_settled', (_event, ctx) => {
+    if (
+      !rootSession ||
+      !hasTui(ctx) ||
+      (ctx as SessionContextLike | undefined)?.isIdle?.() !== true
+    ) {
       return;
     }
 
     agentActive = false;
-
-    const retryableMessage = retryableErrorMessage(event as EventLike);
-    if (retryableMessage) {
-      holdForRetry(retryableMessage);
-      return;
-    }
-
-    publishOrScheduleIdleAfterActivity();
-  });
-
-  pi.on('session_shutdown', async (event) => {
-    if (!stateReportingActive) {
-      return;
-    }
-
-    stateReportingActive = false;
-    activeToolCalls.clear();
-    clearPendingTimers();
-
-    if (shouldReleaseOnSessionShutdown(event as SessionShutdownEventLike | undefined)) {
-      await releaseAgent();
-    }
+    publishState(true);
   });
 }
