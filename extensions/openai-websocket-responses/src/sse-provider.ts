@@ -36,7 +36,9 @@ function createOutput(model: Model<Api>): AssistantMessage {
     provider: model.provider,
     model: model.id,
     usage: emptyUsage(),
-    stopReason: 'stop',
+    // Match the documented/stream-pattern contract: stay pending until a
+    // terminal Responses event sets a real stop reason.
+    stopReason: 'pending',
     timestamp: Date.now(),
   };
 }
@@ -118,7 +120,12 @@ export function createOpenAISseResponsesStream(
         }
         if (!terminal) throw new Error('OpenAI Responses SSE ended before a terminal event');
         if (options?.signal?.aborted) throw new Error('Request was aborted');
-        if (output.stopReason === 'error') throw new Error('OpenAI Responses request failed');
+        if (output.stopReason === 'pending') {
+          throw new Error('OpenAI Responses SSE stream ended without a stop reason');
+        }
+        if (output.stopReason === 'error' || output.stopReason === 'aborted') {
+          throw new Error(output.errorMessage || 'OpenAI Responses request failed');
+        }
 
         stream.push({
           type: 'done',

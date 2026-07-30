@@ -30,6 +30,13 @@ import {
   type TUI,
 } from '@earendil-works/pi-tui';
 
+import { createForkedSessionFromCurrentLeafDetails } from '../pi-native-split/index';
+import { buildNativePiLaunchArgs, cleanupNativePiPromptTempPath } from '../shared/native-pi-launch';
+import {
+  detectTerminal,
+  launchShellInNativeSplit,
+  shellQuote,
+} from '../shared/native-terminal-launch';
 import { hasTui } from '../shared/ui-mode';
 
 const BTW_ENTRY_TYPE = 'btw-thread-entry';
@@ -40,6 +47,13 @@ const BTW_SYSTEM_PROMPT = [
   'You have access to the main conversation context — use it to give informed answers.',
   'Help with focused questions, planning, and quick explorations.',
   'Be direct and practical.',
+].join(' ');
+
+const BTW_PANE_STARTUP_PREAMBLE = [
+  'BTW side-channel session.',
+  'You are a focused side assistant with the parent conversation context already in this session.',
+  'Answer the user directly. Prefer short, practical replies.',
+  'This pane is independent of the parent overlay BTW thread; summarize findings back in the parent when done if needed.',
 ].join(' ');
 
 const BTW_SUMMARY_PROMPT =
@@ -1005,20 +1019,87 @@ export default function (pi: ExtensionAPI) {
     await runBtwPrompt(ctx, question);
   }
 
+  async function launchBtwPane(
+    ctx: ExtensionCommandContext,
+    question: string,
+    env: NodeJS.ProcessEnv = process.env,
+  ): Promise<void> {
+    const terminal = detectTerminal(env);
+    if (!terminal) {
+      notify(
+        ctx,
+        'BTW pane mode needs Ghostty, Kitty, or Herdr. Opening overlay instead.',
+        'warning',
+      );
+      await ensureOverlay(ctx);
+      if (question) {
+        await runBtwPrompt(ctx, question);
+      }
+      return;
+    }
+
+    const splitSession = createForkedSessionFromCurrentLeafDetails(ctx);
+    if (!splitSession) {
+      notify(ctx, 'Failed to create BTW pane session from the current branch.', 'error');
+      return;
+    }
+
+    const startupPrompt = question
+      ? `${BTW_PANE_STARTUP_PREAMBLE}\n\nQuestion:\n${question}`
+      : `${BTW_PANE_STARTUP_PREAMBLE}\n\nWait for the user's side question.`;
+
+    let launchArgs: ReturnType<typeof buildNativePiLaunchArgs> | undefined;
+    const launched = await launchShellInNativeSplit({
+      terminal,
+      exec: (command, args) => pi.exec(command, args),
+      cwd: ctx.cwd,
+      env,
+      prepare: () => {
+        launchArgs = buildNativePiLaunchArgs({
+          cwd: ctx.cwd,
+          sessionFile: splitSession.file,
+          prompt: startupPrompt,
+        });
+        return {
+          command: launchArgs.argv.map(shellQuote).join(' '),
+          cleanupOnFailure: () => cleanupNativePiPromptTempPath(launchArgs?.promptFile),
+        };
+      },
+    });
+
+    if (launched.result.code !== 0) {
+      const reason =
+        launched.result.stderr?.trim() || launched.result.stdout?.trim() || 'unknown launch error';
+      notify(ctx, `Failed to launch BTW pane in ${terminal}: ${reason}`, 'error');
+      return;
+    }
+
+    const targetLabel =
+      launched.native.child?.target === 'tab' ? 'tab' : terminal === 'herdr' ? 'pane' : 'split';
+    notify(
+      ctx,
+      `Opened BTW ${targetLabel} in ${terminal}${question ? ' with your question' : ''}.`,
+      'info',
+    );
+  }
+
   pi.registerCommand('btw', {
     description:
-      'Open a simple BTW side-chat popover. `/btw <text>` asks immediately, `/btw` opens the side thread.',
+      'Open a simple BTW side-chat popover. `/btw <text>` asks immediately, `/btw` opens the side thread. In Herdr/Kitty/Ghostty, `/btw` also offers a native pane.',
     handler: async (args, ctx) => {
       if (!hasTui(ctx)) return;
 
       const question = args.trim();
+      const terminal = detectTerminal();
 
       if (!question) {
         if (thread.length > 0 && ctx.hasUI) {
-          const choice = await ctx.ui.select('BTW side chat:', [
+          const choices = [
             'Continue previous conversation',
             'Start fresh',
-          ]);
+            ...(terminal ? [`Open in ${terminal} pane`] : []),
+          ];
+          const choice = await ctx.ui.select('BTW side chat:', choices);
           if (choice === 'Continue previous conversation') {
             // Dispose session so it's recreated with fresh main context on next submit
             await disposeSideSession();
@@ -1028,8 +1109,22 @@ export default function (pi: ExtensionAPI) {
             await resetThread(ctx, true);
             setOverlayStatus('Ready');
             await ensureOverlay(ctx);
+          } else if (choice?.startsWith('Open in ')) {
+            await launchBtwPane(ctx, '');
           }
           // null = user cancelled (Esc), do nothing
+        } else if (terminal && ctx.hasUI) {
+          const choice = await ctx.ui.select('BTW side chat:', [
+            'Open overlay',
+            `Open in ${terminal} pane`,
+          ]);
+          if (choice === 'Open overlay') {
+            await resetThread(ctx, true);
+            setOverlayStatus('Ready');
+            await ensureOverlay(ctx);
+          } else if (choice?.startsWith('Open in ')) {
+            await launchBtwPane(ctx, '');
+          }
         } else {
           await resetThread(ctx, true);
           setOverlayStatus('Ready');
@@ -1040,6 +1135,15 @@ export default function (pi: ExtensionAPI) {
 
       await ensureOverlay(ctx);
       await runBtwPrompt(ctx, question);
+    },
+  });
+
+  pi.registerCommand('btw-pane', {
+    description:
+      'Open BTW in a native Ghostty/Kitty/Herdr pane with a forked copy of the current session. Optional question is submitted on launch.',
+    handler: async (args, ctx) => {
+      if (!hasTui(ctx)) return;
+      await launchBtwPane(ctx, args.trim());
     },
   });
 

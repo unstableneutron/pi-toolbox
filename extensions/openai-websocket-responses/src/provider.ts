@@ -127,7 +127,9 @@ function createOutput(model: Model<Api>): AssistantMessage {
     provider: model.provider,
     model: model.id,
     usage: emptyUsage(),
-    stopReason: 'stop',
+    // Match the documented/stream-pattern contract: stay pending until a
+    // terminal Responses event sets a real stop reason.
+    stopReason: 'pending',
     timestamp: Date.now(),
   };
 }
@@ -551,10 +553,13 @@ export function createOpenAIWebSocketResponsesStream(
             ? settings.diagnostics.successTimingFields
             : undefined,
         });
-        if (output.stopReason === 'error') {
+        if (output.stopReason === 'pending') {
+          throw new Error('OpenAI WebSocket Responses stream ended without a stop reason');
+        }
+        if (output.stopReason === 'error' || output.stopReason === 'aborted') {
           pushFinalEvent(
             stream,
-            { type: 'error', reason: 'error', error: output },
+            { type: 'error', reason: output.stopReason, error: output },
             output,
             persistUnattachedDiagnostic,
           );

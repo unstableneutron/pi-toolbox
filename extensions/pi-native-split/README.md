@@ -15,7 +15,8 @@ Supported native split backends:
 - Kitty
 - Herdr (`HERDR_ENV=1`)
 
-All backends launch Pi through a shared shell wrapper (`launcher.sh`) that:
+All backends launch Pi through the shared native launcher
+(`extensions/shared/native-pi-launcher.sh`, also used by BTW pane mode) that:
 
 - opens the target session pre-created by the parent Pi process
 - passes startup prompts through a temp file instead of embedding full prompt text in the terminal launch command

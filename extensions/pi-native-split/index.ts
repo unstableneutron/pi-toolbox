@@ -15,31 +15,26 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import * as path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
+import {
+  buildNativePiLaunchArgs,
+  cleanupNativePiPromptTempPath,
+  getNativePiLauncherScriptPath,
+  NATIVE_PI_LAUNCH_EMPTY_VALUE,
+} from '../shared/native-pi-launch';
+import {
+  detectTerminal,
+  getKittyChildWindowId,
+  launchShellInNativeSplit,
+  shellQuote,
+  type NativeLaunchResult,
+  type NativeTerminalDetails,
+  type SupportedTerminal,
+} from '../shared/native-terminal-launch';
 import { hasTui } from '../shared/ui-mode';
 
-const GHOSTTY_SPLIT_SCRIPT = `on run argv
-	set targetCwd to item 1 of argv
-	set startupInput to item 2 of argv
-	tell application "Ghostty"
-		set cfg to new surface configuration
-		set initial working directory of cfg to targetCwd
-		set initial input of cfg to startupInput
-		if (count of windows) > 0 then
-			try
-				set frontWindow to front window
-				set targetTerminal to focused terminal of selected tab of frontWindow
-				split targetTerminal direction right with configuration cfg
-			on error
-				new window with configuration cfg
-			end try
-		else
-			new window with configuration cfg
-		end if
-		activate
-	end tell
-end run`;
+export type { SupportedTerminal } from '../shared/native-terminal-launch';
+export { detectTerminal } from '../shared/native-terminal-launch';
 
 const HANDOFF_SYSTEM_PROMPT = `You are a context transfer assistant. Given a conversation history and the user's goal for a new thread, generate a focused prompt that:
 
@@ -63,31 +58,16 @@ Files involved:
 ## Task
 [Clear description of what to do next based on user's goal]`;
 
-export type SupportedTerminal = 'ghostty' | 'kitty' | 'herdr';
-
-const EMPTY_LAUNCH_VALUE = '__PI_NATIVE_SPLIT_EMPTY__';
+const EMPTY_LAUNCH_VALUE = NATIVE_PI_LAUNCH_EMPTY_VALUE;
 const SPLIT_MARKER_ENV = 'PI_NATIVE_SPLIT_MARKER_FILE';
 const SPLIT_MARKER_PREFIX = 'pi-native-split';
 const CHILD_MARKER_NOTIFY_DELAY_MS = 100;
-// Match Herdr's MOBILE_WIDTH_THRESHOLD from src/ui/mobile.rs.
-const HERDR_MOBILE_WIDTH_THRESHOLD = 64;
 
 type SplitMarkerKind = 'split-fork' | 'split-handoff';
 type SplitPromptKind = 'raw' | 'handoff' | 'none';
 type SplitMarkerSide = 'parent' | 'child';
 
-type NativeSplitDetails = {
-  terminal: SupportedTerminal;
-  parent?: { pane?: string; workspace?: string; window?: string };
-  child?: {
-    pane?: string;
-    window?: string;
-    target?: 'pane' | 'tab';
-    pid?: string;
-    listenOn?: string;
-    socket?: string;
-  };
-};
+type NativeSplitDetails = NativeTerminalDetails;
 
 type SplitMarkerData = {
   v: 1;
@@ -113,17 +93,8 @@ type CreatedSplitSession = {
 type PendingParentMarker = { customType: string; data: SplitMarkerData };
 type SplitMarkerSeed = PendingParentMarker;
 
-function shellQuote(value: string): string {
-  if (value.length === 0) return "''";
-  return `'${value.replace(/'/g, "'\\''")}'`;
-}
-
 function formatSplitMarkerCustomType(kind: SplitMarkerKind, childSessionId: string): string {
   return `${SPLIT_MARKER_PREFIX}.${kind}.${childSessionId}`;
-}
-
-function hasObjectKeys(value: object): boolean {
-  return Object.keys(value).length > 0;
 }
 
 function materializeSessionFile(manager: SessionManager, sessionFile: string): void {
@@ -137,31 +108,6 @@ function materializeSessionFile(manager: SessionManager, sessionFile: string): v
   fs.writeFileSync(sessionFile, `${records.map((entry) => JSON.stringify(entry)).join('\n')}\n`, {
     flag: 'w',
   });
-}
-
-function buildNativeDetails(
-  terminal: SupportedTerminal,
-  env: NodeJS.ProcessEnv,
-): NativeSplitDetails {
-  if (terminal === 'kitty') {
-    const parent: NativeSplitDetails['parent'] = {};
-    if (env.KITTY_WINDOW_ID) parent.window = env.KITTY_WINDOW_ID;
-    return { terminal, parent: hasObjectKeys(parent) ? parent : undefined };
-  }
-
-  if (terminal === 'herdr') {
-    const parent: NativeSplitDetails['parent'] = {};
-    if (env.HERDR_PANE_ID) parent.pane = env.HERDR_PANE_ID;
-    if (env.HERDR_WORKSPACE_ID) parent.workspace = env.HERDR_WORKSPACE_ID;
-    return { terminal, parent: hasObjectKeys(parent) ? parent : undefined };
-  }
-
-  return { terminal };
-}
-
-function getKittyChildWindowId(stdout: string | undefined): string | undefined {
-  const trimmed = stdout?.trim();
-  return trimmed && /^\d+$/.test(trimmed) ? trimmed : undefined;
 }
 
 function augmentNativeWithChildEnv(
@@ -366,36 +312,8 @@ function prepareChildMarkerSeed(
   return writeMarkerSeed({ customType, data });
 }
 
-export function detectTerminal(
-  env: NodeJS.ProcessEnv = process.env,
-): SupportedTerminal | undefined {
-  if (env.HERDR_ENV === '1') {
-    return 'herdr';
-  }
-
-  const termProgram = env.TERM_PROGRAM?.toLowerCase() || '';
-  const term = env.TERM?.toLowerCase() || '';
-
-  if (termProgram === 'ghostty' || term.includes('ghostty') || env.GHOSTTY_RESOURCES_DIR) {
-    return 'ghostty';
-  }
-
-  if (env.KITTY_WINDOW_ID || termProgram === 'kitty') {
-    return 'kitty';
-  }
-
-  return undefined;
-}
-
 export function getLauncherScriptPath(): string {
-  return fileURLToPath(new URL('./launcher.sh', import.meta.url));
-}
-
-function writePromptFile(prompt: string): string {
-  const promptDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-native-split-'));
-  const promptFile = path.join(promptDir, 'prompt.txt');
-  fs.writeFileSync(promptFile, prompt, 'utf8');
-  return promptFile;
+  return getNativePiLauncherScriptPath();
 }
 
 export function buildLaunchWrapperArgs(
@@ -404,30 +322,11 @@ export function buildLaunchWrapperArgs(
   prompt: string,
   markerFile?: string,
 ): { argv: string[]; promptFile?: string; markerFile?: string } {
-  const promptFile = prompt.length > 0 ? writePromptFile(prompt) : undefined;
-
-  return {
-    argv: [
-      '/bin/sh',
-      getLauncherScriptPath(),
-      cwd,
-      sessionFile ?? EMPTY_LAUNCH_VALUE,
-      promptFile ?? EMPTY_LAUNCH_VALUE,
-      markerFile ?? EMPTY_LAUNCH_VALUE,
-    ],
-    promptFile,
-    markerFile,
-  };
+  return buildNativePiLaunchArgs({ cwd, sessionFile, prompt, markerFile });
 }
 
 function cleanupPromptTempPath(promptFile: string | undefined): void {
-  if (!promptFile) return;
-
-  try {
-    fs.rmSync(path.dirname(promptFile), { recursive: true, force: true });
-  } catch {
-    // best-effort cleanup only
-  }
+  cleanupNativePiPromptTempPath(promptFile);
 }
 
 function formatSessionLaunchHint(file: string): string {
@@ -544,7 +443,7 @@ function openCurrentSessionSnapshot(ctx: ExtensionCommandContext): SessionManage
   return SessionManager.open(sessionFile, ctx.sessionManager.getSessionDir());
 }
 
-function createForkedSessionFromCurrentLeafDetails(
+export function createForkedSessionFromCurrentLeafDetails(
   ctx: ExtensionCommandContext,
 ): CreatedSplitSession | undefined {
   const snapshot = openCurrentSessionSnapshot(ctx);
@@ -741,268 +640,7 @@ export async function generateHandoffPrompt(
   return result;
 }
 
-async function launchGhostty(
-  pi: ExtensionAPI,
-  ctx: ExtensionCommandContext,
-  sessionFile: string | undefined,
-  prompt: string,
-  env: NodeJS.ProcessEnv,
-  beforeRun?: (native: NativeSplitDetails) => string | undefined,
-) {
-  const markerFile = beforeRun?.(buildNativeDetails('ghostty', env));
-  const launch = buildLaunchWrapperArgs(ctx.cwd, sessionFile, prompt, markerFile);
-  const startupInput = `${launch.argv.map(shellQuote).join(' ')}\n`;
-
-  try {
-    const result = await pi.exec('osascript', [
-      '-e',
-      GHOSTTY_SPLIT_SCRIPT,
-      '--',
-      ctx.cwd,
-      startupInput,
-    ]);
-
-    if (result.code !== 0) {
-      cleanupPromptTempPath(launch.promptFile);
-      cleanupTempPath(launch.markerFile);
-    }
-
-    return result;
-  } catch (error) {
-    cleanupPromptTempPath(launch.promptFile);
-    cleanupTempPath(launch.markerFile);
-    throw error;
-  }
-}
-
-async function launchKitty(
-  pi: ExtensionAPI,
-  ctx: ExtensionCommandContext,
-  sessionFile: string | undefined,
-  prompt: string,
-  env: NodeJS.ProcessEnv,
-  beforeRun?: (native: NativeSplitDetails) => string | undefined,
-) {
-  const shouldLaunchTab = shouldCreateNativeTab(env);
-  const markerFile = beforeRun?.({
-    ...buildNativeDetails('kitty', env),
-    child: { target: shouldLaunchTab ? 'tab' : 'pane' },
-  });
-  const launch = buildLaunchWrapperArgs(ctx.cwd, sessionFile, prompt, markerFile);
-  const shellPath = env.SHELL || process.env.SHELL || '/bin/sh';
-  const wrapperCommand = launch.argv.map(shellQuote).join(' ');
-
-  try {
-    const result = await pi.exec('kitten', [
-      '@',
-      'launch',
-      '--type',
-      shouldLaunchTab ? 'tab' : 'window',
-      '--location',
-      shouldLaunchTab ? 'after' : 'vsplit',
-      '--cwd',
-      ctx.cwd,
-      shellPath,
-      '-ilc',
-      wrapperCommand,
-    ]);
-
-    if (result.code !== 0) {
-      cleanupPromptTempPath(launch.promptFile);
-      cleanupTempPath(launch.markerFile);
-    }
-
-    return result;
-  } catch (error) {
-    cleanupPromptTempPath(launch.promptFile);
-    cleanupTempPath(launch.markerFile);
-    throw error;
-  }
-}
-
-type LaunchResult = { code: number; stdout?: string; stderr?: string };
-
-type HerdrPaneInfo = {
-  pane_id?: unknown;
-  focused?: unknown;
-  workspace_id?: unknown;
-};
-
-type FocusedHerdrPane = {
-  paneId: string;
-  workspaceId?: string;
-};
-
-function parseJsonResponse(stdout: string | undefined, context: string): unknown {
-  try {
-    return JSON.parse(stdout || '');
-  } catch (error) {
-    throw new Error(`${context} returned invalid JSON: ${formatThrownLaunchError(error)}`);
-  }
-}
-
-function getHerdrErrorMessage(response: unknown): string | undefined {
-  if (!response || typeof response !== 'object' || !('error' in response)) return undefined;
-
-  const error = (response as { error?: { message?: unknown } }).error;
-  return typeof error?.message === 'string' ? error.message : JSON.stringify(error);
-}
-
-function parseFocusedHerdrPane(stdout: string | undefined): FocusedHerdrPane {
-  const response = parseJsonResponse(stdout, 'herdr pane list');
-  const errorMessage = getHerdrErrorMessage(response);
-  if (errorMessage) throw new Error(`herdr pane list failed: ${errorMessage}`);
-
-  const panes = (response as { result?: { panes?: HerdrPaneInfo[] } }).result?.panes;
-  if (!Array.isArray(panes)) {
-    throw new Error('herdr pane list did not return result.panes');
-  }
-
-  const focusedPane = panes.find((pane) => pane && pane.focused === true);
-  if (typeof focusedPane?.pane_id !== 'string' || focusedPane.pane_id.length === 0) {
-    throw new Error('herdr pane list did not include a focused pane');
-  }
-
-  const workspaceId =
-    typeof focusedPane.workspace_id === 'string' && focusedPane.workspace_id.length > 0
-      ? focusedPane.workspace_id
-      : undefined;
-
-  return { paneId: focusedPane.pane_id, workspaceId };
-}
-
-function parseCreatedHerdrPaneId(stdout: string | undefined): string {
-  const response = parseJsonResponse(stdout, 'herdr pane split');
-  const errorMessage = getHerdrErrorMessage(response);
-  if (errorMessage) throw new Error(`herdr pane split failed: ${errorMessage}`);
-
-  const paneId = (response as { result?: { pane?: { pane_id?: unknown } } }).result?.pane?.pane_id;
-  if (typeof paneId !== 'string' || paneId.length === 0) {
-    throw new Error('herdr pane split did not return result.pane.pane_id');
-  }
-
-  return paneId;
-}
-
-function parseCreatedHerdrTabRootPaneId(stdout: string | undefined): string {
-  const response = parseJsonResponse(stdout, 'herdr tab create');
-  const errorMessage = getHerdrErrorMessage(response);
-  if (errorMessage) throw new Error(`herdr tab create failed: ${errorMessage}`);
-
-  const paneId = (response as { result?: { root_pane?: { pane_id?: unknown } } }).result?.root_pane
-    ?.pane_id;
-  if (typeof paneId !== 'string' || paneId.length === 0) {
-    throw new Error('herdr tab create did not return result.root_pane.pane_id');
-  }
-
-  return paneId;
-}
-
-function parsePositiveInteger(value: string | undefined): number | undefined {
-  if (!value) return undefined;
-
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
-}
-
-function getTerminalColumns(env: NodeJS.ProcessEnv): number | undefined {
-  const envColumns = parsePositiveInteger(env.COLUMNS);
-  if (envColumns !== undefined) return envColumns;
-
-  const stdoutColumns = process.stdout.columns;
-  return Number.isInteger(stdoutColumns) && stdoutColumns > 0 ? stdoutColumns : undefined;
-}
-
-function shouldCreateNativeTab(env: NodeJS.ProcessEnv): boolean {
-  const columns = getTerminalColumns(env);
-  return columns !== undefined && columns <= HERDR_MOBILE_WIDTH_THRESHOLD;
-}
-
-async function launchHerdr(
-  pi: ExtensionAPI,
-  ctx: ExtensionCommandContext,
-  sessionFile: string | undefined,
-  prompt: string,
-  env: NodeJS.ProcessEnv,
-  beforeRun?: (native: NativeSplitDetails) => string | undefined,
-) {
-  let launch: ReturnType<typeof buildLaunchWrapperArgs> | undefined;
-
-  try {
-    const listResult = await pi.exec('herdr', ['pane', 'list']);
-    if (listResult.code !== 0) {
-      return listResult;
-    }
-
-    const focusedPane = parseFocusedHerdrPane(listResult.stdout);
-    let newPaneId: string;
-    let target: 'pane' | 'tab';
-
-    if (shouldCreateNativeTab(env)) {
-      const createArgs = ['tab', 'create'];
-      if (focusedPane.workspaceId) {
-        createArgs.push('--workspace', focusedPane.workspaceId);
-      }
-      createArgs.push('--cwd', ctx.cwd, '--no-focus');
-
-      const tabResult = await pi.exec('herdr', createArgs);
-      if (tabResult.code !== 0) {
-        return tabResult;
-      }
-
-      newPaneId = parseCreatedHerdrTabRootPaneId(tabResult.stdout);
-      target = 'tab';
-    } else {
-      const splitResult = await pi.exec('herdr', [
-        'pane',
-        'split',
-        focusedPane.paneId,
-        '--direction',
-        'right',
-        '--cwd',
-        ctx.cwd,
-        '--no-focus',
-      ]);
-      if (splitResult.code !== 0) {
-        return splitResult;
-      }
-
-      newPaneId = parseCreatedHerdrPaneId(splitResult.stdout);
-      target = 'pane';
-    }
-
-    const markerFile = beforeRun?.({
-      terminal: 'herdr',
-      parent: {
-        pane: focusedPane.paneId,
-        workspace: focusedPane.workspaceId,
-      },
-      child: { pane: newPaneId, target },
-    });
-    launch = buildLaunchWrapperArgs(ctx.cwd, sessionFile, prompt, markerFile);
-    const wrapperCommand = launch.argv.map(shellQuote).join(' ');
-
-    const runResult = await pi.exec('herdr', ['pane', 'run', newPaneId, wrapperCommand]);
-    if (runResult.code !== 0) {
-      cleanupPromptTempPath(launch.promptFile);
-      cleanupTempPath(launch.markerFile);
-    }
-
-    return runResult;
-  } catch (error) {
-    cleanupPromptTempPath(launch?.promptFile);
-    cleanupTempPath(launch?.markerFile);
-    throw error;
-  }
-}
-
-function formatThrownLaunchError(error: unknown): string {
-  if (error instanceof Error && error.message) {
-    return error.message;
-  }
-
-  return String(error);
-}
+type LaunchResult = NativeLaunchResult;
 
 async function launchSessionInTerminal(
   terminal: SupportedTerminal,
@@ -1013,22 +651,24 @@ async function launchSessionInTerminal(
   env: NodeJS.ProcessEnv,
   beforeRun?: (native: NativeSplitDetails) => string | undefined,
 ): Promise<LaunchResult> {
-  try {
-    if (terminal === 'ghostty') {
-      return await launchGhostty(pi, ctx, sessionFile, prompt, env, beforeRun);
-    }
-
-    if (terminal === 'herdr') {
-      return await launchHerdr(pi, ctx, sessionFile, prompt, env, beforeRun);
-    }
-
-    return await launchKitty(pi, ctx, sessionFile, prompt, env, beforeRun);
-  } catch (error) {
-    return {
-      code: 1,
-      stderr: `pre-launch command failed: ${formatThrownLaunchError(error)}`,
-    };
-  }
+  const launched = await launchShellInNativeSplit({
+    terminal,
+    exec: (command, args) => pi.exec(command, args),
+    cwd: ctx.cwd,
+    env,
+    prepare: (native) => {
+      const markerFile = beforeRun?.(native);
+      const launch = buildLaunchWrapperArgs(ctx.cwd, sessionFile, prompt, markerFile);
+      return {
+        command: launch.argv.map(shellQuote).join(' '),
+        cleanupOnFailure: () => {
+          cleanupPromptTempPath(launch.promptFile);
+          cleanupTempPath(launch.markerFile);
+        },
+      };
+    },
+  });
+  return launched.result;
 }
 
 function notifyLaunchFailure(

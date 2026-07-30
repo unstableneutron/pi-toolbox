@@ -147,7 +147,7 @@ After installing, toggle individual extensions, skills, and prompts on or off wi
 Custom extensions built in this repo:
 
 - `answer` — `/answer` command with an interactive Q&A TUI.
-- `btw` — lightweight side-channel for inline notes.
+- `btw` — lightweight side-channel for inline notes; `/btw-pane` opens a forked side session in Ghostty/Kitty/Herdr.
 - `execute-command` — self-invocation and follow-up-input queueing.
 - `handoff` — transfer focused context to a new session.
 - `loop` — `/loop` command with a breakout tool.
@@ -157,12 +157,12 @@ Custom extensions built in this repo:
 - `pi-conditional-context` — model-conditional `AGENTS.md` / `CLAUDE.md` blocks via Markdown-safe directives.
 - `pi-fff-search` — fff-router backed find/grep/read tools.
 - `pi-md-hooks` — markdown rendering hooks.
-- `pi-native-split` — session splitting helpers.
+- `pi-native-split` — session splitting helpers (Ghostty/Kitty/Herdr via shared native launch).
 - `pi-retry` — retry + refusal-recovery state machine.
 - `proxied-providers` — provider proxying with Bedrock support.
 - `reload-runtime` — `/reload-runtime` command.
 - `safe-escape` — safer ESC handling with warnings.
-- `shared` — editor-behaviors helpers consumed by other extensions.
+- `shared` — helpers consumed by other extensions (editor behaviors, native terminal/pane launch, Responses utilities).
 - `skill-shortcut` — skill autocomplete in the editor.
 - `smart-sessions` — rolling-summary sessions.
 - `todos` — file-based todo tool.

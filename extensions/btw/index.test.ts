@@ -36,4 +36,18 @@ describe('btw mode guards', () => {
     expect(appendEntry).not.toHaveBeenCalled();
     expect(custom).not.toHaveBeenCalled();
   });
+
+  test('registers btw-pane command', () => {
+    const { commands } = createHarness();
+    expect(commands.has('btw-pane')).toBe(true);
+  });
+
+  test('btw-pane returns outside TUI mode', async () => {
+    const { commands } = createHarness();
+    await commands.get('btw-pane')?.('quick question', {
+      hasUI: true,
+      mode: 'rpc',
+      cwd: '/tmp',
+    });
+  });
 });
