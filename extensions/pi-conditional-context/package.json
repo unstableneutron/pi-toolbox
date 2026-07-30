@@ -1,6 +1,6 @@
 {
   "name": "pi-conditional-context",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Pi extension that conditionally includes AGENTS.md/CLAUDE.md prompt blocks by model",
   "keywords": [
     "agents",
@@ -21,7 +21,7 @@
     "test": "aube exec vitest run"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.79.0",
+    "@earendil-works/pi-coding-agent": "^0.83.0",
     "@types/node": "^24.3.0",
     "typescript": "^5.7.3",
     "vitest": "^3.2.4"

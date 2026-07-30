@@ -253,7 +253,8 @@ const PI_CODING_AGENT_TRANSCRIPT_CACHE_HIDDEN_LABEL_REPLACEMENT = [
   '        this.chatContainer.invalidateRenderCache?.();',
   '        this.ui.requestRender();',
 ].join('\n');
-const PI_CODING_AGENT_TRANSCRIPT_CACHE_EXPANSION_TARGET = [
+// Expansion follow-up text changed in 0.83: requestRender() became showStatus(...).
+const PI_CODING_AGENT_TRANSCRIPT_CACHE_EXPANSION_LOOP = [
   '        for (const container of [this.loadedResourcesContainer, this.chatContainer]) {',
   '            for (const child of container.children) {',
   '                if (isExpandable(child)) {',
@@ -261,19 +262,21 @@ const PI_CODING_AGENT_TRANSCRIPT_CACHE_EXPANSION_TARGET = [
   '                }',
   '            }',
   '        }',
-  '        this.ui.requestRender();',
 ].join('\n');
-const PI_CODING_AGENT_TRANSCRIPT_CACHE_EXPANSION_REPLACEMENT = [
-  '        for (const container of [this.loadedResourcesContainer, this.chatContainer]) {',
-  '            for (const child of container.children) {',
-  '                if (isExpandable(child)) {',
-  '                    child.setExpanded(expanded);',
-  '                }',
-  '            }',
-  '        }',
-  '        this.chatContainer.invalidateRenderCache?.();',
+const PI_CODING_AGENT_TRANSCRIPT_CACHE_EXPANSION_FOLLOWUPS = [
   '        this.ui.requestRender();',
-].join('\n');
+  '        this.showStatus(`Tool output: ${expanded ? "expanded" : "collapsed"}`);',
+] as const;
+const PI_CODING_AGENT_TRANSCRIPT_CACHE_EXPANSION_TARGETS =
+  PI_CODING_AGENT_TRANSCRIPT_CACHE_EXPANSION_FOLLOWUPS.map(
+    (followup) => `${PI_CODING_AGENT_TRANSCRIPT_CACHE_EXPANSION_LOOP}\n${followup}`,
+  );
+function buildPiCodingAgentTranscriptCacheExpansionReplacement(target: string): string {
+  return target.replace(
+    PI_CODING_AGENT_TRANSCRIPT_CACHE_EXPANSION_LOOP,
+    `${PI_CODING_AGENT_TRANSCRIPT_CACHE_EXPANSION_LOOP}\n        this.chatContainer.invalidateRenderCache?.();`,
+  );
+}
 const PI_CODING_AGENT_TRANSCRIPT_CACHE_SHOW_IMAGES_TARGET = [
   '                onShowImagesChange: (enabled) => {',
   '                    this.settingsManager.setShowImages(enabled);',
@@ -973,20 +976,25 @@ export async function applyPiCodingAgentTranscriptCachePatch(
   }
 
   const content = readFileSync(filePath, 'utf8');
+  const expansionTarget = PI_CODING_AGENT_TRANSCRIPT_CACHE_EXPANSION_TARGETS.find((target) =>
+    content.includes(target),
+  );
   const requiredTargets = [
     PI_CODING_AGENT_TRANSCRIPT_CACHE_INSERTION_TARGET,
     PI_CODING_AGENT_TRANSCRIPT_CACHE_CONSTRUCTOR_TARGET,
     PI_CODING_AGENT_TRANSCRIPT_CACHE_HIDDEN_LABEL_TARGET,
-    PI_CODING_AGENT_TRANSCRIPT_CACHE_EXPANSION_TARGET,
+    expansionTarget,
     PI_CODING_AGENT_TRANSCRIPT_CACHE_SHOW_IMAGES_TARGET,
     PI_CODING_AGENT_TRANSCRIPT_CACHE_IMAGE_WIDTH_TARGET,
     PI_CODING_AGENT_TRANSCRIPT_CACHE_OUTPUT_PAD_TARGET,
   ];
-  const missingTarget = requiredTargets.find((target) => !content.includes(target));
-  if (missingTarget) {
+  const missingTarget = requiredTargets.find((target) => !target || !content.includes(target));
+  if (missingTarget !== undefined || !expansionTarget) {
     throw new Error(
       `pi-coding-agent@${version}: transcript cache target not found at ${filePath}. ` +
-        `Expected exact text: ${JSON.stringify(missingTarget)}. ` +
+        `Expected exact text: ${JSON.stringify(
+          missingTarget ?? PI_CODING_AGENT_TRANSCRIPT_CACHE_EXPANSION_TARGETS[0],
+        )}. ` +
         `Upstream may have changed; update pi-update-extensions.ts.`,
     );
   }
@@ -1007,8 +1015,8 @@ export async function applyPiCodingAgentTranscriptCachePatch(
       PI_CODING_AGENT_TRANSCRIPT_CACHE_HIDDEN_LABEL_REPLACEMENT,
     )
     .replace(
-      PI_CODING_AGENT_TRANSCRIPT_CACHE_EXPANSION_TARGET,
-      PI_CODING_AGENT_TRANSCRIPT_CACHE_EXPANSION_REPLACEMENT,
+      expansionTarget,
+      buildPiCodingAgentTranscriptCacheExpansionReplacement(expansionTarget),
     )
     .replace(
       PI_CODING_AGENT_TRANSCRIPT_CACHE_SHOW_IMAGES_TARGET,
@@ -1563,25 +1571,30 @@ export async function applyAmasterPiComputerUseAnalyzeScreenshotPatch(
 // ---------------------------------------------------------------------------
 // pi-herdr prompt guidance patch
 //
-// pi-herdr owns the `herdr` tool and is the right place for Herdr-specific
-// tool routing guidance. Keep the local herdr-agent-state fork focused on
-// pane state IPC, and patch pi-herdr's promptGuidelines after package updates.
+// pi-herdr@0.4+ owns herdr_layout / herdr_pane / herdr_agent. Keep the local
+// herdr-agent-state fork focused on pane state IPC, and patch herdr_pane's
+// promptGuidelines after package updates with bash-routing and sudo sentinel
+// guidance that upstream does not ship.
 // ---------------------------------------------------------------------------
 
 const PI_HERDR_PACKAGE_NAME = '@ogulcancelik/pi-herdr';
 const PI_HERDR_INDEX_RELATIVE_PATH = 'index.ts';
 const PI_HERDR_PROMPT_GUIDANCE_PATCH_MARKER = '__pi_update_extensions:pi-herdr-prompt-guidance__';
-const PI_HERDR_PROMPT_GUIDANCE_TARGET =
-  '\t\t\t"Use friendly aliases such as `server`, `reviewer`, or `tests` for panes created by pane_split, tab_create, or workspace_create.",';
+// Prefer the multi-tool (0.4+) herdr_pane guideline; keep the legacy monotool
+// "friendly aliases" line as a fallback for older installs.
+const PI_HERDR_PROMPT_GUIDANCE_TARGETS = [
+  '\t\t\t"Do not close a Herdr pane you did not create unless the user explicitly asks. herdr_pane always refuses to close the pane running the current pi process.",',
+  '\t\t\t"Use friendly aliases such as `server`, `reviewer`, or `tests` for panes created by pane_split, tab_create, or workspace_create.",',
+] as const;
 
 const PI_HERDR_BASH_ROUTING_GUIDELINE =
-  'When Herdr is explicitly requested, use `bash` for quick one-shot commands and `herdr` for work that needs a real pane: prompts, user input, sudo, persistent cwd/env, logs, sentinels, or follow-up commands.';
+  'When Herdr is explicitly requested, use `bash` for quick one-shot commands and `herdr_pane` for work that needs a real pane: prompts, user input, sudo, persistent cwd/env, logs, sentinels, or follow-up commands.';
 const PI_HERDR_SUDO_SENTINEL_GUIDELINE =
-  'For sudo/user-input flows: split a fresh pane down (`pane_split`, `direction: "down"`), set `focus: true` only when the user must type now, verify readiness, run `sudo -v` with `SUDO_READY:<id>`, keep dependent commands in that pane (sudo auth is per pane/TTY), end with `TASK_DONE:<id>`, `watch` both exact sentinels, read final output, then `stop` one-off panes.';
+  'For sudo/user-input flows: use herdr_layout pane_split with direction "down", set focus true only when the user must type now, run `sudo -v` with `SUDO_READY:<id>` via herdr_pane run, keep dependent commands in that pane (sudo auth is per pane/TTY), end with `TASK_DONE:<id>`, wait_output for both exact sentinels, read final output, then close one-off panes you created.';
 
-export function buildPiHerdrPromptGuidanceReplacement(): string {
+export function buildPiHerdrPromptGuidanceReplacement(target: string): string {
   return [
-    PI_HERDR_PROMPT_GUIDANCE_TARGET,
+    target,
     `\t\t\t// ${PI_HERDR_PROMPT_GUIDANCE_PATCH_MARKER}`,
     `\t\t\t${JSON.stringify(PI_HERDR_BASH_ROUTING_GUIDELINE)},`,
     `\t\t\t${JSON.stringify(PI_HERDR_SUDO_SENTINEL_GUIDELINE)},`,
@@ -1627,7 +1640,8 @@ export async function applyPiHerdrPromptGuidancePatch(
   }
 
   const content = readFileSync(filePath, 'utf8');
-  if (!content.includes(PI_HERDR_PROMPT_GUIDANCE_TARGET)) {
+  const target = PI_HERDR_PROMPT_GUIDANCE_TARGETS.find((candidate) => content.includes(candidate));
+  if (!target) {
     throw new Error(
       `pi-herdr@${version}: target text for pi-herdr prompt guidance patch not found at ${filePath}. ` +
         `Upstream may have changed; update pi-update-extensions.ts.`,
@@ -1638,10 +1652,7 @@ export async function applyPiHerdrPromptGuidancePatch(
     return { status: 'would-apply', packageRoot, version, patchPath: filePath };
   }
 
-  const patched = content.replace(
-    PI_HERDR_PROMPT_GUIDANCE_TARGET,
-    buildPiHerdrPromptGuidanceReplacement(),
-  );
+  const patched = content.replace(target, buildPiHerdrPromptGuidanceReplacement(target));
   writeFileSync(filePath, patched);
   return { status: 'applied', packageRoot, version, patchPath: filePath };
 }

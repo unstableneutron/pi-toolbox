@@ -1,6 +1,6 @@
 {
   "name": "pi-codex-app-server-use",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Pi extension that exposes Codex AppServer exec, Computer Use, and browser surfaces",
   "keywords": [
     "app-server",
@@ -21,9 +21,9 @@
     "test": "vitest run"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "^0.82.0",
-    "@earendil-works/pi-coding-agent": "^0.82.0",
-    "@earendil-works/pi-tui": "^0.82.0",
+    "@earendil-works/pi-ai": "^0.83.0",
+    "@earendil-works/pi-coding-agent": "^0.83.0",
+    "@earendil-works/pi-tui": "^0.83.0",
     "@types/node": "^24.3.0",
     "oxfmt": "^0.60.0",
     "oxlint": "^1.75.0",
@@ -33,9 +33,9 @@
     "vitest": "^3.2.4"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": ">=0.82.0",
-    "@earendil-works/pi-coding-agent": ">=0.82.0",
-    "@earendil-works/pi-tui": ">=0.82.0",
+    "@earendil-works/pi-ai": ">=0.83.0",
+    "@earendil-works/pi-coding-agent": ">=0.83.0",
+    "@earendil-works/pi-tui": ">=0.83.0",
     "typebox": "*"
   },
   "prettier": {

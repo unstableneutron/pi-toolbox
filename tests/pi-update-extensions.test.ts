@@ -556,25 +556,20 @@ describe('@amaster.ai/pi-computer-use analyze_screenshot patching', () => {
 
 describe('pi-herdr prompt guidance patching', () => {
   const TARGET_GUIDELINE =
+    '\t\t\t"Do not close a Herdr pane you did not create unless the user explicitly asks. herdr_pane always refuses to close the pane running the current pi process.",';
+  const LEGACY_TARGET_GUIDELINE =
     '\t\t\t"Use friendly aliases such as `server`, `reviewer`, or `tests` for panes created by pane_split, tab_create, or workspace_create.",';
   const BASH_ROUTING_GUIDELINE =
-    'When Herdr is explicitly requested, use `bash` for quick one-shot commands and `herdr` for work that needs a real pane: prompts, user input, sudo, persistent cwd/env, logs, sentinels, or follow-up commands.';
+    'When Herdr is explicitly requested, use `bash` for quick one-shot commands and `herdr_pane` for work that needs a real pane: prompts, user input, sudo, persistent cwd/env, logs, sentinels, or follow-up commands.';
   const SUDO_SENTINEL_GUIDELINE =
-    'For sudo/user-input flows: split a fresh pane down (`pane_split`, `direction: "down"`), set `focus: true` only when the user must type now, verify readiness, run `sudo -v` with `SUDO_READY:<id>`, keep dependent commands in that pane (sudo auth is per pane/TTY), end with `TASK_DONE:<id>`, `watch` both exact sentinels, read final output, then `stop` one-off panes.';
+    'For sudo/user-input flows: use herdr_layout pane_split with direction "down", set focus true only when the user must type now, run `sudo -v` with `SUDO_READY:<id>` via herdr_pane run, keep dependent commands in that pane (sudo auth is per pane/TTY), end with `TASK_DONE:<id>`, wait_output for both exact sentinels, read final output, then close one-off panes you created.';
   const FIXTURE_CONTENT = [
     'export default function extension(pi) {',
     '\tpi.registerTool({',
-    '\t\tname: "herdr",',
+    '\t\tname: "herdr_pane",',
     '\t\tpromptGuidelines: [',
-    '\t\t\t"Use `herdr` only when the user explicitly mentions Herdr or asks to inspect or control Herdr contexts. Do not invoke it merely because background work or delegation might help.",',
-    '\t\t\t"When the user asks to use Herdr, default to a sibling pane in the current tab and cwd. Create another tab, workspace, or cwd only when the user requests that topology.",',
-    '\t\t\t"Preserve the current UI focus by default. Set focus only when the user explicitly asks to switch context.",',
-    '\t\t\t"Use `herdr` run to submit a command or agent prompt because text and Enter are sent atomically. Use `herdr` send only for literal text or key injection without command submission semantics.",',
-    '\t\t\t"Use `herdr` watch for normal command output and `herdr` wait_agent only for recognized coding agents.",',
-    '\t\t\t"Treat both `idle` and `done` as completed agent states when inspecting status. `done` means the completed result is unseen; `idle` means it is seen.",',
-    '\t\t\t"Use `recent-unwrapped` for logs and transcripts, and `detection` only when agent-detection evidence is needed.",',
-    '\t\t\t"Pane actions target friendly aliases or opaque pane ids, never tab ids. Read ids from Herdr responses instead of constructing them.",',
-    '\t\t\t"When pane_split omits direction, the `herdr` tool chooses right or down from the source pane geometry.",',
+    '\t\t\t"Use herdr_pane for ordinary commands and raw terminal control; use herdr_agent for coding-agent prompts, lifecycle waits, reads, and interactive keys.",',
+    '\t\t\t"Use herdr_pane wait_output for tests, servers, builds, and watchers. It searches existing output immediately; use recent-unwrapped for logs and transcripts.",',
     TARGET_GUIDELINE,
     '\t\t],',
     '\t});',
@@ -593,33 +588,53 @@ describe('pi-herdr prompt guidance patching', () => {
   }
 
   it('reports the current upstream fixture as not yet patched', () => {
-    const packageRoot = setupFakePackage('0.3.0');
+    const packageRoot = setupFakePackage('0.4.0');
     expect(isPiHerdrPromptGuidancePatchApplied(packageRoot)).toBe(false);
   });
 
-  it('adds scoped bash/herdr routing and sudo sentinel guidance', async () => {
-    const packageRoot = setupFakePackage('0.3.0');
+  it('adds scoped bash/herdr_pane routing and sudo sentinel guidance', async () => {
+    const packageRoot = setupFakePackage('0.4.0');
     const result = await applyPiHerdrPromptGuidancePatch({ packageRoot });
 
     expect(result).toMatchObject({
       status: 'applied',
       packageRoot,
-      version: '0.3.0',
+      version: '0.4.0',
     });
     expect(result.patchPath).toBe(join(packageRoot, 'index.ts'));
 
     const patched = readFileSync(join(packageRoot, 'index.ts'), 'utf8');
     expect(patched).toContain('__pi_update_extensions:pi-herdr-prompt-guidance__');
-    expect(patched).toContain('Use `herdr` only when the user explicitly mentions Herdr');
+    expect(patched).toContain('Use herdr_pane for ordinary commands');
     expect(patched).toContain(JSON.stringify(BASH_ROUTING_GUIDELINE));
     expect(patched).toContain(JSON.stringify(SUDO_SENTINEL_GUIDELINE));
-    expect(patched).toContain('split a fresh pane down');
+    expect(patched).toContain('herdr_layout pane_split');
     expect(patched).toContain('`SUDO_READY:<id>`');
     expect(patched).toContain('`TASK_DONE:<id>`');
-    expect(patched).toContain('`watch` both exact sentinels');
-    expect(patched).toContain('read final output, then `stop` one-off panes');
+    expect(patched).toContain('wait_output for both exact sentinels');
+    expect(patched).toContain('close one-off panes you created');
     expect(patched).not.toContain('interactive_shell');
     expect(isPiHerdrPromptGuidancePatchApplied(packageRoot)).toBe(true);
+  });
+
+  it('still patches legacy monotool friendly-alias guidance', async () => {
+    const legacyContent = [
+      'export default function extension(pi) {',
+      '\tpi.registerTool({',
+      '\t\tname: "herdr",',
+      '\t\tpromptGuidelines: [',
+      LEGACY_TARGET_GUIDELINE,
+      '\t\t],',
+      '\t});',
+      '}',
+      '',
+    ].join('\n');
+    const packageRoot = setupFakePackage('0.3.0', legacyContent);
+    const result = await applyPiHerdrPromptGuidancePatch({ packageRoot });
+    expect(result).toMatchObject({ status: 'applied', packageRoot, version: '0.3.0' });
+    const patched = readFileSync(join(packageRoot, 'index.ts'), 'utf8');
+    expect(patched).toContain(JSON.stringify(BASH_ROUTING_GUIDELINE));
+    expect(patched).toContain(JSON.stringify(SUDO_SENTINEL_GUIDELINE));
   });
 
   it('recognizes markerless semantic guidance as already applied', async () => {
@@ -631,30 +646,30 @@ describe('pi-herdr prompt guidance patching', () => {
         `\t\t\t${JSON.stringify(SUDO_SENTINEL_GUIDELINE)},`,
       ].join('\n'),
     );
-    const packageRoot = setupFakePackage('0.3.0', semanticContent);
+    const packageRoot = setupFakePackage('0.4.0', semanticContent);
 
     expect(isPiHerdrPromptGuidancePatchApplied(packageRoot)).toBe(true);
     await expect(applyPiHerdrPromptGuidancePatch({ packageRoot })).resolves.toMatchObject({
       status: 'already-applied',
       packageRoot,
-      version: '0.3.0',
+      version: '0.4.0',
     });
   });
 
   it('is idempotent after patching', async () => {
-    const packageRoot = setupFakePackage('0.3.0');
+    const packageRoot = setupFakePackage('0.4.0');
     await applyPiHerdrPromptGuidancePatch({ packageRoot });
     const second = await applyPiHerdrPromptGuidancePatch({ packageRoot });
 
     expect(second).toMatchObject({
       status: 'already-applied',
       packageRoot,
-      version: '0.3.0',
+      version: '0.4.0',
     });
   });
 
   it('supports dry-run without mutating pi-herdr', async () => {
-    const packageRoot = setupFakePackage('0.3.0');
+    const packageRoot = setupFakePackage('0.4.0');
     const indexPath = join(packageRoot, 'index.ts');
     const original = readFileSync(indexPath, 'utf8');
 
@@ -662,7 +677,7 @@ describe('pi-herdr prompt guidance patching', () => {
     expect(result).toMatchObject({
       status: 'would-apply',
       packageRoot,
-      version: '0.3.0',
+      version: '0.4.0',
     });
     expect(readFileSync(indexPath, 'utf8')).toBe(original);
     expect(isPiHerdrPromptGuidancePatchApplied(packageRoot)).toBe(false);
@@ -676,10 +691,10 @@ describe('pi-herdr prompt guidance patching', () => {
   });
 
   it('builds scoped guidance without mentioning unavailable interactive shell', () => {
-    const replacement = buildPiHerdrPromptGuidanceReplacement();
+    const replacement = buildPiHerdrPromptGuidanceReplacement(TARGET_GUIDELINE);
     expect(replacement).toContain('__pi_update_extensions:pi-herdr-prompt-guidance__');
     expect(replacement).toContain(BASH_ROUTING_GUIDELINE);
-    expect(replacement).toContain('`watch` both exact sentinels');
+    expect(replacement).toContain('wait_output for both exact sentinels');
     expect(replacement).not.toContain('interactive_shell');
   });
 });
@@ -1283,6 +1298,26 @@ describe('pi-coding-agent transcript cache patching', () => {
     expect(patched).toContain('...this.pendingTools.values()');
     expect(patched).toContain('getDynamicChildren');
     expect(patched.match(/invalidateRenderCache\?\.\(\)/g)).toHaveLength(5);
+    expect(isPiCodingAgentTranscriptCachePatchApplied(packageRoot)).toBe(true);
+  });
+
+  it('applies when expansion follow-up uses showStatus (0.83+)', async () => {
+    const currentUpstream = FIXTURE_CONTENT.replace(
+      '        this.ui.requestRender();\n    }\n    settingsHandlers() {',
+      '        this.showStatus(`Tool output: ${expanded ? "expanded" : "collapsed"}`);\n    }\n    settingsHandlers() {',
+    );
+    const packageRoot = setupFakePackage('0.83.0', currentUpstream);
+    const result = await applyPiCodingAgentTranscriptCachePatch({ packageRoot });
+    const patched = readFileSync(
+      join(packageRoot, 'dist', 'modes', 'interactive', 'interactive-mode.js'),
+      'utf8',
+    );
+
+    expect(result).toMatchObject({ status: 'applied', packageRoot, version: '0.83.0' });
+    expect(patched).toContain('invalidateRenderCache?.()');
+    expect(patched).toContain(
+      'this.showStatus(`Tool output: ${expanded ? "expanded" : "collapsed"}`)',
+    );
     expect(isPiCodingAgentTranscriptCachePatchApplied(packageRoot)).toBe(true);
   });
 
