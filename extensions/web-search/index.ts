@@ -19,6 +19,8 @@ import Parallel from 'parallel-web';
 const PARALLEL_SEARCH_MCP_URL = 'https://search.parallel.ai/mcp';
 const MCP_PROTOCOL_VERSION = '2025-06-18';
 const MCP_TOOL_SESSION_ID = `pi_toolbox_${randomUUID()}`;
+const MAX_SEARCH_QUERIES = 3;
+const MAX_FETCH_URLS = 10;
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -105,6 +107,18 @@ function getErrorStatus(err: unknown): number | undefined {
     if (typeof status === 'number') return status;
   }
   return undefined;
+}
+
+function enforceMaximumItems(
+  toolName: string,
+  fieldName: string,
+  itemCount: number,
+  maximum: number,
+): void {
+  if (itemCount <= maximum) return;
+  throw new Error(
+    `${toolName}.${fieldName} accepts at most ${maximum} items; received ${itemCount}`,
+  );
 }
 
 export function shouldFallbackToMcp(err: unknown): boolean {
@@ -268,7 +282,6 @@ export function createWebSearchTools({
               'List of keyword search queries of 3-6 words, which may include search operators. ' +
               'The search queries should be related to the objective. Limited to 3 entries of 100 characters each.',
             minItems: 1,
-            maxItems: 3,
           }),
         },
         { additionalProperties: false },
@@ -277,6 +290,12 @@ export function createWebSearchTools({
 
       async execute(_toolCallId, params, signal, onUpdate) {
         const { objective, search_queries } = params;
+        enforceMaximumItems(
+          'web_search',
+          'search_queries',
+          search_queries.length,
+          MAX_SEARCH_QUERIES,
+        );
 
         onUpdate?.({
           content: [{ type: 'text', text: `Searching: ${search_queries.join(', ')}` }],
@@ -458,7 +477,6 @@ export function createWebSearchTools({
           description:
             'List of URLs to extract content from. Must be valid HTTP/HTTPS URLs. Maximum 10 URLs per request.',
           minItems: 1,
-          maxItems: 10,
         }),
         objective: Type.Optional(
           Type.String({
@@ -472,6 +490,7 @@ export function createWebSearchTools({
 
       async execute(_toolCallId, params, signal, onUpdate) {
         const { urls, objective } = params;
+        enforceMaximumItems('web_fetch', 'urls', urls.length, MAX_FETCH_URLS);
 
         onUpdate?.({
           content: [
