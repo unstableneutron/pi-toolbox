@@ -1,50 +1,21 @@
 import { describe, expect, test } from 'vitest';
 
-import { createWebSearchTools, executeWithFallback, shouldFallbackToMcp } from './index';
+import { createWebSearchTools } from './index';
 
-describe('web-search provider fallback', () => {
-  test('falls back to MCP when the SDK reports insufficient credit', async () => {
-    const calls: string[] = [];
-    const result = await executeWithFallback({
-      sdk: async () => {
-        calls.push('sdk');
-        const error = new Error('Insufficient credit in account');
-        Object.assign(error, { status: 402 });
-        throw error;
-      },
-      mcp: async () => {
-        calls.push('mcp');
-        return { provider: 'mcp' as const, fallbackReason: 'sdk_unavailable' };
-      },
-    });
-
-    expect(calls).toEqual(['sdk', 'mcp']);
-    expect(result).toEqual({ provider: 'mcp', fallbackReason: 'sdk_unavailable' });
-  });
-
-  test('disables the SDK after the first fallback error', async () => {
-    const calls: string[] = [];
+describe('web-search Parallel SDK integration', () => {
+  test('uses the GA Search API in Turbo mode', async () => {
+    const requests: unknown[] = [];
     const tools = createWebSearchTools({
-      apiKey: 'key',
-      modelName: 'test-model',
       client: {
-        beta: {
-          search: async () => {
-            calls.push('sdk');
-            const error = new Error('Insufficient credit in account');
-            Object.assign(error, { status: 402 });
-            throw error;
-          },
+        search: async (request: unknown) => {
+          requests.push(request);
+          return {
+            search_id: 'search_123',
+            results: [{ url: 'https://example.com', excerpts: ['ok'] }],
+            usage: [],
+          };
         },
       } as never,
-      mcpCall: async (name) => {
-        calls.push(`mcp:${name}`);
-        return {
-          search_id: 'search_123',
-          results: [{ url: 'https://example.com', excerpts: ['ok'] }],
-          usage: [],
-        };
-      },
     });
 
     const search = tools.find((tool) => tool.name === 'web_search');
@@ -55,38 +26,25 @@ describe('web-search provider fallback', () => {
       undefined,
       undefined as never,
     );
-    await search?.execute(
-      'two',
-      { objective: 'second', search_queries: ['second query'] },
-      undefined,
-      undefined,
-      undefined as never,
-    );
 
-    expect(calls).toEqual(['sdk', 'mcp:web_search', 'mcp:web_search']);
-  });
-
-  test('does not fall back for ordinary SDK errors', async () => {
-    await expect(
-      executeWithFallback({
-        sdk: async () => {
-          throw new Error('Bad request');
+    expect(requests).toEqual([
+      {
+        objective: 'first',
+        search_queries: ['first query'],
+        mode: 'turbo',
+        max_chars_total: 50_000,
+        advanced_settings: {
+          max_results: 10,
+          excerpt_settings: { max_chars_per_result: 5000 },
         },
-        mcp: async () => {
-          throw new Error('must not call mcp');
-        },
-      }),
-    ).rejects.toThrow('Bad request');
-  });
-
-  test.each([401, 402, 403])('classifies HTTP %i as an MCP fallback error', (status) => {
-    expect(shouldFallbackToMcp(Object.assign(new Error('account issue'), { status }))).toBe(true);
+      },
+    ]);
   });
 });
 
 describe('web-search tool registration', () => {
   test('registers web_search instead of web_search_preview', () => {
-    const tools = createWebSearchTools({ apiKey: undefined, modelName: 'test-model' });
+    const tools = createWebSearchTools();
 
     expect(tools.map((tool) => tool.name)).toEqual(['web_search', 'web_fetch']);
     expect((tools[0]!.parameters as any).additionalProperties).toBe(false);
@@ -98,7 +56,7 @@ describe('web-search tool registration', () => {
   });
 
   test('avoids unsupported array maxItems schema keywords', () => {
-    const tools = createWebSearchTools({ apiKey: undefined, modelName: 'test-model' });
+    const tools = createWebSearchTools();
     const searchParameters = tools[0]!.parameters as any;
     const fetchParameters = tools[1]!.parameters as any;
 
@@ -109,15 +67,7 @@ describe('web-search tool registration', () => {
   });
 
   test('enforces array limits before calling a provider', async () => {
-    const calls: string[] = [];
-    const tools = createWebSearchTools({
-      apiKey: undefined,
-      modelName: 'test-model',
-      mcpCall: async (name) => {
-        calls.push(name);
-        throw new Error('provider must not be called');
-      },
-    });
+    const tools = createWebSearchTools();
     const search = tools.find((tool) => tool.name === 'web_search');
     const fetch = tools.find((tool) => tool.name === 'web_fetch');
 
@@ -141,6 +91,5 @@ describe('web-search tool registration', () => {
         undefined as never,
       ),
     ).rejects.toThrow('web_fetch.urls accepts at most 10 items; received 11');
-    expect(calls).toEqual([]);
   });
 });
