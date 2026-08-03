@@ -1,0 +1,40 @@
+{
+  "name": "pi-executor-remote",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Remote-only Pi bridge to an existing Executor HTTP/MCP server",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "check": "pnpm run check:lint && pnpm run check:format",
+    "check:lint": "pnpm exec oxlint -c ../../.oxlintrc.json --type-aware --type-check --deny-warnings .",
+    "check:format": "pnpm exec oxfmt -c ../../.oxfmtrc.json --check .",
+    "fix": "pnpm run fix:lint && pnpm run fix:format",
+    "fix:lint": "pnpm exec oxlint -c ../../.oxlintrc.json --type-aware --type-check --fix --fix-suggestions --fix-dangerously .",
+    "fix:format": "pnpm exec oxfmt -c ../../.oxfmtrc.json .",
+    "test": "pnpm exec vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.83.0",
+    "@types/node": "^24.3.0",
+    "typebox": "^1.1.24",
+    "typescript": "^5.7.3",
+    "vitest": "^3.2.4"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.83.0",
+    "typebox": "*"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
