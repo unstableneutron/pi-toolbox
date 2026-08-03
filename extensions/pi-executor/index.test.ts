@@ -30,6 +30,12 @@ describe('remote Executor Pi tools', () => {
     expect(tools.map((tool) => tool.name)).toEqual(['search', 'execute']);
   });
 
+  test('keeps optional search parameters out of OpenAI strict mode', () => {
+    const search = createRemoteExecutorTools().find((tool) => tool.name === 'search')!;
+    expect((search.parameters as { required?: string[] }).required).toEqual(['query']);
+    expect(search.constrainedSampling).toBeUndefined();
+  });
+
   test('routes native search through remote Executor execute', async () => {
     const executeCode = vi.fn(async () => ({
       text: '{"items":[]}',

@@ -107,6 +107,7 @@ export function createRemoteExecutorTools(
       'Use short intent phrases such as github issues, repo details, or create calendar event.',
       'Set includeDetails to receive compact input/output TypeScript for each returned tool.',
     ],
+    // Keep this non-strict: OpenAI strict tools require every property, while these filters are optional.
     parameters: Type.Object(
       {
         query: Type.String({
@@ -132,7 +133,6 @@ export function createRemoteExecutorTools(
       },
       { additionalProperties: false },
     ),
-    constrainedSampling: { type: 'json_schema', strict: 'prefer' },
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       return runTool(deps, buildSearchCode(params), signal, ctx);
     },

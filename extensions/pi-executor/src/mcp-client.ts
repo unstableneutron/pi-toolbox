@@ -12,7 +12,7 @@ import type {
 } from './types';
 
 const CLIENT_NAME = 'pi-executor-remote';
-const CLIENT_VERSION = '0.1.0';
+const CLIENT_VERSION = '0.1.1';
 const DEFAULT_TEXT_RESULT = '(no result)';
 
 export interface ExecutorMcpCallOptions {
