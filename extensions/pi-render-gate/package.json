@@ -1,6 +1,6 @@
 {
   "name": "pi-render-gate",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "description": "Pi package that pauses hidden-pane TUI rendering and resumes when visible",
   "keywords": [
     "herdr",
