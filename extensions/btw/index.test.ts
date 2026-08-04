@@ -37,9 +37,49 @@ describe('btw mode guards', () => {
     expect(custom).not.toHaveBeenCalled();
   });
 
-  test('registers btw-pane command', () => {
+  test('registers explicit surface commands', () => {
     const { commands } = createHarness();
-    expect(commands.has('btw-pane')).toBe(true);
+    expect([...commands.keys()].sort()).toEqual([
+      'btw',
+      'btw-inline',
+      'btw-overlay',
+      'btw-pane',
+      'btw-popup',
+    ]);
+  });
+
+  test('default popup falls back to the Pi overlay outside Herdr', async () => {
+    const previous = { ...process.env };
+    try {
+      process.env.PI_CODING_AGENT_DIR = `/tmp/btw-index-test-${process.pid}`;
+      delete process.env.HERDR_ENV;
+      delete process.env.HERDR_SOCKET_PATH;
+      delete process.env.HERDR_PANE_ID;
+      delete process.env.KITTY_WINDOW_ID;
+      delete process.env.GHOSTTY_RESOURCES_DIR;
+      delete process.env.TERM_PROGRAM;
+
+      const { commands } = createHarness();
+      const custom = vi.fn(async () => undefined);
+      const notify = vi.fn();
+
+      await commands.get('btw')?.('quick question', {
+        cwd: '/tmp',
+        getSystemPrompt: () => '',
+        hasUI: true,
+        isIdle: () => true,
+        mode: 'tui',
+        model: undefined,
+        sessionManager: { getBranch: () => [] },
+        ui: { custom, notify },
+        waitForIdle: vi.fn(),
+      });
+
+      expect(custom).toHaveBeenCalledOnce();
+      expect(notify).toHaveBeenCalledWith('No active model selected.', 'error');
+    } finally {
+      process.env = previous;
+    }
   });
 
   test('btw-pane returns outside TUI mode', async () => {

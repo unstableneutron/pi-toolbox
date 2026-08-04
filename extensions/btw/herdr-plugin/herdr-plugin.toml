@@ -1,0 +1,14 @@
+id = "pi-toolbox.btw"
+name = "Pi Toolbox BTW"
+version = "0.1.0"
+min_herdr_version = "0.8.0"
+description = "Run Pi Toolbox BTW sessions in Herdr transient terminal surfaces"
+platforms = ["linux", "macos"]
+
+[[panes]]
+id = "btw"
+title = "Pi BTW"
+placement = "popup"
+width = "80%"
+height = "78%"
+command = ["node", "herdr-popup-launcher.mjs"]

@@ -147,7 +147,7 @@ After installing, toggle individual extensions, skills, and prompts on or off wi
 Custom extensions built in this repo:
 
 - `answer` — `/answer` command with an interactive Q&A TUI.
-- `btw` — lightweight side-channel for inline notes; `/btw-pane` opens a forked side session in Ghostty/Kitty/Herdr.
+- `btw` — configurable side-channel with Herdr popup (default), Herdr overlay, native pane, and Pi inline surfaces.
 - `execute-command` — self-invocation and follow-up-input queueing.
 - `handoff` — transfer focused context to a new session.
 - `loop` — `/loop` command with a breakout tool.

@@ -30,6 +30,7 @@ import {
   type TUI,
 } from '@earendil-works/pi-tui';
 
+import fs from 'node:fs';
 import { createForkedSessionFromCurrentLeafDetails } from '../pi-native-split/index';
 import { buildNativePiLaunchArgs, cleanupNativePiPromptTempPath } from '../shared/native-pi-launch';
 import {
@@ -38,6 +39,16 @@ import {
   shellQuote,
 } from '../shared/native-terminal-launch';
 import { hasTui } from '../shared/ui-mode';
+import {
+  applyBtwConfigCommand,
+  formatBtwConfig,
+  parseBtwInvocation,
+  readBtwConfig,
+  writeBtwConfig,
+  type BtwConfig,
+  type BtwSurfaceMode,
+} from './config';
+import { isHerdrSession, launchBtwHerdrSurface, type BtwHerdrPlacement } from './herdr-surface';
 
 const BTW_ENTRY_TYPE = 'btw-thread-entry';
 const BTW_RESET_TYPE = 'btw-thread-reset';
@@ -350,6 +361,8 @@ class BtwOverlay extends Container implements Focusable {
 }
 
 export default function (pi: ExtensionAPI) {
+  if (process.env.PI_TOOLBOX_BTW_CHILD === '1') return;
+
   let thread: BtwDetails[] = [];
   let pendingQuestion: string | null = null;
   let pendingAnswer = '';
@@ -637,6 +650,17 @@ export default function (pi: ExtensionAPI) {
     }
 
     syncOverlay();
+  }
+
+  function createExternalSession(ctx: ExtensionCommandContext): { file: string } | undefined {
+    const splitSession = createForkedSessionFromCurrentLeafDetails(ctx);
+    return splitSession ? { file: splitSession.file } : undefined;
+  }
+
+  function buildExternalStartupPrompt(question: string): string {
+    return question
+      ? `${BTW_PANE_STARTUP_PREAMBLE}\n\nQuestion:\n${question}`
+      : `${BTW_PANE_STARTUP_PREAMBLE}\n\nWait for the user's side question.`;
   }
 
   async function createSideSession(
@@ -1019,34 +1043,47 @@ export default function (pi: ExtensionAPI) {
     await runBtwPrompt(ctx, question);
   }
 
-  async function launchBtwPane(
-    ctx: ExtensionCommandContext,
-    question: string,
-    env: NodeJS.ProcessEnv = process.env,
-  ): Promise<void> {
-    const terminal = detectTerminal(env);
-    if (!terminal) {
-      notify(
-        ctx,
-        'BTW pane mode needs Ghostty, Kitty, or Herdr. Opening overlay instead.',
-        'warning',
-      );
+  async function openInlineBtw(ctx: ExtensionCommandContext, question: string): Promise<void> {
+    if (question) {
       await ensureOverlay(ctx);
-      if (question) {
-        await runBtwPrompt(ctx, question);
+      await runBtwPrompt(ctx, question);
+      return;
+    }
+
+    if (thread.length > 0 && ctx.hasUI) {
+      const choice = await ctx.ui.select('BTW side chat:', [
+        'Continue previous conversation',
+        'Start fresh',
+      ]);
+      if (choice === 'Continue previous conversation') {
+        await disposeSideSession();
+        setOverlayStatus('Continuing BTW thread.');
+        await ensureOverlay(ctx);
+      } else if (choice === 'Start fresh') {
+        await resetThread(ctx, true);
+        setOverlayStatus('Ready');
+        await ensureOverlay(ctx);
       }
       return;
     }
 
-    const splitSession = createForkedSessionFromCurrentLeafDetails(ctx);
-    if (!splitSession) {
-      notify(ctx, 'Failed to create BTW pane session from the current branch.', 'error');
-      return;
-    }
+    await ensureOverlay(ctx);
+  }
 
-    const startupPrompt = question
-      ? `${BTW_PANE_STARTUP_PREAMBLE}\n\nQuestion:\n${question}`
-      : `${BTW_PANE_STARTUP_PREAMBLE}\n\nWait for the user's side question.`;
+  async function launchBtwPane(
+    ctx: ExtensionCommandContext,
+    question: string,
+    env: NodeJS.ProcessEnv = process.env,
+  ): Promise<boolean> {
+    const terminal = detectTerminal(env);
+    if (!terminal) return false;
+
+    const externalSession = createExternalSession(ctx);
+    if (!externalSession) {
+      notify(ctx, 'Failed to create BTW pane session from the current branch.', 'error');
+      return false;
+    }
+    const startupPrompt = buildExternalStartupPrompt(question);
 
     let launchArgs: ReturnType<typeof buildNativePiLaunchArgs> | undefined;
     const launched = await launchShellInNativeSplit({
@@ -1057,11 +1094,14 @@ export default function (pi: ExtensionAPI) {
       prepare: () => {
         launchArgs = buildNativePiLaunchArgs({
           cwd: ctx.cwd,
-          sessionFile: splitSession.file,
+          sessionFile: externalSession.file,
           prompt: startupPrompt,
         });
+        const command = ['env', 'PI_TOOLBOX_BTW_CHILD=1', ...launchArgs.argv]
+          .map(shellQuote)
+          .join(' ');
         return {
-          command: launchArgs.argv.map(shellQuote).join(' '),
+          command,
           cleanupOnFailure: () => cleanupNativePiPromptTempPath(launchArgs?.promptFile),
         };
       },
@@ -1070,8 +1110,9 @@ export default function (pi: ExtensionAPI) {
     if (launched.result.code !== 0) {
       const reason =
         launched.result.stderr?.trim() || launched.result.stdout?.trim() || 'unknown launch error';
-      notify(ctx, `Failed to launch BTW pane in ${terminal}: ${reason}`, 'error');
-      return;
+      fs.rmSync(externalSession.file, { force: true });
+      notify(ctx, `Failed to launch BTW pane in ${terminal}: ${reason}`, 'warning');
+      return false;
     }
 
     const targetLabel =
@@ -1081,71 +1122,118 @@ export default function (pi: ExtensionAPI) {
       `Opened BTW ${targetLabel} in ${terminal}${question ? ' with your question' : ''}.`,
       'info',
     );
+    return true;
+  }
+
+  async function launchHerdrSurface(
+    ctx: ExtensionCommandContext,
+    question: string,
+    placement: BtwHerdrPlacement,
+  ): Promise<boolean> {
+    const externalSession = createExternalSession(ctx);
+    if (!externalSession) {
+      notify(ctx, 'Failed to create BTW Herdr session from the current branch.', 'error');
+      return false;
+    }
+    const result = await launchBtwHerdrSurface({
+      exec: (command, args) => pi.exec(command, args),
+      placement,
+      payload: {
+        version: 1,
+        cwd: ctx.cwd,
+        sessionFile: externalSession.file,
+        prompt: buildExternalStartupPrompt(question),
+      },
+    });
+    if (!result.ok) {
+      fs.rmSync(externalSession.file, { force: true });
+      notify(ctx, `Herdr ${placement} is unavailable: ${result.error}`, 'warning');
+      return false;
+    }
+    return true;
+  }
+
+  async function openFallback(
+    ctx: ExtensionCommandContext,
+    question: string,
+    config: BtwConfig,
+  ): Promise<void> {
+    if (config.fallbackMode === 'pane' && (await launchBtwPane(ctx, question))) return;
+    await openInlineBtw(ctx, question);
+  }
+
+  async function openBtwSurface(
+    ctx: ExtensionCommandContext,
+    question: string,
+    mode: BtwSurfaceMode,
+    config: BtwConfig,
+    env: NodeJS.ProcessEnv = process.env,
+  ): Promise<void> {
+    if (mode === 'inline') {
+      await openInlineBtw(ctx, question);
+      return;
+    }
+    if (mode === 'pane') {
+      if (!(await launchBtwPane(ctx, question, env))) await openInlineBtw(ctx, question);
+      return;
+    }
+    if (!isHerdrSession(env)) {
+      await openFallback(ctx, question, config);
+      return;
+    }
+    if (!(await launchHerdrSurface(ctx, question, mode))) {
+      await openFallback(ctx, question, config);
+    }
+  }
+
+  function runConfigCommand(args: string, ctx: ExtensionCommandContext): void {
+    try {
+      const current = readBtwConfig();
+      const result = applyBtwConfigCommand(current, args);
+      if (result.changed) writeBtwConfig(result.config);
+      notify(ctx, formatBtwConfig(result.config), 'info');
+    } catch (error) {
+      notify(ctx, error instanceof Error ? error.message : String(error), 'error');
+    }
   }
 
   pi.registerCommand('btw', {
     description:
-      'Open a simple BTW side-chat popover. `/btw <text>` asks immediately, `/btw` opens the side thread. In Herdr/Kitty/Ghostty, `/btw` also offers a native pane.',
+      'Open BTW with the configured surface. Use `/btw config` to select popup, overlay, pane, or inline.',
     handler: async (args, ctx) => {
       if (!hasTui(ctx)) return;
-
-      const question = args.trim();
-      const terminal = detectTerminal();
-
-      if (!question) {
-        if (thread.length > 0 && ctx.hasUI) {
-          const choices = [
-            'Continue previous conversation',
-            'Start fresh',
-            ...(terminal ? [`Open in ${terminal} pane`] : []),
-          ];
-          const choice = await ctx.ui.select('BTW side chat:', choices);
-          if (choice === 'Continue previous conversation') {
-            // Dispose session so it's recreated with fresh main context on next submit
-            await disposeSideSession();
-            setOverlayStatus('Continuing BTW thread.');
-            await ensureOverlay(ctx);
-          } else if (choice === 'Start fresh') {
-            await resetThread(ctx, true);
-            setOverlayStatus('Ready');
-            await ensureOverlay(ctx);
-          } else if (choice?.startsWith('Open in ')) {
-            await launchBtwPane(ctx, '');
-          }
-          // null = user cancelled (Esc), do nothing
-        } else if (terminal && ctx.hasUI) {
-          const choice = await ctx.ui.select('BTW side chat:', [
-            'Open overlay',
-            `Open in ${terminal} pane`,
-          ]);
-          if (choice === 'Open overlay') {
-            await resetThread(ctx, true);
-            setOverlayStatus('Ready');
-            await ensureOverlay(ctx);
-          } else if (choice?.startsWith('Open in ')) {
-            await launchBtwPane(ctx, '');
-          }
-        } else {
-          await resetThread(ctx, true);
-          setOverlayStatus('Ready');
-          await ensureOverlay(ctx);
-        }
+      const invocation = parseBtwInvocation(args);
+      if (invocation.kind === 'config') {
+        runConfigCommand(invocation.args, ctx);
         return;
       }
-
-      await ensureOverlay(ctx);
-      await runBtwPrompt(ctx, question);
+      const config = readBtwConfig();
+      await openBtwSurface(ctx, invocation.question, config.defaultMode, config);
     },
   });
 
-  pi.registerCommand('btw-pane', {
-    description:
-      'Open BTW in a native Ghostty/Kitty/Herdr pane with a forked copy of the current session. Optional question is submitted on launch.',
-    handler: async (args, ctx) => {
-      if (!hasTui(ctx)) return;
-      await launchBtwPane(ctx, args.trim());
-    },
-  });
+  const registerSurfaceCommand = (name: string, mode: BtwSurfaceMode, description: string) => {
+    pi.registerCommand(name, {
+      description,
+      handler: async (args, ctx) => {
+        if (!hasTui(ctx)) return;
+        await openBtwSurface(ctx, args.trim(), mode, readBtwConfig());
+      },
+    });
+  };
+
+  registerSurfaceCommand(
+    'btw-popup',
+    'popup',
+    'Open BTW in a Herdr popup, with the configured fallback outside Herdr.',
+  );
+  registerSurfaceCommand(
+    'btw-overlay',
+    'overlay',
+    'Open BTW in a temporary Herdr full-tab overlay, with the configured fallback.',
+  );
+  registerSurfaceCommand('btw-pane', 'pane', 'Open BTW in a native Ghostty, Kitty, or Herdr pane.');
+  registerSurfaceCommand('btw-inline', 'inline', "Open BTW in Pi's in-process floating overlay.");
 
   pi.on('session_start', async (_event, ctx) => {
     if (!hasTui(ctx)) return;
