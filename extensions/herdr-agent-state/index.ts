@@ -1,6 +1,6 @@
 // Forked from Herdr's managed Pi integration:
 // https://github.com/ogulcancelik/herdr/blob/master/src/integration/assets/pi/herdr-agent-state.ts
-// Upstream baseline: HERDR_INTEGRATION_VERSION=7.
+// Upstream baseline: HERDR_INTEGRATION_VERSION=8.
 // Keep changes surgical and close to upstream so future Herdr updates are easy to diff.
 
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';

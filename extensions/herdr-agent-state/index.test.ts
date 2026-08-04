@@ -194,9 +194,9 @@ describe('herdr agent state extension', () => {
     expect(pi.handlers.get('before_agent_start')).toBeUndefined();
   });
 
-  test('does not report agent state in non-TUI sessions', async () => {
+  test('does not report agent state in RPC sessions with UI APIs', async () => {
     const pi = await loadHarness();
-    const nonTuiContext = fakeContext({ hasUI: false, mode: 'json' });
+    const nonTuiContext = fakeContext({ hasUI: true, mode: 'rpc' });
 
     await pi.emit('session_start', {}, nonTuiContext);
     await flushSocketWork();

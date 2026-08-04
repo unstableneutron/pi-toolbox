@@ -16,7 +16,7 @@ local changes surgical so future upstream refreshes are easy to diff and merge.
 
 Before editing this extension, compare against the upstream Herdr asset. The
 current local baseline is recorded at the top of `index.ts` (integration version
-7 at the time of this refresh). If the snapshot is missing or stale, run:
+8 at the time of this refresh). If the snapshot is missing or stale, run:
 
 ```bash
 gitchamber remove ogulcancelik/herdr
