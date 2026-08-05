@@ -59,21 +59,34 @@ notifications update the active Pi tool row before a call yields.
 
 ## Endpoint resolution
 
-Resolution order:
+In automatic mode, the first available endpoint wins:
 
-1. `PI_EXECUTOR_CONFIG`, when set.
-2. Merged user and project configuration:
-   - `~/.pi/agent/pi-executor.json`
-   - `<cwd>/.pi/pi-executor.json`
-3. Environment overrides.
-4. The active local daemon manifest at
-   `$EXECUTOR_DATA_DIR/server-control/server.json` or
-   `~/.executor/server-control/server.json`.
+1. `PI_EXECUTOR_MCP_URL`.
+2. The profile named by `PI_EXECUTOR_SERVER`.
+3. `mcpUrl` in merged Pi configuration.
+4. `serverProfile` in merged Pi configuration.
+5. The default profile in `$EXECUTOR_DATA_DIR/server-connections.json` or
+   `~/.executor/server-connections.json`.
+6. The active local daemon manifest.
+7. `http://127.0.0.1:4789/mcp`.
+
+Pi configuration is loaded from `PI_EXECUTOR_CONFIG` when set. Otherwise, trusted project settings
+in `<cwd>/.pi/pi-executor.json` override user settings in `~/.pi/agent/pi-executor.json`.
+
+Use `PI_EXECUTOR_ENDPOINT_SOURCE` or the `endpointSource` config field to force one source:
+
+- `auto` — use the order above.
+- `environment` — require `PI_EXECUTOR_MCP_URL`.
+- `config` — require `mcpUrl` in Pi configuration.
+- `profile` — use `PI_EXECUTOR_SERVER`, `serverProfile`, or the Executor default profile.
+- `local` — use the daemon manifest or the conventional localhost endpoint.
 
 Environment overrides:
 
-- `PI_EXECUTOR_URL`
-- `PI_EXECUTOR_TOKEN`
+- `PI_EXECUTOR_ENDPOINT_SOURCE`
+- `PI_EXECUTOR_MCP_URL`
+- `PI_EXECUTOR_SERVER`
+- `PI_EXECUTOR_TOKEN`; `EXECUTOR_API_KEY` and `EXECUTOR_AUTH_TOKEN` are fallback bearer variables.
 - `PI_EXECUTOR_USERNAME`
 - `PI_EXECUTOR_PASSWORD`
 - `PI_EXECUTOR_REQUEST_TIMEOUT_MS` — hard call timeout; default 300000 ms.
@@ -82,12 +95,22 @@ Environment overrides:
 - `PI_EXECUTOR_MAX_OUTPUT_LINES` — initial model-visible lines; default 300.
 - `PI_EXECUTOR_ALLOW_INSECURE_HTTP`
 
-Example configuration:
+The normal remote configuration reuses an Executor CLI profile and its OAuth login:
 
 ```json
 {
-  "url": "https://executor.example.com",
-  "token": "replace-me",
+  "serverProfile": "tcbs-nonprod",
+  "allowInsecureHttp": true
+}
+```
+
+A direct endpoint is also supported. A root origin is normalized to `/mcp`; a non-root path is used
+as the exact MCP endpoint:
+
+```json
+{
+  "endpointSource": "config",
+  "mcpUrl": "https://executor.example.com/mcp",
   "requestTimeoutMs": 300000,
   "yieldAfterMs": 20000,
   "maxOutputBytes": 12288,
@@ -95,20 +118,18 @@ Example configuration:
 }
 ```
 
-Prefer environment variables or a user-only file for credentials. Project configuration is read
-only for projects trusted by Pi. It may override user configuration, but credentials are never
-inherited when an override changes the endpoint URL. Bearer and basic authentication are supported.
-Non-loopback plain HTTP is rejected unless `allowInsecureHttp` is explicitly enabled.
-
-With the Executor CLI daemon running, no configuration is normally needed. The extension reads the
-published server-control manifest, including its authentication settings.
+Executor profiles are re-read on every tool call, so a renewed `executor login` takes effect without
+reloading Pi. An expired OAuth profile reports the exact `executor login --server <name>` command.
+Prefer profile authentication or environment variables over credentials in Pi configuration. Project
+configuration is read only for projects trusted by Pi, and credentials are not inherited when an
+endpoint changes. Non-loopback plain HTTP is rejected unless `allowInsecureHttp` is explicitly set.
 
 ## Status
 
-Run `/executor` to refresh native MCP discovery and inspect the connection. The report includes the
-remote MCP names, adapted Pi names, and MCP resources. Executor MCP App resources are reported but
-are not registered as model-callable tools. Unsupported MCP App content uses Executor's link
-fallback.
+The status line shows the exact sanitized MCP endpoint. Run `/executor` to refresh native MCP
+discovery and inspect the endpoint, selected profile/source, remote MCP names, adapted Pi names, and
+MCP resources. Executor MCP App resources are reported but are not registered as model-callable
+tools. Unsupported MCP App content uses Executor's link fallback.
 
 ## Development
 

@@ -179,10 +179,18 @@ function isProjectTrusted(ctx: ExtensionContext): boolean {
 }
 
 function publicEndpoint(endpoint: ExecutorEndpoint): string {
-  const url = new URL(endpoint.baseUrl);
+  const url = new URL(endpoint.mcpUrl);
   url.username = '';
   url.password = '';
+  for (const key of url.searchParams.keys()) {
+    if (/token|secret|password|api[_-]?key/i.test(key)) url.searchParams.set(key, '[REDACTED]');
+  }
   return url.toString().replace(/\/$/, '');
+}
+
+function endpointStatus(endpoint: ExecutorEndpoint): string {
+  const target = endpoint.profileName ?? endpoint.source;
+  return `executor[${target}]: ${publicEndpoint(endpoint)}`;
 }
 
 function executorCallOptions(
@@ -972,8 +980,8 @@ export function createRemoteExecutorExtension(
 
     pi.on('session_start', async (_event, ctx) => {
       try {
-        await refreshRemoteTools(ctx, ctx.signal);
-        ctx.ui.setStatus('executor', 'executor: connected');
+        const { endpoint } = await refreshRemoteTools(ctx, ctx.signal);
+        ctx.ui.setStatus('executor', endpointStatus(endpoint));
       } catch {
         ctx.ui.setStatus('executor', 'executor: error');
       }
@@ -994,11 +1002,11 @@ export function createRemoteExecutorExtension(
             'skills -> executor_list_guides, executor_get_guide',
             ...nativeCatalog.list().map((tool) => `${tool.remoteName} -> ${tool.name}`),
           ];
-          ctx.ui.setStatus('executor', 'executor: connected');
+          ctx.ui.setStatus('executor', endpointStatus(endpoint));
           ctx.ui.notify(
             [
               `Executor connected: ${publicEndpoint(endpoint)}`,
-              `Configuration: ${endpoint.source}${endpoint.sourcePath ? ` (${endpoint.sourcePath})` : ''}`,
+              `Configuration: ${endpoint.source}${endpoint.profileName ? ` (${endpoint.profileName})` : ''}${endpoint.sourcePath ? ` from ${endpoint.sourcePath}` : ''}`,
               `Limits: yield ${endpoint.yieldAfterMs}ms; hard timeout ${endpoint.requestTimeoutMs}ms; output ${endpoint.maxOutputBytes} bytes/${endpoint.maxOutputLines} lines`,
               `MCP tools: ${inspection.tools.map((tool) => tool.name).join(', ') || '(none)'}`,
               `Pi tools: ${proxyMappings.join('; ')}`,

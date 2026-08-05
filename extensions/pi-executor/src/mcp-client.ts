@@ -13,7 +13,7 @@ import type {
 } from './types';
 
 const CLIENT_NAME = 'pi-executor-remote';
-const CLIENT_VERSION = '0.4.0';
+const CLIENT_VERSION = '0.5.0';
 const DEFAULT_TEXT_RESULT = '(no result)';
 
 export interface ExecutorMcpProgress {
@@ -33,8 +33,8 @@ function buildCapabilities(): ClientCapabilities {
   return { elicitation: { form: {}, url: {} } };
 }
 
-function mcpUrl(baseUrl: string): URL {
-  const url = new URL('mcp', `${baseUrl}/`);
+function requestMcpUrl(mcpEndpoint: string): URL {
+  const url = new URL(mcpEndpoint);
   url.searchParams.set('elicitation_mode', 'native');
   return url;
 }
@@ -81,7 +81,7 @@ async function withExecutorClient<T>(
     { capabilities: buildCapabilities() },
   );
   const authorization = endpointAuthorizationHeader(endpoint.auth);
-  const transport = new StreamableHTTPClientTransport(mcpUrl(endpoint.baseUrl), {
+  const transport = new StreamableHTTPClientTransport(requestMcpUrl(endpoint.mcpUrl), {
     requestInit: authorization ? { headers: { authorization } } : undefined,
   });
 

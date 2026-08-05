@@ -30,7 +30,7 @@ describe('Executor endpoint resolution', () => {
     });
 
     expect(endpoint).toEqual({
-      baseUrl: 'http://localhost:4789',
+      mcpUrl: 'http://localhost:4789/mcp',
       auth: { kind: 'bearer', token: 'daemon-secret' },
       requestTimeoutMs: 300_000,
       yieldAfterMs: 20_000,
@@ -53,7 +53,7 @@ describe('Executor endpoint resolution', () => {
       homeDir: '/home/test',
       readTextFile: reader({
         '/home/test/.pi/agent/pi-executor.json': {
-          url: 'https://executor.example.com',
+          mcpUrl: 'https://executor.example.com/mcp',
           token: 'user-secret',
           requestTimeoutMs: 5000,
         },
@@ -64,15 +64,15 @@ describe('Executor endpoint resolution', () => {
     });
 
     expect(endpoint).toMatchObject({
-      baseUrl: 'https://executor.example.com',
+      mcpUrl: 'https://executor.example.com/mcp',
       auth: { kind: 'bearer', token: 'environment-secret' },
       requestTimeoutMs: 9000,
       yieldAfterMs: 3000,
       maxOutputBytes: 2048,
       maxOutputLines: 50,
-      source: 'environment',
+      source: 'project-config',
     });
-    expect(endpoint.sourcePath).toBeUndefined();
+    expect(endpoint.sourcePath).toBe('/repo/.pi/pi-executor.json');
   });
 
   test('does not send inherited credentials to a project-overridden endpoint', async () => {
@@ -81,16 +81,16 @@ describe('Executor endpoint resolution', () => {
       homeDir: '/home/test',
       readTextFile: reader({
         '/home/test/.pi/agent/pi-executor.json': {
-          url: 'https://trusted.example.com',
+          mcpUrl: 'https://trusted.example.com/mcp',
           token: 'user-secret',
         },
         '/repo/.pi/pi-executor.json': {
-          url: 'https://project.example.com',
+          mcpUrl: 'https://project.example.com/mcp',
         },
       }),
     });
 
-    expect(endpoint.baseUrl).toBe('https://project.example.com');
+    expect(endpoint.mcpUrl).toBe('https://project.example.com/mcp');
     expect(endpoint.auth).toBeUndefined();
   });
 
@@ -101,18 +101,18 @@ describe('Executor endpoint resolution', () => {
       allowProjectConfig: false,
       readTextFile: reader({
         '/home/test/.pi/agent/pi-executor.json': {
-          url: 'https://trusted.example.com',
+          mcpUrl: 'https://trusted.example.com/mcp',
           token: 'user-secret',
         },
         '/repo/.pi/pi-executor.json': {
-          url: 'https://project.example.com',
+          mcpUrl: 'https://project.example.com/mcp',
           token: 'project-secret',
         },
       }),
     });
 
     expect(endpoint).toMatchObject({
-      baseUrl: 'https://trusted.example.com',
+      mcpUrl: 'https://trusted.example.com/mcp',
       auth: { kind: 'bearer', token: 'user-secret' },
       source: 'user-config',
     });
@@ -120,17 +120,17 @@ describe('Executor endpoint resolution', () => {
 
   test('does not carry file credentials to an environment-overridden URL', async () => {
     const endpoint = await resolveExecutorEndpoint('/repo', {
-      env: { PI_EXECUTOR_URL: 'https://environment.example.com' },
+      env: { PI_EXECUTOR_MCP_URL: 'https://environment.example.com/mcp' },
       homeDir: '/home/test',
       readTextFile: reader({
         '/home/test/.pi/agent/pi-executor.json': {
-          url: 'https://trusted.example.com',
+          mcpUrl: 'https://trusted.example.com/mcp',
           token: 'user-secret',
         },
       }),
     });
 
-    expect(endpoint.baseUrl).toBe('https://environment.example.com');
+    expect(endpoint.mcpUrl).toBe('https://environment.example.com/mcp');
     expect(endpoint.auth).toBeUndefined();
   });
 
@@ -143,7 +143,7 @@ describe('Executor endpoint resolution', () => {
       homeDir: '/home/test',
       readTextFile: reader({
         '/home/test/.pi/agent/pi-executor.json': {
-          url: 'https://executor.example.com',
+          mcpUrl: 'https://executor.example.com/mcp',
           token: 'bearer-secret',
         },
       }),
@@ -159,7 +159,7 @@ describe('Executor endpoint resolution', () => {
   test('supports basic authentication', async () => {
     const endpoint = await resolveExecutorEndpoint('/repo', {
       env: {
-        PI_EXECUTOR_URL: 'https://executor.example.com',
+        PI_EXECUTOR_MCP_URL: 'https://executor.example.com/mcp',
         PI_EXECUTOR_USERNAME: 'alice',
         PI_EXECUTOR_PASSWORD: 'secret',
       },
@@ -175,7 +175,7 @@ describe('Executor endpoint resolution', () => {
     await expect(
       resolveExecutorEndpoint('/repo', {
         env: {
-          PI_EXECUTOR_URL: 'http://executor.internal:4789',
+          PI_EXECUTOR_MCP_URL: 'http://executor.internal:4789/mcp',
           PI_EXECUTOR_TOKEN: 'secret',
         },
         homeDir: '/home/test',
@@ -184,13 +184,176 @@ describe('Executor endpoint resolution', () => {
     ).rejects.toThrow('Refusing to send Executor credentials over non-loopback HTTP');
   });
 
-  test('reports a useful error when neither config nor daemon exists', async () => {
+  test('uses the Executor default server profile without duplicate endpoint configuration', async () => {
+    const endpoint = await resolveExecutorEndpoint('/repo', {
+      env: {},
+      homeDir: '/home/test',
+      now: () => 1_000_000,
+      readTextFile: reader({
+        '/home/test/.pi/agent/pi-executor.json': { allowInsecureHttp: true },
+        '/home/test/.executor/server-connections.json': {
+          defaultProfile: 'tcbs-nonprod',
+          profiles: [
+            {
+              name: 'tcbs-nonprod',
+              connection: {
+                kind: 'http',
+                origin: 'http://executor.internal:4788',
+                auth: { kind: 'oauth', accessToken: 'oauth-secret', expiresAt: 2000 },
+              },
+            },
+          ],
+        },
+      }),
+    });
+
+    expect(endpoint).toMatchObject({
+      mcpUrl: 'http://executor.internal:4788/mcp',
+      auth: { kind: 'bearer', token: 'oauth-secret' },
+      authExpiresAt: 2_000_000,
+      source: 'executor-profile',
+      profileName: 'tcbs-nonprod',
+      sourcePath: '/home/test/.executor/server-connections.json',
+    });
+  });
+
+  test('lets the source selector prefer config over an environment endpoint', async () => {
+    const endpoint = await resolveExecutorEndpoint('/repo', {
+      env: {
+        PI_EXECUTOR_ENDPOINT_SOURCE: 'config',
+        PI_EXECUTOR_MCP_URL: 'https://environment.example.com/mcp',
+      },
+      homeDir: '/home/test',
+      readTextFile: reader({
+        '/home/test/.pi/agent/pi-executor.json': {
+          mcpUrl: 'https://configured.example.com/custom-mcp',
+        },
+      }),
+    });
+
+    expect(endpoint).toMatchObject({
+      mcpUrl: 'https://configured.example.com/custom-mcp',
+      source: 'user-config',
+    });
+  });
+
+  test('lets the source selector force the local daemon', async () => {
+    const endpoint = await resolveExecutorEndpoint('/repo', {
+      env: {
+        PI_EXECUTOR_ENDPOINT_SOURCE: 'local',
+        PI_EXECUTOR_MCP_URL: 'https://ignored.example.com/mcp',
+      },
+      homeDir: '/home/test',
+      readTextFile: reader({
+        '/home/test/.executor/server-control/server.json': {
+          connection: {
+            kind: 'http',
+            origin: 'http://localhost:4789',
+            auth: { kind: 'bearer', token: 'local-secret' },
+          },
+        },
+      }),
+    });
+
+    expect(endpoint).toMatchObject({
+      mcpUrl: 'http://localhost:4789/mcp',
+      auth: { kind: 'bearer', token: 'local-secret' },
+      source: 'daemon-manifest',
+    });
+  });
+
+  test('lets an environment token override expired profile authentication', async () => {
+    const endpoint = await resolveExecutorEndpoint('/repo', {
+      env: {
+        PI_EXECUTOR_ENDPOINT_SOURCE: 'profile',
+        PI_EXECUTOR_TOKEN: 'replacement-token',
+      },
+      homeDir: '/home/test',
+      now: () => 2_000_001,
+      readTextFile: reader({
+        '/home/test/.executor/server-connections.json': {
+          defaultProfile: 'remote',
+          profiles: [
+            {
+              name: 'remote',
+              connection: {
+                kind: 'http',
+                origin: 'https://executor.example.com',
+                auth: { kind: 'oauth', accessToken: 'expired', expiresAt: 2000 },
+              },
+            },
+          ],
+        },
+      }),
+    });
+
+    expect(endpoint.auth).toEqual({ kind: 'bearer', token: 'replacement-token' });
+    expect(endpoint.authExpiresAt).toBeUndefined();
+  });
+
+  test('does not copy a daemon token to a different local profile port', async () => {
+    const endpoint = await resolveExecutorEndpoint('/repo', {
+      env: { PI_EXECUTOR_ENDPOINT_SOURCE: 'profile' },
+      homeDir: '/home/test',
+      readTextFile: reader({
+        '/home/test/.executor/server-connections.json': {
+          defaultProfile: 'other-local',
+          profiles: [
+            {
+              name: 'other-local',
+              connection: { kind: 'http', origin: 'http://127.0.0.1:4790' },
+            },
+          ],
+        },
+        '/home/test/.executor/server-control/server.json': {
+          connection: {
+            kind: 'http',
+            origin: 'http://localhost:4789',
+            auth: { kind: 'bearer', token: 'wrong-server-token' },
+          },
+        },
+      }),
+    });
+
+    expect(endpoint.mcpUrl).toBe('http://127.0.0.1:4790/mcp');
+    expect(endpoint.auth).toBeUndefined();
+  });
+
+  test('reports an expired Executor profile login', async () => {
     await expect(
       resolveExecutorEndpoint('/repo', {
-        env: {},
+        env: { PI_EXECUTOR_ENDPOINT_SOURCE: 'profile' },
         homeDir: '/home/test',
-        readTextFile: reader({}),
+        now: () => 2_000_001,
+        readTextFile: reader({
+          '/home/test/.executor/server-connections.json': {
+            defaultProfile: 'remote',
+            profiles: [
+              {
+                name: 'remote',
+                connection: {
+                  kind: 'http',
+                  origin: 'https://executor.example.com',
+                  auth: { kind: 'oauth', accessToken: 'expired', expiresAt: 2000 },
+                },
+              },
+            ],
+          },
+        }),
       }),
-    ).rejects.toThrow('/home/test/.executor/server-control/server.json');
+    ).rejects.toThrow('executor login --server remote');
+  });
+
+  test('defaults to the conventional localhost MCP endpoint', async () => {
+    const endpoint = await resolveExecutorEndpoint('/repo', {
+      env: {},
+      homeDir: '/home/test',
+      readTextFile: reader({}),
+    });
+
+    expect(endpoint).toMatchObject({
+      mcpUrl: 'http://127.0.0.1:4789/mcp',
+      source: 'localhost-default',
+    });
   });
 });

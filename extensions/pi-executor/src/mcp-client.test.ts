@@ -149,7 +149,7 @@ async function startTestServer(expectedToken: string): Promise<TestServer> {
 
 function endpoint(baseUrl: string): ExecutorEndpoint {
   return {
-    baseUrl,
+    mcpUrl: `${baseUrl}/mcp`,
     auth: { kind: 'bearer', token: 'test-token' },
     requestTimeoutMs: 5000,
     yieldAfterMs: 1000,

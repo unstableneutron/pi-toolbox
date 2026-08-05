@@ -9,7 +9,7 @@ import { ExecutorOutputStore } from './src/output-store';
 import type { ExecutorEndpoint, ExecutorMcpInspection, JsonValue } from './src/types';
 
 const endpoint: ExecutorEndpoint = {
-  baseUrl: 'https://executor.example.com',
+  mcpUrl: 'https://executor.example.com/mcp',
   auth: { kind: 'bearer', token: 'must-not-leak' },
   requestTimeoutMs: 5000,
   yieldAfterMs: 1000,
@@ -18,7 +18,7 @@ const endpoint: ExecutorEndpoint = {
   source: 'environment',
 };
 
-function context(hasUI = false) {
+function context(hasUI = false, setStatus = vi.fn()) {
   return {
     cwd: '/repo',
     hasUI,
@@ -26,7 +26,7 @@ function context(hasUI = false) {
       notify: vi.fn(),
       select: vi.fn(),
       editor: vi.fn(),
-      setStatus: vi.fn(),
+      setStatus,
     },
     isProjectTrusted: vi.fn(() => true),
   } as never;
@@ -434,9 +434,14 @@ describe('native Executor Pi tools', () => {
       'executor_cancel_job',
       'executor_read_output',
     ]);
-    await sessionStart!({}, context(true));
+    const setStatus = vi.fn();
+    await sessionStart!({}, context(true, setStatus));
     expect([...registered.keys()]).toContain('executor_list_artifacts');
     expect(active).not.toContain('executor_list_artifacts');
+    expect(setStatus).toHaveBeenCalledWith(
+      'executor',
+      'executor[environment]: https://executor.example.com/mcp',
+    );
   });
 
   test('throws remote failures so Pi marks the result as an error', async () => {

@@ -11,10 +11,14 @@ export type ExecutorEndpointSource =
   | 'explicit-config'
   | 'project-config'
   | 'user-config'
-  | 'daemon-manifest';
+  | 'executor-profile'
+  | 'daemon-manifest'
+  | 'localhost-default';
+
+export type ExecutorEndpointPreference = 'auto' | 'environment' | 'config' | 'profile' | 'local';
 
 export interface ExecutorEndpoint {
-  baseUrl: string;
+  mcpUrl: string;
   auth?: ExecutorAuth;
   requestTimeoutMs: number;
   yieldAfterMs: number;
@@ -22,6 +26,8 @@ export interface ExecutorEndpoint {
   maxOutputLines: number;
   source: ExecutorEndpointSource;
   sourcePath?: string;
+  profileName?: string;
+  authExpiresAt?: number;
 }
 
 export type ElicitationAction = 'accept' | 'decline' | 'cancel';
