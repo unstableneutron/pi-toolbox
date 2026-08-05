@@ -382,14 +382,17 @@ export default function herdrAgentState(pi: ExtensionAPI): void {
     }
 
     rootSession = true;
-    updateSessionRef(ctx as SessionContextLike | undefined);
-    await reportSession((event as SessionStartEventLike | undefined)?.reason);
 
-    // A reload can replace this extension mid-run without another agent_start.
-    agentActive = (ctx as SessionContextLike | undefined)?.isIdle?.() === false;
+    // Read session-bound context before Herdr IPC yields. A replacement can make
+    // ctx stale while the report is pending.
+    const sessionCtx = ctx as SessionContextLike | undefined;
+    updateSessionRef(sessionCtx);
+    agentActive = sessionCtx?.isIdle?.() === false;
     if (agentActive) {
       startActiveRun();
     }
+
+    await reportSession((event as SessionStartEventLike | undefined)?.reason);
     publishState(true);
   });
 

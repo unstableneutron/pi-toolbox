@@ -270,10 +270,24 @@ describe('herdr agent state extension', () => {
     expect(acceptedStates()).toContain('working');
   });
 
-  test('restores working state when a reload begins during an active run', async () => {
+  test('restores working state without reusing a stale reload context', async () => {
     const pi = await loadHarness();
+    let stale = false;
+    const ctx = new Proxy(fakeContext({ isIdle: () => false }), {
+      get(target, property, receiver) {
+        if (stale) {
+          throw new Error('This extension ctx is stale after session replacement or reload');
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
 
-    await pi.emit('session_start', { reason: 'reload' }, fakeContext({ isIdle: () => false }));
+    const sessionStart = pi.emit('session_start', { reason: 'reload' }, ctx);
+    queueMicrotask(() => {
+      stale = true;
+    });
+
+    await expect(sessionStart).resolves.toBeUndefined();
     await flushSocketWork();
 
     expect(lastReport()).toMatchObject({ state: 'working', custom_status: '0s' });
