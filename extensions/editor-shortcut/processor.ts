@@ -18,7 +18,7 @@ async function applyDirective(
   }
 
   if (directive.command === 'fast') {
-    return applyFastDirective(directive.value, ctx, fastMode ?? { enabled: false });
+    return fastMode ? applyFastDirective(directive.value, ctx, fastMode) : true;
   }
 
   return applyModelDirective(directive.value, pi, ctx);

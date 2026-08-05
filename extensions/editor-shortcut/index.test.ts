@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import type { AutocompleteProvider } from '@earendil-works/pi-tui';
 
 import editorShortcut, {
@@ -23,6 +23,11 @@ const models = [
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  vi.stubEnv('PI_SUBAGENT_CHILD', '');
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
 });
 
 function createHarness() {
@@ -650,28 +655,134 @@ describe('editorShortcut extension', () => {
     );
   });
 
-  test('/fast is disabled when switching to an unsupported model', async () => {
+  test('/fast pauses on an unsupported model and restores for the previous model', async () => {
     const harness = createHarness();
     editorShortcut(harness.pi as any);
 
     const fastCommand = harness.registerCommand.mock.calls[0]?.[1];
-    await fastCommand.handler('', { ...harness.ctx, model: models[4] });
+    await fastCommand.handler('on', { ...harness.ctx, model: models[4] });
 
     await harness.handlers.get('model_select')?.(
       { type: 'model_select', model: models[1], previousModel: models[4], source: 'set' },
       harness.ctx,
     );
 
-    const result = await harness.handlers.get('before_provider_request')?.(
+    const paused = await harness.handlers.get('before_provider_request')?.(
       { type: 'before_provider_request', payload: { model: 'gpt-5.5' } },
       { ...harness.ctx, model: models[4] },
     );
 
-    expect(result).toBeUndefined();
+    await harness.handlers.get('model_select')?.(
+      { type: 'model_select', model: models[4], previousModel: models[1], source: 'set' },
+      harness.ctx,
+    );
+
+    const restored = await harness.handlers.get('before_provider_request')?.(
+      { type: 'before_provider_request', payload: { model: 'gpt-5.5' } },
+      { ...harness.ctx, model: models[4] },
+    );
+
+    expect(paused).toBeUndefined();
+    expect(restored).toEqual({ model: 'gpt-5.5', service_tier: 'priority' });
     expect(harness.notify).toHaveBeenCalledWith(
       'Fast mode: off (current model does not support priority)',
       'warning',
     );
+    expect(harness.notify).toHaveBeenCalledWith(
+      'Fast mode: on (restored for current model)',
+      'info',
+    );
+  });
+
+  test('/fast isolates matching model ids from different providers', async () => {
+    const harness = createHarness();
+    editorShortcut(harness.pi as any);
+    const codexModel = models[4];
+    const apiModel = models[0];
+
+    const fastCommand = harness.registerCommand.mock.calls[0]?.[1];
+    await fastCommand.handler('on', { ...harness.ctx, model: codexModel });
+    await harness.handlers.get('model_select')?.(
+      { type: 'model_select', model: apiModel, previousModel: codexModel, source: 'set' },
+      { ...harness.ctx, model: apiModel },
+    );
+
+    const apiResult = await harness.handlers.get('before_provider_request')?.(
+      { type: 'before_provider_request', payload: { model: apiModel.id } },
+      { ...harness.ctx, model: apiModel },
+    );
+
+    await harness.handlers.get('model_select')?.(
+      { type: 'model_select', model: codexModel, previousModel: apiModel, source: 'set' },
+      { ...harness.ctx, model: codexModel },
+    );
+
+    const codexResult = await harness.handlers.get('before_provider_request')?.(
+      { type: 'before_provider_request', payload: { model: codexModel.id } },
+      { ...harness.ctx, model: codexModel },
+    );
+
+    expect(apiResult).toBeUndefined();
+    expect(codexResult).toEqual({ model: codexModel.id, service_tier: 'priority' });
+  });
+
+  test('/fast does not affect non-TUI sessions', async () => {
+    const harness = createHarness();
+    editorShortcut(harness.pi as any);
+    const ctx = { ...harness.ctx, mode: 'rpc', model: models[4] };
+
+    const fastCommand = harness.registerCommand.mock.calls[0]?.[1];
+    await fastCommand.handler('on', ctx);
+
+    const request = await harness.handlers.get('before_provider_request')?.(
+      { type: 'before_provider_request', payload: { model: 'gpt-5.5' } },
+      ctx,
+    );
+    const input = await harness.handlers.get('input')?.(
+      { text: 'Please $fast:on do the work', source: 'rpc' },
+      ctx,
+    );
+
+    expect(request).toBeUndefined();
+    expect(input).toEqual({ action: 'transform', text: 'Please do the work' });
+    expect(harness.notify).not.toHaveBeenCalled();
+  });
+
+  test('/fast does not affect pi-subagent sessions', async () => {
+    vi.stubEnv('PI_SUBAGENT_CHILD', '1');
+    const harness = createHarness();
+    editorShortcut(harness.pi as any);
+    const ctx = { ...harness.ctx, model: models[4] };
+
+    const fastCommand = harness.registerCommand.mock.calls[0]?.[1];
+    await fastCommand.handler('on', ctx);
+
+    const request = await harness.handlers.get('before_provider_request')?.(
+      { type: 'before_provider_request', payload: { model: 'gpt-5.5' } },
+      ctx,
+    );
+    const input = await harness.handlers.get('input')?.(
+      { text: 'Please $fast:on do the work', source: 'interactive' },
+      ctx,
+    );
+
+    expect(request).toBeUndefined();
+    expect(input).toEqual({ action: 'transform', text: 'Please do the work' });
+    expect(harness.notify).not.toHaveBeenCalled();
+  });
+
+  test('ineligible fast directives do not block other editor shortcuts', async () => {
+    const harness = createHarness();
+    editorShortcut(harness.pi as any);
+    const ctx = { ...harness.ctx, mode: 'rpc', model: models[4] };
+
+    const input = await harness.handlers.get('input')?.(
+      { text: '$thinking:high $fast:on Do the work', source: 'rpc' },
+      ctx,
+    );
+
+    expect(input).toEqual({ action: 'transform', text: 'Do the work' });
+    expect(harness.setThinkingLevel).toHaveBeenCalledWith('high');
   });
 
   test('input handler applies inline fast directives', async () => {

@@ -4,6 +4,7 @@ import type {
   ExtensionContext,
 } from '@earendil-works/pi-coding-agent';
 import type { Api, Model } from '@earendil-works/pi-ai/compat';
+import { hasTui } from '../../shared/ui-mode';
 import { modelRef, normalizeModelRef } from './model';
 
 const FAST_MODE_SERVICE_TIER = 'priority';
@@ -19,20 +20,39 @@ const PRIORITY_CAPABLE_MODEL_REFS = [
 
 export type FastModeState = {
   enabled: boolean;
+  enabledModelRefs: Set<string>;
 };
 
 export type FastModeAction = 'toggle' | 'on' | 'off';
 
+export type FastModeTransition = 'on' | 'off';
+
 type RequestPayload = Record<string, unknown>;
 
+type FastModeContext = Pick<ExtensionContext, 'hasUI' | 'mode'>;
+
 export function createFastModeState(): FastModeState {
-  return { enabled: false };
+  return { enabled: false, enabledModelRefs: new Set() };
+}
+
+export function isFastModeEligibleSession(
+  ctx: FastModeContext | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return hasTui(ctx) && env.PI_SUBAGENT_CHILD !== '1';
+}
+
+function getPriorityModelRef(model: Model<Api> | undefined): string | undefined {
+  if (!model) return undefined;
+  const ref = normalizeModelRef(modelRef(model));
+  const supported = PRIORITY_CAPABLE_MODEL_REFS.some(
+    (candidate) => normalizeModelRef(candidate) === ref,
+  );
+  return supported ? ref : undefined;
 }
 
 export function isPriorityCapableModel(model: Model<Api> | undefined): boolean {
-  if (!model) return false;
-  const ref = normalizeModelRef(modelRef(model));
-  return PRIORITY_CAPABLE_MODEL_REFS.some((candidate) => normalizeModelRef(candidate) === ref);
+  return getPriorityModelRef(model) !== undefined;
 }
 
 export function getNextFastModeAction(enabled: boolean): 'on' | 'off' {
@@ -61,6 +81,7 @@ export function registerFastCommand(pi: ExtensionAPI, state: FastModeState): voi
       return filtered.length > 0 ? filtered : null;
     },
     async handler(args, ctx) {
+      if (!isFastModeEligibleSession(ctx)) return;
       applyFastCommand(args, ctx, state);
     },
   });
@@ -82,6 +103,8 @@ export function applyFastDirective(
   ctx: ExtensionContext,
   state: FastModeState,
 ): boolean {
+  if (!isFastModeEligibleSession(ctx)) return false;
+
   const action = parseFastModeAction(value === 'toggle' ? undefined : value);
 
   if (!action) {
@@ -97,38 +120,37 @@ function applyFastAction(
   ctx: ExtensionContext,
   state: FastModeState,
 ): boolean {
-  const supported = isPriorityCapableModel(ctx.model as Model<Api> | undefined);
+  const ref = getPriorityModelRef(ctx.model as Model<Api> | undefined);
 
-  if (!supported) {
+  if (!ref) {
     state.enabled = false;
     notifyUnsupportedModel(ctx);
     return false;
   }
 
-  if (action === 'on') {
-    state.enabled = true;
-    notifyFastModeStatus(ctx, state);
-    return true;
+  const enabled = action === 'toggle' ? !state.enabled : action === 'on';
+  state.enabled = enabled;
+
+  if (enabled) {
+    state.enabledModelRefs.add(ref);
+  } else {
+    state.enabledModelRefs.delete(ref);
   }
 
-  if (action === 'off') {
-    state.enabled = false;
-    notifyFastModeStatus(ctx, state);
-    return true;
-  }
-
-  state.enabled = !state.enabled;
   notifyFastModeStatus(ctx, state);
   return true;
 }
 
-export function disableFastModeForUnsupportedModel(
+export function syncFastModeForModel(
   model: Model<Api> | undefined,
   state: FastModeState,
-): boolean {
-  if (!state.enabled || isPriorityCapableModel(model)) return false;
-  state.enabled = false;
-  return true;
+): FastModeTransition | undefined {
+  const ref = getPriorityModelRef(model);
+  const enabled = ref !== undefined && state.enabledModelRefs.has(ref);
+  if (enabled === state.enabled) return undefined;
+
+  state.enabled = enabled;
+  return enabled ? 'on' : 'off';
 }
 
 export function setFastModeServiceTier(
@@ -136,10 +158,10 @@ export function setFastModeServiceTier(
   ctx: ExtensionContext,
   state: FastModeState,
 ): RequestPayload | undefined {
-  if (!state.enabled || !isPriorityCapableModel(ctx.model as Model<Api> | undefined)) {
-    return undefined;
-  }
-  if (!isRequestPayload(payload)) return undefined;
+  if (!isFastModeEligibleSession(ctx) || !state.enabled) return undefined;
+
+  const ref = getPriorityModelRef(ctx.model as Model<Api> | undefined);
+  if (!ref || !state.enabledModelRefs.has(ref) || !isRequestPayload(payload)) return undefined;
 
   return {
     ...payload,

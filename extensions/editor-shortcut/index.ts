@@ -5,10 +5,11 @@ import { createEditorShortcutAutocompleteProvider } from './autocomplete';
 import { createWrappedEditorFactory } from './editor';
 import {
   createFastModeState,
-  disableFastModeForUnsupportedModel,
+  isFastModeEligibleSession,
   isPriorityCapableModel,
   registerFastCommand,
   setFastModeServiceTier,
+  syncFastModeForModel,
 } from './commands/fast';
 import { getModelCandidates } from './commands/model';
 import {
@@ -38,7 +39,12 @@ export default function editorShortcut(pi: ExtensionAPI) {
 
   pi.on('model_select', (event, ctx) => {
     selectedModel = event.model;
-    if (disableFastModeForUnsupportedModel(event.model, fastMode)) {
+    if (!isFastModeEligibleSession(ctx)) return;
+
+    const transition = syncFastModeForModel(event.model, fastMode);
+    if (transition === 'on') {
+      ctx.ui.notify('Fast mode: on (restored for current model)', 'info');
+    } else if (transition === 'off' && !isPriorityCapableModel(event.model)) {
       ctx.ui.notify('Fast mode: off (current model does not support priority)', 'warning');
     }
   });
@@ -59,7 +65,7 @@ export default function editorShortcut(pi: ExtensionAPI) {
         current,
         () => getModelCandidates(ctx),
         () => fastMode.enabled,
-        () => isPriorityCapableModel(selectedModel as any),
+        () => isFastModeEligibleSession(ctx) && isPriorityCapableModel(selectedModel as any),
         { ctx, state: pasteState },
         () => (selectedModel ? getSupportedThinkingLevels(selectedModel) : ['off']),
       ),
@@ -67,7 +73,13 @@ export default function editorShortcut(pi: ExtensionAPI) {
 
     const previousFactory = ctx.ui.getEditorComponent();
     ctx.ui.setEditorComponent(
-      createWrappedEditorFactory(previousFactory, pi, ctx, fastMode, pasteState),
+      createWrappedEditorFactory(
+        previousFactory,
+        pi,
+        ctx,
+        isFastModeEligibleSession(ctx) ? fastMode : undefined,
+        pasteState,
+      ),
     );
   });
 
@@ -76,7 +88,14 @@ export default function editorShortcut(pi: ExtensionAPI) {
       return { action: 'continue' as const };
     }
 
-    const result = await processEditorShortcutSubmission(event.text, pi, ctx, fastMode, pasteState);
+    const fastModeEligible = isFastModeEligibleSession(ctx);
+    const result = await processEditorShortcutSubmission(
+      event.text,
+      pi,
+      ctx,
+      fastModeEligible ? fastMode : undefined,
+      pasteState,
+    );
 
     if (result.action === 'continue') return { action: 'continue' as const };
     if (result.action === 'submit') return { action: 'transform' as const, text: result.text };
