@@ -44,7 +44,7 @@ describe('native Executor Pi tools', () => {
   test('uses formal names for the core tools', () => {
     const tools = createRemoteExecutorTools();
     expect(tools.map((tool) => tool.name)).toEqual([
-      'executor_find_tools',
+      'executor_search_tools',
       'executor_describe_tool',
       'executor_execute',
       'executor_list_guides',
@@ -55,38 +55,32 @@ describe('native Executor Pi tools', () => {
     ]);
   });
 
-  test('keeps optional finder parameters out of OpenAI strict mode', () => {
-    const finder = createRemoteExecutorTools()[0]!;
-    const parameters = finder.parameters as {
+  test('keeps optional search parameters out of OpenAI strict mode', () => {
+    const search = createRemoteExecutorTools()[0]!;
+    const parameters = search.parameters as {
       required?: string[];
-      properties?: { limit?: { maximum?: number } };
+      properties?: { limit?: { maximum?: number }; kinds?: { maxItems?: number } };
     };
     expect(parameters.required).toEqual(['query']);
     expect(parameters.properties?.limit?.maximum).toBe(50);
-    expect(finder.constrainedSampling).toBeUndefined();
+    expect(parameters.properties?.kinds?.maxItems).toBe(4);
+    expect(search.constrainedSampling).toBeUndefined();
   });
 
-  test('finds concise integration matches without describing every result', async () => {
+  test('returns compact integration matches without describing every result', async () => {
     const executeCode = vi.fn(async (_endpoint: ExecutorEndpoint, _code: string) =>
       completed({
-        matches: [
-          {
-            kind: 'integration',
-            path: 'github.user.main.issues.list',
-            description: 'List issues.',
-          },
-        ],
+        items: [{ path: 'github.user.main.issues.list', summary: 'List issues.' }],
         total: 1,
-        hasMore: false,
       }),
     );
-    const finder = createRemoteExecutorTools({
+    const search = createRemoteExecutorTools({
       dependencies: { resolveEndpoint: async () => endpoint, executeCode },
     })[0]!;
 
-    const result = await finder.execute(
-      'find-1',
-      { query: 'github issues' },
+    const result = await search.execute(
+      'search-1',
+      { query: 'github issues', kinds: ['integration'] },
       undefined,
       undefined,
       context(),
@@ -96,18 +90,154 @@ describe('native Executor Pi tools', () => {
     expect(code).toContain('tools.search');
     expect(code).toContain('"limit":20');
     expect(code).not.toContain('tools.describe.tool');
-    expect(result.content[0]).toMatchObject({ type: 'text' });
+    expect(result.content[0]).toEqual({
+      type: 'text',
+      text: '{"items":[{"path":"github.user.main.issues.list","kind":"integration","summary":"List issues."}],"total":1}',
+    });
     expect(JSON.stringify(result.content)).not.toContain('score');
     expect(JSON.stringify(result.details)).not.toContain('must-not-leak');
   });
 
-  test('activates matching deferred native tools', async () => {
+  test('continues integration pagination with the same namespace', async () => {
+    const executeCode = vi.fn(async (_endpoint: ExecutorEndpoint, code: string) =>
+      completed({
+        items: [
+          {
+            path: code.includes('"offset":1') ? 'github.second' : 'github.first',
+            summary: 'GitHub tool.',
+          },
+        ],
+        total: 2,
+      }),
+    );
+    const search = createRemoteExecutorTools({
+      dependencies: { resolveEndpoint: async () => endpoint, executeCode },
+    })[0]!;
+
+    const first = await search.execute(
+      'search-page-1',
+      { query: 'github', kinds: ['integration'], namespace: 'github', limit: 1 },
+      undefined,
+      undefined,
+      context(),
+    );
+    const firstPage = JSON.parse((first.content[0] as { text: string }).text) as {
+      nextCursor: string;
+    };
+    await search.execute(
+      'search-page-2',
+      {
+        query: 'github',
+        kinds: ['integration'],
+        namespace: 'github',
+        limit: 1,
+        cursor: firstPage.nextCursor,
+      },
+      undefined,
+      undefined,
+      context(),
+    );
+
+    expect(firstPage.nextCursor).toBe('0.1.0');
+    expect(executeCode.mock.calls[1]?.[1]).toContain('"namespace":"github"');
+    expect(executeCode.mock.calls[1]?.[1]).toContain('"offset":1');
+  });
+
+  test('rejects a non-advancing remote pagination offset', async () => {
+    const search = createRemoteExecutorTools({
+      dependencies: {
+        resolveEndpoint: async () => endpoint,
+        executeCode: async () => completed({ items: [], total: 2, nextOffset: 0 }),
+      },
+    })[0]!;
+
+    await expect(
+      search.execute(
+        'search-stalled',
+        { query: 'github', kinds: ['integration'], limit: 1 },
+        undefined,
+        undefined,
+        context(),
+      ),
+    ).rejects.toThrow('Invalid Executor search response: nextOffset did not advance');
+  });
+
+  test('paginates mixed local and remote results without duplicates or gaps', async () => {
+    const remotePaths = ['remote.tool.0', 'remote.tool.1', 'remote.tool.2'];
+    const executeCode = vi.fn(async (_endpoint: ExecutorEndpoint, code: string) => {
+      const offset = Number(code.match(/"offset":(\d+)/)?.[1] ?? 0);
+      const limit = Number(code.match(/"limit":(\d+)/)?.[1] ?? 1);
+      const items = remotePaths.slice(offset, offset + limit).map((path) => ({
+        path,
+        summary: 'Remote Executor tool.',
+      }));
+      const nextOffset = offset + items.length;
+      return completed({
+        items,
+        total: remotePaths.length,
+        ...(nextOffset < remotePaths.length ? { nextOffset } : {}),
+      });
+    });
+    const search = createRemoteExecutorTools({
+      dependencies: { resolveEndpoint: async () => endpoint, executeCode },
+    })[0]!;
+    const paths: string[] = [];
+    let cursor: string | undefined;
+
+    for (let page = 0; page < 20; page += 1) {
+      const result = await search.execute(
+        `mixed-${page}`,
+        { query: 'executor tool', limit: 2, ...(cursor ? { cursor } : {}) },
+        undefined,
+        undefined,
+        context(),
+      );
+      const output = JSON.parse((result.content[0] as { text: string }).text) as {
+        items: Array<{ path: string }>;
+        nextCursor?: string;
+      };
+      paths.push(...output.items.map((item) => item.path));
+      cursor = output.nextCursor;
+      if (!cursor) break;
+    }
+
+    expect(new Set(paths).size).toBe(paths.length);
+    expect(paths).toEqual(expect.arrayContaining(remotePaths));
+    expect(paths).toContain('executor_search_tools');
+    expect(executeCode).toHaveBeenCalledTimes(remotePaths.length);
+  });
+
+  test('searches bridge and sandbox primitives without contacting Executor', async () => {
+    const executeCode = vi.fn();
+    const search = createRemoteExecutorTools({ dependencies: { executeCode } })[0]!;
+
+    const result = await search.execute(
+      'search-local',
+      { query: 'describe tool shape', kinds: ['bridge', 'sandbox'] },
+      undefined,
+      undefined,
+      context(),
+    );
+    const output = JSON.parse((result.content[0] as { text: string }).text) as {
+      items: Array<{ path: string; kind: string }>;
+    };
+
+    expect(output.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ path: 'executor_describe_tool', kind: 'bridge' }),
+        expect.objectContaining({ path: 'tools.describe.tool', kind: 'sandbox' }),
+      ]),
+    );
+    expect(executeCode).not.toHaveBeenCalled();
+  });
+
+  test('loads matched native tools only when requested', async () => {
     let active = false;
     const activate = vi.fn((names: string[]) => {
       active = true;
       return names;
     });
-    const finder = createRemoteExecutorTools({
+    const search = createRemoteExecutorTools({
       nativeTools: {
         list: () => [
           {
@@ -121,36 +251,75 @@ describe('native Executor Pi tools', () => {
       },
     })[0]!;
 
-    const result = await finder.execute(
-      'find-native',
-      { query: 'create dashboard', scope: 'native' },
+    const unloaded = await search.execute(
+      'search-native-1',
+      { query: 'create dashboard', kinds: ['native'] },
       undefined,
       undefined,
       context(),
     );
-
-    expect(activate).toHaveBeenCalledWith(['executor_create_artifact']);
-    expect(result.content[0]).toMatchObject({
-      type: 'text',
-      text: expect.stringContaining('executor_create_artifact'),
+    expect(activate).not.toHaveBeenCalled();
+    expect(unloaded.content[0]).toMatchObject({
+      text: expect.stringContaining('"state":"loadable"'),
     });
-    expect(result.content[0]).toMatchObject({ text: expect.stringContaining('"active":true') });
+
+    const loaded = await search.execute(
+      'search-native-2',
+      { query: 'create dashboard', kinds: ['native'], load: true },
+      undefined,
+      undefined,
+      context(),
+    );
+    expect(activate).toHaveBeenCalledWith(['executor_create_artifact']);
+    expect(loaded.content[0]).toMatchObject({ text: expect.stringContaining('"state":"loaded"') });
   });
 
-  test('describes one exact integration path', async () => {
+  test('reports a native loading failure', async () => {
+    const search = createRemoteExecutorTools({
+      nativeTools: {
+        list: () => [
+          {
+            name: 'executor_create_artifact',
+            remoteName: 'create-artifact',
+            description: 'Create an artifact.',
+            active: false,
+          },
+        ],
+        activate: () => [],
+      },
+    })[0]!;
+
+    await expect(
+      search.execute(
+        'search-native-failed',
+        { query: 'create artifact', kinds: ['native'], load: true },
+        undefined,
+        undefined,
+        context(),
+      ),
+    ).rejects.toThrow('Failed to load Executor native tools: executor_create_artifact');
+  });
+
+  test('describes only the compact success-data contract', async () => {
     const executeCode = vi.fn(async (_endpoint: ExecutorEndpoint, _code: string) =>
       completed({
         path: 'github.user.main.issues.list',
-        description: 'List issues.',
-        input: '{ state?: string }',
-        output: '{ issues: Issue[] }',
+        summary: 'List issues.',
+        inputTypeScript: '{ state?: string | null | null }',
+        dataTypeScript: '{ issues: Issue[]; cursor?: string | null | null; }',
+        outputTypeScript: 'legacy envelope must not win',
+        typeScriptDefinitions: {
+          Issue: '{ id: string; }',
+          ToolError: '{ code: string; message: string; }',
+          ToolHttpMeta: '{ status: number; }',
+        },
       }),
     );
     const describeTool = createRemoteExecutorTools({
       dependencies: { resolveEndpoint: async () => endpoint, executeCode },
     })[1]!;
 
-    await describeTool.execute(
+    const result = await describeTool.execute(
       'describe-1',
       { path: 'github.user.main.issues.list' },
       undefined,
@@ -160,6 +329,93 @@ describe('native Executor Pi tools', () => {
 
     expect(executeCode.mock.calls[0]?.[1]).toContain('tools.describe.tool');
     expect(executeCode.mock.calls[0]?.[1]).toContain('github.user.main.issues.list');
+    expect(result.content[0]).toEqual({
+      type: 'text',
+      text: '{"path":"github.user.main.issues.list","kind":"integration","summary":"List issues.","input":"{ state?: string | null }","data":"{ issues: Issue[]; cursor?: string | null; }","definitions":{"Issue":"{ id: string; }"}}',
+    });
+  });
+
+  test('preserves describe suggestions for an unknown integration path', async () => {
+    const executeCode = vi.fn(async () =>
+      completed({
+        path: 'github.missing',
+        error: {
+          code: 'tool_not_found',
+          message: 'Tool not found: github.missing',
+          suggestions: ['github.user.main.issues.list'],
+        },
+      }),
+    );
+    const describeTool = createRemoteExecutorTools({
+      dependencies: { resolveEndpoint: async () => endpoint, executeCode },
+    })[1]!;
+
+    const result = await describeTool.execute(
+      'describe-missing',
+      { path: 'github.missing' },
+      undefined,
+      undefined,
+      context(),
+    );
+
+    expect(result.content[0]).toMatchObject({
+      text: expect.stringContaining('github.user.main.issues.list'),
+    });
+  });
+
+  test('keeps referenced shared definitions and handles legacy data ordering', async () => {
+    const executeCode = vi.fn(async () =>
+      completed({
+        path: 'files.download',
+        inputTypeScript: '{}',
+        outputTypeScript:
+          '{ ok: false; error: { data: string } } | { data: { issues: Issue[] }; ok: true }',
+        typeScriptDefinitions: {
+          Issue: '{ id: string; attachment: ToolFile | null | null; }',
+          ToolFile: '{ name: string; data: string; }',
+          ToolError: '{ code: string; }',
+        },
+      }),
+    );
+    const describeTool = createRemoteExecutorTools({
+      dependencies: { resolveEndpoint: async () => endpoint, executeCode },
+    })[1]!;
+
+    const result = await describeTool.execute(
+      'describe-legacy',
+      { path: 'files.download' },
+      undefined,
+      undefined,
+      context(),
+    );
+
+    expect(result.content[0]).toMatchObject({
+      text: '{"path":"files.download","kind":"integration","input":"{}","data":"{ issues: Issue[] }","definitions":{"Issue":"{ id: string; attachment: ToolFile | null; }","ToolFile":"{ name: string; data: string; }"}}',
+    });
+  });
+
+  test('extracts legacy success data without a trailing member semicolon', async () => {
+    const executeCode = vi.fn(async () =>
+      completed({
+        path: 'records.get',
+        outputTypeScript: '{ ok: true; data: { value: string } } | { ok: false; error: ToolError }',
+      }),
+    );
+    const describeTool = createRemoteExecutorTools({
+      dependencies: { resolveEndpoint: async () => endpoint, executeCode },
+    })[1]!;
+
+    const result = await describeTool.execute(
+      'describe-no-semicolon',
+      { path: 'records.get' },
+      undefined,
+      undefined,
+      context(),
+    );
+
+    expect(result.content[0]).toMatchObject({
+      text: '{"path":"records.get","kind":"integration","data":"{ value: string }"}',
+    });
   });
 
   test('routes executor_execute through the remote execute tool', async () => {
@@ -172,7 +428,7 @@ describe('native Executor Pi tools', () => {
     const controller = new AbortController();
     const result = await execute.execute(
       'execute-1',
-      { code: 'return { answer: 42 }' },
+      { code: 'return { answer: 42 }', timeoutMs: 4000 },
       controller.signal,
       undefined,
       context(),
@@ -183,11 +439,24 @@ describe('native Executor Pi tools', () => {
       'return { answer: 42 }',
       expect.objectContaining({
         signal: expect.any(AbortSignal),
-        timeoutMs: 5000,
+        timeoutMs: 4000,
         onProgress: expect.any(Function),
       }),
     );
     expect(result.content[0]).toMatchObject({ text: '{"answer":42}' });
+
+    await execute.execute(
+      'execute-clamped',
+      { code: 'return { answer: 42 }', timeoutMs: 10_000 },
+      controller.signal,
+      undefined,
+      context(),
+    );
+    expect(executeCode).toHaveBeenLastCalledWith(
+      endpoint,
+      'return { answer: 42 }',
+      expect.objectContaining({ timeoutMs: endpoint.requestTimeoutMs }),
+    );
   });
 
   test('redacts common credential fields from model-visible JSON', async () => {
@@ -223,20 +492,20 @@ describe('native Executor Pi tools', () => {
 
     const started = await tools[2]!.execute(
       'slow-1',
-      { code: 'return { slow: "done" }', yieldMs: 5 },
+      { code: 'return { slow: "done" }', waitMs: 5 },
       undefined,
       undefined,
       context(),
     );
     const running = JSON.parse((started.content[0] as { text: string }).text) as {
-      status: string;
+      state: string;
       jobId: string;
     };
-    expect(running.status).toBe('running');
+    expect(running.state).toBe('running');
 
     const completedResult = await tools[5]!.execute(
       'poll-1',
-      { jobId: running.jobId, yieldMs: 100 },
+      { jobId: running.jobId, waitMs: 100 },
       undefined,
       undefined,
       context(),
@@ -285,9 +554,11 @@ describe('native Executor Pi tools', () => {
   test('splits remote skills into list and get guide tools', async () => {
     const callTool = vi.fn(async (_endpoint, _name, args: Record<string, unknown>) => ({
       text:
-        'name' in args
-          ? '# execute\n\nGuide text.'
-          : '- `execute` — Execute workflow.\n- `artifact-style` — Artifact style rules.',
+        args.name === 'execute'
+          ? '# execute\n\nGuide text.\n\n## Workflow\n\nSandbox steps.'
+          : args.name === 'artifact-style'
+            ? '# artifact-style\n\nStyle rules.'
+            : '- `execute` — Execute workflow.\n- `artifact-style` — Artifact style rules.',
       structuredContent: null,
       isError: false,
     }));
@@ -300,22 +571,38 @@ describe('native Executor Pi tools', () => {
     const listResult = await listGuides.execute('guides-1', {}, undefined, undefined, context());
     const guideResult = await getGuide.execute(
       'guide-1',
-      { guide: 'execute' },
+      { id: 'execute' },
       undefined,
       undefined,
       context(),
     );
 
-    expect(listResult.content[0]).toMatchObject({
-      text: expect.stringContaining('artifact-style'),
+    expect(listResult.content[0]).toEqual({
+      type: 'text',
+      text: '{"items":[{"id":"execute","summary":"Execute workflow."},{"id":"artifact-style","summary":"Artifact style rules."}]}',
     });
-    expect(guideResult.content[0]).toEqual({ type: 'text', text: '# execute\n\nGuide text.' });
-    expect(callTool).toHaveBeenLastCalledWith(
+    expect(guideResult.content[0]).toMatchObject({
+      type: 'text',
+      text: expect.stringContaining('## Pi bridge workflow'),
+    });
+    expect(callTool).toHaveBeenCalledWith(
       endpoint,
       'skills',
       { name: 'execute' },
       expect.any(Object),
     );
+
+    const artifactGuide = await getGuide.execute(
+      'guide-2',
+      { id: 'artifact-style' },
+      undefined,
+      undefined,
+      context(),
+    );
+    expect(artifactGuide.content[0]).toEqual({
+      type: 'text',
+      text: '# artifact-style\n\nStyle rules.',
+    });
   });
 
   test('adapts artifact names, schemas, outputs, and execution modes', async () => {
@@ -425,7 +712,7 @@ describe('native Executor Pi tools', () => {
 
     extension(pi as never);
     expect([...registered.keys()]).toEqual([
-      'executor_find_tools',
+      'executor_search_tools',
       'executor_describe_tool',
       'executor_execute',
       'executor_list_guides',

@@ -3,8 +3,6 @@ import { randomUUID } from 'node:crypto';
 export interface ExecutorRunningJob {
   status: 'running';
   jobId: string;
-  label: string;
-  elapsedMs: number;
   pollAfterMs: number;
 }
 
@@ -15,8 +13,6 @@ export type ExecutorJobOutcome<T> =
 
 interface JobRecord {
   id: string;
-  label: string;
-  startedAt: number;
   controller: AbortController;
   status: 'running' | 'completed' | 'failed';
   value?: unknown;
@@ -43,7 +39,6 @@ export class ExecutorJobManager {
   readonly #jobs = new Map<string, JobRecord>();
 
   async run<T>(
-    label: string,
     yieldAfterMs: number,
     signal: AbortSignal | undefined,
     operation: (signal: AbortSignal) => Promise<T>,
@@ -51,8 +46,6 @@ export class ExecutorJobManager {
     const controller = new AbortController();
     const record: JobRecord = {
       id: randomUUID(),
-      label,
-      startedAt: Date.now(),
       controller,
       status: 'running',
       settled: Promise.resolve(),
@@ -117,8 +110,6 @@ export class ExecutorJobManager {
     return {
       status: 'running',
       jobId: record.id,
-      label: record.label,
-      elapsedMs: Date.now() - record.startedAt,
       pollAfterMs: DEFAULT_POLL_AFTER_MS,
     };
   }

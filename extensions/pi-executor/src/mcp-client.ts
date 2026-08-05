@@ -13,7 +13,7 @@ import type {
 } from './types';
 
 const CLIENT_NAME = 'pi-executor-remote';
-const CLIENT_VERSION = '0.5.0';
+const CLIENT_VERSION = '0.6.0';
 const DEFAULT_TEXT_RESULT = '(no result)';
 
 export interface ExecutorMcpProgress {
@@ -211,14 +211,12 @@ export function buildFindToolsCode(input: {
   return [
     `const page = await tools.search(${JSON.stringify(searchInput)});`,
     'return {',
-    '  matches: (page.items ?? []).map((item) => ({',
-    '    kind: "integration",',
+    '  items: (page.items ?? []).map((item) => ({',
     '    path: item.path,',
-    '    description: item.description,',
+    '    summary: item.summary ?? item.description,',
     '  })),',
     '  total: page.total ?? 0,',
-    '  hasMore: page.hasMore === true,',
-    '  ...(page.nextOffset === undefined ? {} : { nextOffset: page.nextOffset }),',
+    '  ...(typeof page.nextOffset === "number" ? { nextOffset: page.nextOffset } : {}),',
     '};',
   ].join('\n');
 }
@@ -230,12 +228,11 @@ export function buildDescribeToolCode(path: string): string {
     'if (details.error) return { path: details.path, error: details.error };',
     'return {',
     '  path: details.path,',
-    '  description: details.description,',
-    '  input: details.inputTypeScript,',
-    '  output: details.outputTypeScript,',
-    '  ...(details.typeScriptDefinitions',
-    '    ? { definitions: details.typeScriptDefinitions }',
-    '    : {}),',
+    '  summary: details.summary ?? details.description,',
+    '  inputTypeScript: details.inputTypeScript,',
+    '  dataTypeScript: details.dataTypeScript,',
+    '  outputTypeScript: details.outputTypeScript,',
+    '  typeScriptDefinitions: details.typeScriptDefinitions,',
     '};',
   ].join('\n');
 }

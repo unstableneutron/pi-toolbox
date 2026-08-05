@@ -233,7 +233,9 @@ describe('Executor discovery code', () => {
     expect(code).toContain(
       'tools.search({"query":"issues\\\"; throw new Error(\\\"bad\\\")","namespace":"github","limit":5,"offset":10})',
     );
-    expect(code).toContain('kind: "integration"');
+    expect(code).toContain('summary: item.summary ?? item.description');
+    expect(code).toContain('nextOffset: page.nextOffset');
+    expect(code).not.toContain('kind: "integration"');
     expect(code).not.toContain('tools.describe.tool');
   });
 
@@ -243,7 +245,8 @@ describe('Executor discovery code', () => {
     expect(code).toContain(
       'tools.describe.tool({ path: "github.x\\\"; throw new Error(\\\"bad\\\")" })',
     );
-    expect(code).toContain('input: details.inputTypeScript');
-    expect(code).toContain('definitions: details.typeScriptDefinitions');
+    expect(code).toContain('inputTypeScript: details.inputTypeScript');
+    expect(code).toContain('dataTypeScript: details.dataTypeScript');
+    expect(code).toContain('outputTypeScript: details.outputTypeScript');
   });
 });

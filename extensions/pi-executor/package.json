@@ -1,6 +1,6 @@
 {
   "name": "pi-executor-remote",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
   "description": "Remote-only Pi bridge to an existing Executor HTTP/MCP server",
   "license": "MIT",

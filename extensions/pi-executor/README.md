@@ -11,7 +11,7 @@ URL elicitation in the Pi UI.
 
 Eight focused tools are active at startup:
 
-- `executor_find_tools` — find native Executor capabilities and connected integration tools.
+- `executor_search_tools` — search bridge, sandbox, native, and integration capabilities.
 - `executor_describe_tool` — get one integration tool's compact TypeScript contract.
 - `executor_execute` — run focused TypeScript against connected integrations.
 - `executor_list_guides` — list available procedural guide IDs.
@@ -27,9 +27,10 @@ Native artifact tools are registered but initially deferred:
 - `executor_list_artifacts`
 - `executor_show_artifact`
 
-`executor_find_tools` activates matching native tools through Pi's dynamic tool-loading API. It does
-not inject Pi tools into the Executor sandbox. Inside `executor_execute`, only connected integration
-paths under `tools.*` are available.
+`executor_search_tools` returns compact `{ path, kind, summary, state? }` items. Native items stay
+`loadable` unless the call sets `load: true`; loaded native tools use Pi's dynamic tool-loading API.
+The extension does not inject Pi tools into the Executor sandbox. Inside `executor_execute`, connected
+integration paths run under `tools.*`, while `emit` is a sandbox global.
 
 The bridge adapts Executor's current MCP names internally. For example, `skills` backs
 `executor_list_guides` and `executor_get_guide`; artifact names are converted from hyphens to
@@ -37,13 +38,19 @@ namespaced Pi snake case. The original MCP names are not registered as Pi aliase
 
 ## Discovery workflow
 
-1. Call `executor_find_tools` with a short capability query. It returns at most 20 concise matches
-   by default.
-2. For an integration match, call `executor_describe_tool` with the exact returned path.
+1. Call `executor_search_tools` with a short capability query. It searches bridge, sandbox, native,
+   and integration kinds and returns at most 20 concise items by default.
+2. For an integration item, call `executor_describe_tool` with the exact returned path. Its `data`
+   field describes the success payload without the standard result envelope.
 3. Call `executor_execute` with focused TypeScript and return only the fields needed by the task.
-4. For a native match, call the activated Pi tool directly on the next model turn.
+4. For a native item, search again with `load: true`, then call the loaded Pi tool directly.
+5. Continue pagination with `nextCursor` when it is present; keep the same query, kinds, namespace,
+   and limit.
 
-Search results omit ranking scores and repeated type definitions. JSON output uses compact encoding.
+Search responses use `{ items, total, nextCursor? }`; items use `{ path, kind, summary, state? }`.
+Only native items include `state`, as either `loadable` or `loaded`.
+Describe responses omit unreferenced standard `ToolError`, `ToolHttpMeta`, and `ToolFile`
+definitions. JSON output uses compact encoding.
 Model-visible output defaults to 12 KB or 300 lines. A larger result is saved to a temporary file and
 gets an output ID; use `executor_read_output` with the returned byte offset to read bounded pages.
 ANSI terminal control sequences and NUL bytes are removed from model-visible output. Structured JSON
@@ -51,11 +58,12 @@ fields named like passwords, authorization headers, API keys, cookies, or access
 redacted before they enter model-visible text or persisted Pi tool details.
 
 Long `executor_execute` and native MCP calls yield after 20 seconds by default. `executor_execute`
-accepts a per-call `yieldMs` override. The first response returns a session-local bridge job ID while
-the original MCP request continues in the background. Use `executor_get_job` with the same job ID and
-an optional `yieldMs` to wait again; this polls the original request and does not start the code again.
-Use `executor_cancel_job` to stop it. The hard request timeout defaults to five minutes. MCP progress
-notifications update the active Pi tool row before a call yields.
+accepts a per-call `waitMs` override and an optional hard `timeoutMs`. A yielded response uses
+`{ state: "running", jobId, retryAfterMs }` while the original MCP request continues in the
+background. Use `executor_get_job` with the same job ID and an optional `waitMs` to wait again; this
+polls the original request and does not start the code again. Use `executor_cancel_job` to stop it.
+The hard request timeout defaults to five minutes. MCP progress notifications update the active Pi
+tool row before a call yields.
 
 ## Endpoint resolution
 

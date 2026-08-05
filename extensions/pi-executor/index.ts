@@ -87,6 +87,83 @@ interface NativeToolAdapter {
   executionMode?: 'parallel' | 'sequential';
 }
 
+const SEARCH_KINDS = ['bridge', 'sandbox', 'native', 'integration'] as const;
+type SearchKind = (typeof SEARCH_KINDS)[number];
+type SearchState = 'loadable' | 'loaded';
+
+interface SearchCatalogItem {
+  path: string;
+  kind: SearchKind;
+  summary: string;
+  state?: SearchState;
+}
+
+const BRIDGE_SEARCH_ITEMS: readonly SearchCatalogItem[] = [
+  {
+    path: 'executor_search_tools',
+    kind: 'bridge',
+    summary: 'Search bridge, sandbox, native, and integration capabilities.',
+  },
+  {
+    path: 'executor_describe_tool',
+    kind: 'bridge',
+    summary: "Get one integration tool's compact input and success-data contract.",
+  },
+  {
+    path: 'executor_execute',
+    kind: 'bridge',
+    summary: 'Run focused TypeScript against connected integrations.',
+  },
+  {
+    path: 'executor_list_guides',
+    kind: 'bridge',
+    summary: 'List available Executor procedural guides.',
+  },
+  {
+    path: 'executor_get_guide',
+    kind: 'bridge',
+    summary: 'Fetch one Executor guide by exact ID.',
+  },
+  {
+    path: 'executor_get_job',
+    kind: 'bridge',
+    summary: 'Wait for a yielded Executor operation.',
+  },
+  {
+    path: 'executor_cancel_job',
+    kind: 'bridge',
+    summary: 'Cancel a yielded Executor operation.',
+  },
+  {
+    path: 'executor_read_output',
+    kind: 'bridge',
+    summary: 'Read a bounded page from a truncated Executor result.',
+  },
+];
+
+const SANDBOX_SEARCH_ITEMS: readonly SearchCatalogItem[] = [
+  {
+    path: 'tools.search',
+    kind: 'sandbox',
+    summary: 'Search integration tools from inside executor_execute.',
+  },
+  {
+    path: 'tools.describe.tool',
+    kind: 'sandbox',
+    summary: 'Describe an integration tool from inside executor_execute.',
+  },
+  {
+    path: 'tools.executor.integrations.list',
+    kind: 'sandbox',
+    summary: 'List configured Executor integrations from inside executor_execute.',
+  },
+  {
+    path: 'emit',
+    kind: 'sandbox',
+    summary: 'Append user-visible output from inside executor_execute.',
+  },
+];
+
 const defaults: RemoteExecutorDependencies = {
   resolveEndpoint: (cwd, projectTrusted) =>
     resolveExecutorEndpoint(cwd, { allowProjectConfig: projectTrusted }),
@@ -331,12 +408,11 @@ async function yieldingToolResult(
   jobs: ExecutorJobManager,
   outputs: ExecutorOutputStore,
   endpoint: ExecutorEndpoint,
-  label: string,
   yieldMs: number | undefined,
   signal: AbortSignal | undefined,
   operation: (signal: AbortSignal) => Promise<ExecutorPiToolResult>,
 ): Promise<ExecutorPiToolResult> {
-  const outcome = await jobs.run(label, yieldMs ?? endpoint.yieldAfterMs, signal, operation);
+  const outcome = await jobs.run(yieldMs ?? endpoint.yieldAfterMs, signal, operation);
   if (outcome.status === 'completed') return outcome.value;
   if (outcome.status === 'failed') {
     throw new Error(errorMessage(outcome.error), { cause: outcome.error });
@@ -354,11 +430,9 @@ function progressText(label: string, progress: ExecutorMcpProgress): string {
 
 function runningJobValue(job: ExecutorRunningJob): JsonObject {
   return {
-    status: job.status,
+    state: job.status,
     jobId: job.jobId,
-    label: job.label,
-    elapsedMs: job.elapsedMs,
-    pollAfterMs: job.pollAfterMs,
+    retryAfterMs: job.pollAfterMs,
   };
 }
 
@@ -383,6 +457,202 @@ function compactDescription(description: string | undefined): string {
     : `${firstParagraph.slice(0, 317).trimEnd()}...`;
 }
 
+function compactSearchSummary(summary: unknown): string | undefined {
+  if (typeof summary !== 'string') return undefined;
+  const compact = summary.replace(/\s+/g, ' ').trim();
+  if (compact.length === 0) return undefined;
+  return compact.length <= 160 ? compact : `${compact.slice(0, 157).trimEnd()}...`;
+}
+
+function searchMatchScore(
+  item: Pick<SearchCatalogItem, 'path' | 'summary'>,
+  query: string,
+): number {
+  const terms = query
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+  const path = item.path.toLowerCase();
+  const summary = item.summary.toLowerCase();
+  return terms.reduce((score, term) => {
+    if (path.includes(term)) return score + 4;
+    if (summary.includes(term)) return score + 1;
+    return score;
+  }, 0);
+}
+
+interface SearchCursor {
+  localOffset: number;
+  remoteOffset: number;
+  remoteExhausted: boolean;
+}
+
+function decodeSearchCursor(cursor: string | undefined): SearchCursor {
+  if (cursor === undefined) {
+    return { localOffset: 0, remoteOffset: 0, remoteExhausted: false };
+  }
+  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.([01])$/.exec(cursor);
+  const localOffset = Number(match?.[1]);
+  const remoteOffset = Number(match?.[2]);
+  if (!Number.isSafeInteger(localOffset) || !Number.isSafeInteger(remoteOffset)) {
+    throw new Error('Invalid Executor search cursor; restart the search without a cursor');
+  }
+  return { localOffset, remoteOffset, remoteExhausted: match?.[3] === '1' };
+}
+
+function encodeSearchCursor(cursor: SearchCursor): string {
+  return `${cursor.localOffset}.${cursor.remoteOffset}.${cursor.remoteExhausted ? 1 : 0}`;
+}
+
+function normalizeTypeScript(typeScript: string): string {
+  // Executor 1.5.x can generate adjacent duplicate null members for optional nullable fields.
+  return typeScript.replace(/(\|\s*null)(?:\s*\|\s*null)+/g, '$1');
+}
+
+function splitTopLevelTypeUnion(typeScript: string): string[] {
+  const arms: string[] = [];
+  let start = 0;
+  let braces = 0;
+  let brackets = 0;
+  let parentheses = 0;
+  let quote: '"' | "'" | '`' | undefined;
+  let escaped = false;
+  for (let index = 0; index < typeScript.length; index += 1) {
+    const character = typeScript[index];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (character === '\\') escaped = true;
+      else if (character === quote) quote = undefined;
+      continue;
+    }
+    if (character === '"' || character === "'" || character === '`') {
+      quote = character;
+      continue;
+    }
+    if (character === '{') braces += 1;
+    else if (character === '}') braces -= 1;
+    else if (character === '[') brackets += 1;
+    else if (character === ']') brackets -= 1;
+    else if (character === '(') parentheses += 1;
+    else if (character === ')') parentheses -= 1;
+    else if (character === '|' && braces === 0 && brackets === 0 && parentheses === 0) {
+      arms.push(typeScript.slice(start, index).trim());
+      start = index + 1;
+    }
+  }
+  arms.push(typeScript.slice(start).trim());
+  return arms;
+}
+
+function successDataTypeScript(outputTypeScript: string): string {
+  const normalized = normalizeTypeScript(outputTypeScript);
+  const successArm = splitTopLevelTypeUnion(normalized).find((arm) =>
+    /\bok\s*:\s*true\b/.test(arm),
+  );
+  if (!successArm) return normalized;
+  const dataMatch = /\bdata\s*:/.exec(successArm);
+  if (!dataMatch) return normalized;
+
+  const start = dataMatch.index + dataMatch[0].length;
+  let braces = 0;
+  let brackets = 0;
+  let parentheses = 0;
+  let quote: '"' | "'" | '`' | undefined;
+  let escaped = false;
+  for (let index = start; index < successArm.length; index += 1) {
+    const character = successArm[index];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (character === '\\') escaped = true;
+      else if (character === quote) quote = undefined;
+      continue;
+    }
+    if (character === '"' || character === "'" || character === '`') {
+      quote = character;
+      continue;
+    }
+    if (character === '{') braces += 1;
+    else if (character === '}') {
+      braces -= 1;
+      if (braces < 0 && brackets === 0 && parentheses === 0) {
+        return normalizeTypeScript(successArm.slice(start, index).trim());
+      }
+    } else if (character === '[') brackets += 1;
+    else if (character === ']') brackets -= 1;
+    else if (character === '(') parentheses += 1;
+    else if (character === ')') parentheses -= 1;
+    else if (character === ';' && braces === 0 && brackets === 0 && parentheses === 0) {
+      return normalizeTypeScript(successArm.slice(start, index).trim());
+    }
+  }
+  return normalized;
+}
+
+function referencesType(typeScript: string, name: string): boolean {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(^|[^A-Za-z0-9_$])${escaped}(?![A-Za-z0-9_$])`).test(typeScript);
+}
+
+function referencedDefinitionNames(
+  contractTypes: string,
+  definitions: ReadonlyArray<readonly [string, string]>,
+): ReadonlySet<string> {
+  const referenced = new Set<string>();
+  let searchable = contractTypes;
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [name, definition] of definitions) {
+      if (referenced.has(name) || !referencesType(searchable, name)) continue;
+      referenced.add(name);
+      searchable += ` ${definition}`;
+      changed = true;
+    }
+  }
+  return referenced;
+}
+
+function compactDescribeResult(value: JsonValue, requestedPath: string): JsonObject {
+  const details = asObject(value);
+  if (!details) throw new Error(`Invalid describe response for ${requestedPath}`);
+  const path = typeof details.path === 'string' ? details.path : requestedPath;
+  if (details.error !== undefined) {
+    return { path, kind: 'integration', error: details.error };
+  }
+
+  const summary = compactSearchSummary(details.summary ?? details.description);
+  const rawInput = details.inputTypeScript ?? details.input;
+  const rawData = details.dataTypeScript ?? details.data;
+  const rawOutput = details.outputTypeScript ?? details.output;
+  const input = typeof rawInput === 'string' ? normalizeTypeScript(rawInput) : undefined;
+  const data =
+    typeof rawData === 'string'
+      ? normalizeTypeScript(rawData)
+      : typeof rawOutput === 'string'
+        ? successDataTypeScript(rawOutput)
+        : 'unknown';
+  const rawDefinitions = asObject(details.typeScriptDefinitions ?? details.definitions);
+  const definitionEntries = rawDefinitions
+    ? Object.entries(rawDefinitions)
+        .filter((entry): entry is [string, string] => typeof entry[1] === 'string')
+        .map(([name, definition]) => [name, normalizeTypeScript(definition)] as const)
+    : [];
+  const referenced = referencedDefinitionNames(`${input ?? ''} ${data}`, definitionEntries);
+  const sharedDefinitions = new Set(['ToolError', 'ToolHttpMeta', 'ToolFile']);
+  const definitions = Object.fromEntries(
+    definitionEntries.filter(([name]) => !sharedDefinitions.has(name) || referenced.has(name)),
+  );
+
+  return {
+    path,
+    kind: 'integration',
+    ...(summary ? { summary } : {}),
+    ...(input ? { input } : {}),
+    data,
+    ...(Object.keys(definitions).length > 0 ? { definitions } : {}),
+  };
+}
+
 function compactJsonSchema(value: JsonValue): JsonValue {
   if (Array.isArray(value)) return value.map((item) => compactJsonSchema(item));
   const object = asObject(value);
@@ -403,20 +673,6 @@ function proxyToolParameters(tool: ExecutorMcpTool): TSchema {
   const adapter = nativeToolAdapters[tool.name];
   if (adapter) return adapter.parameters;
   return compactJsonSchema(structuredClone(tool.inputSchema)) as TSchema;
-}
-
-function nativeMatchScore(tool: NativeToolSummary, query: string): number {
-  const terms = query
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .filter(Boolean);
-  const name = `${tool.name} ${tool.remoteName}`.toLowerCase();
-  const description = tool.description.toLowerCase();
-  return terms.reduce((score, term) => {
-    if (name.includes(term)) return score + 4;
-    if (description.includes(term)) return score + 1;
-    return score;
-  }, 0);
 }
 
 const nativeToolNameReplacements: Record<string, string> = {
@@ -485,9 +741,27 @@ function adaptNativeToolOutput(
   };
 }
 
-function adaptGuideContent(text: string): string {
+const PI_EXECUTE_GUIDANCE = [
+  '## Pi bridge workflow',
+  '',
+  'The Pi bridge and the Executor sandbox are separate call surfaces:',
+  '',
+  '- Call `executor_search_tools`, `executor_describe_tool`, and `executor_execute` as Pi tools.',
+  '- Inside `executor_execute`, call integration paths under `tools.*`.',
+  '- Call bridge or loaded native matches directly as Pi tools. Do not place them under `tools.*`.',
+  '- `emit(value)` is a sandbox global, not an integration path.',
+  '',
+  '1. Search with `executor_search_tools({ query, kinds: ["integration"] })`.',
+  '2. Use the exact returned `path` with `executor_describe_tool({ path })`.',
+  '3. Read `input`, `data`, and optional `definitions`. `data` is the success payload in `result.data`.',
+  '4. Run focused code with `executor_execute({ code })` and call the integration as `tools[path](input)`.',
+  '',
+  'Return only fields required by the task. Remove empty fields, filter large collections in the sandbox, and do not return raw provider envelopes unless debugging.',
+].join('\n');
+
+function adaptGuideContent(text: string, id: string): string {
   let adapted = text
-    .replace(/skills\(\{\s*name:/g, 'executor_get_guide({ guide:')
+    .replace(/skills\(\{\s*name:/g, 'executor_get_guide({ id:')
     .replaceAll('`skills`', '`executor_get_guide`')
     .replaceAll('`execute`', '`executor_execute`');
   for (const [remoteName, localName] of Object.entries(nativeToolNameReplacements)) {
@@ -495,21 +769,28 @@ function adaptGuideContent(text: string): string {
       .replaceAll(`\`${remoteName}\``, `\`${localName}\``)
       .replaceAll(`${remoteName} tool`, `${localName} tool`);
   }
+  if (id === 'execute' && !adapted.includes('## Pi bridge workflow')) {
+    const workflowHeading = /^## Workflow\s*$/m;
+    adapted = workflowHeading.test(adapted)
+      ? adapted.replace(workflowHeading, `${PI_EXECUTE_GUIDANCE}\n\n## Sandbox workflow`)
+      : `${adapted.trimEnd()}\n\n${PI_EXECUTE_GUIDANCE}\n`;
+  }
   return adapted;
 }
 
 function parseGuideList(text: string): JsonValue {
-  const guides: JsonValue[] = [];
+  const items: JsonValue[] = [];
   for (const match of text.matchAll(/^- `([^`]+)`\s+[—-]\s+(.+)$/gm)) {
-    guides.push({
-      guide: match[1] ?? '',
-      description: adaptNativeToolReferences(match[2] ?? '').replace(
-        /\bexecute\b/g,
-        'executor_execute',
-      ),
+    const summary = adaptNativeToolReferences(match[2] ?? '').replace(
+      /\bexecute\b/g,
+      'executor_execute',
+    );
+    items.push({
+      id: match[1] ?? '',
+      summary: compactSearchSummary(summary) ?? '',
     });
   }
-  return { guides };
+  return { items };
 }
 
 export function createRemoteMcpProxyTool(
@@ -538,7 +819,6 @@ export function createRemoteMcpProxyTool(
           jobs,
           outputs,
           endpoint,
-          localName,
           undefined,
           signal,
           async (jobSignal) => {
@@ -579,22 +859,27 @@ export function createRemoteExecutorTools(
   const jobs = options.jobs ?? new ExecutorJobManager();
   const outputs = options.outputs ?? new ExecutorOutputStore();
 
-  const findTools = defineTool({
-    name: 'executor_find_tools',
-    label: 'Executor: Find Tools',
+  const searchTools = defineTool({
+    name: 'executor_search_tools',
+    label: 'Executor: Search Tools',
     description:
-      'Find native Executor capabilities and connected integration tools. Native matches are activated for the next Pi model call. Results are concise; use executor_describe_tool for one integration schema.',
-    promptSnippet: 'Find and activate Executor capabilities or connected integration tools.',
+      'Search Pi bridge tools, Executor sandbox primitives, loadable native capabilities, and connected integration tools. Use load=true to activate native matches. Integration paths run under tools inside executor_execute.',
+    promptSnippet: 'Search Executor bridge, sandbox, native, and integration capabilities.',
     promptGuidelines: [
-      'Use executor_find_tools when the required native Executor capability or integration path is unknown.',
+      'Use executor_search_tools when the required Executor capability or integration path is unknown.',
       'Use short capability phrases and keep the default result limit unless more results are required.',
+      'When executor_search_tools returns nextCursor, reuse the same query, kinds, namespace, and limit for the next page.',
+      'Call executor_search_tools with load=true when you intend to call a matched native tool.',
     ],
     parameters: Type.Object(
       {
         query: Type.String({ description: 'Short capability query.', minLength: 1 }),
-        scope: Type.Optional(
-          StringEnum(['all', 'native', 'integration'] as const, {
-            description: 'Search scope. Defaults to all.',
+        kinds: Type.Optional(
+          Type.Array(StringEnum(SEARCH_KINDS), {
+            description: 'Kinds to search. Defaults to all kinds.',
+            minItems: 1,
+            maxItems: SEARCH_KINDS.length,
+            uniqueItems: true,
           }),
         ),
         namespace: Type.Optional(
@@ -607,82 +892,136 @@ export function createRemoteExecutorTools(
             maximum: 50,
           }),
         ),
-        offset: Type.Optional(Type.Integer({ description: 'Pagination offset.', minimum: 0 })),
+        cursor: Type.Optional(Type.String({ description: 'Cursor returned by the prior page.' })),
+        load: Type.Optional(
+          Type.Boolean({ description: 'Activate matched native tools. Defaults to false.' }),
+        ),
       },
       { additionalProperties: false },
     ),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      const scope = params.scope ?? 'all';
+      const kinds = new Set<SearchKind>((params.kinds ?? SEARCH_KINDS) as SearchKind[]);
       const limit = params.limit ?? 20;
-      const offset = params.offset ?? 0;
-      const nativeMatches =
-        scope === 'integration'
-          ? []
-          : (options.nativeTools?.list() ?? [])
-              .map((tool) => ({ tool, score: nativeMatchScore(tool, params.query) }))
-              .filter((match) => match.score > 0)
-              .sort(
-                (left, right) =>
-                  right.score - left.score || left.tool.name.localeCompare(right.tool.name),
-              )
-              .map((match) => match.tool);
-
-      const nativeOffset =
-        scope === 'native' || scope === 'all' ? Math.min(offset, nativeMatches.length) : 0;
-      const selectedNative = nativeMatches.slice(nativeOffset, nativeOffset + limit);
-      const remaining = limit - selectedNative.length;
-      const remoteOffset = scope === 'all' ? Math.max(0, offset - nativeMatches.length) : offset;
+      const cursor = decodeSearchCursor(params.cursor);
+      const nativeItems: SearchCatalogItem[] = (options.nativeTools?.list() ?? []).map((tool) => ({
+        path: tool.name,
+        kind: 'native',
+        summary: compactSearchSummary(tool.description) ?? 'Call this native Executor capability.',
+        state: tool.active ? 'loaded' : 'loadable',
+      }));
+      const localItems = [
+        ...(kinds.has('bridge') ? BRIDGE_SEARCH_ITEMS : []),
+        ...(kinds.has('sandbox') ? SANDBOX_SEARCH_ITEMS : []),
+        ...(kinds.has('native') ? nativeItems : []),
+      ];
+      const localMatches = localItems
+        .map((item) => ({ item, score: searchMatchScore(item, params.query) }))
+        .filter((match) => match.score > 0)
+        .sort(
+          (left, right) =>
+            right.score - left.score || left.item.path.localeCompare(right.item.path),
+        )
+        .map((match) => match.item);
+      const searchRemote = kinds.has('integration') && !cursor.remoteExhausted;
+      const localOffset = Math.min(cursor.localOffset, localMatches.length);
+      const localBudget = searchRemote ? Math.max(0, limit - 1) : limit;
+      let selectedLocal = localMatches.slice(localOffset, localOffset + localBudget);
+      const remaining = limit - selectedLocal.length;
       let endpoint: ExecutorEndpoint | undefined;
-      let remoteMatches: JsonObject[] = [];
-      let remoteTotal = 0;
+      let remoteItems: SearchCatalogItem[] = [];
+      let remoteTotal = cursor.remoteExhausted ? cursor.remoteOffset : 0;
+      let nextRemoteOffset = cursor.remoteOffset;
+      let remoteExhausted = cursor.remoteExhausted || !kinds.has('integration');
 
-      if (scope !== 'native') {
-        const remoteLimit = Math.max(1, remaining);
+      if (searchRemote && remaining > 0) {
         const response = await requestExecutorCode(
           deps,
           buildFindToolsCode({
             query: params.query,
             namespace: params.namespace,
-            limit: remoteLimit,
-            offset: remoteOffset,
+            limit: remaining,
+            offset: cursor.remoteOffset,
           }),
           signal,
           ctx,
         );
         endpoint = response.endpoint;
         const page = asObject(executorReturnedValue(response.result));
-        const matches = page?.matches;
-        remoteMatches = Array.isArray(matches)
-          ? matches
+        const items = page?.items;
+        remoteItems = Array.isArray(items)
+          ? items
               .map(asObject)
-              .filter((match): match is JsonObject => Boolean(match))
+              .filter(
+                (item): item is JsonObject => item !== undefined && typeof item.path === 'string',
+              )
               .slice(0, remaining)
+              .map((item) => ({
+                path: item.path as string,
+                kind: 'integration',
+                summary:
+                  compactSearchSummary(item.summary) ?? 'Call this connected integration tool.',
+              }))
           : [];
-        remoteTotal = typeof page?.total === 'number' ? page.total : remoteMatches.length;
+        if (typeof page?.total !== 'number') {
+          throw new Error('Invalid Executor search response: total is missing');
+        }
+        const consumedRemoteOffset = cursor.remoteOffset + remoteItems.length;
+        const pageNextOffset = typeof page.nextOffset === 'number' ? page.nextOffset : undefined;
+        if (
+          pageNextOffset !== undefined &&
+          (pageNextOffset <= cursor.remoteOffset || pageNextOffset < consumedRemoteOffset)
+        ) {
+          throw new Error('Invalid Executor search response: nextOffset did not advance');
+        }
+        remoteTotal = page.total;
+        nextRemoteOffset = pageNextOffset ?? consumedRemoteOffset;
+        remoteExhausted = pageNextOffset === undefined && consumedRemoteOffset >= remoteTotal;
+
+        const unfilled = limit - selectedLocal.length - remoteItems.length;
+        if (unfilled > 0) {
+          selectedLocal = localMatches.slice(
+            localOffset,
+            localOffset + selectedLocal.length + unfilled,
+          );
+        }
       }
 
-      const activated =
-        options.nativeTools?.activate(selectedNative.map((tool) => tool.name)) ?? [];
-      const activeTools = new Map(
-        (options.nativeTools?.list() ?? []).map((tool) => [tool.name, tool.active]),
-      );
-      const matches: JsonValue[] = [
-        ...selectedNative.map((tool) => ({
-          kind: 'native',
-          name: tool.name,
-          description: tool.description,
-          active: activeTools.get(tool.name) ?? tool.active,
-        })),
-        ...remoteMatches,
-      ];
-      const total = (scope === 'integration' ? 0 : nativeMatches.length) + remoteTotal;
-      const nextOffset = offset + matches.length;
+      if (params.load === true) {
+        const nativePaths = selectedLocal
+          .filter((item) => item.kind === 'native')
+          .map((item) => item.path);
+        options.nativeTools?.activate(nativePaths);
+        const active = new Set(
+          (options.nativeTools?.list() ?? [])
+            .filter((tool) => tool.active)
+            .map((tool) => tool.name),
+        );
+        const failed = nativePaths.filter((path) => !active.has(path));
+        if (failed.length > 0) {
+          throw new Error(`Failed to load Executor native tools: ${failed.join(', ')}`);
+        }
+        selectedLocal = selectedLocal.map((item) =>
+          item.kind === 'native' && active.has(item.path) ? { ...item, state: 'loaded' } : item,
+        );
+      }
+
+      const items: JsonValue[] = [...selectedLocal, ...remoteItems].map((item) => ({
+        path: item.path,
+        kind: item.kind,
+        summary: item.summary,
+        ...(item.state ? { state: item.state } : {}),
+      }));
+      const total = localMatches.length + remoteTotal;
+      const nextCursor: SearchCursor = {
+        localOffset: localOffset + selectedLocal.length,
+        remoteOffset: nextRemoteOffset,
+        remoteExhausted,
+      };
+      const hasMore = nextCursor.localOffset < localMatches.length || !nextCursor.remoteExhausted;
       const output: JsonValue = {
-        matches,
-        activated,
+        items,
         total,
-        hasMore: nextOffset < total,
-        ...(nextOffset < total ? { nextOffset } : {}),
+        ...(hasMore ? { nextCursor: encodeSearchCursor(nextCursor) } : {}),
       };
       return formatToolResult(outputs, jsonText(output), output, endpoint);
     },
@@ -692,7 +1031,7 @@ export function createRemoteExecutorTools(
     name: 'executor_describe_tool',
     label: 'Executor: Describe Tool',
     description:
-      'Get the compact TypeScript input and output contract for one connected integration tool path returned by executor_find_tools.',
+      'Get the compact TypeScript input and success-data contract for one connected integration path returned by executor_search_tools.',
     parameters: Type.Object(
       { path: Type.String({ description: 'Exact integration tool path.', minLength: 1 }) },
       { additionalProperties: false },
@@ -704,7 +1043,7 @@ export function createRemoteExecutorTools(
         signal,
         ctx,
       );
-      const output = executorReturnedValue(result);
+      const output = compactDescribeResult(executorReturnedValue(result), params.path);
       return formatToolResult(
         outputs,
         jsonText(output),
@@ -719,11 +1058,11 @@ export function createRemoteExecutorTools(
     name: 'executor_execute',
     label: 'Executor: Execute',
     description:
-      'Run focused TypeScript in Executor to call connected integrations. Use exact paths from executor_find_tools, inspect one with executor_describe_tool, and return only fields needed by the task.',
+      'Run focused TypeScript in Executor to call connected integrations. Use exact integration paths from executor_search_tools, inspect one with executor_describe_tool, and return only fields needed by the task.',
     promptSnippet: 'Run focused TypeScript against connected Executor integrations.',
     promptGuidelines: [
-      'Before the first complex executor_execute call, use executor_get_guide with guide execute.',
-      'Inside executor_execute code, call tools by the exact full path returned by executor_find_tools.',
+      'Before the first complex executor_execute call, use executor_get_guide with id execute.',
+      'Inside executor_execute code, call integration paths exactly as returned by executor_search_tools.',
       'Keep executor_execute snippets focused, filter large collections in the sandbox, and return only required fields.',
       'Do not use fetch inside executor_execute; use configured tools.* calls.',
       'If executor_execute returns a running job, use executor_get_job instead of restarting the code.',
@@ -734,12 +1073,20 @@ export function createRemoteExecutorTools(
           description: 'TypeScript code with a top-level return.',
           minLength: 1,
         }),
-        yieldMs: Type.Optional(
+        waitMs: Type.Optional(
           Type.Integer({
             description:
               'Return a bridge job ID if execution still runs after this delay. Uses the configured default when omitted.',
             minimum: 0,
             maximum: 30_000,
+          }),
+        ),
+        timeoutMs: Type.Optional(
+          Type.Integer({
+            description:
+              'Hard execution timeout. The configured endpoint timeout remains the upper bound.',
+            minimum: 1,
+            maximum: 1_800_000,
           }),
         ),
       },
@@ -753,20 +1100,25 @@ export function createRemoteExecutorTools(
           jobs,
           outputs,
           endpoint,
-          'executor_execute',
-          params.yieldMs,
+          params.waitMs,
           signal,
           async (jobSignal) => {
             const result = await deps.executeCode(
               endpoint,
               params.code,
-              executorCallOptions(deps, jobSignal, ctx, endpoint.requestTimeoutMs, (progress) => {
-                if (!acceptingProgress) return;
-                onUpdate?.({
-                  content: [{ type: 'text', text: progressText('executor_execute', progress) }],
-                  details: { structuredContent: null },
-                });
-              }),
+              executorCallOptions(
+                deps,
+                jobSignal,
+                ctx,
+                Math.min(params.timeoutMs ?? endpoint.requestTimeoutMs, endpoint.requestTimeoutMs),
+                (progress) => {
+                  if (!acceptingProgress) return;
+                  onUpdate?.({
+                    content: [{ type: 'text', text: progressText('executor_execute', progress) }],
+                    details: { structuredContent: null },
+                  });
+                },
+              ),
             );
             if (result.isError) throw new Error(executorFailureMessage(result));
             const output = executorReturnedValue(result);
@@ -798,19 +1150,19 @@ export function createRemoteExecutorTools(
     description:
       'Fetch one Executor procedural guide by exact guide ID from executor_list_guides. Guide IDs are not Pi tool names or integration paths.',
     parameters: Type.Object(
-      { guide: Type.String({ description: 'Exact guide ID.', minLength: 1 }) },
+      { id: Type.String({ description: 'Exact guide ID.', minLength: 1 }) },
       { additionalProperties: false },
     ),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const { endpoint, result } = await requestExecutorTool(
         deps,
         'skills',
-        { name: params.guide },
+        { name: params.id },
         signal,
         ctx,
       );
-      const content = adaptGuideContent(result.text);
-      return formatToolResult(outputs, content, { guide: params.guide, content }, endpoint);
+      const markdown = adaptGuideContent(result.text, params.id);
+      return formatToolResult(outputs, markdown, { id: params.id, markdown }, endpoint);
     },
   });
 
@@ -825,7 +1177,7 @@ export function createRemoteExecutorTools(
           description: 'Session-local bridge job ID returned by executor_execute.',
           minLength: 1,
         }),
-        yieldMs: Type.Optional(
+        waitMs: Type.Optional(
           Type.Integer({
             description: 'Wait this long for the same execution. Defaults to 5000 ms.',
             minimum: 0,
@@ -836,7 +1188,7 @@ export function createRemoteExecutorTools(
       { additionalProperties: false },
     ),
     async execute(_toolCallId, params) {
-      const outcome = await jobs.poll<ExecutorPiToolResult>(params.jobId, params.yieldMs ?? 5_000);
+      const outcome = await jobs.poll<ExecutorPiToolResult>(params.jobId, params.waitMs ?? 5_000);
       if (!outcome) throw new Error(`Unknown or expired Executor job: ${params.jobId}`);
       if (outcome.status === 'completed') return outcome.value;
       if (outcome.status === 'failed') {
@@ -903,7 +1255,7 @@ export function createRemoteExecutorTools(
     },
   });
 
-  return [findTools, describeTool, execute, listGuides, getGuide, getJob, cancelJob, readOutput];
+  return [searchTools, describeTool, execute, listGuides, getGuide, getJob, cancelJob, readOutput];
 }
 
 export function createRemoteExecutorExtension(
