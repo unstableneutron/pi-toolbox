@@ -9,14 +9,23 @@ import type {
   ExecutorEndpoint,
   ExecutorMcpInspection,
   ExecutorMcpResult,
+  JsonObject,
 } from './types';
 
 const CLIENT_NAME = 'pi-executor-remote';
-const CLIENT_VERSION = '0.1.1';
+const CLIENT_VERSION = '0.4.0';
 const DEFAULT_TEXT_RESULT = '(no result)';
+
+export interface ExecutorMcpProgress {
+  progress: number;
+  total?: number;
+  message?: string;
+}
 
 export interface ExecutorMcpCallOptions {
   signal?: AbortSignal;
+  timeoutMs?: number;
+  onProgress?: (progress: ExecutorMcpProgress) => void;
   onElicitation?: (request: ExecutorElicitationRequest) => Promise<ExecutorElicitationResponse>;
 }
 
@@ -108,20 +117,32 @@ async function withExecutorClient<T>(
   }
 }
 
+export async function callRemoteTool(
+  endpoint: ExecutorEndpoint,
+  name: string,
+  args: JsonObject,
+  options: ExecutorMcpCallOptions = {},
+): Promise<ExecutorMcpResult> {
+  return withExecutorClient(endpoint, options, async (client) => {
+    const timeoutMs = options.timeoutMs ?? endpoint.requestTimeoutMs;
+    return normalizeToolResult(
+      await client.callTool({ name, arguments: args }, undefined, {
+        signal: options.signal,
+        timeout: timeoutMs,
+        maxTotalTimeout: timeoutMs,
+        resetTimeoutOnProgress: true,
+        ...(options.onProgress ? { onprogress: options.onProgress } : {}),
+      }),
+    );
+  });
+}
+
 export async function executeRemoteCode(
   endpoint: ExecutorEndpoint,
   code: string,
   options: ExecutorMcpCallOptions = {},
 ): Promise<ExecutorMcpResult> {
-  return withExecutorClient(endpoint, options, async (client) =>
-    normalizeToolResult(
-      await client.callTool({ name: 'execute', arguments: { code } }, undefined, {
-        signal: options.signal,
-        timeout: endpoint.requestTimeoutMs,
-        maxTotalTimeout: endpoint.requestTimeoutMs,
-      }),
-    ),
-  );
+  return callRemoteTool(endpoint, 'execute', { code }, options);
 }
 
 export async function inspectRemoteExecutor(
@@ -129,56 +150,92 @@ export async function inspectRemoteExecutor(
   signal?: AbortSignal,
 ): Promise<ExecutorMcpInspection> {
   return withExecutorClient(endpoint, { signal }, async (client) => {
+    const timeoutMs = Math.min(endpoint.requestTimeoutMs, 30_000);
+    const requestOptions = {
+      signal,
+      timeout: timeoutMs,
+      maxTotalTimeout: timeoutMs,
+    };
     const tools: ExecutorMcpInspection['tools'] = [];
     let cursor: string | undefined;
     do {
-      const response = await client.listTools(cursor ? { cursor } : undefined, {
-        signal,
-        timeout: endpoint.requestTimeoutMs,
-        maxTotalTimeout: endpoint.requestTimeoutMs,
-      });
+      const response = await client.listTools(cursor ? { cursor } : undefined, requestOptions);
       tools.push(
         ...response.tools.map((tool) => ({
           name: tool.name,
-          description: tool.description,
+          ...(tool.title ? { title: tool.title } : {}),
+          ...(tool.description ? { description: tool.description } : {}),
+          inputSchema: cloneJsonObject(tool.inputSchema),
+          ...(tool.outputSchema ? { outputSchema: cloneJsonObject(tool.outputSchema) } : {}),
         })),
       );
       cursor = response.nextCursor;
     } while (cursor);
 
-    return { instructions: client.getInstructions(), tools };
+    const resources: ExecutorMcpInspection['resources'] = [];
+    if (client.getServerCapabilities()?.resources) {
+      cursor = undefined;
+      do {
+        const response = await client.listResources(
+          cursor ? { cursor } : undefined,
+          requestOptions,
+        );
+        resources.push(
+          ...response.resources.map((resource) => ({
+            name: resource.name,
+            uri: resource.uri,
+            ...(resource.description ? { description: resource.description } : {}),
+            ...(resource.mimeType ? { mimeType: resource.mimeType } : {}),
+          })),
+        );
+        cursor = response.nextCursor;
+      } while (cursor);
+    }
+
+    return { instructions: client.getInstructions(), tools, resources };
   });
 }
 
-export function buildSearchCode(input: {
+export function buildFindToolsCode(input: {
   query: string;
   namespace?: string;
-  limit?: number;
-  offset?: number;
-  includeDetails?: boolean;
+  limit: number;
+  offset: number;
 }): string {
   const searchInput = {
     query: input.query,
     ...(input.namespace ? { namespace: input.namespace } : {}),
-    ...(input.limit !== undefined ? { limit: input.limit } : {}),
-    ...(input.offset !== undefined ? { offset: input.offset } : {}),
+    limit: input.limit,
+    offset: input.offset,
   };
-  const serializedInput = JSON.stringify(searchInput);
-  if (!input.includeDetails) {
-    return `return await tools.search(${serializedInput});`;
-  }
-
   return [
-    `const page = await tools.search(${serializedInput});`,
-    'const sourceItems = page.items ?? [];',
-    'const items = [];',
-    'for (let offset = 0; offset < sourceItems.length; offset += 4) {',
-    '  const batch = sourceItems.slice(offset, offset + 4);',
-    '  items.push(...await Promise.all(batch.map(async (item) => ({',
-    '    ...item,',
-    '    details: await tools.describe.tool({ path: item.path }),',
-    '  }))));',
-    '}',
-    'return { ...page, items };',
+    `const page = await tools.search(${JSON.stringify(searchInput)});`,
+    'return {',
+    '  matches: (page.items ?? []).map((item) => ({',
+    '    kind: "integration",',
+    '    path: item.path,',
+    '    description: item.description,',
+    '  })),',
+    '  total: page.total ?? 0,',
+    '  hasMore: page.hasMore === true,',
+    '  ...(page.nextOffset === undefined ? {} : { nextOffset: page.nextOffset }),',
+    '};',
+  ].join('\n');
+}
+
+export function buildDescribeToolCode(path: string): string {
+  const serializedPath = JSON.stringify(path);
+  return [
+    `const details = await tools.describe.tool({ path: ${serializedPath} });`,
+    'if (details.error) return { path: details.path, error: details.error };',
+    'return {',
+    '  path: details.path,',
+    '  description: details.description,',
+    '  input: details.inputTypeScript,',
+    '  output: details.outputTypeScript,',
+    '  ...(details.typeScriptDefinitions',
+    '    ? { definitions: details.typeScriptDefinitions }',
+    '    : {}),',
+    '};',
   ].join('\n');
 }

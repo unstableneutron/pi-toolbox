@@ -10,7 +10,10 @@ import type {
   JsonValue,
 } from './types';
 
-const DEFAULT_REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
+const DEFAULT_YIELD_AFTER_MS = 20 * 1000;
+const DEFAULT_MAX_OUTPUT_BYTES = 12 * 1024;
+const DEFAULT_MAX_OUTPUT_LINES = 300;
 const DEFAULT_BASIC_USERNAME = 'executor';
 
 interface FileConfig {
@@ -19,6 +22,9 @@ interface FileConfig {
   username?: string;
   password?: string;
   requestTimeoutMs?: number;
+  yieldAfterMs?: number;
+  maxOutputBytes?: number;
+  maxOutputLines?: number;
   allowInsecureHttp?: boolean;
 }
 
@@ -61,12 +67,16 @@ function optionalBoolean(value: unknown, field: string): boolean | undefined {
   return value;
 }
 
-function optionalTimeout(value: unknown, field: string): number | undefined {
+function optionalInteger(value: unknown, field: string, minimum: number): number | undefined {
   if (value === undefined) return undefined;
-  if (!Number.isSafeInteger(value) || (value as number) < 1000) {
-    throw new Error(`${field} must be an integer of at least 1000 milliseconds`);
+  if (!Number.isSafeInteger(value) || (value as number) < minimum) {
+    throw new Error(`${field} must be an integer of at least ${minimum}`);
   }
   return value as number;
+}
+
+function optionalTimeout(value: unknown, field: string): number | undefined {
+  return optionalInteger(value, field, 1000);
 }
 
 function parseFileConfig(raw: string, path: string): FileConfig {
@@ -86,6 +96,9 @@ function parseFileConfig(raw: string, path: string): FileConfig {
     username: optionalString(parsed.username, `${path}#username`),
     password: optionalString(parsed.password, `${path}#password`),
     requestTimeoutMs: optionalTimeout(parsed.requestTimeoutMs, `${path}#requestTimeoutMs`),
+    yieldAfterMs: optionalTimeout(parsed.yieldAfterMs, `${path}#yieldAfterMs`),
+    maxOutputBytes: optionalInteger(parsed.maxOutputBytes, `${path}#maxOutputBytes`, 1024),
+    maxOutputLines: optionalInteger(parsed.maxOutputLines, `${path}#maxOutputLines`, 10),
     allowInsecureHttp: optionalBoolean(parsed.allowInsecureHttp, `${path}#allowInsecureHttp`),
   };
 }
@@ -110,9 +123,17 @@ function parseEnvBoolean(value: string | undefined, field: string): boolean | un
   throw new Error(`${field} must be true, false, 1, or 0`);
 }
 
-function parseEnvTimeout(value: string | undefined): number | undefined {
+function parseEnvInteger(
+  value: string | undefined,
+  field: string,
+  minimum: number,
+): number | undefined {
   if (value === undefined || value.trim() === '') return undefined;
-  return optionalTimeout(Number(value), 'PI_EXECUTOR_REQUEST_TIMEOUT_MS');
+  return optionalInteger(Number(value), field, minimum);
+}
+
+function parseEnvTimeout(value: string | undefined): number | undefined {
+  return parseEnvInteger(value, 'PI_EXECUTOR_REQUEST_TIMEOUT_MS', 1000);
 }
 
 function envConfig(env: NodeJS.ProcessEnv): FileConfig {
@@ -122,6 +143,21 @@ function envConfig(env: NodeJS.ProcessEnv): FileConfig {
     username: optionalString(env.PI_EXECUTOR_USERNAME, 'PI_EXECUTOR_USERNAME'),
     password: optionalString(env.PI_EXECUTOR_PASSWORD, 'PI_EXECUTOR_PASSWORD'),
     requestTimeoutMs: parseEnvTimeout(env.PI_EXECUTOR_REQUEST_TIMEOUT_MS),
+    yieldAfterMs: parseEnvInteger(
+      env.PI_EXECUTOR_YIELD_AFTER_MS,
+      'PI_EXECUTOR_YIELD_AFTER_MS',
+      1000,
+    ),
+    maxOutputBytes: parseEnvInteger(
+      env.PI_EXECUTOR_MAX_OUTPUT_BYTES,
+      'PI_EXECUTOR_MAX_OUTPUT_BYTES',
+      1024,
+    ),
+    maxOutputLines: parseEnvInteger(
+      env.PI_EXECUTOR_MAX_OUTPUT_LINES,
+      'PI_EXECUTOR_MAX_OUTPUT_LINES',
+      10,
+    ),
     allowInsecureHttp: parseEnvBoolean(
       env.PI_EXECUTOR_ALLOW_INSECURE_HTTP,
       'PI_EXECUTOR_ALLOW_INSECURE_HTTP',
@@ -146,6 +182,9 @@ function mergeConfig(base: FileConfig, override: FileConfig): FileConfig {
     username: override.username ?? inheritedAuth.username,
     password: override.password ?? inheritedAuth.password,
     requestTimeoutMs: override.requestTimeoutMs ?? base.requestTimeoutMs,
+    yieldAfterMs: override.yieldAfterMs ?? base.yieldAfterMs,
+    maxOutputBytes: override.maxOutputBytes ?? base.maxOutputBytes,
+    maxOutputLines: override.maxOutputLines ?? base.maxOutputLines,
     allowInsecureHttp: override.allowInsecureHttp ?? base.allowInsecureHttp,
   };
 }
@@ -275,6 +314,9 @@ async function resolveConfiguredEndpoint(
     baseUrl: normalizeBaseUrl(config.url, config.allowInsecureHttp ?? false),
     auth: authFromConfig(config),
     requestTimeoutMs: config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+    yieldAfterMs: config.yieldAfterMs ?? DEFAULT_YIELD_AFTER_MS,
+    maxOutputBytes: config.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES,
+    maxOutputLines: config.maxOutputLines ?? DEFAULT_MAX_OUTPUT_LINES,
     source: environmentOverrides ? 'environment' : (loaded?.source ?? 'environment'),
     sourcePath: environmentOverrides ? undefined : loaded?.sourcePath,
   };
@@ -310,12 +352,15 @@ export async function resolveExecutorEndpoint(
     throw error;
   }
   const manifest = parseServerManifest(raw, manifestPath);
-  const timeout = mergeConfig({}, envConfig(env)).requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const bridgeConfig = mergeConfig({}, envConfig(env));
 
   return {
     baseUrl: normalizeBaseUrl(manifest.connection.origin, false),
     auth: manifest.connection.auth,
-    requestTimeoutMs: timeout,
+    requestTimeoutMs: bridgeConfig.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+    yieldAfterMs: bridgeConfig.yieldAfterMs ?? DEFAULT_YIELD_AFTER_MS,
+    maxOutputBytes: bridgeConfig.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES,
+    maxOutputLines: bridgeConfig.maxOutputLines ?? DEFAULT_MAX_OUTPUT_LINES,
     source: 'daemon-manifest',
     sourcePath: manifestPath,
   };

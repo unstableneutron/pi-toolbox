@@ -2,7 +2,13 @@ import { createServer } from 'node:http';
 
 import { afterEach, describe, expect, test } from 'vitest';
 
-import { buildSearchCode, executeRemoteCode, inspectRemoteExecutor } from './mcp-client';
+import {
+  buildDescribeToolCode,
+  buildFindToolsCode,
+  callRemoteTool,
+  executeRemoteCode,
+  inspectRemoteExecutor,
+} from './mcp-client';
 import type { ExecutorEndpoint } from './types';
 
 interface JsonRpcRequest {
@@ -63,7 +69,7 @@ async function startTestServer(expectedToken: string): Promise<TestServer> {
     if (request.method === 'initialize') {
       result = {
         protocolVersion: '2025-06-18',
-        capabilities: { tools: {} },
+        capabilities: { tools: {}, resources: {} },
         serverInfo: { name: 'executor', version: '1.0.0' },
         instructions: 'Use Executor tools through execute.',
       };
@@ -79,14 +85,38 @@ async function startTestServer(expectedToken: string): Promise<TestServer> {
               required: ['code'],
             },
           },
+          {
+            name: 'skills',
+            description: 'Fetch Executor guidance.',
+            inputSchema: {
+              type: 'object',
+              properties: { name: { type: 'string' } },
+            },
+          },
+        ],
+      };
+    } else if (request.method === 'resources/list') {
+      result = {
+        resources: [
+          {
+            name: 'Executor Shell',
+            uri: 'ui://executor/shell.html',
+            mimeType: 'text/html;profile=mcp-app',
+          },
         ],
       };
     } else if (request.method === 'tools/call') {
-      const params = request.params as { arguments?: { code?: string } } | undefined;
-      const code = params?.arguments?.code ?? '';
+      const params = request.params as
+        | { name?: string; arguments?: Record<string, unknown> }
+        | undefined;
+      const name = params?.name ?? '';
+      const args = params?.arguments ?? {};
+      const code = typeof args.code === 'string' ? args.code : '';
+      if (code === 'slow') await new Promise((resolve) => setTimeout(resolve, 100));
+      const text = name === 'execute' ? `ran:${code}` : `called:${name}:${JSON.stringify(args)}`;
       result = {
-        content: [{ type: 'text', text: `ran:${code}` }],
-        structuredContent: { status: 'completed', code },
+        content: [{ type: 'text', text }],
+        structuredContent: { status: 'completed', name, args },
       };
     } else {
       outgoing.writeHead(404).end();
@@ -122,6 +152,9 @@ function endpoint(baseUrl: string): ExecutorEndpoint {
     baseUrl,
     auth: { kind: 'bearer', token: 'test-token' },
     requestTimeoutMs: 5000,
+    yieldAfterMs: 1000,
+    maxOutputBytes: 12_288,
+    maxOutputLines: 300,
     source: 'environment',
   };
 }
@@ -137,7 +170,11 @@ describe('remote Executor MCP client', () => {
 
     expect(result).toEqual({
       text: 'ran:return 1',
-      structuredContent: { status: 'completed', code: 'return 1' },
+      structuredContent: {
+        status: 'completed',
+        name: 'execute',
+        args: { code: 'return 1' },
+      },
       isError: false,
     });
     expect(server.requests.every((request) => request.authorization === 'Bearer test-token')).toBe(
@@ -146,32 +183,67 @@ describe('remote Executor MCP client', () => {
     expect(server.requests[0]?.elicitationMode).toBe('native');
   });
 
-  test('inspects the remote MCP server', async () => {
+  test('enforces the configured hard request timeout', async () => {
+    const server = await startTestServer('test-token');
+    const shortEndpoint = { ...endpoint(server.baseUrl), requestTimeoutMs: 20 };
+
+    await expect(executeRemoteCode(shortEndpoint, 'slow')).rejects.toThrow();
+  });
+
+  test('calls any native MCP tool', async () => {
+    const server = await startTestServer('test-token');
+    const result = await callRemoteTool(endpoint(server.baseUrl), 'skills', { name: 'execute' });
+
+    expect(result.text).toBe('called:skills:{"name":"execute"}');
+    expect(result.structuredContent).toMatchObject({
+      name: 'skills',
+      args: { name: 'execute' },
+    });
+  });
+
+  test('inspects tools, schemas, and resources from the remote MCP server', async () => {
     const server = await startTestServer('test-token');
     const result = await inspectRemoteExecutor(endpoint(server.baseUrl));
 
     expect(result.instructions).toBe('Use Executor tools through execute.');
-    expect(result.tools.map((tool) => tool.name)).toEqual(['execute']);
+    expect(result.tools.map((tool) => tool.name)).toEqual(['execute', 'skills']);
+    expect(result.tools[1]?.inputSchema).toMatchObject({
+      type: 'object',
+      properties: { name: { type: 'string' } },
+    });
+    expect(result.resources).toEqual([
+      {
+        name: 'Executor Shell',
+        uri: 'ui://executor/shell.html',
+        mimeType: 'text/html;profile=mcp-app',
+      },
+    ]);
   });
 });
 
-describe('Executor search code', () => {
+describe('Executor discovery code', () => {
   test('serializes search inputs without allowing code injection', () => {
-    const code = buildSearchCode({
+    const code = buildFindToolsCode({
       query: 'issues"; throw new Error("bad")',
       namespace: 'github',
       limit: 5,
       offset: 10,
     });
 
-    expect(code).toBe(
-      'return await tools.search({"query":"issues\\\"; throw new Error(\\\"bad\\\")","namespace":"github","limit":5,"offset":10});',
+    expect(code).toContain(
+      'tools.search({"query":"issues\\\"; throw new Error(\\\"bad\\\")","namespace":"github","limit":5,"offset":10})',
     );
+    expect(code).toContain('kind: "integration"');
+    expect(code).not.toContain('tools.describe.tool');
   });
 
-  test('optionally describes every returned tool', () => {
-    const code = buildSearchCode({ query: 'github issues', includeDetails: true });
-    expect(code).toContain('tools.search({"query":"github issues"})');
-    expect(code).toContain('tools.describe.tool({ path: item.path })');
+  test('describes one exact tool path without allowing code injection', () => {
+    const code = buildDescribeToolCode('github.x"; throw new Error("bad")');
+
+    expect(code).toContain(
+      'tools.describe.tool({ path: "github.x\\\"; throw new Error(\\\"bad\\\")" })',
+    );
+    expect(code).toContain('input: details.inputTypeScript');
+    expect(code).toContain('definitions: details.typeScriptDefinitions');
   });
 });

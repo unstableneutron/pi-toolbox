@@ -17,6 +17,9 @@ export interface ExecutorEndpoint {
   baseUrl: string;
   auth?: ExecutorAuth;
   requestTimeoutMs: number;
+  yieldAfterMs: number;
+  maxOutputBytes: number;
+  maxOutputLines: number;
   source: ExecutorEndpointSource;
   sourcePath?: string;
 }
@@ -47,7 +50,23 @@ export interface ExecutorMcpResult {
   isError: boolean;
 }
 
+export interface ExecutorMcpTool {
+  name: string;
+  title?: string;
+  description?: string;
+  inputSchema: JsonObject;
+  outputSchema?: JsonObject;
+}
+
+export interface ExecutorMcpResource {
+  name: string;
+  uri: string;
+  description?: string;
+  mimeType?: string;
+}
+
 export interface ExecutorMcpInspection {
   instructions?: string;
-  tools: Array<{ name: string; description?: string }>;
+  tools: ExecutorMcpTool[];
+  resources: ExecutorMcpResource[];
 }

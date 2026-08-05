@@ -32,7 +32,10 @@ describe('Executor endpoint resolution', () => {
     expect(endpoint).toEqual({
       baseUrl: 'http://localhost:4789',
       auth: { kind: 'bearer', token: 'daemon-secret' },
-      requestTimeoutMs: 600_000,
+      requestTimeoutMs: 300_000,
+      yieldAfterMs: 20_000,
+      maxOutputBytes: 12_288,
+      maxOutputLines: 300,
       source: 'daemon-manifest',
       sourcePath: '/home/test/.executor/server-control/server.json',
     });
@@ -43,6 +46,9 @@ describe('Executor endpoint resolution', () => {
       env: {
         PI_EXECUTOR_TOKEN: 'environment-secret',
         PI_EXECUTOR_REQUEST_TIMEOUT_MS: '9000',
+        PI_EXECUTOR_YIELD_AFTER_MS: '3000',
+        PI_EXECUTOR_MAX_OUTPUT_BYTES: '2048',
+        PI_EXECUTOR_MAX_OUTPUT_LINES: '50',
       },
       homeDir: '/home/test',
       readTextFile: reader({
@@ -61,6 +67,9 @@ describe('Executor endpoint resolution', () => {
       baseUrl: 'https://executor.example.com',
       auth: { kind: 'bearer', token: 'environment-secret' },
       requestTimeoutMs: 9000,
+      yieldAfterMs: 3000,
+      maxOutputBytes: 2048,
+      maxOutputLines: 50,
       source: 'environment',
     });
     expect(endpoint.sourcePath).toBeUndefined();
