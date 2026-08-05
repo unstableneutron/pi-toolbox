@@ -34,6 +34,7 @@ function createHarness() {
   const handlers = new Map<string, (event: any, ctx: any) => unknown>();
   const registerCommand = vi.fn();
   const notify = vi.fn();
+  const setStatus = vi.fn();
   const setModel = vi.fn(async () => true);
   const setThinkingLevel = vi.fn();
   const sendUserMessage = vi.fn();
@@ -66,6 +67,7 @@ function createHarness() {
     },
     ui: {
       notify,
+      setStatus,
       addAutocompleteProvider,
       setEditorComponent,
       getEditorComponent,
@@ -78,6 +80,7 @@ function createHarness() {
     handlers,
     registerCommand,
     notify,
+    setStatus,
     setModel,
     setThinkingLevel,
     sendUserMessage,
@@ -692,6 +695,11 @@ describe('editorShortcut extension', () => {
       'Fast mode: on (restored for current model)',
       'info',
     );
+    expect(harness.setStatus.mock.calls).toEqual([
+      ['editor-shortcut-fast', '⚡'],
+      ['editor-shortcut-fast', undefined],
+      ['editor-shortcut-fast', '⚡'],
+    ]);
   });
 
   test('/fast isolates matching model ids from different providers', async () => {
@@ -746,6 +754,7 @@ describe('editorShortcut extension', () => {
     expect(request).toBeUndefined();
     expect(input).toEqual({ action: 'transform', text: 'Please do the work' });
     expect(harness.notify).not.toHaveBeenCalled();
+    expect(harness.setStatus).not.toHaveBeenCalled();
   });
 
   test('/fast does not affect pi-subagent sessions', async () => {
@@ -769,6 +778,7 @@ describe('editorShortcut extension', () => {
     expect(request).toBeUndefined();
     expect(input).toEqual({ action: 'transform', text: 'Please do the work' });
     expect(harness.notify).not.toHaveBeenCalled();
+    expect(harness.setStatus).not.toHaveBeenCalled();
   });
 
   test('ineligible fast directives do not block other editor shortcuts', async () => {

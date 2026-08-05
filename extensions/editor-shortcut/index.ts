@@ -10,6 +10,7 @@ import {
   registerFastCommand,
   setFastModeServiceTier,
   syncFastModeForModel,
+  updateFastModeIndicator,
 } from './commands/fast';
 import { getModelCandidates } from './commands/model';
 import {
@@ -42,6 +43,7 @@ export default function editorShortcut(pi: ExtensionAPI) {
     if (!isFastModeEligibleSession(ctx)) return;
 
     const transition = syncFastModeForModel(event.model, fastMode);
+    updateFastModeIndicator(ctx, fastMode);
     if (transition === 'on') {
       ctx.ui.notify('Fast mode: on (restored for current model)', 'info');
     } else if (transition === 'off' && !isPriorityCapableModel(event.model)) {
@@ -60,6 +62,7 @@ export default function editorShortcut(pi: ExtensionAPI) {
 
     if (!hasTui(ctx)) return;
 
+    updateFastModeIndicator(ctx, fastMode);
     ctx.ui.addAutocompleteProvider((current) =>
       createEditorShortcutAutocompleteProvider(
         current,

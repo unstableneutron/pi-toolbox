@@ -8,6 +8,7 @@ import { hasTui } from '../../shared/ui-mode';
 import { modelRef, normalizeModelRef } from './model';
 
 const FAST_MODE_SERVICE_TIER = 'priority';
+const FAST_MODE_STATUS_KEY = 'editor-shortcut-fast';
 
 const PRIORITY_CAPABLE_MODEL_REFS = [
   'openai-codex/gpt-5.3-codex-spark',
@@ -40,6 +41,11 @@ export function isFastModeEligibleSession(
   env: NodeJS.ProcessEnv = process.env,
 ): boolean {
   return hasTui(ctx) && env.PI_SUBAGENT_CHILD !== '1';
+}
+
+export function updateFastModeIndicator(ctx: ExtensionContext, state: FastModeState): void {
+  if (!isFastModeEligibleSession(ctx)) return;
+  ctx.ui.setStatus(FAST_MODE_STATUS_KEY, state.enabled ? '⚡' : undefined);
 }
 
 function getPriorityModelRef(model: Model<Api> | undefined): string | undefined {
@@ -124,6 +130,7 @@ function applyFastAction(
 
   if (!ref) {
     state.enabled = false;
+    updateFastModeIndicator(ctx, state);
     notifyUnsupportedModel(ctx);
     return false;
   }
@@ -137,6 +144,7 @@ function applyFastAction(
     state.enabledModelRefs.delete(ref);
   }
 
+  updateFastModeIndicator(ctx, state);
   notifyFastModeStatus(ctx, state);
   return true;
 }
