@@ -53,6 +53,7 @@ describe('native Executor Pi tools', () => {
       'executor_cancel_job',
       'executor_read_output',
     ]);
+    expect(tools.every((tool) => tool.renderCall && tool.renderResult)).toBe(true);
   });
 
   test('keeps optional search parameters out of OpenAI strict mode', () => {
@@ -628,6 +629,8 @@ describe('native Executor Pi tools', () => {
     expect(tool.name).toBe('executor_create_artifact');
     expect(tool.executionMode).toBe('sequential');
     expect(tool.description).toContain('executor_edit_artifact');
+    expect(tool.renderCall).toBeTypeOf('function');
+    expect(tool.renderResult).toBeTypeOf('function');
     expect(tool.parameters).toMatchObject({
       required: ['code'],
       properties: { code: { type: 'string' } },

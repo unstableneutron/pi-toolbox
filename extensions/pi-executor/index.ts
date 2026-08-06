@@ -25,6 +25,7 @@ import {
   type ExecutorMcpProgress,
 } from './src/mcp-client';
 import { ExecutorOutputStore } from './src/output-store';
+import { createExecutorRenderer } from './src/rendering';
 import type {
   ExecutorEndpoint,
   ExecutorMcpInspection,
@@ -805,12 +806,17 @@ export function createRemoteMcpProxyTool(
   const description =
     adapter?.description ??
     `Call Executor's ${JSON.stringify(remoteTool.name)} MCP capability. ${compactDescription(remoteTool.description)}`;
+  const label = adapter?.label ?? `Executor: ${remoteTool.title ?? remoteTool.name}`;
   return defineTool({
     name: localName,
-    label: adapter?.label ?? `Executor: ${remoteTool.title ?? remoteTool.name}`,
+    label,
     description,
     parameters: proxyToolParameters(remoteTool),
     ...(adapter?.executionMode ? { executionMode: adapter.executionMode } : {}),
+    ...createExecutorRenderer({
+      kind: 'proxy',
+      label: label.replace(/^Executor:\s*/, 'Executor '),
+    }),
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const endpoint = await deps.resolveEndpoint(ctx.cwd, isProjectTrusted(ctx));
       let acceptingProgress = true;
@@ -871,6 +877,7 @@ export function createRemoteExecutorTools(
       'When executor_search_tools returns nextCursor, reuse the same query, kinds, namespace, and limit for the next page.',
       'Call executor_search_tools with load=true when you intend to call a matched native tool.',
     ],
+    ...createExecutorRenderer({ kind: 'search', label: 'Executor Search' }),
     parameters: Type.Object(
       {
         query: Type.String({ description: 'Short capability query.', minLength: 1 }),
@@ -1032,6 +1039,7 @@ export function createRemoteExecutorTools(
     label: 'Executor: Describe Tool',
     description:
       'Get the compact TypeScript input and success-data contract for one connected integration path returned by executor_search_tools.',
+    ...createExecutorRenderer({ kind: 'describe', label: 'Executor Describe' }),
     parameters: Type.Object(
       { path: Type.String({ description: 'Exact integration tool path.', minLength: 1 }) },
       { additionalProperties: false },
@@ -1067,6 +1075,7 @@ export function createRemoteExecutorTools(
       'Do not use fetch inside executor_execute; use configured tools.* calls.',
       'If executor_execute returns a running job, use executor_get_job instead of restarting the code.',
     ],
+    ...createExecutorRenderer({ kind: 'execute', label: 'Executor Execute' }),
     parameters: Type.Object(
       {
         code: Type.String({
@@ -1136,6 +1145,7 @@ export function createRemoteExecutorTools(
     name: 'executor_list_guides',
     label: 'Executor: List Guides',
     description: 'List the exact IDs and summaries of available Executor procedural guides.',
+    ...createExecutorRenderer({ kind: 'list-guides', label: 'Executor Guides' }),
     parameters: Type.Object({}, { additionalProperties: false }),
     async execute(_toolCallId, _params, signal, _onUpdate, ctx) {
       const { endpoint, result } = await requestExecutorTool(deps, 'skills', {}, signal, ctx);
@@ -1149,6 +1159,7 @@ export function createRemoteExecutorTools(
     label: 'Executor: Get Guide',
     description:
       'Fetch one Executor procedural guide by exact guide ID from executor_list_guides. Guide IDs are not Pi tool names or integration paths.',
+    ...createExecutorRenderer({ kind: 'guide', label: 'Executor Guide' }),
     parameters: Type.Object(
       { id: Type.String({ description: 'Exact guide ID.', minLength: 1 }) },
       { additionalProperties: false },
@@ -1171,6 +1182,7 @@ export function createRemoteExecutorTools(
     label: 'Executor: Get Job',
     description:
       'Wait briefly for a yielded Executor job and return its final result when ready. A running response can be checked again with the same job ID.',
+    ...createExecutorRenderer({ kind: 'job', label: 'Executor Job' }),
     parameters: Type.Object(
       {
         jobId: Type.String({
@@ -1203,6 +1215,7 @@ export function createRemoteExecutorTools(
     name: 'executor_cancel_job',
     label: 'Executor: Cancel Job',
     description: 'Cancel one yielded session-local Executor bridge job by ID.',
+    ...createExecutorRenderer({ kind: 'cancel-job', label: 'Executor Cancel Job' }),
     parameters: Type.Object(
       { jobId: Type.String({ description: 'Session-local bridge job ID.', minLength: 1 }) },
       { additionalProperties: false },
@@ -1219,6 +1232,7 @@ export function createRemoteExecutorTools(
     label: 'Executor: Read Output',
     description:
       'Read a bounded page from a truncated Executor result. Use the output ID and next offset from the truncation notice.',
+    ...createExecutorRenderer({ kind: 'read-output', label: 'Executor Read Output' }),
     parameters: Type.Object(
       {
         outputId: Type.String({ description: 'Truncated output ID.', minLength: 1 }),
