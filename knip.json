@@ -1,7 +1,7 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "tags": ["-lintignore"],
-  "ignoreBinaries": ["aube", "aubr", "duckdb", "gitchamber"],
+  "ignoreBinaries": ["aube", "aubr", "duckdb", "gitchamber", "mkfifo"],
   "ignoreDependencies": ["@earendil-works/pi-agent-core", "@aws-sdk/client-bedrock-runtime", "tsx"],
   "ignoreExportsUsedInFile": {
     "interface": true,
@@ -29,7 +29,7 @@
       "project": ["**/*.ts"]
     },
     "extensions/pi-fff-search": {
-      "entry": ["index.ts"],
+      "entry": ["index.ts", "robust-read/index.ts"],
       "project": ["**/*.ts"]
     },
     "extensions/pi-codex-browser": {

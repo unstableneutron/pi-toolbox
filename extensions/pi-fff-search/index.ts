@@ -28,6 +28,15 @@ import {
   formatToolCallText,
   shortenDisplayPath,
 } from './rendering';
+import {
+  createRobustReader,
+  loadRobustReadConfig,
+  RobustReadError,
+  SessionReadLedger,
+  type RobustReadConfig,
+  type RobustReadDependencies,
+  type RobustReader,
+} from './robust-read';
 
 type PublicToolName = 'fff_find_files' | 'fff_search_terms' | 'fff_grep';
 
@@ -329,6 +338,10 @@ export interface CreatePiFffSearchExtensionOptions {
   createBuiltInFindTool?: typeof createFindToolDefinition;
   createBuiltInLsTool?: typeof createLsToolDefinition;
   findGitRootForReadFallback?: (cwd: string) => string | null | Promise<string | null>;
+  robustReadConfig?: Partial<RobustReadConfig>;
+  robustReadDependencies?: RobustReadDependencies;
+  robustReader?: RobustReader;
+  readLedger?: SessionReadLedger;
 }
 
 export default createPiFffSearchExtension();
@@ -2171,6 +2184,23 @@ export function createPiFffSearchExtension(options: CreatePiFffSearchExtensionOp
   const createBuiltInLs = options.createBuiltInLsTool ?? createLsToolDefinition;
   const findGitRootForReadFallback =
     options.findGitRootForReadFallback ?? defaultFindGitRootForReadFallback;
+  const robustReadConfig = loadRobustReadConfig(options.robustReadConfig);
+  const readLedger = options.readLedger ?? new SessionReadLedger();
+  const robustReader =
+    options.robustReader ??
+    createRobustReader(robustReadConfig, options.robustReadDependencies, readLedger);
+
+  const sessionKey = (ctx: unknown): string => {
+    const sessionManager =
+      ctx && typeof ctx === 'object' && 'sessionManager' in ctx
+        ? (
+            ctx as {
+              sessionManager?: { getSessionId?: () => string; getSessionFile?: () => string };
+            }
+          ).sessionManager
+        : undefined;
+    return sessionManager?.getSessionId?.() ?? sessionManager?.getSessionFile?.() ?? 'ephemeral';
+  };
 
   return function piFffSearchExtension(pi: ExtensionAPI) {
     const builtInTemplates =
@@ -2255,6 +2285,29 @@ export function createPiFffSearchExtension(options: CreatePiFffSearchExtensionOp
     pi.on('session_shutdown', async () => {
       unregisterBashRewriteProvider();
     });
+
+    if (overrideBuiltinRead) {
+      pi.on('session_start', async () => {
+        readLedger.clear();
+      });
+      pi.on('tool_call', async (event, ctx) => {
+        if (event.toolName !== 'write' && event.toolName !== 'edit') return;
+        const requestedPath =
+          event.input && typeof event.input.path === 'string' ? event.input.path : null;
+        if (!requestedPath) return;
+        const decision = await readLedger.checkMutation(sessionKey(ctx), requestedPath, ctx.cwd, {
+          enforceReadBeforeWrite: robustReadConfig.enforceReadBeforeWrite,
+          rejectStaleWrites: robustReadConfig.rejectStaleWrites,
+        });
+        return decision.block ? { block: true, reason: decision.reason } : undefined;
+      });
+      pi.on('tool_result', async (event, ctx) => {
+        if (event.isError || (event.toolName !== 'write' && event.toolName !== 'edit')) return;
+        const requestedPath =
+          event.input && typeof event.input.path === 'string' ? event.input.path : null;
+        if (requestedPath) await readLedger.recordMutation(sessionKey(ctx), requestedPath, ctx.cwd);
+      });
+    }
 
     pi.on('before_agent_start', async (event) => ({
       systemPrompt: `${event.systemPrompt}\n\n${SEARCH_TOOL_PROMPT}`,
@@ -2436,6 +2489,13 @@ export function createPiFffSearchExtension(options: CreatePiFffSearchExtensionOp
     if (overrideBuiltinRead && builtInTemplates) {
       pi.registerTool({
         ...builtInTemplates.read,
+        description: `Safely read text, images, Jupyter notebooks, PDFs, Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, and CSV files. Text and converted documents are bounded to ${robustReadConfig.maxLines} lines, ${Math.floor(robustReadConfig.maxResponseBytes / 1024)} KiB, and ${robustReadConfig.maxLineCharacters} characters per line. Continue from the returned offset. PDF extraction uses the local text layer only and reports pages that need OCR/vision; notebook binary assets and oversized outputs are reported as omissions.`,
+        promptGuidelines: [
+          ...(builtInTemplates.read.promptGuidelines ?? []),
+          'Use read for supported structured documents and continue from the returned offset instead of rereading the whole file.',
+          'Treat PDF pages marked OCR/vision needed and notebook omissions as unextracted content; do not claim they were read.',
+          'Do not bypass read with shell commands for unknown, large, or structured files.',
+        ],
         renderCall(args, theme, context) {
           return wrapBuiltinReadCallRenderer({
             renderArgs: args as Record<string, unknown>,
@@ -2454,15 +2514,56 @@ export function createPiFffSearchExtension(options: CreatePiFffSearchExtensionOp
         },
         async execute(toolCallId, params, signal, onUpdate, ctx) {
           const builtInRead = createBuiltInRead(ctx.cwd);
+          const executeRead = async (readParams: typeof params) => {
+            // Explicit custom factories may target remote filesystems and remain
+            // responsible for their own safety contract. The normal local path
+            // always uses robust-read.
+            if (options.createBuiltInReadTool) {
+              return builtInRead.execute(
+                toolCallId,
+                readParams,
+                withBuiltinToolTimeout(signal),
+                onUpdate,
+                ctx,
+              );
+            }
+
+            const result = await robustReader.read(readParams, {
+              cwd: ctx.cwd,
+              sessionId: sessionKey(ctx),
+              signal: withBuiltinToolTimeout(signal),
+            });
+            if (result.kind === 'directory') {
+              throw new RobustReadError(
+                'directory',
+                'EISDIR: illegal operation on a directory, read',
+                { requestedPath: readParams.path },
+              );
+            }
+            if (result.kind === 'image') {
+              const nativeImageRead = createReadToolDefinition(ctx.cwd, {
+                operations: {
+                  access: async () => {},
+                  readFile: async () => result.buffer,
+                  detectImageMimeType: async () => result.mimeType,
+                },
+              });
+              return nativeImageRead.execute(
+                toolCallId,
+                { ...readParams, path: result.target.canonicalPath },
+                withBuiltinToolTimeout(signal),
+                onUpdate,
+                ctx,
+              );
+            }
+            return {
+              content: [{ type: 'text' as const, text: result.content }],
+              details: result.details,
+            } as Awaited<ReturnType<typeof builtInRead.execute>>;
+          };
 
           try {
-            return await builtInRead.execute(
-              toolCallId,
-              params,
-              withBuiltinToolTimeout(signal),
-              onUpdate,
-              ctx,
-            );
+            return await executeRead(params);
           } catch (error) {
             const requestedPath =
               typeof (params as Record<string, unknown>).path === 'string'
@@ -2527,58 +2628,53 @@ export function createPiFffSearchExtension(options: CreatePiFffSearchExtensionOp
                 throw error;
               }
 
-              return await builtInRead
-                .execute(
-                  toolCallId,
-                  { ...(params as Record<string, unknown>), path: resolvedPath },
-                  withBuiltinToolTimeout(signal),
-                  onUpdate,
-                  ctx,
-                )
-                .then((resolvedResult) => {
-                  const firstTextBlock = resolvedResult.content.find(
-                    (entry): entry is { type: 'text'; text: string } =>
-                      entry.type === 'text' && typeof entry.text === 'string',
-                  );
-                  if (!firstTextBlock) {
-                    return resolvedResult;
-                  }
+              return await executeRead({
+                ...(params as Record<string, unknown>),
+                path: resolvedPath,
+              } as typeof params).then((resolvedResult) => {
+                const firstTextBlock = resolvedResult.content.find(
+                  (entry): entry is { type: 'text'; text: string } =>
+                    entry.type === 'text' && typeof entry.text === 'string',
+                );
+                if (!firstTextBlock) {
+                  return resolvedResult;
+                }
 
-                  const fixedPath = formatFixedReadPath(resolvedPath, ctx.cwd);
-                  const resolutionNotice = broadenedResolution
-                    ? `\nAuto-resolved missing read path ${requestedPath} → ${fixedPath}.`
-                    : '';
-                  const updatedContent = resolvedResult.content.map((entry, index) =>
-                    index === resolvedResult.content.indexOf(firstTextBlock)
-                      ? entry.type === 'text'
-                        ? {
-                            ...entry,
-                            text: `Path (fixed): ${fixedPath}${resolutionNotice}\n\n${entry.text}`,
-                          }
-                        : entry
-                      : entry,
-                  );
+                const fixedPath = formatFixedReadPath(resolvedPath, ctx.cwd);
+                const resolutionNotice = broadenedResolution
+                  ? `\nAuto-resolved missing read path ${requestedPath} → ${fixedPath}.`
+                  : '';
+                const updatedContent = resolvedResult.content.map((entry, index) =>
+                  index === resolvedResult.content.indexOf(firstTextBlock)
+                    ? entry.type === 'text'
+                      ? {
+                          ...entry,
+                          text: `Path (fixed): ${fixedPath}${resolutionNotice}\n\n${entry.text}`,
+                        }
+                      : entry
+                    : entry,
+                );
 
-                  return {
-                    ...resolvedResult,
-                    content: updatedContent,
-                    details:
-                      resolvedResult.details && typeof resolvedResult.details === 'object'
-                        ? {
-                            ...resolvedResult.details,
-                            routedVia: 'fff-then-builtin',
-                            resolvedFromPath: requestedPath,
-                            resolvedToPath: fixedPath,
-                            broadenedResolution,
-                          }
-                        : {
-                            routedVia: 'fff-then-builtin',
-                            resolvedFromPath: requestedPath,
-                            resolvedToPath: fixedPath,
-                            broadenedResolution,
-                          },
-                  };
-                });
+                return {
+                  ...resolvedResult,
+                  content: updatedContent,
+                  details:
+                    resolvedResult.details && typeof resolvedResult.details === 'object'
+                      ? {
+                          ...resolvedResult.details,
+                          routedVia: 'fff-then-builtin',
+                          resolvedFromPath: requestedPath,
+                          resolvedToPath: fixedPath,
+                          broadenedResolution,
+                        }
+                      : {
+                          routedVia: 'fff-then-builtin',
+                          resolvedFromPath: requestedPath,
+                          resolvedToPath: fixedPath,
+                          broadenedResolution,
+                        },
+                };
+              });
             } catch (resolutionError) {
               if (resolutionError === error) {
                 throw resolutionError;

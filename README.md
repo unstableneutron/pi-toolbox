@@ -156,7 +156,7 @@ Custom extensions built in this repo:
 - `pi-bash-rewrite` — optional bash override that routes recognized shell idioms to structured tools.
 - `pi-conditional-context` — model-conditional `AGENTS.md` / `CLAUDE.md` blocks via Markdown-safe directives.
 - `pi-executor` — remote-only `search`/`execute` bridge to an existing authenticated Executor daemon.
-- `pi-fff-search` — fff-router backed find/grep/read tools.
+- `pi-fff-search` — fff-router backed find/grep plus bounded, safe, format-aware reads for text, images, notebooks, PDFs, and office documents. See its [robust-read guide](./extensions/pi-fff-search/README.md).
 - `pi-md-hooks` — markdown rendering hooks.
 - `pi-native-split` — session splitting helpers (Ghostty/Kitty/Herdr via shared native launch).
 - `pi-retry` — retry + refusal-recovery state machine.
