@@ -2548,13 +2548,22 @@ export function createPiFffSearchExtension(options: CreatePiFffSearchExtensionOp
                   detectImageMimeType: async () => result.mimeType,
                 },
               });
-              return nativeImageRead.execute(
+              const nativeResult = await nativeImageRead.execute(
                 toolCallId,
                 { ...readParams, path: result.target.canonicalPath },
                 withBuiltinToolTimeout(signal),
                 onUpdate,
                 ctx,
               );
+              if (!result.notice) return nativeResult;
+              return {
+                ...nativeResult,
+                content: nativeResult.content.map((entry, index) =>
+                  index === 0 && entry.type === 'text'
+                    ? { ...entry, text: `${result.notice}\n\n${entry.text}` }
+                    : entry,
+                ),
+              };
             }
             return {
               content: [{ type: 'text' as const, text: result.content }],
@@ -2628,9 +2637,17 @@ export function createPiFffSearchExtension(options: CreatePiFffSearchExtensionOp
                 throw error;
               }
 
+              const fixedPath = formatFixedReadPath(resolvedPath, ctx.cwd);
+              const resolutionNotice = broadenedResolution
+                ? `\nAuto-resolved missing read path ${requestedPath} → ${fixedPath}.`
+                : '';
+              const responsePrefix = `Path (fixed): ${fixedPath}${resolutionNotice}`;
               return await executeRead({
                 ...(params as Record<string, unknown>),
                 path: resolvedPath,
+                ...(options.createBuiltInReadTool
+                  ? {}
+                  : { responsePrefix, recoveredFromPath: requestedPath }),
               } as typeof params).then((resolvedResult) => {
                 const firstTextBlock = resolvedResult.content.find(
                   (entry): entry is { type: 'text'; text: string } =>
@@ -2640,20 +2657,15 @@ export function createPiFffSearchExtension(options: CreatePiFffSearchExtensionOp
                   return resolvedResult;
                 }
 
-                const fixedPath = formatFixedReadPath(resolvedPath, ctx.cwd);
-                const resolutionNotice = broadenedResolution
-                  ? `\nAuto-resolved missing read path ${requestedPath} → ${fixedPath}.`
-                  : '';
-                const updatedContent = resolvedResult.content.map((entry, index) =>
-                  index === resolvedResult.content.indexOf(firstTextBlock)
-                    ? entry.type === 'text'
-                      ? {
-                          ...entry,
-                          text: `Path (fixed): ${fixedPath}${resolutionNotice}\n\n${entry.text}`,
-                        }
-                      : entry
-                    : entry,
-                );
+                const updatedContent = options.createBuiltInReadTool
+                  ? resolvedResult.content.map((entry, index) =>
+                      index === resolvedResult.content.indexOf(firstTextBlock)
+                        ? entry.type === 'text'
+                          ? { ...entry, text: `${responsePrefix}\n\n${entry.text}` }
+                          : entry
+                        : entry,
+                    )
+                  : resolvedResult.content;
 
                 return {
                   ...resolvedResult,

@@ -18,6 +18,8 @@ export interface RobustReadRequest {
   path: string;
   offset?: number;
   limit?: number;
+  responsePrefix?: string;
+  recoveredFromPath?: string;
 }
 
 export interface RobustReader {
@@ -106,7 +108,7 @@ function detailsFor(
     format,
     requestedOffset: request.offset ?? 1,
     requestedLimit: Math.min(request.limit ?? config.maxLines, config.maxLines),
-    recoveredFromPath: target.recoveredFrom,
+    recoveredFromPath: request.recoveredFromPath ?? target.recoveredFrom,
   };
 }
 
@@ -118,9 +120,14 @@ function truncateUtf8(text: string, maxBytes: number): string {
   return bytes.subarray(0, end).toString('utf8');
 }
 
-function recoveryNotice(target: ValidatedTarget, maxResponseBytes: number): string | null {
-  if (!target.recoveredFrom || maxResponseBytes < 4) return null;
-  const raw = `Path (fixed): ${target.canonicalPath}\nAuto-resolved Unicode/punctuation-equivalent path '${target.recoveredFrom}'.`;
+function recoveryNotice(target: ValidatedTarget): string | null {
+  return target.recoveredFrom
+    ? `Path (fixed): ${target.canonicalPath}\nAuto-resolved Unicode/punctuation-equivalent path '${target.recoveredFrom}'.`
+    : null;
+}
+
+function boundedNotice(raw: string | null, maxResponseBytes: number): string | null {
+  if (!raw || maxResponseBytes < 4) return null;
   const reservedContentBytes = Math.min(128, Math.floor(maxResponseBytes / 2));
   const budget = Math.max(0, maxResponseBytes - reservedContentBytes - 2);
   if (Buffer.byteLength(raw, 'utf8') <= budget) return raw;
@@ -147,6 +154,14 @@ export function createRobustReader(
       const identity = identityFromStats(target.stats);
       try {
         const readRegion = regionKey(request, config);
+        const notice = boundedNotice(
+          request.responsePrefix ?? recoveryNotice(target),
+          config.maxResponseBytes,
+        );
+        const noticeBytes = notice ? Buffer.byteLength(`${notice}\n\n`, 'utf8') : 0;
+        const pageConfig = noticeBytes
+          ? { ...config, maxResponseBytes: config.maxResponseBytes - noticeBytes }
+          : config;
         const mimeType = await imageMimeType(handle);
         if (mimeType) {
           if (
@@ -155,10 +170,13 @@ export function createRobustReader(
           ) {
             const details = detailsFor(target, identity, 'image', request, config);
             details.unchanged = true;
+            const unchanged =
+              '[Image unchanged since this session read the same region. Refer to the earlier image attachment.]';
+            const content = notice ? `${notice}\n\n${unchanged}` : unchanged;
+            details.responseBytes = Buffer.byteLength(content, 'utf8');
             return {
               kind: 'text',
-              content:
-                '[Image unchanged since this session read the same region. Refer to the earlier image attachment.]',
+              content,
               details,
             };
           }
@@ -170,7 +188,7 @@ export function createRobustReader(
             readRegion,
             target.absolutePath,
           );
-          return { kind: 'image', target, identity, buffer, mimeType };
+          return { kind: 'image', target, identity, buffer, mimeType, notice: notice ?? undefined };
         }
 
         const format = structuredFormatForPath(target.canonicalPath);
@@ -180,19 +198,17 @@ export function createRobustReader(
         ) {
           const details = detailsFor(target, identity, format ?? 'text', request, config);
           details.unchanged = true;
+          const unchanged =
+            '[File unchanged since this session read the same region. Refer to the earlier read result.]';
+          const content = notice ? `${notice}\n\n${unchanged}` : unchanged;
+          details.responseBytes = Buffer.byteLength(content, 'utf8');
           return {
             kind: 'text',
-            content:
-              '[File unchanged since this session read the same region. Refer to the earlier read result.]',
+            content,
             details,
           };
         }
 
-        const notice = recoveryNotice(target, config.maxResponseBytes);
-        const noticeBytes = notice ? Buffer.byteLength(`${notice}\n\n`, 'utf8') : 0;
-        const pageConfig = noticeBytes
-          ? { ...config, maxResponseBytes: config.maxResponseBytes - noticeBytes }
-          : config;
         let paginated;
         let details: RobustReadDetails;
         if (format) {

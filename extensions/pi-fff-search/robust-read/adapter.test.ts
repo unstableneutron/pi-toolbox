@@ -50,7 +50,12 @@ function context(cwd: string, sessionId = 'session') {
 describe('Pi robust read adapter', () => {
   test('keeps exactly one read registration and composes missing paths through FFF', async () => {
     const cwd = await workspace();
-    await writeFile(join(cwd, 'actual.txt'), 'resolved content');
+    await writeFile(
+      join(cwd, 'actual.txt'),
+      ['resolved content', ...Array.from({ length: 100 }, (_, index) => `line ${index + 1}`)].join(
+        '\n',
+      ),
+    );
     const callPublicToolOverHttp = vi.fn(async () => ({
       ok: true as const,
       value: {
@@ -62,6 +67,7 @@ describe('Pi robust read adapter', () => {
     }));
     const { read, tools } = harness({
       overrideBuiltinRead: true,
+      robustReadConfig: { maxResponseBytes: 512 },
       ensureDaemonRunning: async () => {},
       callPublicToolOverHttp,
     });
@@ -75,6 +81,8 @@ describe('Pi robust read adapter', () => {
     );
     expect(result.content[0].text).toContain('Path (fixed): actual.txt');
     expect(result.content[0].text).toContain('resolved content');
+    expect(Buffer.byteLength(result.content[0].text, 'utf8')).toBeLessThanOrEqual(512);
+    expect(result.details.nextOffset).toBeGreaterThan(1);
     expect(result.details).toMatchObject({ routedVia: 'fff-then-builtin' });
   });
 

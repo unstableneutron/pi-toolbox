@@ -85,6 +85,7 @@ export interface RobustImageRead {
   identity: FileIdentity;
   buffer: Buffer;
   mimeType: string;
+  notice?: string;
 }
 
 export interface RobustDirectoryRead {
