@@ -112,6 +112,20 @@ describe('tryRewriteBash — grep rewrites', () => {
     });
   });
 
+  test("grep -n '' FILE → read because the empty pattern prints every line", () => {
+    const r = rewrite("cd /tmp && grep -n '' snapshot.md");
+    expect(r?.decision).toMatchObject({
+      tool: 'read',
+      params: { path: 'snapshot.md' },
+      recognizer: 'grep-all-lines',
+    });
+    expect(r?.cwd).toBe('/tmp');
+  });
+
+  test('empty grep pattern over multiple paths → pass through', () => {
+    expect(rewrite("grep '' a.ts b.ts")).toBeNull();
+  });
+
   test('grep -n PAT PATH → ignored flag (fff already returns line numbers)', () => {
     const r = rewrite('grep -n "createLsToolDefinition" file.ts');
     expect(r?.decision?.params).toEqual({
@@ -634,6 +648,15 @@ describe('tryRewriteBash — pipelines', () => {
     expect(r?.cwd).toBe('/repo');
   });
 
+  test("grep -n '' FILE | head -N → read with limit", () => {
+    const r = rewrite("grep -n '' snapshot.md | head -20");
+    expect(r?.decision).toMatchObject({
+      tool: 'read',
+      params: { path: 'snapshot.md', limit: 20 },
+      recognizer: 'grep-all-lines+head',
+    });
+  });
+
   test('grep | head --bytes=N → pass through', () => {
     expect(rewrite('grep -rn "foo" src/ | head --bytes=20')).toBeNull();
   });
@@ -703,6 +726,15 @@ describe('tryRewriteBash — pipelines', () => {
       recognizer: 'grep-sed-range',
     });
     expect(r?.cwd).toBe('/tmp');
+  });
+
+  test("grep -n '' FILE | sed -n range → read with offset and limit", () => {
+    const r = rewrite("grep -n '' src/index.ts | sed -n '160,300p'");
+    expect(r?.decision).toMatchObject({
+      tool: 'read',
+      params: { path: 'src/index.ts', offset: 160, limit: 141 },
+      recognizer: 'grep-all-lines-sed-range',
+    });
   });
 
   test("grep | sed -n '2,Np' → pass through because it skips matches", () => {

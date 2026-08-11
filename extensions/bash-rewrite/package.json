@@ -1,6 +1,6 @@
 {
   "name": "pi-bash-rewrite",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Optional Pi bash tool rewrite orchestrator with provider hooks",
   "keywords": [
     "bash",

@@ -672,6 +672,20 @@ function classifyCat(tokens: Token[]): RewriteDecision | null {
   };
 }
 
+/** Match `grep [-n] '' FILE`, which prints the complete file with optional line numbers. */
+function classifyGrepAllLines(tokens: Token[]): RewriteDecision | null {
+  const strs = asStrings(tokens);
+  if (!strs || strs[0] !== 'grep') return null;
+  const rest = strs.slice(1);
+  if (rest[0] === '-n') rest.shift();
+  if (rest.length !== 2 || rest[0] !== '' || rest[1]!.startsWith('-')) return null;
+  return {
+    tool: 'read',
+    params: { path: rest[1] },
+    recognizer: 'grep-all-lines',
+  };
+}
+
 function classifyLs(tokens: Token[]): RewriteDecision | null {
   const strs = asStrings(tokens);
   if (!strs || strs[0] !== 'ls') return null;
@@ -992,7 +1006,7 @@ function classifyGrep(tokens: Token[]): RewriteDecision | null {
     else paths.push(t);
   }
 
-  if (pattern === null) return null;
+  if (pattern === null || pattern.length === 0) return null;
 
   // Determine the grep regex flavor so we can (a) split alternation into
   // fff_grep's OR-matched `patterns` array and (b) bail on BRE-only
@@ -1352,6 +1366,7 @@ const SINGLE_STAGE_CLASSIFIERS = [
   classifyCat,
   classifyLs,
   classifyHead,
+  classifyGrepAllLines,
   classifyGrep,
   classifyFind,
   classifyFd,
@@ -1862,24 +1877,23 @@ export function tryRewriteBashWithOptions(
         return filtered ? withEffectiveCwd(filtered, normalized) : null;
       }
     }
-    // `cat FILE | sed -n 'N,Mp'` → read(path=FILE, offset=N, limit=M-N+1).
-    // Recognizing this shape matters because the model often reaches for the
-    // pipeline form (muscle memory from `sed`'s stdin-filter usage) even when
-    // the pure `sed -n 'N,Mp' FILE` is available. Both collapse to the same
-    // read call; catching the pipeline form here saves a round-trip through
-    // bash.
+    // `cat FILE | sed -n 'N,Mp'` and `grep -n '' FILE | sed -n 'N,Mp'`
+    // both select a line range from a complete file. Pi's read renderer adds
+    // line numbers, so either source collapses to the same structured read.
     const sedRange = extractSedRangeFilter(strippedStages[1]!);
     if (sedRange) {
-      const catDecision = classifyCat(strippedStages[0]!);
-      if (catDecision && catDecision.recognizer === 'cat-file') {
+      const readDecision =
+        classifyCat(strippedStages[0]!) ?? classifyGrepAllLines(strippedStages[0]!);
+      if (readDecision) {
         const d: RewriteDecision = {
           tool: 'read',
           params: {
-            path: catDecision.params.path,
+            path: readDecision.params.path,
             offset: sedRange.offset,
             limit: sedRange.limit,
           },
-          recognizer: 'cat-sed-range',
+          recognizer:
+            readDecision.recognizer === 'cat-file' ? 'cat-sed-range' : 'grep-all-lines-sed-range',
         };
         const filtered = filterRewriteResult(
           { decision: d, notice: formatNotice(rewriteCommand.trim(), d) },

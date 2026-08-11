@@ -59,20 +59,23 @@ For a sharper lens on "is this specific shape passing through, and why," use the
 
 Read this before adding anything new — your target may already exist and just need one flag or shape loosened.
 
-| Recognizer            | Source shape                                     | Target                                                                |
-| --------------------- | ------------------------------------------------ | --------------------------------------------------------------------- |
-| `cat-file`            | `cat FILE`                                       | `read(path)`                                                          |
-| `ls-dir`              | `ls [flags] [PATH]`                              | `ls(path?)`                                                           |
-| `head-n-file`         | `head [-N] FILE`                                 | `read(path, limit?)`                                                  |
-| `grep-search`         | `grep/rg/egrep/fgrep PAT [FILE ...]`             | `fff_grep(patterns, within, …)` — multi-path emits `within: string[]` |
-| `find-name-glob`      | `find PATH -name GLOB`                           | `fff_find_files(query, glob)`                                         |
-| `fd-search`           | `fd PAT [PATH]`                                  | `fff_find_files(query, within?)`                                      |
-| `sed-range-print`     | `sed -n 'N,Mp' FILE`                             | `read(path, offset, limit)`                                           |
-| `cat-sed-range`       | `cat FILE \| sed -n 'N,Mp'`                      | `read(path, offset, limit)`                                           |
-| `cat-grep`            | `cat FILE \| grep PAT`                           | `fff_grep(patterns, within, …)`                                       |
-| `find-xargs-cat`      | `find PATH \| head -1 \| xargs cat [\| head -N]` | `read(path, limit?)`                                                  |
-| `apply-patch-heredoc` | `apply_patch <<'PATCH' … PATCH`                  | `apply_patch(patch)`                                                  |
-| `<recognizer>+head`   | any of the above `\| head -N`                    | same target, with `limit: N`                                          |
+| Recognizer                        | Source shape                                     | Target                                                                |
+| --------------------------------- | ------------------------------------------------ | --------------------------------------------------------------------- |
+| `cat-file`                        | `cat [-n] FILE`                                  | `read(path)`                                                          |
+| `grep-all-lines`                  | `grep [-n] '' FILE`                              | `read(path)`                                                          |
+| `ls-dir`                          | `ls [flags] [PATH]`                              | `ls(path?)`                                                           |
+| `head-n-file`                     | `head [-N] FILE`                                 | `read(path, limit?)`                                                  |
+| `grep-search`                     | `grep/rg/egrep/fgrep PAT [FILE ...]`             | `fff_grep(patterns, within, …)` — multi-path emits `within: string[]` |
+| `find-name-glob`                  | `find PATH -name GLOB`                           | `fff_find_files(query, glob)`                                         |
+| `fd-search`                       | `fd PAT [PATH]`                                  | `fff_find_files(query, within?)`                                      |
+| `sed-range-print`                 | `sed -n 'N,Mp' FILE`                             | `read(path, offset, limit)`                                           |
+| `cat-sed-range`                   | `cat [-n] FILE \| sed -n 'N,Mp'`                 | `read(path, offset, limit)`                                           |
+| `grep-all-lines-sed-range`        | `grep [-n] '' FILE \| sed -n 'N,Mp'`             | `read(path, offset, limit)`                                           |
+| `grep-sed-range` / `rg-sed-range` | `grep/rg PAT [PATH ...] \| sed -n '1,Np'`        | `fff_grep(patterns, within, limit=N)`                                 |
+| `cat-grep`                        | `cat FILE \| grep PAT`                           | `fff_grep(patterns, within, …)`                                       |
+| `find-xargs-cat`                  | `find PATH \| head -1 \| xargs cat [\| head -N]` | `read(path, limit?)`                                                  |
+| `apply-patch-heredoc`             | `apply_patch <<'PATCH' … PATCH`                  | `apply_patch(patch)`                                                  |
+| `<single-stage>+head`             | any single-stage recognizer `\| head -N`         | same target, with `limit: N`                                          |
 
 ## Adding a recognizer
 
