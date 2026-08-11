@@ -114,7 +114,8 @@ describe('handoff', () => {
       mode: 'tui',
       model: { provider: 'anthropic', id: 'claude-haiku-4-5' },
       modelRegistry: {
-        getApiKeyAndHeaders: vi.fn().mockResolvedValue({ ok: true, apiKey: 'key', headers: {} }),
+        hasConfiguredAuth: vi.fn(() => true),
+        complete: completeMock,
       },
       sessionManager: {
         getEntries: () => entries,

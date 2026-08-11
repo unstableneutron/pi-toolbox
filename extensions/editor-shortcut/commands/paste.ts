@@ -1,14 +1,11 @@
 import { execFile } from 'node:child_process';
 import { platform } from 'node:os';
 
-import {
-  completeSimple,
-  type Api,
-  type Model,
-  type UserMessage,
-} from '@earendil-works/pi-ai/compat';
+import { type Api, type Model, type UserMessage } from '@earendil-works/pi-ai/compat';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
+
+import { completeSimpleWithResolvedAuth } from '../../shared/model-completion';
 
 const CLIPBOARD_TIMEOUT_MS = 2_000;
 const CLIPBOARD_MAX_BYTES = 5 * 1024 * 1024;
@@ -366,9 +363,6 @@ async function generatePasteTag(content: string, ctx: ExtensionContext): Promise
   const model = await selectTagGenerationModel(ctx);
   if (!model) return null;
 
-  const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-  if (!auth.ok) return null;
-
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), TAG_GENERATION_TIMEOUT_MS);
 
@@ -384,13 +378,11 @@ async function generatePasteTag(content: string, ctx: ExtensionContext): Promise
       ],
     };
 
-    const response = await completeSimple(
+    const response = await completeSimpleWithResolvedAuth(
+      ctx.modelRegistry,
       model,
       { systemPrompt: TAG_GENERATION_PROMPT, messages: [userMessage] },
       {
-        apiKey: auth.apiKey,
-        headers: auth.headers,
-        env: auth.env,
         maxTokens: TAG_GENERATION_MAX_TOKENS,
         reasoning: model.reasoning ? 'low' : undefined,
         signal: controller.signal,
@@ -414,10 +406,7 @@ async function selectTagGenerationModel(ctx: ExtensionContext): Promise<Model<Ap
     const model = ctx.modelRegistry.find(preferred.provider, preferred.id) as
       | Model<Api>
       | undefined;
-    if (!model) continue;
-
-    const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-    if (auth.ok) return model;
+    if (model && (await ctx.modelRegistry.getApiKeyAndHeaders(model)).ok) return model;
   }
 
   return null;

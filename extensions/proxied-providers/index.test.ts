@@ -587,6 +587,7 @@ describe('extension registration', () => {
       getApiKeyAndHeaders: vi.fn(async () => ({
         ok: true,
         apiKey: 'devai-key',
+        baseUrl: 'https://resolved.devai.example/v1',
         headers: { 'x-routed': 'devai' },
       })),
     };
@@ -611,7 +612,11 @@ describe('extension registration', () => {
       expect.objectContaining({ provider: 'devai', id: 'global.anthropic.claude-sonnet-4-6' }),
     );
     expect(originalProviderStreamSimple).toHaveBeenCalledWith(
-      expect.objectContaining({ provider: 'devai', id: 'global.anthropic.claude-sonnet-4-6' }),
+      expect.objectContaining({
+        provider: 'devai',
+        id: 'global.anthropic.claude-sonnet-4-6',
+        baseUrl: 'https://resolved.devai.example/v1',
+      }),
       expect.anything(),
       expect.objectContaining({ apiKey: 'devai-key', headers: { 'x-routed': 'devai' } }),
     );

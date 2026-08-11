@@ -121,7 +121,8 @@ function createCommandHarness(execResult: { code: number; stdout?: string; stder
     isIdle: () => true,
     model: { provider: 'openai', id: 'gpt-5', api: 'openai-responses' },
     modelRegistry: {
-      getApiKeyAndHeaders: vi.fn().mockResolvedValue({ ok: true, apiKey: 'test-key', headers: {} }),
+      hasConfiguredAuth: vi.fn(() => true),
+      complete: vi.mocked(complete),
     },
     sessionManager: {
       getSessionFile: () => sessionFile,

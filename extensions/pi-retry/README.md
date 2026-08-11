@@ -16,6 +16,8 @@ It handles:
 
 ## Install
 
+Pi 0.84.1 or newer is required for the Pi host entrypoint.
+
 Local path:
 
 ```bash
@@ -68,8 +70,9 @@ messages for the first 5 attempts. The first continue attempt stays visually cle
 no counter suffix, and later continue attempts show `· 2/5` through `· 5/5`.
 
 If refusal rewrites are enabled, `pi-retry` then tries up to 2 rewrite-based retries,
-capped by the usable configured review models. Rewrite retries show their own counters,
-for example:
+capped by the usable configured review models. Review requests preserve Pi's
+credential-resolved base URL, environment, and header deletion markers. Rewrite
+retries show their own counters, for example:
 
 - `↻ Refusal detected; asking gpt-5.4 for review...`
 - `↻ Rewrite sent; waiting for recovery...`

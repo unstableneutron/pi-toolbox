@@ -336,7 +336,14 @@ export function createOpenAIWebSocketResponsesStream(
           });
         }
 
-        const fullBody = buildResponsesBody(model, context, options, profile, settings.request);
+        let fullBody = buildResponsesBody(model, context, options, profile, settings.request);
+        const replacement = await options?.onPayload?.(fullBody, model);
+        if (replacement !== undefined) {
+          if (!replacement || typeof replacement !== 'object' || Array.isArray(replacement)) {
+            throw new TypeError('OpenAI Responses onPayload must return an object or undefined');
+          }
+          fullBody = replacement as ResponsesBody;
+        }
         const continuationRequest = buildContinuationRequestBody(
           getContinuation(cacheKey),
           fullBody,

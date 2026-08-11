@@ -11,6 +11,8 @@ It does **not** suspend the Pi process. Agent work, tools, and session state con
 
 ## Requirements
 
+Pi 0.84.1 or newer is required.
+
 The extension activates only when all of these Herdr variables are present:
 
 - `HERDR_ENV=1`
@@ -24,6 +26,8 @@ Set `PI_RENDER_GATE_DISABLED=1` to disable the extension for a session.
 ## Behavior
 
 - Active when the Herdr workspace is focused and its active tab matches `HERDR_TAB_ID`.
+- Rebinds the render gate when Pi switches between regular and fullscreen TUI
+  renderers.
 - Inactive when another workspace or tab is focused.
 - While inactive, coarse lifecycle events schedule one debounced forced render flush, then rendering is paused again. These events are `agent_start`, `agent_end`, `message_end`, `tool_execution_end`, `turn_end`, and `user_bash`. This keeps hidden-pane terminal buffers fresh enough for Herdr `pane read` / `agent read` fallback checks without streaming every intermediate render.
 - If the Herdr socket fails, the extension fails open and resumes rendering.

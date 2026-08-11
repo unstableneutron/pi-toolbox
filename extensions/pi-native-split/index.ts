@@ -1,4 +1,4 @@
-import { complete, type Message } from '@earendil-works/pi-ai/compat';
+import { type Message } from '@earendil-works/pi-ai/compat';
 import {
   BorderedLoader,
   SessionManager,
@@ -16,6 +16,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import * as path from 'node:path';
 
+import { completeWithModelRegistry } from '../shared/model-completion';
 import {
   buildNativePiLaunchArgs,
   cleanupNativePiPromptTempPath,
@@ -595,11 +596,6 @@ export async function generateHandoffPrompt(
     loader.onAbort = () => done(null);
 
     const doGenerate = async (): Promise<string | null> => {
-      const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model!);
-      if (!auth.ok) {
-        throw new Error(auth.error);
-      }
-
       const userMessage: Message = {
         role: 'user',
         content: [
@@ -611,10 +607,11 @@ export async function generateHandoffPrompt(
         timestamp: Date.now(),
       };
 
-      const response = await complete(
+      const response = await completeWithModelRegistry(
+        ctx.modelRegistry,
         ctx.model!,
         { systemPrompt: HANDOFF_SYSTEM_PROMPT, messages: [userMessage] },
-        { apiKey: auth.apiKey, headers: auth.headers, env: auth.env, signal: loader.signal },
+        { signal: loader.signal },
       );
 
       if (response.stopReason === 'aborted') {

@@ -10,7 +10,7 @@
  * 4. Submits the compiled answers when done
  */
 
-import { complete, type Model, type Api, type UserMessage } from '@earendil-works/pi-ai/compat';
+import { type Model, type Api, type UserMessage } from '@earendil-works/pi-ai/compat';
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -29,6 +29,7 @@ import {
   wrapTextWithAnsi,
 } from '@earendil-works/pi-tui';
 
+import { completeWithModelRegistry } from '../shared/model-completion';
 import { hasTui } from '../shared/ui-mode';
 
 // Structured output format for question extraction
@@ -84,24 +85,14 @@ async function selectExtractionModel(
   modelRegistry: ModelRegistry,
 ): Promise<Model<Api>> {
   const codexModel = modelRegistry.find('openai-codex', CODEX_MODEL_ID);
-  if (codexModel) {
-    const auth = await modelRegistry.getApiKeyAndHeaders(codexModel);
-    if (auth.ok) {
-      return codexModel;
-    }
+  if (codexModel && (await modelRegistry.getApiKeyAndHeaders(codexModel)).ok) {
+    return codexModel;
   }
 
   const haikuModel = modelRegistry.find('anthropic', HAIKU_MODEL_ID);
-  if (!haikuModel) {
-    return currentModel;
-  }
-
-  const auth = await modelRegistry.getApiKeyAndHeaders(haikuModel);
-  if (!auth.ok) {
-    return currentModel;
-  }
-
-  return haikuModel;
+  return haikuModel && (await modelRegistry.getApiKeyAndHeaders(haikuModel)).ok
+    ? haikuModel
+    : currentModel;
 }
 
 /**
@@ -466,20 +457,17 @@ export default function (pi: ExtensionAPI) {
         loader.onAbort = () => done(null);
 
         const doExtract = async () => {
-          const auth = await ctx.modelRegistry.getApiKeyAndHeaders(extractionModel);
-          if (!auth.ok) {
-            throw new Error(auth.error);
-          }
           const userMessage: UserMessage = {
             role: 'user',
             content: [{ type: 'text', text: lastAssistantText! }],
             timestamp: Date.now(),
           };
 
-          const response = await complete(
+          const response = await completeWithModelRegistry(
+            ctx.modelRegistry,
             extractionModel,
             { systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
-            { apiKey: auth.apiKey, headers: auth.headers, env: auth.env, signal: loader.signal },
+            { signal: loader.signal },
           );
 
           if (response.stopReason === 'aborted') {

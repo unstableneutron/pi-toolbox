@@ -1643,7 +1643,12 @@ describe('handleRefusalRecovery', () => {
       if ('gpt-5.4' === model.id) {
         return { ok: false, error: 'missing auth' };
       }
-      return { ok: true, apiKey: 'fallback-key', headers: { 'x-test': '1' } };
+      return {
+        ok: true,
+        apiKey: 'fallback-key',
+        baseUrl: 'https://resolved.example/v1',
+        headers: { 'x-test': '1' },
+      };
     });
     const { ctx, statusCalls, notify } = createCtx(sessionManager, {
       modelRegistry: {
@@ -1689,7 +1694,10 @@ describe('handleRefusalRecovery', () => {
       'gemini-3.1-pro-preview',
     ]);
     expect(reviewRewrite).toHaveBeenCalledTimes(1);
-    expect(reviewRewrite.mock.calls[0]?.[0]?.model?.id).toBe('gemini-3.1-pro-preview');
+    expect(reviewRewrite.mock.calls[0]?.[0]).toMatchObject({
+      model: { id: 'gemini-3.1-pro-preview' },
+      baseUrl: 'https://resolved.example/v1',
+    });
     expectStockContinueMessages(sendUserMessage.mock.calls.slice(0, 5).map(([message]) => message));
     expect(sendUserMessage.mock.calls.at(-1)?.[0]).toBe(
       'Please explain the blocker and suggest a safe implementation plan.',

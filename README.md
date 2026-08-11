@@ -87,6 +87,9 @@ best run via `aube run ...` or the `~/.local/bin` symlink above.
 
 ## Quick start
 
+This release requires Pi 0.84.1 or newer. Workspace Pi dependencies and package
+peer requirements use the same baseline.
+
 ```bash
 # 1. Install workspace dependencies.
 pnpm install

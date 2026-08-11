@@ -1141,6 +1141,21 @@ describe('body and continuation helpers', () => {
     expect(body.max_output_tokens).toBeUndefined();
   });
 
+  it('merges model and per-request sampling parameters into the request body', () => {
+    const body = buildResponsesBody(
+      makeModel({ samplingParams: { top_p: 0.8, repetition_penalty: 1.1 } }),
+      { messages: [{ role: 'user', content: 'Hi', timestamp: 1 }] },
+      { samplingParams: { top_p: 0.6, min_p: 0.05 } } as any,
+      'generic',
+    );
+
+    expect(body).toMatchObject({
+      top_p: 0.6,
+      min_p: 0.05,
+      repetition_penalty: 1.1,
+    });
+  });
+
   it('defaults OpenAI provider requests to stateless storage', () => {
     const body = buildResponsesBody(
       makeModel({ provider: 'openai', id: 'gpt-5.4-mini' }),
@@ -2100,7 +2115,11 @@ describe('Responses adapter and retrieve recovery', () => {
     await processResponsesEvents(
       events({
         type: 'response.incomplete',
-        response: { id: 'resp_incomplete', status: 'incomplete' },
+        response: {
+          id: 'resp_incomplete',
+          status: 'incomplete',
+          incomplete_details: { reason: 'max_output_tokens' },
+        },
       }),
       output,
       stream,
@@ -2109,6 +2128,40 @@ describe('Responses adapter and retrieve recovery', () => {
 
     expect(output.responseId).toBe('resp_incomplete');
     expect(output.stopReason).toBe('length');
+    expect(output.rawStopReason).toBe('incomplete.max_output_tokens');
+    expect(output.errorMessage).toBeUndefined();
+  });
+
+  it('maps content-filtered incomplete responses to detailed errors', async () => {
+    const model = makeModel();
+    const output = makeAssistantMessage(model);
+    output.content.push({
+      type: 'toolCall',
+      id: 'call_partial|fc_partial',
+      name: 'bash',
+      arguments: {},
+      partialJson: '{"command":',
+    } as any);
+    const stream = createAssistantMessageEventStream();
+
+    await processResponsesEvents(
+      events({
+        type: 'response.incomplete',
+        response: {
+          id: 'resp_filtered',
+          status: 'incomplete',
+          incomplete_details: { reason: 'content_filter' },
+        },
+      }),
+      output,
+      stream,
+      model,
+    );
+
+    expect(output.stopReason).toBe('error');
+    expect(output.rawStopReason).toBe('incomplete.content_filter');
+    expect(output.errorMessage).toBe('Response incomplete: content_filter');
+    expect(output.content).not.toContainEqual(expect.objectContaining({ type: 'toolCall' }));
   });
 
   it('strips streamed tool calls when the response is incomplete', async () => {
@@ -3366,7 +3419,11 @@ describe('WebSocket transport', () => {
           this.emit('message', {
             data: JSON.stringify({
               type: 'response.incomplete',
-              response: { id: 'resp_cut', status: 'incomplete' },
+              response: {
+                id: 'resp_cut',
+                status: 'incomplete',
+                incomplete_details: { reason: 'max_output_tokens' },
+              },
             }),
           });
         });
@@ -3392,7 +3449,12 @@ describe('WebSocket transport', () => {
     }
 
     const model = makeCodexModel();
-    const options = { apiKey: 'sk-test', sessionId: 'session-incomplete' } as any;
+    const onPayload = vi.fn((payload: any) => ({ ...payload, toolbox_marker: 'transformed' }));
+    const options = {
+      apiKey: 'sk-test',
+      sessionId: 'session-incomplete',
+      onPayload,
+    } as any;
     const settings = normalizeSettings({ websocket: { retries: 0, firstEventTimeoutMs: 0 } });
     const websocketHeaders = buildWebSocketHeaders(model, options, 'codex');
     const url = resolveWebSocketResponsesUrl(model, settings, websocketHeaders, 'codex');
@@ -3404,12 +3466,15 @@ describe('WebSocket transport', () => {
       headersFingerprint: headersFingerprint(websocketHeaders),
     });
     setContinuation(cacheKey, {
-      lastRequestBody: buildResponsesBody(
-        model,
-        { messages: [{ role: 'user', content: 'first', timestamp: 1 }] },
-        options,
-        'codex',
-      ),
+      lastRequestBody: {
+        ...buildResponsesBody(
+          model,
+          { messages: [{ role: 'user', content: 'first', timestamp: 1 }] },
+          options,
+          'codex',
+        ),
+        toolbox_marker: 'transformed',
+      },
       lastResponseId: 'resp_previous',
       lastResponseItems: [],
     });
@@ -3435,7 +3500,11 @@ describe('WebSocket transport', () => {
         expect.objectContaining({ type: 'toolCall' }),
       );
       expect(getContinuation(cacheKey)).toBeUndefined();
-      expect(sentBodies[0]).toMatchObject({ previous_response_id: 'resp_previous' });
+      expect(sentBodies[0]).toMatchObject({
+        previous_response_id: 'resp_previous',
+        toolbox_marker: 'transformed',
+      });
+      expect(onPayload).toHaveBeenCalledWith(expect.any(Object), model);
       expect(instances).toHaveLength(1);
     } finally {
       wsModuleMock.WebSocketCtor = undefined;

@@ -6,19 +6,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   applyAmasterPiComputerUseAnalyzeScreenshotPatch,
-  applyPiCodingAgentResolverPatch,
   applyPiCodingAgentTranscriptCachePatch,
   applyPiContinuousLearningPatch,
   applyPiHerdrPromptGuidancePatch,
-  applyPiAiBedrockApiKeyBearerPatch,
   applyPiAiOpenAICodexAuthHeaderPatch,
   applyPiMermaidPatch,
   applyPiSubagentsApplyPatchToolPatch,
-  buildPiAiBedrockApiKeyBearerReplacement,
   buildPiAiOpenAICodexAccountIdReplacement,
   buildPiAiOpenAICodexHeaderReplacement,
   buildPiHerdrPromptGuidanceReplacement,
-  buildPiCodingAgentResolverReplacement,
   buildPiCodingAgentTranscriptCacheInsertion,
   buildPiApproveBuildsCommand,
   buildPiSelfUpdateCommand,
@@ -31,11 +27,11 @@ import {
   formatPackageManagerCommand,
   getPackageManagerCommandCandidates,
   getPnpmWorkspaceOverrideChanges,
-  isPiCodingAgentResolverPatchApplied,
+  hasPiAiBedrockApiKeyBearerUpstreamFix,
+  hasPiCodingAgentResolverUpstreamFix,
   isPiCodingAgentTranscriptCachePatchApplied,
   isPiContinuousLearningPatchApplied,
   isPiHerdrPromptGuidancePatchApplied,
-  isPiAiBedrockApiKeyBearerPatchApplied,
   isPiAiOpenAICodexAuthHeaderPatchApplied,
   isAmasterPiComputerUseAnalyzeScreenshotPatchApplied,
   isPiMermaidPatchApplied,
@@ -45,6 +41,8 @@ import {
   readConfiguredNpmCommand,
   resolvePackageManagerCommand,
   runPiUpdate,
+  verifyPiAiBedrockApiKeyBearerUpstreamFix,
+  verifyPiCodingAgentResolverUpstreamFix,
   writePnpmWorkspaceOverrides,
 } from '../scripts/pi-update-extensions.ts';
 
@@ -1092,36 +1090,21 @@ describe('pi-subagents apply_patch agent tool patching', () => {
   });
 });
 
-describe('pi-coding-agent resolver patching', () => {
-  const FIXTURE_CONTENT = [
-    'export function resolveCliModel(options) {',
-    '    const { cliProvider, cliModel, modelRegistry } = options;',
-    '    if (!cliModel) { return { model: undefined }; }',
-    '    // Important: use *all* models here, not just models with pre-configured auth.',
-    '    // This allows "--api-key" to be used for first-time setup.',
-    '    const availableModels = modelRegistry.getAll();',
-    '    return availableModels;',
-    '}',
-    '',
-  ].join('\n');
+describe('pi-coding-agent resolver verification', () => {
+  const LEGACY_CONTENT = 'const availableModels = modelRegistry.getAll();\n';
   const CURRENT_UPSTREAM_CONTENT = [
     'export function resolveCliModel(options) {',
     '    const { cliModel, modelRuntime } = options;',
     '    const availableModels = [...modelRuntime.getModels()];',
-    '    const model = availableModels[0];',
     '    const rawExactMatches = availableModels.slice(1);',
-    '    if (rawExactMatches.length > 0 && !modelRuntime.hasConfiguredAuth(model.provider)) {',
     '            const authenticatedRawMatches = rawExactMatches.filter((m) => modelRuntime.hasConfiguredAuth(m.provider));',
     '                if (authenticatedRawMatches.length === 1) {',
     '            return { model: authenticatedRawMatches[0] };',
-    '        }',
-    '    }',
-    '    return { model };',
     '}',
     '',
   ].join('\n');
 
-  function setupFakePackage(version: string, resolverContent = FIXTURE_CONTENT): string {
+  function setupFakePackage(version: string, resolverContent: string): string {
     const packageRoot = makeTempDir('pi-coding-agent-');
     writeFileSync(
       join(packageRoot, 'package.json'),
@@ -1132,82 +1115,26 @@ describe('pi-coding-agent resolver patching', () => {
     return packageRoot;
   }
 
-  it('reports unpatched fixture as not yet patched', () => {
-    const packageRoot = setupFakePackage('0.67.6');
-    expect(isPiCodingAgentResolverPatchApplied(packageRoot)).toBe(false);
-  });
+  it('recognizes and verifies the upstream authenticated disambiguation', () => {
+    const packageRoot = setupFakePackage('0.84.1', CURRENT_UPSTREAM_CONTENT);
 
-  it('recognizes the current upstream authenticated disambiguation', async () => {
-    const packageRoot = setupFakePackage('0.80.8', CURRENT_UPSTREAM_CONTENT);
-
-    expect(isPiCodingAgentResolverPatchApplied(packageRoot)).toBe(true);
-    await expect(applyPiCodingAgentResolverPatch({ packageRoot })).resolves.toMatchObject({
-      status: 'already-applied',
+    expect(hasPiCodingAgentResolverUpstreamFix(packageRoot)).toBe(true);
+    expect(verifyPiCodingAgentResolverUpstreamFix({ packageRoot })).toEqual({
       packageRoot,
-      version: '0.80.8',
+      version: '0.84.1',
+      sourcePath: join(packageRoot, 'dist', 'core', 'model-resolver.js'),
     });
   });
 
-  it('applies the resolver patch and marks it as applied', async () => {
-    const packageRoot = setupFakePackage('0.67.6');
-    const result = await applyPiCodingAgentResolverPatch({ packageRoot });
-
-    expect(result).toMatchObject({
-      status: 'applied',
-      packageRoot,
-      version: '0.67.6',
-    });
-    expect(result.patchPath).toBe(join(packageRoot, 'dist', 'core', 'model-resolver.js'));
-
-    const patched = readFileSync(join(packageRoot, 'dist', 'core', 'model-resolver.js'), 'utf8');
-    expect(patched).toContain('let availableModels = modelRegistry.getAvailable();');
-    expect(patched).toContain('availableModels = modelRegistry.getAll();');
-    expect(patched).not.toMatch(/^    const availableModels = modelRegistry\.getAll\(\);$/m);
-    expect(isPiCodingAgentResolverPatchApplied(packageRoot)).toBe(true);
-  });
-
-  it('is idempotent: re-applying detects the marker and reports already-applied', async () => {
-    const packageRoot = setupFakePackage('0.67.6');
-    await applyPiCodingAgentResolverPatch({ packageRoot });
-    const second = await applyPiCodingAgentResolverPatch({ packageRoot });
-
-    expect(second).toMatchObject({
-      status: 'already-applied',
-      packageRoot,
-      version: '0.67.6',
-    });
-  });
-
-  it('supports dry-run without mutating the file', async () => {
-    const packageRoot = setupFakePackage('0.67.6');
+  it('rejects legacy resolver behavior without rewriting it', () => {
+    const packageRoot = setupFakePackage('0.83.0', LEGACY_CONTENT);
     const resolverPath = join(packageRoot, 'dist', 'core', 'model-resolver.js');
-    const original = readFileSync(resolverPath, 'utf8');
 
-    const result = await applyPiCodingAgentResolverPatch({ packageRoot, dryRun: true });
-    expect(result).toMatchObject({
-      status: 'would-apply',
-      packageRoot,
-      version: '0.67.6',
-    });
-    expect(readFileSync(resolverPath, 'utf8')).toBe(original);
-    expect(isPiCodingAgentResolverPatchApplied(packageRoot)).toBe(false);
-  });
-
-  it('throws a descriptive error when the target line is missing', async () => {
-    const packageRoot = setupFakePackage(
-      '1.0.0',
-      'export function resolveCliModel() { /* upstream rewrote this */ }\n',
+    expect(hasPiCodingAgentResolverUpstreamFix(packageRoot)).toBe(false);
+    expect(() => verifyPiCodingAgentResolverUpstreamFix({ packageRoot })).toThrow(
+      /authenticated resolver semantics not found/i,
     );
-    await expect(applyPiCodingAgentResolverPatch({ packageRoot })).rejects.toThrow(
-      /target line for resolver patch not found/i,
-    );
-  });
-
-  it('builds a replacement containing both the marker and both branches', () => {
-    const replacement = buildPiCodingAgentResolverReplacement();
-    expect(replacement).toContain('__pi_update_extensions:model-resolver-uses-available__');
-    expect(replacement).toContain('modelRegistry.getAvailable()');
-    expect(replacement).toContain('modelRegistry.getAll()');
+    expect(readFileSync(resolverPath, 'utf8')).toBe(LEGACY_CONTENT);
   });
 });
 
@@ -1477,44 +1404,19 @@ describe('pi-coding-agent transcript cache patching', () => {
   });
 });
 
-describe('pi-ai Bedrock apiKey bearer patching', () => {
-  const FIXTURE_CONTENT = [
-    'export const streamBedrock = (model, context, options = {}) => {',
-    '    const config = {};',
-    '        // Resolve bearer token for Bedrock API key auth.',
-    '        const bearerToken = options.bearerToken || process.env.AWS_BEARER_TOKEN_BEDROCK || undefined;',
-    '        const useBearerToken = bearerToken !== undefined && process.env.AWS_BEDROCK_SKIP_AUTH !== "1";',
-    '    return config;',
-    '};',
+describe('pi-ai Bedrock apiKey bearer verification', () => {
+  const LEGACY_CONTENT =
+    'const bearerToken = options.bearerToken || getProviderEnvValue("AWS_BEARER_TOKEN_BEDROCK", options.env) || undefined;\n';
+  const CURRENT_UPSTREAM_CONTENT = [
+    'const bearerToken =',
+    '    options.bearerToken ||',
+    '    options.apiKey ||',
+    '    getProviderEnvValue("AWS_BEARER_TOKEN_BEDROCK", options.env) ||',
+    '    undefined;',
     '',
   ].join('\n');
 
-  const PROVIDER_ENV_FIXTURE_CONTENT = [
-    'export const streamBedrock = (model, context, options = {}) => {',
-    '    const config = {};',
-    '        // Resolve bearer token for Bedrock API key auth.',
-    '        const skipAuth = getProviderEnvValue("AWS_BEDROCK_SKIP_AUTH", options.env) === "1";',
-    '        const bearerToken = options.bearerToken || getProviderEnvValue("AWS_BEARER_TOKEN_BEDROCK", options.env) || undefined;',
-    '        const useBearerToken = bearerToken !== undefined && !skipAuth;',
-    '    return config;',
-    '};',
-    '',
-  ].join('\n');
-
-  const UPSTREAM_API_KEY_FIXTURE_CONTENT = [
-    'export const streamBedrock = (model, context, options = {}) => {',
-    '    const config = {};',
-    '        const bearerToken =',
-    '            options.bearerToken ||',
-    '            options.apiKey ||',
-    '            getProviderEnvValue("AWS_BEARER_TOKEN_BEDROCK", options.env) ||',
-    '            undefined;',
-    '    return config;',
-    '};',
-    '',
-  ].join('\n');
-
-  function setupFakePackage(version: string, bedrockContent = FIXTURE_CONTENT): string {
+  function setupFakePackage(version: string, bedrockContent: string): string {
     const packageRoot = makeTempDir('pi-ai-');
     writeFileSync(
       join(packageRoot, 'package.json'),
@@ -1525,116 +1427,26 @@ describe('pi-ai Bedrock apiKey bearer patching', () => {
     return packageRoot;
   }
 
-  it('reports unpatched fixture as not yet patched', () => {
-    const packageRoot = setupFakePackage('0.78.1');
-    expect(isPiAiBedrockApiKeyBearerPatchApplied(packageRoot)).toBe(false);
-  });
+  it('recognizes and verifies the upstream bearer implementation', () => {
+    const packageRoot = setupFakePackage('0.84.1', CURRENT_UPSTREAM_CONTENT);
 
-  it('applies the Bedrock apiKey bearer patch and marks it as applied', async () => {
-    const packageRoot = setupFakePackage('0.78.1');
-    const result = await applyPiAiBedrockApiKeyBearerPatch({ packageRoot });
-
-    expect(result).toMatchObject({
-      status: 'applied',
+    expect(hasPiAiBedrockApiKeyBearerUpstreamFix(packageRoot)).toBe(true);
+    expect(verifyPiAiBedrockApiKeyBearerUpstreamFix({ packageRoot })).toEqual({
       packageRoot,
-      version: '0.78.1',
-    });
-    expect(result.patchPath).toBe(join(packageRoot, 'dist', 'providers', 'amazon-bedrock.js'));
-
-    const patched = readFileSync(
-      join(packageRoot, 'dist', 'providers', 'amazon-bedrock.js'),
-      'utf8',
-    );
-    expect(patched).toContain('__pi_update_extensions:bedrock-api-key-as-bearer__');
-    expect(patched).toContain('options.apiKey');
-    expect(patched).toContain('["facade", "facade-full"].includes(model.provider)');
-    expect(patched).toContain('envBearerToken');
-    expect(patched).toContain('getProviderEnvValue("AWS_BEARER_TOKEN_BEDROCK", options.env)');
-    expect(patched).toContain('process.env.AWS_BEARER_TOKEN_BEDROCK');
-    expect(patched).not.toContain(
-      'const bearerToken = options.bearerToken || process.env.AWS_BEARER_TOKEN_BEDROCK || undefined;',
-    );
-    expect(isPiAiBedrockApiKeyBearerPatchApplied(packageRoot)).toBe(true);
-  });
-
-  it('applies the Bedrock apiKey bearer patch to provider-env-helper upstream builds', async () => {
-    const packageRoot = setupFakePackage('0.79.5', PROVIDER_ENV_FIXTURE_CONTENT);
-    const result = await applyPiAiBedrockApiKeyBearerPatch({ packageRoot });
-
-    expect(result).toMatchObject({
-      status: 'applied',
-      packageRoot,
-      version: '0.79.5',
-    });
-
-    const patched = readFileSync(
-      join(packageRoot, 'dist', 'providers', 'amazon-bedrock.js'),
-      'utf8',
-    );
-    expect(patched).toContain('__pi_update_extensions:bedrock-api-key-as-bearer__');
-    expect(patched).toContain('envBearerToken');
-    expect(patched).toContain('options.apiKey');
-    expect(patched).not.toContain(
-      'const bearerToken = options.bearerToken || getProviderEnvValue("AWS_BEARER_TOKEN_BEDROCK", options.env) || undefined;',
-    );
-    expect(isPiAiBedrockApiKeyBearerPatchApplied(packageRoot)).toBe(true);
-  });
-
-  it('recognizes the upstream apiKey bearer implementation', async () => {
-    const packageRoot = setupFakePackage('0.80.7', UPSTREAM_API_KEY_FIXTURE_CONTENT);
-
-    expect(isPiAiBedrockApiKeyBearerPatchApplied(packageRoot)).toBe(true);
-    await expect(applyPiAiBedrockApiKeyBearerPatch({ packageRoot })).resolves.toMatchObject({
-      status: 'already-applied',
-      packageRoot,
-      version: '0.80.7',
+      version: '0.84.1',
+      sourcePath: join(packageRoot, 'dist', 'providers', 'amazon-bedrock.js'),
     });
   });
 
-  it('is idempotent after patching', async () => {
-    const packageRoot = setupFakePackage('0.78.1');
-    await applyPiAiBedrockApiKeyBearerPatch({ packageRoot });
-    const second = await applyPiAiBedrockApiKeyBearerPatch({ packageRoot });
+  it('rejects legacy bearer behavior without rewriting it', () => {
+    const packageRoot = setupFakePackage('0.83.0', LEGACY_CONTENT);
+    const providerPath = join(packageRoot, 'dist', 'providers', 'amazon-bedrock.js');
 
-    expect(second).toMatchObject({
-      status: 'already-applied',
-      packageRoot,
-      version: '0.78.1',
-    });
-  });
-
-  it('supports dry-run without mutating the file', async () => {
-    const packageRoot = setupFakePackage('0.78.1');
-    const bedrockPath = join(packageRoot, 'dist', 'providers', 'amazon-bedrock.js');
-    const original = readFileSync(bedrockPath, 'utf8');
-
-    const result = await applyPiAiBedrockApiKeyBearerPatch({ packageRoot, dryRun: true });
-    expect(result).toMatchObject({
-      status: 'would-apply',
-      packageRoot,
-      version: '0.78.1',
-    });
-    expect(readFileSync(bedrockPath, 'utf8')).toBe(original);
-    expect(isPiAiBedrockApiKeyBearerPatchApplied(packageRoot)).toBe(false);
-  });
-
-  it('throws a descriptive error when the target line is missing', async () => {
-    const packageRoot = setupFakePackage(
-      '1.0.0',
-      'export function streamBedrock() { /* upstream rewrote auth setup */ }\n',
+    expect(hasPiAiBedrockApiKeyBearerUpstreamFix(packageRoot)).toBe(false);
+    expect(() => verifyPiAiBedrockApiKeyBearerUpstreamFix({ packageRoot })).toThrow(
+      /Bedrock apiKey bearer semantics not found/i,
     );
-    await expect(applyPiAiBedrockApiKeyBearerPatch({ packageRoot })).rejects.toThrow(
-      /target line for Bedrock apiKey bearer patch not found/i,
-    );
-  });
-
-  it('builds a replacement containing the marker and fallback order', () => {
-    const replacement = buildPiAiBedrockApiKeyBearerReplacement();
-    expect(replacement).toContain('__pi_update_extensions:bedrock-api-key-as-bearer__');
-    expect(replacement).toContain('options.bearerToken');
-    expect(replacement).toContain('options.apiKey');
-    expect(replacement).toContain('getProviderEnvValue("AWS_BEARER_TOKEN_BEDROCK", options.env)');
-    expect(replacement).toContain('process.env.AWS_BEARER_TOKEN_BEDROCK');
+    expect(readFileSync(providerPath, 'utf8')).toBe(LEGACY_CONTENT);
   });
 });
 

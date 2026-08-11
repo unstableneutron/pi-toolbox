@@ -1,6 +1,6 @@
 {
   "name": "pi-fff-search",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Pi extension for FFF-backed search and robust format-aware reading",
   "keywords": [
     "pi-extension",
@@ -21,9 +21,9 @@
     "picomatch": "^4.0.3"
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "^0.83.0",
-    "@earendil-works/pi-coding-agent": "^0.83.0",
-    "@earendil-works/pi-tui": "^0.83.0",
+    "@earendil-works/pi-agent-core": "^0.84.1",
+    "@earendil-works/pi-coding-agent": "^0.84.1",
+    "@earendil-works/pi-tui": "^0.84.1",
     "@types/node": "^24.3.0",
     "@types/picomatch": "^4.0.3",
     "oxfmt": "^0.60.0",
@@ -34,10 +34,10 @@
     "vitest": "^3.2.4"
   },
   "peerDependencies": {
-    "@earendil-works/pi-agent-core": "*",
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*",
+    "@earendil-works/pi-agent-core": ">=0.84.1",
+    "@earendil-works/pi-ai": ">=0.84.1",
+    "@earendil-works/pi-coding-agent": ">=0.84.1",
+    "@earendil-works/pi-tui": ">=0.84.1",
     "typebox": "*"
   },
   "optionalDependencies": {

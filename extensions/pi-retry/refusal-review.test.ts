@@ -235,6 +235,7 @@ describe('requestRefusalRewrite', () => {
     const result = await requestRefusalRewrite({
       model: { provider: 'gust', id: 'gpt-5.4', api: 'openai-responses' } as any,
       apiKey: 'test-key',
+      baseUrl: 'https://resolved.example/v1',
       headers: { 'x-test': '1' },
       env: { PROVIDER_REGION: 'test-region' },
       transcriptText: '<user>original ask</user>',
@@ -247,7 +248,7 @@ describe('requestRefusalRewrite', () => {
     });
 
     expect(completeSimple).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'gpt-5.4' }),
+      expect.objectContaining({ id: 'gpt-5.4', baseUrl: 'https://resolved.example/v1' }),
       expect.objectContaining({
         systemPrompt: expect.stringContaining('Return exactly this format'),
       }),

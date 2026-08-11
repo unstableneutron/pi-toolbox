@@ -184,36 +184,17 @@ export function compareVersions(left: string, right: string): number {
 // amazon-bedrock" before the proxied-providers extension ever gets a chance
 // to reroute the stream).
 //
-// The patch is idempotent (checked via a marker comment) and loudly fails if
-// the upstream target line changes so we notice instead of silently no-oping.
+// Pi 0.84 moved this logic into modelRuntime. Keep a semantic guard so an
+// upstream regression is visible, but do not rewrite the installed source.
 // ---------------------------------------------------------------------------
 
 const PI_CODING_AGENT_PACKAGE_NAME = '@earendil-works/pi-coding-agent';
 const PI_CODING_AGENT_RESOLVER_RELATIVE_PATH = 'dist/core/model-resolver.js';
-const PI_CODING_AGENT_RESOLVER_PATCH_MARKER =
-  '__pi_update_extensions:model-resolver-uses-available__';
-const PI_CODING_AGENT_RESOLVER_PATCH_TARGET = '    const availableModels = modelRegistry.getAll();';
-// Current modelRuntime-based releases perform authenticated disambiguation
-// directly, so the old modelRegistry rewrite is no longer applicable.
 const PI_CODING_AGENT_RESOLVER_UPSTREAM_SEMANTIC_TARGETS = [
   '    const availableModels = [...modelRuntime.getModels()];',
   '            const authenticatedRawMatches = rawExactMatches.filter((m) => modelRuntime.hasConfiguredAuth(m.provider));',
   '                if (authenticatedRawMatches.length === 1) {',
 ] as const;
-
-export function buildPiCodingAgentResolverReplacement(): string {
-  return [
-    `    // ${PI_CODING_AGENT_RESOLVER_PATCH_MARKER}`,
-    `    // Prefer authenticated models so fuzzy matches do not land on a`,
-    `    // provider the user can't actually call. Fall back to getAll() so`,
-    `    // "--api-key + --model" first-time-setup still works when nothing`,
-    `    // is authenticated yet.`,
-    `    let availableModels = modelRegistry.getAvailable();`,
-    `    if (availableModels.length === 0) {`,
-    `        availableModels = modelRegistry.getAll();`,
-    `    }`,
-  ].join('\n');
-}
 
 // ---------------------------------------------------------------------------
 // pi-coding-agent transcript prefix cache patch
@@ -881,19 +862,18 @@ function findPackagePathInPiExtensionTempWorkspaces(packageName: string): string
   return undefined;
 }
 
-export function isPiCodingAgentResolverPatchApplied(packageRoot: string): boolean {
+export function hasPiCodingAgentResolverUpstreamFix(packageRoot: string): boolean {
   const filePath = join(packageRoot, PI_CODING_AGENT_RESOLVER_RELATIVE_PATH);
   if (!existsSync(filePath)) return false;
   const content = readFileSync(filePath, 'utf8');
-  return (
-    content.includes(PI_CODING_AGENT_RESOLVER_PATCH_MARKER) ||
-    PI_CODING_AGENT_RESOLVER_UPSTREAM_SEMANTIC_TARGETS.every((target) => content.includes(target))
+  return PI_CODING_AGENT_RESOLVER_UPSTREAM_SEMANTIC_TARGETS.every((target) =>
+    content.includes(target),
   );
 }
 
-export async function applyPiCodingAgentResolverPatch(
-  options: { dryRun?: boolean; packageRoot?: string; cwd?: string } = {},
-): Promise<ApplyPatchResult> {
+export function verifyPiCodingAgentResolverUpstreamFix(
+  options: { packageRoot?: string; cwd?: string } = {},
+): { packageRoot: string; version: string; sourcePath: string } {
   const packageRoot =
     options.packageRoot ??
     findPiCodingAgentRootFromExecutable() ??
@@ -905,34 +885,18 @@ export async function applyPiCodingAgentResolverPatch(
   }
 
   const version = getPackageVersion(packageRoot) ?? 'unknown';
-  const filePath = join(packageRoot, PI_CODING_AGENT_RESOLVER_RELATIVE_PATH);
-  if (!existsSync(filePath)) {
-    throw new Error(`pi-coding-agent@${version}: resolver file not found at ${filePath}`);
+  const sourcePath = join(packageRoot, PI_CODING_AGENT_RESOLVER_RELATIVE_PATH);
+  if (!existsSync(sourcePath)) {
+    throw new Error(`pi-coding-agent@${version}: resolver file not found at ${sourcePath}`);
   }
-
-  if (isPiCodingAgentResolverPatchApplied(packageRoot)) {
-    return { status: 'already-applied', packageRoot, version, patchPath: filePath };
-  }
-
-  const content = readFileSync(filePath, 'utf8');
-  if (!content.includes(PI_CODING_AGENT_RESOLVER_PATCH_TARGET)) {
+  if (!hasPiCodingAgentResolverUpstreamFix(packageRoot)) {
     throw new Error(
-      `pi-coding-agent@${version}: target line for resolver patch not found at ${filePath}. ` +
-        `Expected exact line: ${JSON.stringify(PI_CODING_AGENT_RESOLVER_PATCH_TARGET)}. ` +
-        `Upstream may have changed; update pi-update-extensions.ts.`,
+      `pi-coding-agent@${version}: authenticated resolver semantics not found at ${sourcePath}. ` +
+        'Pi 0.84.0 or newer is required; update pi-update-extensions.ts if upstream changed.',
     );
   }
 
-  if (options.dryRun) {
-    return { status: 'would-apply', packageRoot, version, patchPath: filePath };
-  }
-
-  const patched = content.replace(
-    PI_CODING_AGENT_RESOLVER_PATCH_TARGET,
-    buildPiCodingAgentResolverReplacement(),
-  );
-  writeFileSync(filePath, patched);
-  return { status: 'applied', packageRoot, version, patchPath: filePath };
+  return { packageRoot, version, sourcePath };
 }
 
 function writeJavaScriptPatchAtomically(filePath: string, content: string): void {
@@ -1035,17 +999,10 @@ export async function applyPiCodingAgentTranscriptCachePatch(
 }
 
 // ---------------------------------------------------------------------------
-// pi-ai Bedrock provider apiKey bearer patch
+// pi-ai Bedrock provider apiKey bearer verification
 //
-// Patches `dist/providers/amazon-bedrock.js` in the installed
-// @earendil-works/pi-ai so facade Bedrock Converse routes can use the
-// provider-level `apiKey` as the SDK HTTP bearer token. This avoids exporting
-// AWS_BEARER_TOKEN_BEDROCK, which would make the built-in amazon-bedrock
-// provider appear authenticated and load all of its models.
-//
-// Keep the behavior narrowly scoped to local facade providers: built-in
-// amazon-bedrock must continue to use normal AWS credentials, and other
-// providers should not implicitly reinterpret apiKey as a Bedrock bearer token.
+// Pi 0.84 passes provider apiKey through as the Bedrock bearer token. Verify
+// that behavior after updates instead of carrying an installed-source rewrite.
 // ---------------------------------------------------------------------------
 
 const PI_AI_PACKAGE_NAME = '@earendil-works/pi-ai';
@@ -1053,39 +1010,13 @@ const PI_AI_BEDROCK_RELATIVE_PATHS = [
   'dist/api/bedrock-converse-stream.js',
   'dist/providers/amazon-bedrock.js',
 ] as const;
-const PI_AI_BEDROCK_API_KEY_BEARER_PATCH_MARKER =
-  '__pi_update_extensions:bedrock-api-key-as-bearer__';
-const PI_AI_BEDROCK_API_KEY_BEARER_PATCH_TARGETS = [
-  '        const bearerToken = options.bearerToken || process.env.AWS_BEARER_TOKEN_BEDROCK || undefined;',
-  '        const bearerToken = options.bearerToken || getProviderEnvValue("AWS_BEARER_TOKEN_BEDROCK", options.env) || undefined;',
-] as const;
 
-export function buildPiAiBedrockApiKeyBearerReplacement(): string {
-  return [
-    `        // ${PI_AI_BEDROCK_API_KEY_BEARER_PATCH_MARKER}`,
-    `        // Local facade Bedrock proxies authenticate with provider apiKey`,
-    `        // as an HTTP bearer token. Do not apply this to built-in`,
-    `        // amazon-bedrock, where auth can come from AWS credential-chain`,
-    `        // sentinels instead of a real bearer token.`,
-    `        const envBearerToken =`,
-    `            typeof getProviderEnvValue === "function"`,
-    `                ? getProviderEnvValue("AWS_BEARER_TOKEN_BEDROCK", options.env)`,
-    `                : process.env.AWS_BEARER_TOKEN_BEDROCK;`,
-    `        const bearerToken =`,
-    `            options.bearerToken ||`,
-    `            (["facade", "facade-full"].includes(model.provider) ? options.apiKey : undefined) ||`,
-    `            envBearerToken ||`,
-    `            undefined;`,
-  ].join('\n');
-}
-
-export function isPiAiBedrockApiKeyBearerPatchApplied(packageRoot: string): boolean {
+export function hasPiAiBedrockApiKeyBearerUpstreamFix(packageRoot: string): boolean {
   const filePath = findExistingPackageFile(packageRoot, PI_AI_BEDROCK_RELATIVE_PATHS);
   if (!filePath) return false;
   const content = readFileSync(filePath, 'utf8');
-  return (
-    content.includes(PI_AI_BEDROCK_API_KEY_BEARER_PATCH_MARKER) ||
-    /const bearerToken\s*=\s*options\.bearerToken\s*\|\|\s*options\.apiKey\s*\|\|/.test(content)
+  return /const bearerToken\s*=\s*options\.bearerToken\s*\|\|\s*options\.apiKey\s*\|\|/.test(
+    content,
   );
 }
 
@@ -1109,9 +1040,9 @@ function findPiAiPackageRoot(options: { cwd?: string } = {}): string | undefined
   return undefined;
 }
 
-export async function applyPiAiBedrockApiKeyBearerPatch(
-  options: { dryRun?: boolean; packageRoot?: string; cwd?: string } = {},
-): Promise<ApplyPatchResult> {
+export function verifyPiAiBedrockApiKeyBearerUpstreamFix(
+  options: { packageRoot?: string; cwd?: string } = {},
+): { packageRoot: string; version: string; sourcePath: string } {
   const packageRoot = options.packageRoot ?? findPiAiPackageRoot({ cwd: options.cwd });
   if (!packageRoot) {
     throw new Error(
@@ -1120,36 +1051,20 @@ export async function applyPiAiBedrockApiKeyBearerPatch(
   }
 
   const version = getPackageVersion(packageRoot) ?? 'unknown';
-  const filePath = findExistingPackageFile(packageRoot, PI_AI_BEDROCK_RELATIVE_PATHS);
-  if (!filePath) {
+  const sourcePath = findExistingPackageFile(packageRoot, PI_AI_BEDROCK_RELATIVE_PATHS);
+  if (!sourcePath) {
     throw new Error(
       `pi-ai@${version}: Bedrock provider file not found at any of ${PI_AI_BEDROCK_RELATIVE_PATHS.join(', ')}`,
     );
   }
-
-  if (isPiAiBedrockApiKeyBearerPatchApplied(packageRoot)) {
-    return { status: 'already-applied', packageRoot, version, patchPath: filePath };
-  }
-
-  const content = readFileSync(filePath, 'utf8');
-  const target = PI_AI_BEDROCK_API_KEY_BEARER_PATCH_TARGETS.find((candidate) =>
-    content.includes(candidate),
-  );
-  if (!target) {
+  if (!hasPiAiBedrockApiKeyBearerUpstreamFix(packageRoot)) {
     throw new Error(
-      `pi-ai@${version}: target line for Bedrock apiKey bearer patch not found at ${filePath}. ` +
-        `Expected one of: ${JSON.stringify([...PI_AI_BEDROCK_API_KEY_BEARER_PATCH_TARGETS])}. ` +
-        `Upstream may have changed; update pi-update-extensions.ts.`,
+      `pi-ai@${version}: Bedrock apiKey bearer semantics not found at ${sourcePath}. ` +
+        'Pi 0.84.0 or newer is required; update pi-update-extensions.ts if upstream changed.',
     );
   }
 
-  if (options.dryRun) {
-    return { status: 'would-apply', packageRoot, version, patchPath: filePath };
-  }
-
-  const patched = content.replace(target, buildPiAiBedrockApiKeyBearerReplacement());
-  writeFileSync(filePath, patched);
-  return { status: 'applied', packageRoot, version, patchPath: filePath };
+  return { packageRoot, version, sourcePath };
 }
 
 // ---------------------------------------------------------------------------
@@ -2722,20 +2637,13 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
 
   if (!skipPatch) {
     try {
-      const resolverResult = await applyPiCodingAgentResolverPatch({
-        dryRun,
-        cwd: REPO_ROOT,
-      });
-      const label =
-        resolverResult.status === 'already-applied'
-          ? `Already applied: pi-coding-agent resolver patch (${resolverResult.version})`
-          : resolverResult.status === 'would-apply'
-            ? `Would apply: pi-coding-agent resolver patch (${resolverResult.version})`
-            : `${resolverResult.status}: pi-coding-agent resolver patch (${resolverResult.version}) via ${resolverResult.patchPath}`;
-      console.log(label);
+      const resolverResult = verifyPiCodingAgentResolverUpstreamFix({ cwd: REPO_ROOT });
+      console.log(
+        `Verified upstream: pi-coding-agent authenticated resolver (${resolverResult.version})`,
+      );
     } catch (error) {
       console.error(
-        `Skipped pi-coding-agent resolver patch: ${error instanceof Error ? error.message : String(error)}`,
+        `Failed pi-coding-agent resolver verification: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
 
@@ -2758,20 +2666,11 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     }
 
     try {
-      const bedrockResult = await applyPiAiBedrockApiKeyBearerPatch({
-        dryRun,
-        cwd: REPO_ROOT,
-      });
-      const label =
-        bedrockResult.status === 'already-applied'
-          ? `Already applied: pi-ai Bedrock apiKey bearer patch (${bedrockResult.version})`
-          : bedrockResult.status === 'would-apply'
-            ? `Would apply: pi-ai Bedrock apiKey bearer patch (${bedrockResult.version})`
-            : `${bedrockResult.status}: pi-ai Bedrock apiKey bearer patch (${bedrockResult.version}) via ${bedrockResult.patchPath}`;
-      console.log(label);
+      const bedrockResult = verifyPiAiBedrockApiKeyBearerUpstreamFix({ cwd: REPO_ROOT });
+      console.log(`Verified upstream: pi-ai Bedrock apiKey bearer (${bedrockResult.version})`);
     } catch (error) {
       console.error(
-        `Skipped pi-ai Bedrock apiKey bearer patch: ${error instanceof Error ? error.message : String(error)}`,
+        `Failed pi-ai Bedrock apiKey bearer verification: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
 

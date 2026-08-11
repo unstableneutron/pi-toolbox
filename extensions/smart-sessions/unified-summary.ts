@@ -1,11 +1,7 @@
-import {
-  completeSimple,
-  type Api,
-  type Model,
-  type UserMessage,
-} from '@earendil-works/pi-ai/compat';
+import { type Api, type Model, type UserMessage } from '@earendil-works/pi-ai/compat';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 
+import { completeSimpleWithResolvedAuth } from '../shared/model-completion';
 import {
   compactName,
   compactText,
@@ -170,22 +166,17 @@ export async function generateRollingSummary(
   ];
 
   for (const model of models) {
-    const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-    if (!auth.ok) continue;
-
     const controller = new AbortController();
     const abort = () => controller.abort();
     const timeout = setTimeout(() => controller.abort(), SUMMARIZE_TIMEOUT_MS);
     externalSignal?.addEventListener('abort', abort, { once: true });
 
     try {
-      const response = await completeSimple(
+      const response = await completeSimpleWithResolvedAuth(
+        ctx.modelRegistry,
         model,
         { systemPrompt: UNIFIED_SUMMARY_PROMPT, messages },
         {
-          apiKey: auth.apiKey,
-          headers: auth.headers,
-          env: auth.env,
           maxTokens: SUMMARIZE_MAX_TOKENS,
           signal: controller.signal,
         },

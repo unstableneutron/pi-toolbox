@@ -12,7 +12,7 @@
  * The generated prompt appears as a draft in the editor for review/editing.
  */
 
-import { complete, type Message } from '@earendil-works/pi-ai/compat';
+import { type Message } from '@earendil-works/pi-ai/compat';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import {
   BorderedLoader,
@@ -21,6 +21,7 @@ import {
   serializeConversation,
 } from '@earendil-works/pi-coding-agent';
 
+import { completeWithModelRegistry } from '../shared/model-completion';
 import { hasTui } from '../shared/ui-mode';
 
 const SYSTEM_PROMPT = `You are a context transfer assistant. Given a conversation history and the user's goal for a new thread, generate a focused prompt that:
@@ -88,11 +89,6 @@ export default function (pi: ExtensionAPI) {
         loader.onAbort = () => done(null);
 
         const doGenerate = async () => {
-          const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model!);
-          if (!auth.ok) {
-            throw new Error(auth.error);
-          }
-
           const userMessage: Message = {
             role: 'user',
             content: [
@@ -104,10 +100,11 @@ export default function (pi: ExtensionAPI) {
             timestamp: Date.now(),
           };
 
-          const response = await complete(
+          const response = await completeWithModelRegistry(
+            ctx.modelRegistry,
             ctx.model!,
             { systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
-            { apiKey: auth.apiKey, headers: auth.headers, env: auth.env, signal: loader.signal },
+            { signal: loader.signal },
           );
 
           if (response.stopReason === 'aborted') {

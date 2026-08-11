@@ -419,7 +419,8 @@ function buildConfiguredStream(
         throw new Error(auth.error);
       }
 
-      const routed = dispatcher(targetModel, context, {
+      const requestModel = auth.baseUrl ? { ...targetModel, baseUrl: auth.baseUrl } : targetModel;
+      const routed = dispatcher(requestModel, context, {
         ...options,
         apiKey: auth.apiKey,
         headers: auth.headers,

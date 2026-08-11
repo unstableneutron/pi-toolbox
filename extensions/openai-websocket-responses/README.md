@@ -3,7 +3,7 @@
 Experimental Pi extension providing a transport facade for OpenAI-compatible
 Responses APIs, with shared SSE/WebSocket parsing, Azure/LFM-friendly URL
 handling, terminal-output reconciliation, provider-side constrained sampling,
-and midstream recovery. Version 0.5 requires Pi 0.82 or newer.
+and midstream recovery. Version 0.6 requires Pi 0.84.1 or newer.
 
 The extension provides two modes:
 
@@ -164,6 +164,14 @@ also match Pi's Codex Responses path where Azure supports them:
   levels, including `max`, are clamped through Pi's provider-verified model
   metadata before serialization.
 - `tool_choice: "auto"` and `parallel_tool_calls: true` are sent by default.
+- Arbitrary OpenAI-compatible `samplingParams` from the model and request are
+  copied into both SSE and WebSocket bodies. Request values override model
+  defaults per key.
+- Pi's `onPayload` request transform runs before either transport sends the
+  body. WebSocket continuation comparison and diagnostics use the transformed
+  body. Keep transforms deterministic and side-effect free: transformed fields
+  are part of the continuation fingerprint, and a transport fallback can run
+  the callback for another physical request.
 - Tools using Pi 0.82's JSON-schema constrained sampling send `strict: true`
   only when `compat.supportsStrictMode` is enabled. `strict: "require"` fails
   before the request when strict tools are unavailable.
@@ -280,10 +288,12 @@ turns.
 
 Both transports reconcile `response.completed.response.output` against streamed
 items. Missing terminal text and function calls are emitted exactly once; output
-that diverges from already-streamed text fails rather than rewriting history. A
-completed response with only reasoning, empty/whitespace text, and no function
-call is emitted as a retryable `Model produced invalid content` error instead of
-a successful empty stop.
+that diverges from already-streamed text fails rather than rewriting history.
+Incomplete responses report `length` only for `max_output_tokens`; content
+filtering and missing or unknown incomplete reasons retain their provider detail
+and report an error. A completed response with only reasoning,
+empty/whitespace text, and no function call is emitted as a retryable
+`Model produced invalid content` error instead of a successful empty stop.
 
 The extension keeps its own per-session socket/continuation cache keyed by
 session, URL, provider, model, and headers; it does not share Pi's built-in

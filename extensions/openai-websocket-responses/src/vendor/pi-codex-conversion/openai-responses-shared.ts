@@ -443,10 +443,21 @@ export function buildResponsesTools(
   });
 }
 
-function mapStopReason(status: string | undefined): AssistantMessage['stopReason'] {
-  if (status === 'incomplete') return 'length';
-  if (status === 'failed' || status === 'cancelled') return 'error';
-  return 'stop';
+function mapStopReason(
+  status: string | undefined,
+  incompleteReason?: string,
+): { stopReason: AssistantMessage['stopReason']; errorMessage?: string } {
+  if (status === 'incomplete') {
+    if (incompleteReason === 'max_output_tokens') return { stopReason: 'length' };
+    return {
+      stopReason: 'error',
+      errorMessage: incompleteReason
+        ? `Response incomplete: ${incompleteReason}`
+        : 'Response incomplete without a provider reason',
+    };
+  }
+  if (status === 'failed' || status === 'cancelled') return { stopReason: 'error' };
+  return { stopReason: 'stop' };
 }
 
 function stripToolCalls(output: AssistantMessage): void {
@@ -512,11 +523,18 @@ function applyCompletedResponse<TApi extends Api>(
 ): void {
   output.responseId = response.id ?? output.responseId;
   applyResponseUsage(output, model, response.usage);
-  output.stopReason = mapStopReason(response.status);
-  if (output.stopReason === 'length') {
-    stripToolCalls(output);
-    return;
+  const status = response.status;
+  const incompleteDetails = response.incomplete_details as { reason?: unknown } | null | undefined;
+  const incompleteReason =
+    typeof incompleteDetails?.reason === 'string' ? incompleteDetails.reason : undefined;
+  if (status !== undefined) {
+    output.rawStopReason = incompleteReason ? `${status}.${incompleteReason}` : status;
   }
+  const mappedStop = mapStopReason(status, incompleteReason);
+  output.stopReason = mappedStop.stopReason;
+  output.errorMessage = mappedStop.errorMessage;
+  if (status === 'incomplete') stripToolCalls(output);
+  if (output.stopReason === 'length') return;
   if (output.content.some((block) => block.type === 'toolCall') && output.stopReason === 'stop') {
     output.stopReason = 'toolUse';
   }

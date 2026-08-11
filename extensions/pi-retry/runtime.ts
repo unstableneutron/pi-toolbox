@@ -119,7 +119,8 @@ export interface PendingRecovery {
 export interface ReviewModelAuth {
   ok: boolean;
   apiKey?: string;
-  headers?: { [key: string]: string };
+  baseUrl?: string;
+  headers?: { [key: string]: string | null };
   env?: { [key: string]: string };
   error?: string;
 }
@@ -1364,7 +1365,8 @@ export async function handleRefusalRecovery(input: {
   reviewRewrite: (args: {
     model: Model<any>;
     apiKey?: string;
-    headers?: { [key: string]: string };
+    baseUrl?: string;
+    headers?: { [key: string]: string | null };
     env?: { [key: string]: string };
     transcriptText: string;
     signal?: AbortSignal;
@@ -1712,6 +1714,7 @@ export async function handleRefusalRecovery(input: {
       review = await input.reviewRewrite({
         model: reviewModel,
         apiKey: auth.apiKey,
+        baseUrl: auth.baseUrl,
         headers: auth.headers,
         env: auth.env,
         transcriptText,

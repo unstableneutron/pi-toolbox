@@ -131,6 +131,72 @@ describe('createRenderGate', () => {
     expect(requestRender).toHaveBeenCalledWith(true);
   });
 
+  test('rebinds after Pi replaces the renderer for a TUI mode switch', () => {
+    const regularRender = vi.fn();
+    const fullscreenRender = vi.fn();
+    let renderer = { mode: 'regular', requestRender: regularRender };
+    const tui = new Proxy({} as typeof renderer, {
+      get: (_target, property) => {
+        const methodRenderer = renderer;
+        const value = Reflect.get(methodRenderer, property, methodRenderer);
+        return typeof value === 'function' ? value.bind(methodRenderer) : value;
+      },
+      set: (_target, property, value) => Reflect.set(renderer, property, value, renderer),
+    });
+    const gate = createRenderGate(tui);
+    gate.setActive(false);
+
+    renderer = { mode: 'fullscreen', requestRender: fullscreenRender };
+    gate.refreshBinding();
+    tui.requestRender(true);
+
+    expect(regularRender).not.toHaveBeenCalled();
+    expect(fullscreenRender).not.toHaveBeenCalled();
+
+    gate.setActive(true);
+
+    expect(fullscreenRender).toHaveBeenCalledOnce();
+    expect(fullscreenRender).toHaveBeenCalledWith(true);
+  });
+
+  test('flushes through the replacement renderer before its widget renders', () => {
+    const regularRender = vi.fn();
+    const fullscreenRender = vi.fn();
+    let renderer = { mode: 'regular', requestRender: regularRender };
+    const tui = new Proxy({} as typeof renderer, {
+      get: (_target, property) => {
+        const methodRenderer = renderer;
+        const value = Reflect.get(methodRenderer, property, methodRenderer);
+        return typeof value === 'function' ? value.bind(methodRenderer) : value;
+      },
+      set: (_target, property, value) => Reflect.set(renderer, property, value, renderer),
+    });
+    const gate = createRenderGate(tui);
+    gate.setActive(false);
+
+    renderer = { mode: 'fullscreen', requestRender: fullscreenRender };
+    gate.flushOnce();
+
+    expect(regularRender).not.toHaveBeenCalled();
+    expect(fullscreenRender).toHaveBeenCalledOnce();
+    expect(fullscreenRender).toHaveBeenCalledWith(true);
+  });
+
+  test('does not bind the gate to itself when one TUI object changes mode', () => {
+    const requestRender = vi.fn();
+    const tui = { mode: 'regular', requestRender } as any;
+    const gate = createRenderGate(tui);
+    gate.setActive(false);
+
+    tui.mode = 'fullscreen';
+    gate.refreshBinding();
+    tui.requestRender(true);
+
+    expect(requestRender).not.toHaveBeenCalled();
+    gate.setActive(true);
+    expect(requestRender).toHaveBeenCalledOnce();
+  });
+
   test('restores the original requestRender implementation', () => {
     const requestRender = vi.fn();
     const tui = { requestRender } as any;

@@ -7,11 +7,12 @@
  */
 
 import { Type } from 'typebox';
-import { complete, type Api, type Model, type UserMessage } from '@earendil-works/pi-ai/compat';
+import { type Api, type Model, type UserMessage } from '@earendil-works/pi-ai/compat';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { Container, type SelectItem, SelectList, Text } from '@earendil-works/pi-tui';
 import { DynamicBorder } from '@earendil-works/pi-coding-agent';
 
+import { completeWithModelRegistry } from '../shared/model-completion';
 import { hasTui } from '../shared/ui-mode';
 
 type LoopMode = 'tests' | 'custom' | 'self';
@@ -86,27 +87,17 @@ function getConditionText(mode: LoopMode, condition?: string): string {
   }
 }
 
-async function selectSummaryModel(ctx: ExtensionContext): Promise<{
-  model: Model<Api>;
-  apiKey?: string;
-  headers?: Record<string, string>;
-  env?: Record<string, string>;
-} | null> {
+async function selectSummaryModel(ctx: ExtensionContext): Promise<Model<Api> | null> {
   if (!ctx.model) return null;
 
   if (ctx.model.provider === 'anthropic') {
     const haikuModel = ctx.modelRegistry.find('anthropic', HAIKU_MODEL_ID);
-    if (haikuModel) {
-      const auth = await ctx.modelRegistry.getApiKeyAndHeaders(haikuModel);
-      if (auth.ok) {
-        return { model: haikuModel, apiKey: auth.apiKey, headers: auth.headers, env: auth.env };
-      }
+    if (haikuModel && (await ctx.modelRegistry.getApiKeyAndHeaders(haikuModel)).ok) {
+      return haikuModel;
     }
   }
 
-  const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
-  if (!auth.ok) return null;
-  return { model: ctx.model, apiKey: auth.apiKey, headers: auth.headers, env: auth.env };
+  return (await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model)).ok ? ctx.model : null;
 }
 
 async function summarizeBreakoutCondition(
@@ -115,8 +106,8 @@ async function summarizeBreakoutCondition(
   condition?: string,
 ): Promise<string> {
   const fallback = summarizeCondition(mode, condition);
-  const selection = await selectSummaryModel(ctx);
-  if (!selection) return fallback;
+  const model = await selectSummaryModel(ctx);
+  if (!model) return fallback;
 
   const conditionText = getConditionText(mode, condition);
   const userMessage: UserMessage = {
@@ -125,25 +116,28 @@ async function summarizeBreakoutCondition(
     timestamp: Date.now(),
   };
 
-  const response = await complete(
-    selection.model,
-    { systemPrompt: SUMMARY_SYSTEM_PROMPT, messages: [userMessage] },
-    { apiKey: selection.apiKey, headers: selection.headers, env: selection.env },
-  );
+  try {
+    const response = await completeWithModelRegistry(ctx.modelRegistry, model, {
+      systemPrompt: SUMMARY_SYSTEM_PROMPT,
+      messages: [userMessage],
+    });
 
-  if (response.stopReason === 'aborted' || response.stopReason === 'error') {
+    if (response.stopReason === 'aborted' || response.stopReason === 'error') {
+      return fallback;
+    }
+
+    const summary = response.content
+      .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
+      .map((c) => c.text)
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!summary) return fallback;
+    return summary.length > 60 ? `${summary.slice(0, 57)}...` : summary;
+  } catch {
     return fallback;
   }
-
-  const summary = response.content
-    .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
-    .map((c) => c.text)
-    .join(' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  if (!summary) return fallback;
-  return summary.length > 60 ? `${summary.slice(0, 57)}...` : summary;
 }
 
 function updateStatus(ctx: ExtensionContext, state: LoopStateData): void {

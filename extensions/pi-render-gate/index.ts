@@ -17,11 +17,13 @@ type RequestRender = (force?: boolean) => void;
 export interface RenderGate {
   flushOnce(): void;
   isActive(): boolean;
+  refreshBinding(): void;
   restore(): void;
   setActive(active: boolean): void;
 }
 
 interface PatchableTui {
+  mode?: unknown;
   requestRender: RequestRender;
 }
 
@@ -252,7 +254,8 @@ export function createRenderGate(tui: PatchableTui): RenderGate {
   const existing = gates.get(tui);
   if (existing) return existing;
 
-  const originalRequestRender = tui.requestRender.bind(tui);
+  let originalRequestRender = tui.requestRender.bind(tui);
+  let boundMode = tui.mode;
   let active = true;
   let dirty = false;
   let forceDirty = false;
@@ -273,19 +276,33 @@ export function createRenderGate(tui: PatchableTui): RenderGate {
   const gate: RenderGate = {
     flushOnce() {
       if (restored) return;
+      gate.refreshBinding();
       dirty = false;
       forceDirty = false;
       originalRequestRender(true);
     },
     isActive: () => active,
+    refreshBinding() {
+      if (restored || tui.mode === boundMode) return;
+      if (tui.requestRender === patchedRequestRender) {
+        boundMode = tui.mode;
+        return;
+      }
+      const nextOriginalRequestRender = tui.requestRender.bind(tui);
+      tui.requestRender = patchedRequestRender;
+      originalRequestRender = nextOriginalRequestRender;
+      boundMode = tui.mode;
+    },
     restore() {
       if (restored) return;
+      gate.refreshBinding();
       restored = true;
       tui.requestRender = originalRequestRender;
       gates.delete(tui);
     },
     setActive(nextActive: boolean) {
       if (restored || active === nextActive) return;
+      if (nextActive) gate.refreshBinding();
       active = nextActive;
       if (!active || !dirty) return;
 
@@ -404,9 +421,12 @@ export function isHerdrEnv(env: NodeJS.ProcessEnv): env is NodeJS.ProcessEnv & {
 }
 
 class InvisibleComponent implements Component {
+  constructor(private readonly onRender: () => void = () => {}) {}
+
   invalidate(): void {}
 
   render(_width: number): string[] {
+    this.onRender();
     return [];
   }
 }
@@ -424,7 +444,7 @@ function installForSession(
     WIDGET_KEY,
     (tui: TUI) => {
       gate = createRenderGate(tui);
-      return new InvisibleComponent();
+      return new InvisibleComponent(() => gate?.refreshBinding());
     },
     { placement: 'belowEditor' },
   );

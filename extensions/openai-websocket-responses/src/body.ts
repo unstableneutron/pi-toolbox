@@ -257,5 +257,6 @@ export function buildResponsesBody(
     body.reasoning = { effort, summary: resolveReasoningSummary(options) };
   }
   if (tools) body.tools = tools;
+  Object.assign(body, model.samplingParams, options?.samplingParams);
   return body;
 }

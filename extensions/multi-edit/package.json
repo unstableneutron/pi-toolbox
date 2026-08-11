@@ -1,6 +1,6 @@
 {
   "name": "pi-multi-edit",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
   "description": "Pi multi-file edit tool with diff preview and patch safety checks.",
   "license": "MIT",
@@ -9,16 +9,16 @@
     "diff": ">=8.0.0"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.83.0",
-    "@earendil-works/pi-tui": "^0.83.0",
+    "@earendil-works/pi-coding-agent": "^0.84.1",
+    "@earendil-works/pi-tui": "^0.84.1",
     "@types/node": "^24.3.0",
     "typebox": "^1.1.24",
     "typescript": "^5.7.3",
     "vitest": "^3.2.4"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.83.0",
-    "@earendil-works/pi-tui": ">=0.83.0",
+    "@earendil-works/pi-coding-agent": ">=0.84.1",
+    "@earendil-works/pi-tui": ">=0.84.1",
     "typebox": "*"
   },
   "pi": {

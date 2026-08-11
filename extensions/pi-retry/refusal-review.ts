@@ -1,11 +1,16 @@
-import type { AssistantMessage, Model, UserMessage } from '@earendil-works/pi-ai/compat';
+import type {
+  AssistantMessage,
+  Model,
+  ProviderHeaders,
+  UserMessage,
+} from '@earendil-works/pi-ai/compat';
 
 type CompleteSimple = (
   model: Model<any>,
   context: { systemPrompt: string; messages: UserMessage[] },
   options: {
     apiKey?: string;
-    headers?: { [key: string]: string };
+    headers?: ProviderHeaders;
     env?: { [key: string]: string };
     reasoning: 'high';
     maxTokens: number;
@@ -62,7 +67,8 @@ REWRITE:
 interface ReviewCallInput {
   model: Model<any>;
   apiKey?: string;
-  headers?: { [key: string]: string };
+  baseUrl?: string;
+  headers?: ProviderHeaders;
   env?: { [key: string]: string };
   transcriptText: string;
   signal?: AbortSignal;
@@ -242,8 +248,9 @@ export async function requestRefusalRewrite(
   const completeSimple = await loadCompleteSimple();
   if (!completeSimple) return undefined;
 
+  const requestModel = input.baseUrl ? { ...input.model, baseUrl: input.baseUrl } : input.model;
   const response = await completeSimple(
-    input.model,
+    requestModel,
     { systemPrompt: REVIEW_PROMPT, messages: [message] },
     {
       apiKey: input.apiKey,

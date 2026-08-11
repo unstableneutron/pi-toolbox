@@ -1,6 +1,6 @@
 {
   "name": "pi-executor-remote",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "private": true,
   "description": "Remote-only Pi bridge to an existing Executor HTTP/MCP server",
   "license": "MIT",
@@ -19,18 +19,18 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "^0.83.0",
-    "@earendil-works/pi-coding-agent": "^0.83.0",
-    "@earendil-works/pi-tui": "^0.83.0",
+    "@earendil-works/pi-ai": "^0.84.1",
+    "@earendil-works/pi-coding-agent": "^0.84.1",
+    "@earendil-works/pi-tui": "^0.84.1",
     "@types/node": "^24.3.0",
     "typebox": "^1.1.24",
     "typescript": "^5.7.3",
     "vitest": "^3.2.4"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": ">=0.83.0",
-    "@earendil-works/pi-coding-agent": ">=0.83.0",
-    "@earendil-works/pi-tui": ">=0.83.0",
+    "@earendil-works/pi-ai": ">=0.84.1",
+    "@earendil-works/pi-coding-agent": ">=0.84.1",
+    "@earendil-works/pi-tui": ">=0.84.1",
     "typebox": "*"
   },
   "engines": {
