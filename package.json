@@ -1,6 +1,6 @@
 {
   "name": "pi-toolbox",
-  "version": "0.86.3",
+  "version": "0.86.4",
   "private": true,
   "description": "My own pi-toolbox of extensions, skills, prompts, and subagent templates.",
   "license": "MIT",
@@ -45,7 +45,7 @@
   "engines": {
     "node": ">=22.19.0"
   },
-  "packageManager": "pnpm@11.17.0",
+  "packageManager": "pnpm@11.21.0",
   "omp": {
     "extensions": [
       "./extensions/openai-websocket-responses/omp.ts",
