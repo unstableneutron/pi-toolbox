@@ -103,6 +103,18 @@ importers:
       '@types/node':
         specifier: ^24.3.0
         version: 24.13.3
+      oxfmt:
+        specifier: ^0.60.0
+        version: 0.60.0
+      oxlint:
+        specifier: ^1.75.0
+        version: 1.75.0(oxlint-tsgolint@7.0.2001)
+      oxlint-tsgolint:
+        specifier: ^7.0.2001
+        version: 7.0.2001
+      pi-bash-rewrite:
+        specifier: workspace:*
+        version: link:../bash-rewrite
       typebox:
         specifier: ^1.1.24
         version: 1.1.38
@@ -249,9 +261,6 @@ importers:
 
   extensions/pi-fff-search:
     dependencies:
-      '@earendil-works/pi-ai':
-        specifier: 0.84.1
-        version: 0.84.1(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
       fff-router:
         specifier: github:unstableneutron/fff-router#semver:>=0.8.0
         version: https://codeload.github.com/unstableneutron/fff-router/tar.gz/599ee0409d113573c003d419c3702ffc3b0d3a1f
@@ -283,6 +292,9 @@ importers:
       oxlint-tsgolint:
         specifier: ^7.0.2001
         version: 7.0.2001
+      pi-bash-rewrite:
+        specifier: workspace:*
+        version: link:../bash-rewrite
       typebox:
         specifier: ^1.1.24
         version: 1.1.38
@@ -399,6 +411,30 @@ importers:
       typebox:
         specifier: ^1.1.24
         version: 1.1.38
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/node@24.13.3)(jiti@2.7.0)(tsx@4.23.1)(yaml@2.9.0)
+
+  packages/bash-rewrite-subagent:
+    devDependencies:
+      '@earendil-works/pi-coding-agent':
+        specifier: 0.84.1
+        version: 0.84.1(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
+      '@types/node':
+        specifier: ^24.3.0
+        version: 24.13.3
+      oxfmt:
+        specifier: ^0.60.0
+        version: 0.60.0
+      oxlint:
+        specifier: ^1.75.0
+        version: 1.75.0(oxlint-tsgolint@7.0.2001)
+      oxlint-tsgolint:
+        specifier: ^7.0.2001
+        version: 7.0.2001
       typescript:
         specifier: ^5.7.3
         version: 5.9.3

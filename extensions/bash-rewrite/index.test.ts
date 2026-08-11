@@ -1,6 +1,15 @@
+import { fileURLToPath } from 'node:url';
 import { describe, expect, test, vi } from 'vitest';
 
-import bashRewriteExtension, { bashCommandContainsExpensiveTool } from './index';
+import bashRewriteExtension, {
+  BASH_REWRITE_API_VERSION,
+  BASH_REWRITE_PROVIDER_PRIORITY_RULE,
+  BASH_REWRITE_TARGET_POLICY,
+  bashCommandContainsExpensiveTool,
+} from './index';
+
+const PACKAGE_JSON_PATH = fileURLToPath(new URL('./package.json', import.meta.url));
+const PACKAGE_GREP_COMMAND = `grep -n "pi-bash-rewrite" ${JSON.stringify(PACKAGE_JSON_PATH)}`;
 
 function createHarness(activeTools = ['bash', 'read', 'ls', 'fff_grep', 'fff_find_files']) {
   const tools: any[] = [];
@@ -44,6 +53,12 @@ describe('bash-rewrite orchestrator', () => {
     expect(tools.map((tool) => tool.name)).toEqual(['bash']);
   });
 
+  test('exports the closed target and deterministic provider-priority contract', () => {
+    expect(BASH_REWRITE_API_VERSION).toBe(1);
+    expect(BASH_REWRITE_TARGET_POLICY).toBe('closed-v1');
+    expect(BASH_REWRITE_PROVIDER_PRIORITY_RULE).toBe('higher-priority-then-provider-id');
+  });
+
   test('dispatches grep rewrites to an event-collected provider', async () => {
     const { tools, pi } = createHarness();
     const execute = vi.fn(async () => ({
@@ -82,6 +97,39 @@ describe('bash-rewrite orchestrator', () => {
       rewriteProviderId: 'test-fff',
       rewriteRecognizer: 'grep-search+head',
     });
+  });
+
+  test('selects higher-priority providers and uses provider id as the tie-breaker', async () => {
+    const { tools, pi } = createHarness();
+    const calls: string[] = [];
+    pi.events.on('bash-rewrite:collect-providers', (payload: any) => {
+      for (const [id, priority] of [
+        ['z-low', 10],
+        ['z-high', 100],
+        ['a-high', 100],
+      ] as const) {
+        payload.register({
+          id,
+          priority,
+          tools: ['fff_grep'],
+          async execute() {
+            calls.push(id);
+            return { content: [{ type: 'text', text: id }] };
+          },
+        });
+      }
+    });
+
+    const result = await tools[0].execute(
+      'tool-call',
+      { command: 'grep -rn "foo" src/' },
+      undefined,
+      undefined,
+      { cwd: process.cwd() },
+    );
+
+    expect(calls).toEqual(['a-high']);
+    expect(result.details.rewriteProviderId).toBe('a-high');
   });
 
   test('passes renderCall context through to rewrite provider previews', () => {
@@ -130,6 +178,99 @@ describe('bash-rewrite orchestrator', () => {
     );
   });
 
+  test('caches preview collection by command, cwd, and active-tool state', () => {
+    const activeTools = ['bash', 'fff_grep'];
+    const { tools, pi } = createHarness(activeTools);
+    let collectCount = 0;
+    pi.events.on('bash-rewrite:collect-providers', (payload: any) => {
+      collectCount += 1;
+      payload.register({
+        id: 'test-fff',
+        tools: ['fff_grep'],
+        execute: vi.fn(),
+        renderPreview: () => ({ render: () => ['preview'] }),
+      });
+    });
+    const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+    const args = { command: 'grep -rn "foo" src/' };
+
+    tools[0].renderCall(args, theme, { cwd: '/repo' }).render(80);
+    tools[0].renderCall(args, theme, { cwd: '/repo' }).render(80);
+    expect(collectCount).toBe(1);
+
+    activeTools.push('read');
+    tools[0].renderCall(args, theme, { cwd: '/repo' }).render(80);
+    expect(collectCount).toBe(2);
+  });
+
+  test('refreshes providers at the next turn and does not reuse stale previews', async () => {
+    const { tools, handlers, pi } = createHarness(['bash', 'fff_grep']);
+    let providerAvailable = true;
+    pi.events.on('bash-rewrite:collect-providers', (payload: any) => {
+      if (!providerAvailable) return;
+      payload.register({
+        id: 'test-fff',
+        tools: ['fff_grep'],
+        execute: vi.fn(),
+        renderPreview: () => ({ render: () => ['provider-preview'] }),
+      });
+    });
+    const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+    const args = { command: 'grep -rn "foo" src/' };
+
+    expect(tools[0].renderCall(args, theme, { cwd: '/repo' }).render(80)).toEqual([
+      'provider-preview',
+    ]);
+
+    providerAvailable = false;
+    const diagnostic = await handlers.get('before_agent_start')!({ systemPrompt: 'BASE' });
+    const result = await tools[0].execute(
+      'tool-call',
+      { command: PACKAGE_GREP_COMMAND },
+      undefined,
+      undefined,
+      {
+        cwd: process.cwd(),
+        sessionManager: {
+          getSessionId: () => 'provider-refresh-test',
+          getSessionFile: () => '/tmp/provider-refresh-test.jsonl',
+        },
+      },
+    );
+
+    expect(diagnostic.systemPrompt).toContain(
+      'no provider is registered for active target(s): fff_grep',
+    );
+    expect(result.content[0].text).toContain('"name": "pi-bash-rewrite"');
+    expect(result.content[0].text).not.toContain('base_path:');
+  });
+
+  test('renders legacy routedVia metadata for every provider tool', () => {
+    const { tools, pi } = createHarness();
+    const renderResult = vi.fn(() => ({ render: () => ['second-tool-renderer'] }));
+    pi.events.on('bash-rewrite:collect-providers', (payload: any) => {
+      payload.register({
+        id: 'test-fff',
+        tools: ['fff_grep', 'fff_find_files'],
+        execute: vi.fn(),
+        renderResult,
+      });
+    });
+
+    const rendered = tools[0].renderResult(
+      {
+        content: [{ type: 'text', text: 'base_path: /repo\n\nsrc/file.ts' }],
+        details: { routedVia: 'bash-to-fff_find_files', rewriteToParams: { query: 'file' } },
+      },
+      { expanded: false, isPartial: false },
+      { fg: (_color: string, text: string) => text },
+      { cwd: '/repo' },
+    );
+
+    expect(rendered.render(80)).toEqual(['second-tool-renderer']);
+    expect(renderResult).toHaveBeenCalledOnce();
+  });
+
   test('renders builtin read rewrite results without collecting external providers', () => {
     const { tools, pi } = createHarness();
     let collectCount = 0;
@@ -155,6 +296,135 @@ describe('bash-rewrite orchestrator', () => {
 
     expect(rendered.render(80)).toEqual([]);
     expect(collectCount).toBe(0);
+  });
+
+  test('keeps the expensive-command timeout when provider execution falls back', async () => {
+    const { tools, pi } = createHarness();
+    const execute = vi.fn(async () => {
+      throw new Error('provider unavailable');
+    });
+    pi.events.on('bash-rewrite:collect-providers', (payload: any) => {
+      payload.register({
+        id: 'test-fff',
+        tools: ['fff_grep'],
+        fallbackOnExecuteError: true,
+        execute,
+      });
+    });
+
+    const result = await tools[0].execute(
+      'tool-call',
+      { command: PACKAGE_GREP_COMMAND },
+      undefined,
+      undefined,
+      {
+        cwd: process.cwd(),
+        sessionManager: {
+          getSessionId: () => 'fallback-test',
+          getSessionFile: () => '/tmp/fallback-test.jsonl',
+        },
+      },
+    );
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(result.content[0].text).toMatch(/^\(60s timeout\)/);
+  });
+
+  test('reports missing providers once and passes through without activating tools', async () => {
+    const { tools, handlers } = createHarness(['bash', 'fff_grep', 'apply_patch']);
+    const beforeAgentStart = handlers.get('before_agent_start')!;
+    const first = await beforeAgentStart({ systemPrompt: 'BASE' });
+    const second = await beforeAgentStart({ systemPrompt: 'BASE' });
+    const result = await tools[0].execute(
+      'tool-call',
+      { command: PACKAGE_GREP_COMMAND },
+      undefined,
+      undefined,
+      {
+        cwd: process.cwd(),
+        sessionManager: {
+          getSessionId: () => 'missing-provider-test',
+          getSessionFile: () => '/tmp/missing-provider-test.jsonl',
+        },
+      },
+    );
+
+    expect(first.systemPrompt).toContain('no external providers are registered');
+    expect(first.systemPrompt).toContain(
+      'no provider is registered for active target(s): apply_patch, fff_grep',
+    );
+    expect(first.systemPrompt).toContain('this notice does not activate tools');
+    expect(second).toBeUndefined();
+    expect(result.content[0].text).toContain('"name": "pi-bash-rewrite"');
+    expect(result.content[0].text).not.toContain('base_path:');
+  });
+
+  test('does not warn about deliberately inactive provider targets', async () => {
+    const { handlers, pi } = createHarness(['bash', 'read']);
+    pi.events.on('bash-rewrite:collect-providers', (payload: any) => {
+      payload.register({
+        id: 'test-fff',
+        tools: ['fff_grep', 'fff_find_files'],
+        execute: vi.fn(),
+      });
+    });
+
+    const diagnostic = await handlers.get('before_agent_start')!({ systemPrompt: 'BASE' });
+
+    expect(diagnostic).toBeUndefined();
+  });
+
+  test('never falls back to raw bash after a mutating provider error', async () => {
+    const { tools, pi } = createHarness(['bash', 'apply_patch']);
+    pi.events.on('bash-rewrite:collect-providers', (payload: any) => {
+      payload.register({
+        id: 'test-apply-patch',
+        tools: ['apply_patch'],
+        fallbackOnExecuteError: false,
+        async execute() {
+          throw new Error('patch provider rejected input');
+        },
+      });
+    });
+    const command = `apply_patch <<'PATCH'
+*** Begin Patch
+*** Add File: scratch/should-not-exist.txt
++no
+*** End Patch
+PATCH`;
+
+    await expect(
+      tools[0].execute('tool-call', { command }, undefined, undefined, {
+        cwd: process.cwd(),
+        sessionManager: {
+          getSessionId: () => 'mutating-provider-test',
+          getSessionFile: () => '/tmp/mutating-provider-test.jsonl',
+        },
+      }),
+    ).rejects.toThrow('patch provider rejected input');
+  });
+
+  test('fails closed and reports when the active-tool API is unavailable', async () => {
+    const { tools, handlers, pi } = createHarness(['bash', 'read']);
+    pi.getActiveTools = undefined;
+    const beforeAgentStart = handlers.get('before_agent_start')!;
+    const diagnostic = await beforeAgentStart({ systemPrompt: 'BASE' });
+    const result = await tools[0].execute(
+      'tool-call',
+      { command: 'cat package.json | head -3' },
+      undefined,
+      undefined,
+      {
+        cwd: process.cwd(),
+        sessionManager: {
+          getSessionId: () => 'unavailable-tools-test',
+          getSessionFile: () => '/tmp/unavailable-tools-test.jsonl',
+        },
+      },
+    );
+
+    expect(diagnostic.systemPrompt).toContain('active-tool list is unavailable');
+    expect(result.content[0].text).not.toContain('Use offset=4 to continue');
   });
 
   test('passes through commands with Pi 0.82 live session environment', async () => {

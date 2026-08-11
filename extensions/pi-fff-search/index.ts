@@ -3,6 +3,12 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { Text, type Component } from '@earendil-works/pi-tui';
 import { type TSchema } from 'typebox';
+import type {
+  BashRewriteApiVersion,
+  BashRewriteCollectProvidersEvent,
+  BashRewriteProvider,
+  BashRewriteProviderCollectorPayload,
+} from 'pi-bash-rewrite/contract';
 import {
   createFindToolDefinition,
   createGrepToolDefinition,
@@ -37,6 +43,20 @@ import {
   type RobustReadDependencies,
   type RobustReader,
 } from './robust-read';
+
+const BASH_REWRITE_COLLECT_PROVIDERS_EVENT: BashRewriteCollectProvidersEvent =
+  'bash-rewrite:collect-providers';
+const BASH_REWRITE_API_VERSION: BashRewriteApiVersion = 1;
+
+function isCompatibleBashRewriteCollector(
+  payload: unknown,
+): payload is BashRewriteProviderCollectorPayload {
+  if (!payload || typeof payload !== 'object') return false;
+  const candidate = payload as { apiVersion?: unknown; register?: unknown };
+  return (
+    candidate.apiVersion === BASH_REWRITE_API_VERSION && typeof candidate.register === 'function'
+  );
+}
 
 type PublicToolName = 'fff_find_files' | 'fff_search_terms' | 'fff_grep';
 
@@ -2213,77 +2233,66 @@ export function createPiFffSearchExtension(options: CreatePiFffSearchExtensionOp
           }
         : null;
 
-    const unregisterBashRewriteProvider =
-      pi.events?.on?.('bash-rewrite:collect-providers', (payload: unknown) => {
-        if (!payload || typeof payload !== 'object') return;
-        const register = (payload as { register?: unknown }).register;
-        if (typeof register !== 'function') return;
+    pi.events?.on?.(BASH_REWRITE_COLLECT_PROVIDERS_EVENT, (payload: unknown) => {
+      if (!isCompatibleBashRewriteCollector(payload)) return;
 
-        register({
-          id: 'pi-fff-search',
-          priority: 100,
-          tools: ['fff_grep', 'fff_find_files'],
-          fallbackOnExecuteError: true,
-          async execute(
-            decision: { tool: PublicToolName; params: Record<string, unknown> },
-            runtime: { ctx: { cwd: string } },
-          ) {
-            if (decision.tool !== 'fff_grep' && decision.tool !== 'fff_find_files') {
-              throw new Error(
-                `Unsupported pi-fff-search bash rewrite target: ${String(decision.tool)}`,
-              );
-            }
-            const forwarded = await forwardToolCall({
-              toolName: decision.tool,
-              params: decision.params,
-              cwd: runtime.ctx.cwd,
-              ensureDaemonRunning: ensureDaemon,
-              callPublicToolOverHttp: callTool,
-              runRipgrepFallback: runFallback,
-            });
-            return {
-              content: [{ type: 'text' as const, text: forwarded.text }],
-              details: forwarded.details,
-            };
-          },
-          renderPreview(
-            decision: { tool: 'fff_grep' | 'fff_find_files'; params: Record<string, unknown> },
-            theme: CompactCallTheme,
-            runtime: { cwd?: string },
-          ) {
-            const compact = buildCompactFffSearchSummary(
-              decision.tool,
-              decision.params,
-              runtime.cwd,
-              'bash',
+      const provider: BashRewriteProvider = {
+        id: 'pi-fff-search',
+        priority: 100,
+        tools: ['fff_grep', 'fff_find_files'],
+        fallbackOnExecuteError: true,
+        async execute(decision, runtime) {
+          if (decision.tool !== 'fff_grep' && decision.tool !== 'fff_find_files') {
+            throw new Error(
+              `Unsupported pi-fff-search bash rewrite target: ${String(decision.tool)}`,
             );
-            return compact
-              ? createWidthAwareText((width) => renderCompactSearchCall(compact, width, theme))
-              : null;
-          },
-          renderResult(
-            result: { content?: unknown },
-            options: { expanded?: boolean },
-            theme: { fg(color: string, text: string): string },
-            context: { cwd?: string } | undefined,
-          ) {
-            const contentText = extractPrimaryText(result.content);
-            if (!contentText) return null;
-            const details = (result as { details?: { routedVia?: string } }).details;
-            const toolName =
-              details?.routedVia === 'bash-to-fff_find_files' ? 'fff_find_files' : 'fff_grep';
-            return createWidthAwareText((width) => {
-              const summary = options.expanded
-                ? formatExpandedResultText(toolName, { contentText, cwd: context?.cwd, width })
-                : formatCollapsedResultText(toolName, { contentText, cwd: context?.cwd, width });
-              return styleResultText(summary, theme);
-            });
-          },
-        });
-      }) ?? (() => {});
-
-    pi.on('session_shutdown', async () => {
-      unregisterBashRewriteProvider();
+          }
+          const forwarded = await forwardToolCall({
+            toolName: decision.tool,
+            params: decision.params,
+            cwd: runtime.ctx.cwd,
+            ensureDaemonRunning: ensureDaemon,
+            callPublicToolOverHttp: callTool,
+            runRipgrepFallback: runFallback,
+          });
+          return {
+            content: [{ type: 'text' as const, text: forwarded.text }],
+            details: forwarded.details,
+          };
+        },
+        renderPreview(decision, theme, runtime) {
+          if (decision.tool !== 'fff_grep' && decision.tool !== 'fff_find_files') return null;
+          const compact = buildCompactFffSearchSummary(
+            decision.tool,
+            decision.params,
+            runtime.cwd,
+            'bash',
+          );
+          return compact
+            ? createWidthAwareText((width) =>
+                renderCompactSearchCall(compact, width, theme as CompactCallTheme),
+              )
+            : null;
+        },
+        renderResult(result, options, theme, context) {
+          const contentText = extractPrimaryText(
+            (result as { content?: unknown } | undefined)?.content,
+          );
+          if (!contentText) return null;
+          const details = (result as { details?: { routedVia?: string } }).details;
+          const toolName =
+            details?.routedVia === 'bash-to-fff_find_files' ? 'fff_find_files' : 'fff_grep';
+          const expanded = (options as { expanded?: boolean } | undefined)?.expanded;
+          const cwd = (context as { cwd?: string } | undefined)?.cwd;
+          return createWidthAwareText((width) => {
+            const summary = expanded
+              ? formatExpandedResultText(toolName, { contentText, cwd, width })
+              : formatCollapsedResultText(toolName, { contentText, cwd, width });
+            return styleResultText(summary, theme);
+          });
+        },
+      };
+      payload.register(provider);
     });
 
     if (overrideBuiltinRead) {

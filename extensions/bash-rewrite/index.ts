@@ -11,12 +11,35 @@ import {
   tryRewriteBashWithOptions,
   type RewriteDecision,
   type RewriteResult,
-  type RewriteTool,
 } from './bash-rewrite';
+import {
+  BASH_REWRITE_API_VERSION,
+  BASH_REWRITE_COLLECT_PROVIDERS_EVENT,
+  type BashRewriteExecuteResult,
+  type BashRewriteProvider,
+  type BashRewriteProviderCollectorPayload,
+  type BashRewriteRouteDetails,
+  type BashRewriteTheme,
+} from './contract';
 import { TOOL_REWRITE_ARROW } from '../shared/rewrite-label';
 
-export const BASH_REWRITE_COLLECT_PROVIDERS_EVENT = 'bash-rewrite:collect-providers';
-export const BASH_REWRITE_API_VERSION = 1;
+export {
+  BASH_REWRITE_API_VERSION,
+  BASH_REWRITE_COLLECT_PROVIDERS_EVENT,
+  BASH_REWRITE_PROVIDER_PRIORITY_RULE,
+  BASH_REWRITE_TARGET_POLICY,
+} from './contract';
+export type {
+  BashRewriteApiVersion,
+  BashRewriteCollectProvidersEvent,
+  BashRewriteExecuteResult,
+  BashRewriteExecuteRuntime,
+  BashRewriteProvider,
+  BashRewriteProviderCollectorPayload,
+  BashRewriteRenderRuntime,
+  BashRewriteRouteDetails,
+  BashRewriteTheme,
+} from './contract';
 
 const BUILTIN_TOOL_TIMEOUT_MS = 10_000;
 const PASS_THROUGH_EXPENSIVE_TIMEOUT_MS = 60_000;
@@ -42,52 +65,7 @@ type ToolContentEntry = { type: 'text'; text: string } | { type: string; [key: s
 type BashTool = ReturnType<typeof createBashToolDefinition>;
 type ReadTool = ReturnType<typeof createReadToolDefinition>;
 type LsTool = ReturnType<typeof createLsToolDefinition>;
-type BashExecuteParams = Parameters<BashTool['execute']>;
 type BashExecuteResult = Awaited<ReturnType<BashTool['execute']>>;
-
-export interface BashRewriteExecuteRuntime {
-  toolCallId: string;
-  originalCommand: string;
-  signal: AbortSignal | undefined;
-  onUpdate: BashExecuteParams[3];
-  ctx: BashExecuteParams[4];
-}
-
-export interface BashRewriteRenderRuntime {
-  cwd?: string;
-  isPartial?: boolean;
-  executionStarted?: boolean;
-  argsComplete?: boolean;
-  state?: unknown;
-  invalidate?: () => void;
-}
-
-export interface BashRewriteProvider {
-  id: string;
-  priority?: number;
-  tools: RewriteTool[];
-  fallbackOnExecuteError?: boolean;
-  execute(
-    decision: RewriteDecision,
-    runtime: BashRewriteExecuteRuntime,
-  ): Promise<BashExecuteResult>;
-  renderPreview?(
-    decision: RewriteDecision,
-    theme: { fg: (...args: any[]) => string; bold?: (text: string) => string },
-    runtime: BashRewriteRenderRuntime,
-  ): Component | null;
-  renderResult?(
-    result: unknown,
-    options: unknown,
-    theme: { fg: (...args: any[]) => string; bold?: (text: string) => string },
-    context: unknown,
-  ): Component | null;
-}
-
-interface ProviderCollectorPayload {
-  apiVersion: number;
-  register(provider: BashRewriteProvider): void;
-}
 
 interface CachedTool<TTool> {
   cwd: string;
@@ -98,6 +76,35 @@ interface BuiltinResultRenderCache {
   read?: CachedTool<ReadTool>;
   ls?: CachedTool<LsTool>;
 }
+
+interface ActiveToolSnapshot {
+  tools: Set<string>;
+  key: string;
+  reliable: boolean;
+}
+
+interface ProviderSnapshot extends ActiveToolSnapshot {
+  externalProviders: BashRewriteProvider[];
+  providers: BashRewriteProvider[];
+  providerKey: string;
+}
+
+interface ProviderSnapshotCache {
+  snapshot?: ProviderSnapshot;
+  revision: number;
+}
+
+interface PreviewResolution {
+  rewrite: RewriteResult | null;
+  provider: BashRewriteProvider | null;
+}
+
+interface PreviewResolutionCache {
+  entries: Map<string, PreviewResolution>;
+}
+
+const EXTERNAL_REWRITE_TOOLS = ['fff_grep', 'fff_find_files', 'apply_patch'] as const;
+const PREVIEW_RESOLUTION_CACHE_LIMIT = 64;
 
 function withBuiltinToolTimeout(
   signal: AbortSignal | undefined,
@@ -152,13 +159,14 @@ function prependBashNotice(result: BashExecuteResult, notice: string): BashExecu
 }
 
 function mergeRewriteDetails(
-  result: BashExecuteResult,
+  result: BashRewriteExecuteResult,
   extraDetails: Record<string, unknown>,
 ): BashExecuteResult {
   return {
-    ...result,
+    content: result.content,
+    ...(result.isError !== undefined ? { isError: result.isError } : {}),
     details: {
-      ...(result.details as Record<string, unknown> | undefined),
+      ...(result.details && typeof result.details === 'object' ? result.details : {}),
       ...extraDetails,
     } as BashExecuteResult['details'],
   };
@@ -166,7 +174,7 @@ function mergeRewriteDetails(
 
 function collectExternalProviders(pi: ExtensionAPI): BashRewriteProvider[] {
   const providers = new Map<string, BashRewriteProvider>();
-  const payload: ProviderCollectorPayload = {
+  const payload: BashRewriteProviderCollectorPayload = {
     apiVersion: BASH_REWRITE_API_VERSION,
     register(provider) {
       if (!provider || !provider.id || provider.tools.length === 0) return;
@@ -180,20 +188,24 @@ function collectExternalProviders(pi: ExtensionAPI): BashRewriteProvider[] {
   });
 }
 
-function getActiveToolSet(pi: ExtensionAPI): Set<string> | null {
+function getActiveToolSnapshot(pi: ExtensionAPI): ActiveToolSnapshot {
   try {
     const active = pi.getActiveTools?.();
-    return Array.isArray(active) ? new Set(active) : null;
+    if (Array.isArray(active)) {
+      const tools = new Set(active);
+      return { tools, key: `reliable:${[...tools].sort().join('\u0000')}`, reliable: true };
+    }
   } catch {
-    return null;
+    // A missing or failed active-tool API must fail closed.
   }
+  return { tools: new Set(), key: 'unavailable', reliable: false };
 }
 
-function isToolActive(activeTools: Set<string> | null, toolName: string): boolean {
-  return activeTools === null || activeTools.has(toolName);
+function isToolActive(activeTools: Set<string>, toolName: string): boolean {
+  return activeTools.has(toolName);
 }
 
-function createBuiltinProviders(activeTools: Set<string> | null): BashRewriteProvider[] {
+function createBuiltinProviders(activeTools: Set<string>): BashRewriteProvider[] {
   const providers: BashRewriteProvider[] = [];
   if (isToolActive(activeTools, 'read')) {
     providers.push({
@@ -262,10 +274,25 @@ function createBuiltinProviders(activeTools: Set<string> | null): BashRewritePro
   return providers;
 }
 
-function getProviders(pi: ExtensionAPI): BashRewriteProvider[] {
-  const activeTools = getActiveToolSet(pi);
-  const all = [...collectExternalProviders(pi), ...createBuiltinProviders(activeTools)];
-  return all.filter((provider) => provider.tools.some((tool) => isToolActive(activeTools, tool)));
+function getProviderSnapshot(pi: ExtensionAPI, cache: ProviderSnapshotCache): ProviderSnapshot {
+  const active = getActiveToolSnapshot(pi);
+  if (cache.snapshot?.key === active.key) return cache.snapshot;
+
+  const externalProviders = collectExternalProviders(pi);
+  const all = [...externalProviders, ...createBuiltinProviders(active.tools)];
+  const providers = all.filter((provider) =>
+    provider.tools.some((tool) => isToolActive(active.tools, tool)),
+  );
+  cache.revision += 1;
+  const providerKey = `${cache.revision}:${providers
+    .map(
+      (provider) =>
+        `${provider.id}:${provider.priority ?? 0}:${[...provider.tools].sort().join(',')}`,
+    )
+    .join('|')}`;
+  const snapshot = { ...active, externalProviders, providers, providerKey };
+  cache.snapshot = snapshot;
+  return snapshot;
 }
 
 function enabledRewriteTools(providers: BashRewriteProvider[]): Set<string> {
@@ -305,12 +332,9 @@ function renderParamsForSignature(params: Record<string, unknown>): string {
     .join(', ');
 }
 
-function renderGenericPreview(
-  decision: RewriteDecision,
-  theme: { fg: (...args: any[]) => string; bold?: (text: string) => string },
-): Component {
+function renderGenericPreview(decision: RewriteDecision, theme: BashRewriteTheme): Component {
   const title = theme.fg('dim', `bash${TOOL_REWRITE_ARROW}`);
-  const tool = theme.fg('toolTitle', theme.bold ? theme.bold(decision.tool) : decision.tool);
+  const tool = theme.fg('toolTitle', theme.bold(decision.tool));
   return new Text(`${title}${tool}(${renderParamsForSignature(decision.params)})`, 0, 0);
 }
 
@@ -348,7 +372,7 @@ function renderBuiltinRewriteResult(
   else if (providerId === BUILTIN_LS_PROVIDER_ID) tool = 'ls';
   else return undefined;
 
-  const activeTools = getActiveToolSet(pi);
+  const activeTools = getActiveToolSnapshot(pi).tools;
   if (!isToolActive(activeTools, tool)) return null;
 
   const cwd = getRenderCwd(context);
@@ -378,7 +402,7 @@ function routeDetails(args: {
   originalCommand: string;
   notice: string;
   cwd?: string;
-}): Record<string, unknown> {
+}): BashRewriteRouteDetails {
   return {
     routedVia: `bash-to-${args.decision.tool}`,
     rewriteProviderId: args.provider.id,
@@ -390,24 +414,63 @@ function routeDetails(args: {
   };
 }
 
+function providerDiagnostic(snapshot: ProviderSnapshot): string | null {
+  if (!snapshot.reliable) {
+    return 'Bash rewrite diagnostics: the active-tool list is unavailable, so structured rewrites are disabled and matching commands run as Bash.';
+  }
+  if (!snapshot.tools.has('bash')) return null;
+
+  const supported = new Set(snapshot.externalProviders.flatMap((provider) => provider.tools));
+  const missing = EXTERNAL_REWRITE_TOOLS.filter(
+    (tool) => snapshot.tools.has(tool) && !supported.has(tool),
+  ).sort();
+  const messages: string[] = [];
+  if (snapshot.externalProviders.length === 0) {
+    messages.push('no external providers are registered');
+  }
+  if (missing.length > 0) {
+    messages.push(`no provider is registered for active target(s): ${missing.join(', ')}`);
+  }
+  return messages.length > 0
+    ? `Bash rewrite diagnostics: ${messages.join('; ')}. Matching commands run as Bash; this notice does not activate tools.`
+    : null;
+}
+
 function renderBashRewritePreview(
   pi: ExtensionAPI,
   args: unknown,
-  theme: { fg: (...args: any[]) => string; bold?: (text: string) => string },
+  theme: BashRewriteTheme,
   context: unknown,
+  providerCache: ProviderSnapshotCache,
+  previewCache: PreviewResolutionCache,
 ): Component | null {
   const command = extractBashCommand(args);
   if (!command) return null;
   const renderContext =
     context && typeof context === 'object' ? (context as Record<string, unknown>) : {};
   const cwd = typeof renderContext.cwd === 'string' ? renderContext.cwd : undefined;
-  const providers = getProviders(pi);
-  const rewrite = tryRewriteBashWithOptions(command, cwd ?? process.cwd(), {
-    enabledTools: enabledRewriteTools(providers),
-  });
-  if (!rewrite?.decision) return null;
-  const provider = findProviderForDecision(providers, rewrite.decision);
-  if (!provider) return null;
+  const snapshot = getProviderSnapshot(pi, providerCache);
+  const cacheKey = `${snapshot.key}\u0000${snapshot.providerKey}\u0000${cwd ?? process.cwd()}\u0000${command}`;
+  let resolution = previewCache.entries.get(cacheKey);
+  if (resolution) {
+    previewCache.entries.delete(cacheKey);
+    previewCache.entries.set(cacheKey, resolution);
+  } else {
+    const rewrite = tryRewriteBashWithOptions(command, cwd ?? process.cwd(), {
+      enabledTools: enabledRewriteTools(snapshot.providers),
+    });
+    const provider = rewrite?.decision
+      ? findProviderForDecision(snapshot.providers, rewrite.decision)
+      : null;
+    resolution = { rewrite, provider };
+    previewCache.entries.set(cacheKey, resolution);
+    if (previewCache.entries.size > PREVIEW_RESOLUTION_CACHE_LIMIT) {
+      const oldestKey = previewCache.entries.keys().next().value;
+      if (oldestKey !== undefined) previewCache.entries.delete(oldestKey);
+    }
+  }
+  const { rewrite, provider } = resolution;
+  if (!rewrite?.decision || !provider) return null;
   const effectiveCwd = rewrite.cwd ?? cwd;
   return (
     provider.renderPreview?.(rewrite.decision, theme, {
@@ -421,9 +484,10 @@ function renderBashRewriteResult(
   pi: ExtensionAPI,
   result: unknown,
   options: unknown,
-  theme: { fg: (...args: any[]) => string; bold?: (text: string) => string },
+  theme: BashRewriteTheme,
   context: unknown,
   builtinResultRenderCache: BuiltinResultRenderCache,
+  providerCache: ProviderSnapshotCache,
 ): Component | null {
   if (!result || typeof result !== 'object') return null;
   const details = (result as { details?: unknown }).details;
@@ -451,30 +515,59 @@ function renderBashRewriteResult(
   );
   if (builtinResult !== undefined) return builtinResult;
 
-  const providers = getProviders(pi);
+  const providers = getProviderSnapshot(pi, providerCache).providers;
   const provider =
     typeof providerId === 'string'
       ? providers.find((candidate) => candidate.id === providerId)
-      : providers.find((candidate) => routedVia === `bash-to-${candidate.tools[0]}`);
+      : providers.find((candidate) =>
+          candidate.tools.some((tool) => routedVia === `bash-to-${tool}`),
+        );
   return provider?.renderResult?.(result, options, theme, renderContext) ?? null;
 }
 
 export default function bashRewriteExtension(pi: ExtensionAPI) {
   const bashTemplate = createBashToolDefinition(process.cwd());
   const builtinResultRenderCache: BuiltinResultRenderCache = {};
+  const providerCache: ProviderSnapshotCache = { revision: 0 };
+  const previewCache: PreviewResolutionCache = { entries: new Map() };
+  let providerDiagnosticEmitted = false;
+
+  pi.on?.('session_start', async () => {
+    providerCache.snapshot = undefined;
+    providerCache.revision = 0;
+    previewCache.entries.clear();
+    providerDiagnosticEmitted = false;
+  });
+
+  pi.on?.('before_agent_start', async (event) => {
+    providerCache.snapshot = undefined;
+    previewCache.entries.clear();
+    if (providerDiagnosticEmitted) return undefined;
+    const diagnostic = providerDiagnostic(getProviderSnapshot(pi, providerCache));
+    if (!diagnostic) return undefined;
+    providerDiagnosticEmitted = true;
+    return { systemPrompt: `${event.systemPrompt}\n\n${diagnostic}` };
+  });
 
   pi.registerTool({
     ...bashTemplate,
     renderCall(args, theme, context) {
       return (
-        renderBashRewritePreview(pi, args, theme, context) ??
+        renderBashRewritePreview(pi, args, theme, context, providerCache, previewCache) ??
         bashTemplate.renderCall!(args, theme, context)
       );
     },
     renderResult(result, options, theme, context) {
       return (
-        renderBashRewriteResult(pi, result, options, theme, context, builtinResultRenderCache) ??
-        bashTemplate.renderResult!(result as never, options, theme, context)
+        renderBashRewriteResult(
+          pi,
+          result,
+          options,
+          theme,
+          context,
+          builtinResultRenderCache,
+          providerCache,
+        ) ?? bashTemplate.renderResult!(result as never, options, theme, context)
       );
     },
     async execute(toolCallId, params, signal, onUpdate, ctx) {
@@ -482,7 +575,7 @@ export default function bashRewriteExtension(pi: ExtensionAPI) {
       const command = extractBashCommand(params);
       if (!command) return builtInBash.execute(toolCallId, params, signal, onUpdate, ctx);
 
-      const providers = getProviders(pi);
+      const providers = getProviderSnapshot(pi, providerCache).providers;
       const rewrite: RewriteResult | null = tryRewriteBashWithOptions(command, ctx.cwd, {
         enabledTools: enabledRewriteTools(providers),
       });
@@ -510,7 +603,17 @@ export default function bashRewriteExtension(pi: ExtensionAPI) {
       }
 
       const provider = findProviderForDecision(providers, rewrite.decision);
-      if (!provider) return builtInBash.execute(toolCallId, params, signal, onUpdate, ctx);
+      if (!provider) {
+        const cap = capPassThroughBashSignal(command, signal);
+        const result = await builtInBash.execute(
+          toolCallId,
+          params,
+          cap?.signal ?? signal,
+          onUpdate,
+          ctx,
+        );
+        return cap ? prependBashNotice(result, cap.warning) : result;
+      }
       const providerCtx = rewrite.cwd ? ({ ...ctx, cwd: rewrite.cwd } as typeof ctx) : ctx;
 
       try {
@@ -533,7 +636,15 @@ export default function bashRewriteExtension(pi: ExtensionAPI) {
         );
       } catch (error) {
         if (provider.fallbackOnExecuteError === false) throw error;
-        return builtInBash.execute(toolCallId, params, signal, onUpdate, ctx);
+        const cap = capPassThroughBashSignal(command, signal);
+        const result = await builtInBash.execute(
+          toolCallId,
+          params,
+          cap?.signal ?? signal,
+          onUpdate,
+          ctx,
+        );
+        return cap ? prependBashNotice(result, cap.warning) : result;
       }
     },
   });

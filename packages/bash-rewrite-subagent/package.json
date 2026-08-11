@@ -1,8 +1,8 @@
 {
-  "name": "pi-multi-edit",
-  "version": "0.3.1",
+  "name": "pi-bash-rewrite-subagent",
+  "version": "0.1.0",
   "private": true,
-  "description": "Pi multi-file edit tool with diff preview and patch safety checks.",
+  "description": "Local-only pi-subagents bundle for bash rewrites, FFF, and multi-edit",
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -14,29 +14,16 @@
     "fix:format": "oxfmt -c .oxfmtrc.json .",
     "test": "vitest run"
   },
-  "dependencies": {
-    "diff": ">=8.0.0"
-  },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^0.84.1",
-    "@earendil-works/pi-tui": "^0.84.1",
     "@types/node": "^24.3.0",
     "oxfmt": "^0.60.0",
     "oxlint": "^1.75.0",
     "oxlint-tsgolint": "^7.0.2001",
-    "pi-bash-rewrite": "workspace:*",
-    "typebox": "^1.1.24",
     "typescript": "^5.7.3",
     "vitest": "^3.2.4"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.84.1",
-    "@earendil-works/pi-tui": ">=0.84.1",
-    "typebox": "*"
-  },
-  "pi": {
-    "extensions": [
-      "./index.ts"
-    ]
+    "@earendil-works/pi-coding-agent": ">=0.84.1"
   }
 }

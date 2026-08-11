@@ -166,11 +166,14 @@ describe('multi-edit extension', () => {
   test('registers apply_patch as a bash-rewrite provider', async () => {
     const tools: any[] = [];
     const eventHandlers = new Map<string, Function[]>();
+    const lifecycleEvents: string[] = [];
     const pi = {
       registerTool(tool: any) {
         tools.push(tool);
       },
-      on() {},
+      on(event: string) {
+        lifecycleEvents.push(event);
+      },
       events: {
         on(event: string, handler: Function) {
           eventHandlers.set(event, [...(eventHandlers.get(event) ?? []), handler]);
@@ -186,10 +189,16 @@ describe('multi-edit extension', () => {
 
       const providers: any[] = [];
       for (const handler of eventHandlers.get('bash-rewrite:collect-providers') ?? []) {
+        handler({ apiVersion: 2, register: (provider: any) => providers.push(provider) });
+      }
+      expect(providers).toHaveLength(0);
+
+      for (const handler of eventHandlers.get('bash-rewrite:collect-providers') ?? []) {
         handler({ apiVersion: 1, register: (provider: any) => providers.push(provider) });
       }
 
       expect(providers).toHaveLength(1);
+      expect(lifecycleEvents).not.toContain('session_shutdown');
       expect(providers[0]).toMatchObject({
         id: 'multi-edit.apply-patch',
         priority: 200,

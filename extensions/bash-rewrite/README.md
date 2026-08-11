@@ -21,32 +21,75 @@ When a `cd` prefix is accepted, providers execute with that effective cwd. Outpu
 
 ## Provider contract
 
-Providers register synchronously when `pi-bash-rewrite` emits:
+`contract.ts` is the authoritative provider contract and is exported as
+`pi-bash-rewrite/contract`. Providers can use a type-only import so they stay
+usable when the host extension is not active. They register synchronously when
+`pi-bash-rewrite` emits:
 
 ```ts
-pi.events.emit('bash-rewrite:collect-providers', {
-  apiVersion: 1,
-  register(provider) {
-    // provider: { id, priority?, tools, fallbackOnExecuteError?, execute, renderPreview?, renderResult? }
-  },
+import type {
+  BashRewriteCollectProvidersEvent,
+  BashRewriteProviderCollectorPayload,
+} from 'pi-bash-rewrite/contract';
+
+const eventName: BashRewriteCollectProvidersEvent = 'bash-rewrite:collect-providers';
+
+pi.events.on(eventName, (payload: unknown) => {
+  if (!isApiVersion1Collector(payload)) return;
+  payload.register(provider);
 });
 ```
 
 Rules:
 
-- Provider IDs are de-duplicated; higher `priority` wins dispatch order, then ID sort.
+- Contract version 1 uses a closed rewrite-target set. A new target requires a
+  central recognizer, safety review, tests, and a contract change. Execution
+  providers can stay separate, but providers do not add shell recognizers.
+- A provider must check `apiVersion === 1` before registration.
+- Provider IDs are de-duplicated. Higher `priority` wins for the same target;
+  equal priority sorts by provider ID. Priorities do not matter for disjoint
+  target sets.
 - `tools` declares the rewrite target names a provider can execute.
 - `execute(decision, runtime)` must return a normal Pi tool result.
-- Set `fallbackOnExecuteError: false` for mutating rewrites such as `apply_patch` so failures do not silently run raw shell.
-- Unsubscribe provider listeners on `session_shutdown` when the extension runtime supports it.
+- Set `fallbackOnExecuteError: false` for mutating rewrites such as
+  `apply_patch` so failures do not silently run raw shell.
+- Keep the provider listener active for the extension process lifetime so Pi
+  session switches do not make rewrites dormant.
 
 The orchestrator adds routing metadata to rewritten results: `routedVia`, `rewriteProviderId`, `rewriteRecognizer`, `rewriteFromCommand`, `rewriteToParams`, `rewriteCall`, and `rewriteCwd` when a `cd` prefix changed the provider cwd.
+
+The host fails closed when Pi cannot report active tools. When `bash` is active,
+it adds one system-prompt diagnostic if no external providers are registered
+or if an active target has no provider. A provider target that is deliberately
+outside the strict allowlist is not an error. The diagnostic does not activate
+tools. Matching commands still run as Bash.
+
+## Pi subagents
+
+Use the private local bundle at
+`packages/bash-rewrite-subagent/index.ts` for strict child processes. It lives
+outside the root Pi manifest's `extensions/` discovery directory, so normal
+toolbox sessions do not load the bundle. The bundle loads FFF, multi-edit, and
+this host while keeping this host as the only `bash` override. Its required
+target allowlist is:
+
+```text
+bash,read,ls,fff_grep,fff_find_files,apply_patch
+```
+
+Keep the agent's other required tools. Loading the bundle does not grant a
+tool that is absent from the child allowlist. See
+`packages/bash-rewrite-subagent/README.md` for the settings contract.
+
+The parser remains in this package because it has one runtime consumer. A
+separate core package is deferred until there is a verified second consumer or
+an independent publication requirement.
 
 ## Development
 
 ```shell
-aube exec vitest run extensions/bash-rewrite
-aube exec vitest run extensions/bash-rewrite extensions/pi-fff-search/index.test.ts extensions/multi-edit/index.test.ts
+npm test
+npm run check
 ```
 
 Use `test-fixtures/README.md` for corpus refresh and local triage commands.

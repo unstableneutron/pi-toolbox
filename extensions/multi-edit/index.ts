@@ -9,6 +9,12 @@ import type {
 import { Container, Spacer, Text } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
 
+import type {
+  BashRewriteApiVersion,
+  BashRewriteCollectProvidersEvent,
+  BashRewriteProvider,
+  BashRewriteProviderCollectorPayload,
+} from 'pi-bash-rewrite/contract';
 import {
   applyClassicEditsToText,
   detectLineEnding,
@@ -47,6 +53,20 @@ import {
 import { renderApplyPatchRows } from '../shared/apply-patch-summary';
 import { TOOL_REWRITE_ARROW } from '../shared/rewrite-label';
 import type { Workspace } from './workspace';
+
+const BASH_REWRITE_COLLECT_PROVIDERS_EVENT: BashRewriteCollectProvidersEvent =
+  'bash-rewrite:collect-providers';
+const BASH_REWRITE_API_VERSION: BashRewriteApiVersion = 1;
+
+function isCompatibleBashRewriteCollector(
+  payload: unknown,
+): payload is BashRewriteProviderCollectorPayload {
+  if (!payload || typeof payload !== 'object') return false;
+  const candidate = payload as { apiVersion?: unknown; register?: unknown };
+  return (
+    candidate.apiVersion === BASH_REWRITE_API_VERSION && typeof candidate.register === 'function'
+  );
+}
 
 type ToolProfile = 'extended' | 'codex-compatible' | 'classic';
 type ApplyPatchProfile = 'extended' | 'codex-compatible';
@@ -1911,48 +1931,41 @@ export default function multiEditExtension(
 
   registerEditTool(getProfile(undefined));
 
-  const unregisterBashRewriteProvider =
-    pi.events?.on?.('bash-rewrite:collect-providers', (payload: unknown) => {
-      if (!payload || typeof payload !== 'object') return;
-      const register = (payload as { register?: unknown }).register;
-      if (typeof register !== 'function') return;
+  pi.events?.on?.(BASH_REWRITE_COLLECT_PROVIDERS_EVENT, (payload: unknown) => {
+    if (!isCompatibleBashRewriteCollector(payload)) return;
 
-      register({
-        id: 'multi-edit.apply-patch',
-        priority: 200,
-        tools: ['apply_patch'],
-        fallbackOnExecuteError: false,
-        async execute(
-          decision: { params: { patch?: unknown } },
-          runtime: {
-            signal?: AbortSignal;
-            onUpdate?: unknown;
-            ctx: { cwd: string; model?: { provider?: string; id?: string } };
-          },
-        ) {
-          if (typeof decision.params.patch !== 'string') {
-            throw new Error('apply_patch bash rewrite requires a string patch payload.');
-          }
-          return executePatch(
-            decision.params.patch,
-            runtime.ctx.cwd,
-            runtime.signal,
-            runtime.onUpdate as any,
-            runtime.ctx as any,
-            toApplyPatchProfile(getProfile(runtime.ctx.model), 'apply_patch'),
-          );
-        },
-        renderPreview(decision: { params: { patch?: unknown } }, theme: any, runtime: any) {
-          return renderBashApplyPatchPreview(decision.params, theme, runtime);
-        },
-        renderResult(result: unknown, options: ToolRenderResultOptions, theme: any, context: any) {
-          return renderBashApplyPatchResult(result, options, theme, context);
-        },
-      });
-    }) ?? (() => {});
-
-  pi.on?.('session_shutdown', async () => {
-    unregisterBashRewriteProvider();
+    const provider: BashRewriteProvider = {
+      id: 'multi-edit.apply-patch',
+      priority: 200,
+      tools: ['apply_patch'],
+      fallbackOnExecuteError: false,
+      async execute(decision, runtime) {
+        const patch = decision.params.patch;
+        if (typeof patch !== 'string') {
+          throw new Error('apply_patch bash rewrite requires a string patch payload.');
+        }
+        return executePatch(
+          patch,
+          runtime.ctx.cwd,
+          runtime.signal,
+          runtime.onUpdate as any,
+          runtime.ctx as any,
+          toApplyPatchProfile(getProfile(runtime.ctx.model), 'apply_patch'),
+        );
+      },
+      renderPreview(decision, theme, runtime) {
+        return renderBashApplyPatchPreview(decision.params, theme, runtime);
+      },
+      renderResult(result, options, theme, context) {
+        return renderBashApplyPatchResult(
+          result,
+          options as ToolRenderResultOptions,
+          theme,
+          context,
+        );
+      },
+    };
+    payload.register(provider);
   });
 
   pi.on?.('session_start', async (_event, ctx) => {

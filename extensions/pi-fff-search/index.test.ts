@@ -524,14 +524,22 @@ describe('pi-fff-search extension', () => {
     ]);
   });
 
-  test('registers an optional bash-rewrite provider without registering bash', () => {
-    const { tools, pi } = createHarness({
+  test('registers a process-lifetime bash-rewrite provider without registering bash', () => {
+    const { tools, handlers, pi } = createHarness({
       overrideBuiltinRead: false,
       overrideBuiltinGrep: false,
       overrideBuiltinFind: false,
     });
 
     const providers: any[] = [];
+    pi.events.emit('bash-rewrite:collect-providers', {
+      apiVersion: 2,
+      register(provider: any) {
+        providers.push(provider);
+      },
+    });
+    expect(providers).toHaveLength(0);
+
     pi.events.emit('bash-rewrite:collect-providers', {
       apiVersion: 1,
       register(provider: any) {
@@ -540,6 +548,7 @@ describe('pi-fff-search extension', () => {
     });
 
     expect(tools.map((tool) => tool.name)).toEqual(['fff_find_files', 'fff_grep']);
+    expect(handlers.has('session_shutdown')).toBe(false);
     expect(providers.map((provider) => provider.id)).toEqual(['pi-fff-search']);
     expect(providers[0].tools).toEqual(['fff_grep', 'fff_find_files']);
 
