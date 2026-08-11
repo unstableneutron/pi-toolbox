@@ -342,6 +342,35 @@ describe('pi self-update package manager detection', () => {
     expect(buildPiApproveBuildsCommand('npm')).toBeUndefined();
   });
 
+  it('runs pnpm self-update outside the workspace package-manager context', async () => {
+    const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
+
+    await runPiUpdate({
+      piCommand: 'pi',
+      piPath:
+        '/Users/me/.local/share/pnpm/global/v11/hash/node_modules/@earendil-works/pi-coding-agent/dist/cli.js',
+      execFile: ((command: string, args: string[], options?: { cwd?: string }) => {
+        calls.push({ command, args, cwd: options?.cwd });
+        return '';
+      }) as typeof import('node:child_process').execFileSync,
+      log: () => {},
+    });
+
+    expect(calls).toEqual([
+      {
+        command: 'pnpm',
+        args: [
+          'add',
+          '-g',
+          '@earendil-works/pi-coding-agent@latest',
+          '--config.minimum-release-age=0',
+        ],
+        cwd: tmpdir(),
+      },
+      { command: 'pi', args: ['update', '--extensions'], cwd: undefined },
+    ]);
+  });
+
   it('runs package-manager self-update before pi extension update', async () => {
     const calls: Array<{ command: string; args: string[] }> = [];
     const logs: string[] = [];

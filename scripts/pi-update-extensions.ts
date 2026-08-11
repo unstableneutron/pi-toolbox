@@ -2402,7 +2402,14 @@ export async function runPiUpdate(
     if (options.dryRun) {
       log(`Would run: ${display}`);
     } else {
-      execFile(selfUpdateCommand.command, selfUpdateCommand.args, { stdio: 'inherit' });
+      // Do not let this workspace's `packageManager` pin make pnpm replace
+      // itself before it can run the global update. The temporary directory
+      // has no project manifest, so the installed package-manager binary runs
+      // directly.
+      execFile(selfUpdateCommand.command, selfUpdateCommand.args, {
+        cwd: tmpdir(),
+        stdio: 'inherit',
+      });
       log(`Ran: ${display}`);
     }
   } else {
@@ -2415,7 +2422,10 @@ export async function runPiUpdate(
       if (options.dryRun) {
         log(`Would run: ${display}`);
       } else {
-        execFile(approveBuildsCommand.command, approveBuildsCommand.args, { stdio: 'inherit' });
+        execFile(approveBuildsCommand.command, approveBuildsCommand.args, {
+          cwd: tmpdir(),
+          stdio: 'inherit',
+        });
         log(`Ran: ${display}`);
       }
     } else {
