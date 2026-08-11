@@ -8,8 +8,9 @@ import { tryRewriteApplyPatchCliBash } from './apply-patch';
  *
  * Scope (v1):
  *   - Simple single commands: `cat`, `ls`, `grep`, `find`, `head`, `rg`, `fd`, `egrep`, `fgrep`.
- *   - Two-stage pipelines of the form `<search> | head -N` where `<search>` is one
- *     of the recognized tools; the `head -N` folds into `limit: N`.
+ *   - Two-stage pipelines of the form `<search> | head -N` or
+ *     `<search> | sed -n '1,Np'` where `<search>` is one of the recognized tools;
+ *     the final stage folds into `limit: N`.
  *   - A defensive-read idiom `find <path> [-type f] | head -1 | xargs cat [| head -N]`
  *     collapses to `read <path> [limit=N]`.
  *   - Narrow safety/navigation prefixes: optional shebang, standalone `set -e` /
@@ -657,12 +658,16 @@ function asStrings(tokens: Token[]): string[] | null {
 
 function classifyCat(tokens: Token[]): RewriteDecision | null {
   const strs = asStrings(tokens);
-  if (!strs || strs[0] !== 'cat' || strs.length !== 2) return null;
-  const p = strs[1]!;
-  if (p.startsWith('-')) return null; // cat with flags → pass through
+  if (!strs || strs[0] !== 'cat') return null;
+  const rest = strs.slice(1);
+  // Pi's read rendering already includes line numbers, so `cat -n FILE`
+  // preserves the useful presentation without routing through bash. Other
+  // cat flags can change content and remain intentional pass-throughs.
+  if (rest[0] === '-n') rest.shift();
+  if (rest.length !== 1 || rest[0]!.startsWith('-')) return null;
   return {
     tool: 'read',
-    params: { path: p },
+    params: { path: rest[0] },
     recognizer: 'cat-file',
   };
 }
@@ -1337,6 +1342,12 @@ function extractSedRangeFilter(tokens: Token[]): { offset: number; limit: number
   return { offset: start, limit: end - start + 1 };
 }
 
+/** Match `sed -n '1,Np'` as an output-limiting pipeline stage. */
+function extractSedFirstLinesLimit(tokens: Token[]): number | null {
+  const range = extractSedRangeFilter(tokens);
+  return range?.offset === 1 ? range.limit : null;
+}
+
 const SINGLE_STAGE_CLASSIFIERS = [
   classifyCat,
   classifyLs,
@@ -1877,6 +1888,26 @@ export function tryRewriteBashWithOptions(
         return filtered ? withEffectiveCwd(filtered, normalized) : null;
       }
     }
+    // `<search> | sed -n '1,Np'` is the same output limit as `| head -N`.
+    // Keep other sed ranges as pass-throughs because they skip prior matches.
+    const sedFirstLinesLimit = extractSedFirstLinesLimit(strippedStages[1]!);
+    if (sedFirstLinesLimit !== null) {
+      const sourceDecision = classifySingleStage(strippedStages[0]!);
+      if (sourceDecision) {
+        const source = sourceDecision.recognizer.split(/[-+]/, 1)[0]!;
+        const d: RewriteDecision = {
+          tool: sourceDecision.tool,
+          params: { ...sourceDecision.params, limit: sedFirstLinesLimit },
+          recognizer: `${source}-sed-range`,
+        };
+        const filtered = filterRewriteResult(
+          { decision: d, notice: formatNotice(rewriteCommand.trim(), d) },
+          options,
+        );
+        return filtered ? withEffectiveCwd(filtered, normalized) : null;
+      }
+    }
+
     const limit = extractHeadLimit(strippedStages[1]!);
     if (limit === null) {
       // Even without a rewriteable pipeline shape, a notice on the

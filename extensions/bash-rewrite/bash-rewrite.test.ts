@@ -41,8 +41,18 @@ describe('tryRewriteBash — single-command rewrites', () => {
     expect(rewrite('cat file1.ts file2.ts')).toBeNull();
   });
 
-  test('cat with flag → pass through', () => {
-    expect(rewrite('cat -n file.ts')).toBeNull();
+  test('cat -n FILE → read because read output already has line numbers', () => {
+    const r = rewrite('cd /tmp && cat -n file.ts');
+    expect(r?.decision).toMatchObject({
+      tool: 'read',
+      params: { path: 'file.ts' },
+      recognizer: 'cat-file',
+    });
+    expect(r?.cwd).toBe('/tmp');
+  });
+
+  test('cat content-changing flag → pass through', () => {
+    expect(rewrite('cat -s file.ts')).toBeNull();
   });
 
   test('ls DIR → builtin ls', () => {
@@ -685,7 +695,21 @@ describe('tryRewriteBash — pipelines', () => {
     expect(rewrite('grep foo f.ts | grep bar | head -10')).toBeNull();
   });
 
-  test('grep | sed → pass through', () => {
+  test("grep | sed -n '1,Np' → fff_grep with limit", () => {
+    const r = rewrite("cd /tmp && grep -n 'foo' src/ | sed -n '1,120p'");
+    expect(r?.decision).toMatchObject({
+      tool: 'fff_grep',
+      params: { patterns: ['foo'], within: 'src/', limit: 120 },
+      recognizer: 'grep-sed-range',
+    });
+    expect(r?.cwd).toBe('/tmp');
+  });
+
+  test("grep | sed -n '2,Np' → pass through because it skips matches", () => {
+    expect(rewrite("grep foo f.ts | sed -n '2,20p'")).toBeNull();
+  });
+
+  test('grep | sed substitution → pass through', () => {
     expect(rewrite('grep foo f.ts | sed "s/a/b/"')).toBeNull();
   });
 });
@@ -1097,9 +1121,10 @@ describe('tryRewriteBash — cat -A notice-only (BSD cat incompatibility)', () =
     expect(r!.decision).toBeUndefined();
   });
 
-  test('cat -n FILE stays a pass-through (no -A, no notice)', () => {
-    // -n (number lines) is harmless; existing behavior says pass through.
-    expect(rewrite('cat -n file.ts')).toBeNull();
+  test('cat -n FILE routes to read instead of the notice path', () => {
+    const r = rewrite('cat -n file.ts');
+    expect(r?.decision).toMatchObject({ tool: 'read', params: { path: 'file.ts' } });
+    expect(r?.notice).not.toMatch(/BSD `cat`/);
   });
 
   test('cat FILE (no flags) still routes to read, not the notice path', () => {
@@ -1201,6 +1226,15 @@ describe('tryRewriteBash — cat FILE | sed -n range pipeline', () => {
     });
   });
 
+  test('cat -n FILE | sed -n range → read because read output has line numbers', () => {
+    const r = rewrite("cat -n snapshot.md | sed -n '135,290p'");
+    expect(r?.decision).toMatchObject({
+      tool: 'read',
+      params: { path: 'snapshot.md', offset: 135, limit: 156 },
+      recognizer: 'cat-sed-range',
+    });
+  });
+
   test("cat FILE | sed -n '42p' → single-line read(offset=42, limit=1)", () => {
     const r = rewrite("cat README.md | sed -n '42p'");
     expect(r?.decision).toMatchObject({
@@ -1216,6 +1250,15 @@ describe('tryRewriteBash — cat FILE | sed -n range pipeline', () => {
       tool: 'read',
       params: { path: 'a.txt', offset: 1, limit: 5 },
       recognizer: 'cat-sed-range',
+    });
+  });
+
+  test('cat -n FILE | head -N → read with limit', () => {
+    const r = rewrite('cat -n snapshot.md | head -20');
+    expect(r?.decision).toMatchObject({
+      tool: 'read',
+      params: { path: 'snapshot.md', limit: 20 },
+      recognizer: 'cat-file+head',
     });
   });
 

@@ -17,7 +17,7 @@ The parser tolerates narrow safety/navigation prefixes before a rewriteable comm
 - standalone `set -e`, `set -u`, `set -euo pipefail`, and `set -o pipefail` preambles
 - one or more simple `cd <literal-dir> &&`, `cd <literal-dir>;`, or `cd <literal-dir>` newline prefixes
 
-When a `cd` prefix is accepted, providers execute with that effective cwd. More complex setup, variables, command substitutions, loops, redirects, and non-rewriteable commands still pass through to builtin bash unchanged.
+When a `cd` prefix is accepted, providers execute with that effective cwd. Output limits written as `| head -N` or `| sed -n '1,Np'` fold into the structured call. `cat -n FILE` also maps to `read` because Pi already renders line numbers. More complex setup, variables, command substitutions, loops, redirects, and non-rewriteable commands still pass through to builtin bash unchanged.
 
 ## Provider contract
 
