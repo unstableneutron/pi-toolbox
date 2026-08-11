@@ -307,7 +307,7 @@ describe('AppServer exec tool helpers', () => {
     expect(shouldUseAppServerExecTools(undefined, 'all')).toBe(true);
   });
 
-  test('registers Codex-compatible exec tool descriptions and prompt snippets', () => {
+  test('keeps prompt metadata only on initially active exec tools', () => {
     const registeredTools: Array<{
       name: string;
       description?: string;
@@ -338,8 +338,7 @@ describe('AppServer exec tool helpers', () => {
       },
       {
         name: 'write_stdin',
-        description: 'Write/poll exec session.',
-        promptSnippet: 'Write to exec session.',
+        description: expect.stringContaining('enabled additively'),
       },
       {
         name: 'apply_patch',
@@ -349,6 +348,9 @@ describe('AppServer exec tool helpers', () => {
         constrainedSampling: { type: 'json_schema', strict: 'prefer' },
       },
     ]);
+    expect(
+      registeredTools.find((tool) => tool.name === 'write_stdin')?.promptSnippet,
+    ).toBeUndefined();
   });
 
   test('apply_patch executes patch text through AppServer command/exec argv', async () => {
@@ -537,11 +539,17 @@ describe('AppServer exec tool helpers', () => {
       clientFactory: () => fake.client as any,
     });
     const registeredTools: Array<{ name: string; execute?: (...args: any[]) => Promise<any> }> = [];
+    let activeTools = ['exec_command'];
+    const setActiveTools = vi.fn((names: string[]) => {
+      activeTools = names;
+    });
     registerAppServerExecTools(
       {
         registerTool(tool: { name: string; execute?: (...args: any[]) => Promise<any> }) {
           registeredTools.push(tool);
         },
+        getActiveTools: () => activeTools,
+        setActiveTools,
       } as any,
       sessions,
     );
@@ -575,8 +583,43 @@ describe('AppServer exec tool helpers', () => {
     await expect(pending).resolves.toMatchObject({
       details: { exec_session_id: 1, session_id: 1, command: 'sleep 10' },
     });
+    expect(setActiveTools).toHaveBeenCalledWith(['exec_command', 'write_stdin']);
     sessions.close();
     vi.useRealTimers();
+  });
+
+  test('does not enable write_stdin after a completed exec_command', async () => {
+    const registeredTools: Array<{ name: string; execute?: (...args: any[]) => Promise<any> }> = [];
+    let activeTools = ['exec_command'];
+    const setActiveTools = vi.fn((names: string[]) => {
+      activeTools = names;
+    });
+    const sessions = {
+      exec: vi.fn(async () => ({
+        exec_session_id: 1,
+        process_id: 'process-1',
+        chunk: 'done',
+        exit_code: 0,
+        wall_time_seconds: 0.01,
+      })),
+    };
+    registerAppServerExecTools(
+      {
+        registerTool(tool: { name: string; execute?: (...args: any[]) => Promise<any> }) {
+          registeredTools.push(tool);
+        },
+        getActiveTools: () => activeTools,
+        setActiveTools,
+      } as any,
+      sessions as any,
+    );
+
+    const execTool = registeredTools.find((tool) => tool.name === 'exec_command');
+    await execTool?.execute?.('exec-complete', { cmd: 'true' }, undefined, undefined, {
+      cwd: '/repo',
+    });
+
+    expect(setActiveTools).not.toHaveBeenCalled();
   });
 
   test('decodes split UTF-8 and terminal controls consistently in partial and final TTY output', async () => {

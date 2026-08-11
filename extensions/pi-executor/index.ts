@@ -8,6 +8,11 @@ import {
 } from '@earendil-works/pi-coding-agent';
 import { Type, type TSchema } from 'typebox';
 
+import {
+  DEFERRED_TOOL_SEARCH_PROVIDER_EVENT,
+  DEFERRED_TOOLS_PROTOCOL_VERSION,
+  type DeferredToolSearchProviderRequest,
+} from '../shared/deferred-tools-protocol';
 import { resolveExecutorEndpoint } from './src/config';
 import {
   createElicitationHandler,
@@ -76,6 +81,7 @@ interface NativeToolCatalog {
 export interface CreateRemoteExecutorExtensionOptions {
   dependencies?: Partial<RemoteExecutorDependencies>;
   nativeTools?: NativeToolCatalog;
+  activateTools?: (names: string[]) => string[];
   jobs?: ExecutorJobManager;
   outputs?: ExecutorOutputStore;
 }
@@ -368,9 +374,15 @@ async function formatToolResult(
   };
 }
 
-function asObject(value: JsonValue): JsonObject | undefined {
+function asObject(value: JsonValue | undefined): JsonObject | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? (value as JsonObject)
+    : undefined;
+}
+
+function asUnknownObject(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
     : undefined;
 }
 
@@ -405,6 +417,21 @@ function jsonText(value: JsonValue): string {
 
 type ExecutorPiToolResult = Awaited<ReturnType<typeof formatToolResult>>;
 
+function activateExecutorResultTools(
+  result: ExecutorPiToolResult,
+  activateTools?: (names: string[]) => string[],
+): ExecutorPiToolResult {
+  const details = result.details as ExecutorToolDetails | undefined;
+  const structured = asObject(details?.structuredContent);
+  const names: string[] = [];
+  if (structured?.state === 'running' && typeof structured.jobId === 'string') {
+    names.push('executor_get_job', 'executor_cancel_job');
+  }
+  if (details?.outputId) names.push('executor_read_output');
+  if (names.length > 0) activateTools?.(names);
+  return result;
+}
+
 async function yieldingToolResult(
   jobs: ExecutorJobManager,
   outputs: ExecutorOutputStore,
@@ -412,14 +439,18 @@ async function yieldingToolResult(
   yieldMs: number | undefined,
   signal: AbortSignal | undefined,
   operation: (signal: AbortSignal) => Promise<ExecutorPiToolResult>,
+  activateTools?: (names: string[]) => string[],
 ): Promise<ExecutorPiToolResult> {
   const outcome = await jobs.run(yieldMs ?? endpoint.yieldAfterMs, signal, operation);
-  if (outcome.status === 'completed') return outcome.value;
   if (outcome.status === 'failed') {
     throw new Error(errorMessage(outcome.error), { cause: outcome.error });
   }
+  if (outcome.status === 'completed') {
+    return activateExecutorResultTools(outcome.value, activateTools);
+  }
   const running = runningJobValue(outcome);
-  return formatToolResult(outputs, jsonText(running), running, endpoint);
+  const result = await formatToolResult(outputs, jsonText(running), running, endpoint);
+  return activateExecutorResultTools(result, activateTools);
 }
 
 function progressText(label: string, progress: ExecutorMcpProgress): string {
@@ -850,6 +881,7 @@ export function createRemoteMcpProxyTool(
               result.structuredContent,
             );
           },
+          options.activateTools,
         );
       } finally {
         acceptingProgress = false;
@@ -869,14 +901,7 @@ export function createRemoteExecutorTools(
     name: 'executor_search_tools',
     label: 'Executor: Search Tools',
     description:
-      'Search Pi bridge tools, Executor sandbox primitives, loadable native capabilities, and connected integration tools. Use load=true to activate native matches. Integration paths run under tools inside executor_execute.',
-    promptSnippet: 'Search Executor bridge, sandbox, native, and integration capabilities.',
-    promptGuidelines: [
-      'Use executor_search_tools when the required Executor capability or integration path is unknown.',
-      'Use short capability phrases and keep the default result limit unless more results are required.',
-      'When executor_search_tools returns nextCursor, reuse the same query, kinds, namespace, and limit for the next page.',
-      'Call executor_search_tools with load=true when you intend to call a matched native tool.',
-    ],
+      'Search Pi bridge tools, Executor sandbox primitives, loadable native capabilities, and connected integration tools. Use a short capability query. With load=true, matching bridge and native Pi tools are activated additively; integration matches activate executor_describe_tool and executor_execute but remain paths under tools inside executor_execute. Reuse the same query, kinds, namespace, and limit with nextCursor.',
     ...createExecutorRenderer({ kind: 'search', label: 'Executor Search' }),
     parameters: Type.Object(
       {
@@ -994,6 +1019,13 @@ export function createRemoteExecutorTools(
       }
 
       if (params.load === true) {
+        const bridgePaths = selectedLocal
+          .filter((item) => item.kind === 'bridge' && item.path !== 'executor_search_tools')
+          .map((item) => item.path);
+        const integrationHelpers =
+          remoteItems.length > 0 ? ['executor_describe_tool', 'executor_execute'] : [];
+        options.activateTools?.([...bridgePaths, ...integrationHelpers]);
+
         const nativePaths = selectedLocal
           .filter((item) => item.kind === 'native')
           .map((item) => item.path);
@@ -1030,7 +1062,10 @@ export function createRemoteExecutorTools(
         total,
         ...(hasMore ? { nextCursor: encodeSearchCursor(nextCursor) } : {}),
       };
-      return formatToolResult(outputs, jsonText(output), output, endpoint);
+      return activateExecutorResultTools(
+        await formatToolResult(outputs, jsonText(output), output, endpoint),
+        options.activateTools,
+      );
     },
   });
 
@@ -1052,12 +1087,15 @@ export function createRemoteExecutorTools(
         ctx,
       );
       const output = compactDescribeResult(executorReturnedValue(result), params.path);
-      return formatToolResult(
-        outputs,
-        jsonText(output),
-        output,
-        endpoint,
-        result.structuredContent,
+      return activateExecutorResultTools(
+        await formatToolResult(
+          outputs,
+          jsonText(output),
+          output,
+          endpoint,
+          result.structuredContent,
+        ),
+        options.activateTools,
       );
     },
   });
@@ -1066,15 +1104,7 @@ export function createRemoteExecutorTools(
     name: 'executor_execute',
     label: 'Executor: Execute',
     description:
-      'Run focused TypeScript in Executor to call connected integrations. Use exact integration paths from executor_search_tools, inspect one with executor_describe_tool, and return only fields needed by the task.',
-    promptSnippet: 'Run focused TypeScript against connected Executor integrations.',
-    promptGuidelines: [
-      'Before the first complex executor_execute call, use executor_get_guide with id execute.',
-      'Inside executor_execute code, call integration paths exactly as returned by executor_search_tools.',
-      'Keep executor_execute snippets focused, filter large collections in the sandbox, and return only required fields.',
-      'Do not use fetch inside executor_execute; use configured tools.* calls.',
-      'If executor_execute returns a running job, use executor_get_job instead of restarting the code.',
-    ],
+      'Run focused TypeScript in Executor to call connected integrations. Use exact paths returned by search_tools or executor_search_tools and inspect unfamiliar paths with executor_describe_tool. Before the first complex call, read the execute guide. Call integrations through tools.*, never fetch; filter large collections and return only required fields. If this returns a running job, use executor_get_job instead of restarting the code.',
     ...createExecutorRenderer({ kind: 'execute', label: 'Executor Execute' }),
     parameters: Type.Object(
       {
@@ -1105,7 +1135,7 @@ export function createRemoteExecutorTools(
       const endpoint = await deps.resolveEndpoint(ctx.cwd, isProjectTrusted(ctx));
       let acceptingProgress = true;
       try {
-        return await yieldingToolResult(
+        const result = await yieldingToolResult(
           jobs,
           outputs,
           endpoint,
@@ -1134,7 +1164,9 @@ export function createRemoteExecutorTools(
             const text = typeof output === 'string' ? output : jsonText(output);
             return formatToolResult(outputs, text, output, endpoint, result.structuredContent);
           },
+          options.activateTools,
         );
+        return result;
       } finally {
         acceptingProgress = false;
       }
@@ -1150,7 +1182,10 @@ export function createRemoteExecutorTools(
     async execute(_toolCallId, _params, signal, _onUpdate, ctx) {
       const { endpoint, result } = await requestExecutorTool(deps, 'skills', {}, signal, ctx);
       const output = parseGuideList(result.text);
-      return formatToolResult(outputs, jsonText(output), output, endpoint);
+      return activateExecutorResultTools(
+        await formatToolResult(outputs, jsonText(output), output, endpoint),
+        options.activateTools,
+      );
     },
   });
 
@@ -1173,7 +1208,10 @@ export function createRemoteExecutorTools(
         ctx,
       );
       const markdown = adaptGuideContent(result.text, params.id);
-      return formatToolResult(outputs, markdown, { id: params.id, markdown }, endpoint);
+      return activateExecutorResultTools(
+        await formatToolResult(outputs, markdown, { id: params.id, markdown }, endpoint),
+        options.activateTools,
+      );
     },
   });
 
@@ -1202,12 +1240,17 @@ export function createRemoteExecutorTools(
     async execute(_toolCallId, params) {
       const outcome = await jobs.poll<ExecutorPiToolResult>(params.jobId, params.waitMs ?? 5_000);
       if (!outcome) throw new Error(`Unknown or expired Executor job: ${params.jobId}`);
-      if (outcome.status === 'completed') return outcome.value;
       if (outcome.status === 'failed') {
         throw new Error(errorMessage(outcome.error), { cause: outcome.error });
       }
-      const running = runningJobValue(outcome);
-      return formatToolResult(outputs, jsonText(running), running);
+      let result: ExecutorPiToolResult;
+      if (outcome.status === 'completed') {
+        result = outcome.value;
+      } else {
+        const running = runningJobValue(outcome);
+        result = await formatToolResult(outputs, jsonText(running), running);
+      }
+      return activateExecutorResultTools(result, options.activateTools);
     },
   });
 
@@ -1223,7 +1266,10 @@ export function createRemoteExecutorTools(
     async execute(_toolCallId, params) {
       const cancelled = jobs.cancel(params.jobId);
       const output: JsonValue = { jobId: params.jobId, cancelled };
-      return formatToolResult(outputs, jsonText(output), output);
+      return activateExecutorResultTools(
+        await formatToolResult(outputs, jsonText(output), output),
+        options.activateTools,
+      );
     },
   });
 
@@ -1272,6 +1318,22 @@ export function createRemoteExecutorTools(
   return [searchTools, describeTool, execute, listGuides, getGuide, getJob, cancelJob, readOutput];
 }
 
+function isDeferredSearchProviderRequest(
+  value: unknown,
+): value is DeferredToolSearchProviderRequest {
+  const record = asUnknownObject(value);
+  return (
+    record?.version === DEFERRED_TOOLS_PROTOCOL_VERSION &&
+    typeof record.query === 'string' &&
+    typeof record.limit === 'number' &&
+    Number.isInteger(record.limit) &&
+    (record.cursor === undefined || typeof record.cursor === 'string') &&
+    Array.isArray(record.pending) &&
+    typeof record.context === 'object' &&
+    record.context !== null
+  );
+}
+
 export function createRemoteExecutorExtension(
   options: CreateRemoteExecutorExtensionOptions = {},
 ): (pi: ExtensionAPI) => void {
@@ -1280,6 +1342,15 @@ export function createRemoteExecutorExtension(
     const jobs = options.jobs ?? new ExecutorJobManager();
     const outputs = options.outputs ?? new ExecutorOutputStore();
     const nativeProxies = new Map<string, { remoteName: string; tool: ToolDefinition }>();
+    const activateTools = (names: string[]): string[] => {
+      const available = new Set(pi.getAllTools().map((tool) => tool.name));
+      const active = pi.getActiveTools();
+      const activeSet = new Set(active);
+      const requested = names.filter((name) => available.has(name) && !activeSet.has(name));
+      if (requested.length > 0) pi.setActiveTools([...active, ...requested]);
+      const activeAfter = new Set(pi.getActiveTools());
+      return requested.filter((name) => activeAfter.has(name));
+    };
     const nativeCatalog: NativeToolCatalog = {
       list: () => {
         const active = new Set(pi.getActiveTools());
@@ -1290,23 +1361,71 @@ export function createRemoteExecutorExtension(
           active: active.has(tool.name),
         }));
       },
-      activate: (names) => {
-        const current = new Set(pi.getActiveTools());
-        const requested = names.filter((name) => nativeProxies.has(name) && !current.has(name));
-        if (requested.length > 0) pi.setActiveTools([...current, ...requested]);
-        const active = new Set(pi.getActiveTools());
-        return requested.filter((name) => active.has(name));
-      },
+      activate: (names) => activateTools(names.filter((name) => nativeProxies.has(name))),
     };
 
-    for (const tool of createRemoteExecutorTools({
+    const executorTools = createRemoteExecutorTools({
       dependencies: deps,
       nativeTools: nativeCatalog,
+      activateTools,
       jobs,
       outputs,
-    })) {
-      pi.registerTool(tool);
-    }
+    });
+    for (const tool of executorTools) pi.registerTool(tool);
+    const executorSearchTool = executorTools.find((tool) => tool.name === 'executor_search_tools');
+    if (!executorSearchTool) throw new Error('executor_search_tools was not created');
+
+    pi.events.on(DEFERRED_TOOL_SEARCH_PROVIDER_EVENT, (value) => {
+      if (!isDeferredSearchProviderRequest(value)) return;
+      const request = value;
+      request.pending.push(
+        Promise.resolve(
+          executorSearchTool.execute(
+            'pi-deferred-tools:executor-search',
+            {
+              query: request.query,
+              kinds: ['native', 'integration'],
+              limit: request.limit,
+              cursor: request.cursor,
+              load: true,
+            },
+            request.signal,
+            undefined,
+            request.context,
+          ),
+        ).then((result) => {
+          const details = result.details as ExecutorToolDetails | undefined;
+          const structured = asObject(details?.structuredContent);
+          const items = Array.isArray(structured?.items)
+            ? structured.items.flatMap((value) => {
+                const item = asObject(value);
+                if (
+                  typeof item?.path !== 'string' ||
+                  typeof item.kind !== 'string' ||
+                  typeof item.summary !== 'string'
+                ) {
+                  return [];
+                }
+                return [
+                  {
+                    path: item.path,
+                    kind: item.kind,
+                    summary: item.summary,
+                    ...(typeof item.state === 'string' ? { state: item.state } : {}),
+                  },
+                ];
+              })
+            : [];
+          return {
+            provider: 'executor',
+            items,
+            ...(typeof structured?.nextCursor === 'string'
+              ? { nextCursor: structured.nextCursor }
+              : {}),
+          };
+        }),
+      );
+    });
 
     const refreshRemoteTools = async (ctx: ExtensionContext, signal?: AbortSignal) => {
       const endpoint = await deps.resolveEndpoint(ctx.cwd, isProjectTrusted(ctx));
@@ -1328,7 +1447,7 @@ export function createRemoteExecutorExtension(
         }
         const tool = createRemoteMcpProxyTool(
           remoteTool,
-          { dependencies: deps, jobs, outputs },
+          { dependencies: deps, activateTools, jobs, outputs },
           localName,
         );
         pi.registerTool(tool);

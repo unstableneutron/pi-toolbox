@@ -20,8 +20,6 @@ export default function (pi: ExtensionAPI) {
     description: `Queue a follow-up for yourself after the current turn. Supports:
 - /answer to self-invoke the answer flow after asking questions
 - Plain text to prefill the editor for the user to review and send`,
-    promptSnippet: 'Queue /answer or plain-text follow-up input for after this turn',
-
     parameters: Type.Object({
       command: Type.String({
         description: "The command or message to queue (e.g., '/answer' or any plain text)",

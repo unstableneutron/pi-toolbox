@@ -16,6 +16,18 @@ The repo is itself a pi package (see the `pi` field in `package.json`), so the w
 | `tests/`                          | Vitest coverage for guardrails config, extension layout, and the `scripts/pi-update-extensions.ts` tooling.                                                                                                                                                                                                                                                               |
 | `scripts/pi-update-extensions.ts` | Maintenance script that updates the pnpm-managed global `pi` CLI, pins this workspace's devDependencies to that exact version, applies compatibility patches, and refreshes gitchamber source snapshots.                                                                                                                                                                  |
 
+## Deferred tool discovery
+
+`extensions/pi-deferred-tools` keeps a small reviewed baseline of common tool schemas and exposes one
+`search_tools` entry point for deferred Pi tools and connected Executor capabilities. Tool loading is
+additive after the first model request, so enabled schemas stay stable for prompt caching. Unknown
+registered tools fail open and remain active until the catalog explicitly reviews them.
+
+Executor-native capabilities can become ordinary Pi proxy tools. Arbitrary connected integrations
+stay behind `executor_describe_tool` and `executor_execute`, which avoids one prompt schema per remote
+integration. See [`extensions/pi-deferred-tools/README.md`](./extensions/pi-deferred-tools/README.md)
+for the policy and extension-owner contract.
+
 ## Standalone roundtable reviewer CLI
 
 `roundtable-review` is a Node CLI that uses the Pi SDK directly to run several

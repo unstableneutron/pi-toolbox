@@ -4,6 +4,11 @@ import path from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
+import {
+  DEFERRED_TOOL_POLICY_EVENT,
+  DEFERRED_TOOLS_PROTOCOL_VERSION,
+  type DeferredToolPolicyRequest,
+} from '../shared/deferred-tools-protocol';
 import piCodexAppServerUseExtension from './src/extension';
 
 function registerExtensionWithHealthyAppServer(
@@ -303,6 +308,103 @@ describe('pi-codex-app-server-use extension commands and activation', () => {
       'write_stdin',
       'view_image',
     ]);
+  });
+
+  test('respects deferred consumers across session start and model changes', async () => {
+    let activeTools = ['read', 'bash', 'apply_patch', 'write_stdin', 'view_image', 'search_tools'];
+    const handlers = new Map<string, (event: unknown, ctx: any) => Promise<void>>();
+    const projectSettings = path.join(root, 'project/.pi/settings.json');
+    fs.mkdirSync(path.dirname(projectSettings), { recursive: true });
+    fs.writeFileSync(
+      projectSettings,
+      JSON.stringify({ codexAppServerUse: { exec: { enabled: true, models: 'all' } } }),
+    );
+    const pi = {
+      getActiveTools: () => activeTools,
+      registerTool() {},
+      registerCommand() {},
+      on(event: string, handler: (event: unknown, ctx: any) => Promise<void>) {
+        handlers.set(event, handler);
+      },
+      setActiveTools(nextActiveTools: string[]) {
+        activeTools = nextActiveTools;
+      },
+      events: {
+        emit(channel: string, value: unknown) {
+          if (channel !== DEFERRED_TOOL_POLICY_EVENT) return;
+          const request = value as DeferredToolPolicyRequest;
+          expect(request.version).toBe(DEFERRED_TOOLS_PROTOCOL_VERSION);
+          request.deferredNames.add('write_stdin');
+          request.deferredNames.add('view_image');
+          request.handled = true;
+        },
+      },
+    };
+    const ctx = {
+      ...makeSessionContext(root),
+      model: { provider: 'openai', api: 'openai-responses', id: 'gpt-5.5', input: ['image'] },
+    };
+
+    registerExtensionWithHealthyAppServer(pi as any);
+    await handlers.get('session_start')?.({ type: 'session_start' }, ctx);
+
+    expect(activeTools).toEqual(['read', 'bash', 'apply_patch', 'search_tools', 'exec_command']);
+
+    activeTools.push('write_stdin', 'view_image', 'herdr_layout');
+    await handlers.get('model_select')?.({ type: 'model_select' }, ctx);
+    expect(activeTools).toEqual(
+      expect.arrayContaining(['write_stdin', 'view_image', 'herdr_layout']),
+    );
+
+    fs.writeFileSync(
+      projectSettings,
+      JSON.stringify({ codexAppServerUse: { exec: { enabled: false, models: 'all' } } }),
+    );
+    await handlers.get('model_select')?.({ type: 'model_select' }, ctx);
+    expect(activeTools).toContain('herdr_layout');
+    expect(activeTools).not.toContain('exec_command');
+    expect(activeTools).not.toContain('write_stdin');
+  });
+
+  test('removes only AppServer-added extras when exec becomes inactive', async () => {
+    let activeTools = ['read', 'bash', 'apply_patch'];
+    const handlers = new Map<string, (event: unknown, ctx: any) => Promise<void>>();
+    const projectSettings = path.join(root, 'project/.pi/settings.json');
+    fs.mkdirSync(path.dirname(projectSettings), { recursive: true });
+    fs.writeFileSync(
+      projectSettings,
+      JSON.stringify({ codexAppServerUse: { exec: { enabled: true, models: 'all' } } }),
+    );
+    const pi = {
+      getActiveTools: () => activeTools,
+      registerTool() {},
+      registerCommand() {},
+      on(event: string, handler: (event: unknown, ctx: any) => Promise<void>) {
+        handlers.set(event, handler);
+      },
+      setActiveTools(nextActiveTools: string[]) {
+        activeTools = nextActiveTools;
+      },
+    };
+    const ctx = {
+      ...makeSessionContext(root),
+      model: { provider: 'openai', api: 'openai-responses', id: 'gpt-5.5', input: ['image'] },
+    };
+
+    registerExtensionWithHealthyAppServer(pi as any);
+    await handlers.get('session_start')?.({ type: 'session_start' }, ctx);
+    expect(activeTools).toContain('view_image');
+
+    fs.writeFileSync(
+      projectSettings,
+      JSON.stringify({ codexAppServerUse: { exec: { enabled: false, models: 'all' } } }),
+    );
+    await handlers.get('model_select')?.({ type: 'model_select' }, ctx);
+
+    expect(activeTools).toContain('apply_patch');
+    expect(activeTools).not.toContain('exec_command');
+    expect(activeTools).not.toContain('write_stdin');
+    expect(activeTools).not.toContain('view_image');
   });
 
   test('replaces Pi local shell and edit tools when replacement is enabled', async () => {

@@ -15,7 +15,11 @@ const PNG_BASE64 =
 const CLI_JPEG_BASE64 = '/9j/4AAQSkZJRgABAQAAAQABAAD/2w==';
 
 function createRegisteredViewImageTool(deps?: ViewImageToolDeps) {
-  const registeredTools: Array<{ name: string; execute?: (...args: any[]) => Promise<any> }> = [];
+  const registeredTools: Array<{
+    name: string;
+    promptSnippet?: string;
+    execute?: (...args: any[]) => Promise<any>;
+  }> = [];
   registerViewImageTool(
     {
       registerTool(tool: { name: string; execute?: (...args: any[]) => Promise<any> }) {
@@ -30,16 +34,16 @@ function createRegisteredViewImageTool(deps?: ViewImageToolDeps) {
 }
 
 describe('view_image tool', () => {
-  test('registers Codex-compatible description and prompt snippet', () => {
+  test('registers a deferred-tool description without prompt metadata', () => {
     const { registeredTools } = createRegisteredViewImageTool();
 
     expect(registeredTools).toMatchObject([
       {
         name: 'view_image',
-        description: 'View image.',
-        promptSnippet: 'View image.',
+        description: expect.stringContaining('deferred capability'),
       },
     ]);
+    expect(registeredTools[0]?.promptSnippet).toBeUndefined();
   });
 
   test('returns Pi image content for a local image path', async () => {

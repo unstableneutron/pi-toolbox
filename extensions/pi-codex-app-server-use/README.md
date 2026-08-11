@@ -18,6 +18,10 @@ until enabled in `/codex-app-server`.
 - Codex browser automation through the existing `node_repl` browser-client path
   and the local Chromium DevTools fallback.
 
+When `pi-deferred-tools` is also loaded, `write_stdin` and `view_image` can start inactive even when
+Exec Tools are enabled. A live `exec_command` result additively enables `write_stdin`; `search_tools`
+can enable either capability directly. This keeps state-dependent schemas out of the initial prompt.
+
 All capabilities use the global Codex AppServer daemon. The extension does not
 spawn or maintain its own app-server process. When every capability is disabled,
 Pi does not probe the daemon and does not warn. When any active capability needs

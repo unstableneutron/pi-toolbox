@@ -925,6 +925,12 @@ export class CodexAppServerExecSessionManager {
   }
 }
 
+function activateToolAdditively(pi: ExtensionAPI, name: string): void {
+  if (typeof pi.getActiveTools !== 'function' || typeof pi.setActiveTools !== 'function') return;
+  const active = pi.getActiveTools();
+  if (!active.includes(name)) pi.setActiveTools([...active, name]);
+}
+
 export function registerAppServerExecControlTools(
   pi: ExtensionAPI,
   sessions: CodexAppServerExecSessionManager,
@@ -948,6 +954,9 @@ export function registerAppServerExecControlTools(
       };
       const result = await sessions.exec(typedParams, ctx.cwd, signal, emitUpdate, toolCallId);
       throwIfExecFailed(result);
+      if (result.session_id !== undefined) {
+        activateToolAdditively(pi, 'write_stdin');
+      }
       return {
         content: [{ type: 'text', text: formatUnifiedExecResult(result, typedParams.cmd) }],
         details: { ...result, command: typedParams.cmd },
@@ -958,8 +967,8 @@ export function registerAppServerExecControlTools(
   pi.registerTool({
     name: 'write_stdin',
     label: 'write_stdin',
-    description: 'Write/poll exec session.',
-    promptSnippet: 'Write to exec session.',
+    description:
+      'Write to or poll a live exec_command session by session_id. This tool is enabled additively when exec_command returns a live session.',
     parameters: WRITE_STDIN_PARAMETERS,
     renderCall: renderWriteStdinCall,
     renderResult: renderExecCommandResult,

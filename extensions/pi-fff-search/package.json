@@ -1,6 +1,6 @@
 {
   "name": "pi-fff-search",
-  "version": "0.10.1",
+  "version": "0.10.2",
   "description": "Pi extension for FFF-backed search and robust format-aware reading",
   "keywords": [
     "pi-extension",

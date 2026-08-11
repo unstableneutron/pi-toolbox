@@ -159,18 +159,10 @@ type FffRouterRuntime = {
 
 const SEARCH_TOOL_PROMPT = `For repository search, prefer \`fff_*\` tools first:
 
-- \`fff_find_files\` — fuzzy file/path search; keep queries short and let \`glob\`, \`extensions\`, and \`exclude_paths\` do the narrowing
-- \`fff_grep\` — default content search; pass one or more entries in \`patterns\` (OR-matched) plus a required \`literal\` boolean. Use \`literal: true\` for code search (quotes, braces, punctuation, whitespace all safe); use \`literal: false\` only when you genuinely need regex alternation or metacharacters. \`glob\` / \`extensions\` / \`exclude_paths\` prefilter files.
+- Use \`fff_find_files\` for fuzzy file and path search. Keep queries short; narrow with \`glob\`, \`extensions\`, and \`exclude_paths\`.
+- Use \`fff_grep\` for content search. Set required \`literal: true\` for code and punctuation; use \`literal: false\` only for a real regular expression. Multiple patterns use OR semantics.
 
-Examples:
-
-- \`fff_find_files\`: {"query":"openssl header","within":"/opt/homebrew/lib","glob":"**/*.h","exclude_paths":["pkgconfig"]}
-- \`fff_grep\`: {"patterns":["ActorAuth","actor_auth","PopulatedActorAuth"],"literal":true,"within":"src","extensions":["rs"],"exclude_paths":["tests"]}
-- \`fff_grep\`: {"patterns":["plan(Request)?","build(Request)?"],"literal":false,"within":"~/src","glob":"src/**/*.ts","exclude_paths":["dist"]}
-
-These tools return compact text with a \`base_path:\` header. \`fff_find_files\` returns one relative path per line. \`fff_grep\` returns \`path:line: text\` lines.
-
-Fall back to builtin or shell tools only when \`fff_*\` is unavailable, failing, awkward for the query, or outside the active workspace or scope. Briefly say why when falling back.`;
+Results use a \`base_path:\` header; grep rows use \`path:line: text\`. Fall back only when \`fff_*\` is unavailable, fails, or does not fit the query.`;
 
 const ENABLE_SEARCH_TERMS = false;
 const HIDE_SEARCH_TERMS = !ENABLE_SEARCH_TERMS;

@@ -312,12 +312,19 @@ export default function loopExtension(pi: ExtensionAPI): void {
     }
   }
 
+  const activateLoopTool = (): void => {
+    if (typeof pi.getActiveTools !== 'function' || typeof pi.setActiveTools !== 'function') return;
+    const active = pi.getActiveTools();
+    if (!active.includes('signal_loop_success')) {
+      pi.setActiveTools([...active, 'signal_loop_success']);
+    }
+  };
+
   pi.registerTool({
     name: 'signal_loop_success',
     label: 'Signal Loop Success',
     description:
-      'Stop the active loop when the breakout condition is satisfied. Only call this tool when explicitly instructed to do so by the user, tool or system prompt.',
-    promptSnippet: 'Signal that the active /loop breakout condition has been satisfied.',
+      'Stop the active loop when the breakout condition is satisfied. The /loop command enables this deferred tool additively. Only call it when explicitly instructed by the user, tool, or system prompt.',
     parameters: Type.Object({}, { additionalProperties: false }),
     constrainedSampling: { type: 'json_schema', strict: 'prefer' },
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
@@ -362,6 +369,7 @@ export default function loopExtension(pi: ExtensionAPI): void {
       }
 
       const summarizedState: LoopStateData = { ...nextState, summary: undefined, loopCount: 0 };
+      activateLoopTool();
       setLoopState(summarizedState, ctx);
       if (hasTui(ctx)) ctx.ui.notify('Loop active', 'info');
       triggerLoopPrompt(ctx);
@@ -406,6 +414,8 @@ export default function loopExtension(pi: ExtensionAPI): void {
     loopState = await loadState(ctx);
     updateStatus(ctx, loopState);
 
+    if (loopState.active) activateLoopTool();
+
     if (loopState.active && loopState.mode && !loopState.summary) {
       const mode = loopState.mode;
       const condition = loopState.condition;
@@ -421,6 +431,10 @@ export default function loopExtension(pi: ExtensionAPI): void {
   }
 
   pi.on('session_start', async (_event, ctx) => {
+    await restoreLoopState(ctx);
+  });
+
+  pi.on('session_tree', async (_event, ctx) => {
     await restoreLoopState(ctx);
   });
 }

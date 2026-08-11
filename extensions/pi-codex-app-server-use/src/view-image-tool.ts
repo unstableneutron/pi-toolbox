@@ -248,8 +248,8 @@ export function registerViewImageTool(
   pi.registerTool({
     name: VIEW_IMAGE_TOOL_NAME,
     label: VIEW_IMAGE_TOOL_NAME,
-    description: 'View image.',
-    promptSnippet: 'View image.',
+    description:
+      'View a local image after this deferred capability is enabled. Requires an image-capable model.',
     parameters: VIEW_IMAGE_PARAMETERS,
     prepareArguments: prepareViewImageArguments as (args: unknown) => ViewImageParams,
     renderCall: renderViewImageCall,

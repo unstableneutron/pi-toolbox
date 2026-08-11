@@ -1,6 +1,11 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 
 import {
+  DEFERRED_TOOL_POLICY_EVENT,
+  DEFERRED_TOOLS_PROTOCOL_VERSION,
+  type DeferredToolPolicyRequest,
+} from '../../shared/deferred-tools-protocol';
+import {
   checkCodexAppServerControlSocket,
   type CodexAppServerControlSocketHealth,
 } from './app-server-control';
@@ -77,6 +82,18 @@ function getCodexExecToolNames(ctx: ExtensionContext): string[] {
   return supportsViewImageInputs(ctx.model) ? CODEX_EXEC_TOOL_NAMES : APP_SERVER_EXEC_TOOL_NAMES;
 }
 
+function getDeferredToolPolicy(pi: ExtensionAPI): Set<string> | undefined {
+  const events = (pi as ExtensionAPI & { events?: ExtensionAPI['events'] }).events;
+  if (!events || typeof events.emit !== 'function') return undefined;
+  const request: DeferredToolPolicyRequest = {
+    version: DEFERRED_TOOLS_PROTOCOL_VERSION,
+    deferredNames: new Set(),
+    handled: false,
+  };
+  events.emit(DEFERRED_TOOL_POLICY_EVENT, request);
+  return request.handled ? request.deferredNames : undefined;
+}
+
 function formatUnavailableWarning(
   health: Extract<CodexAppServerControlSocketHealth, { ok: false }>,
 ): string {
@@ -88,7 +105,6 @@ const CODEX_EXEC_GUIDELINES = [
   'Use tty=true for dev servers, watchers, REPLs, and prompts.',
   'Use apply_patch for text-file changes, including creates/deletes/moves; group related multi-file edits into one patch.',
   'Prefer the apply_patch tool; use shell apply_patch only when chaining edits with other shell steps.',
-  'Use write_stdin only for running exec_command sessions; poll sparingly.',
   'Run independent tool calls in parallel when practical.',
 ];
 
@@ -214,7 +230,9 @@ export default function piCodexAppServerUseExtension(
   let execControlToolsRegistered = false;
   let execExtraToolsRegistered = false;
   let execWasActive = false;
-  let previousToolNames: string[] | undefined;
+  let execWasReplacing = false;
+  let replacedPiLocalToolNames: string[] = [];
+  const execActivatedExtraToolNames = new Set<string>();
   let lastUnavailableWarningKey: string | undefined;
   let statusFlashTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -287,35 +305,69 @@ export default function piCodexAppServerUseExtension(
     return false;
   }
 
-  async function syncActiveTools(ctx: ExtensionContext): Promise<void> {
+  async function syncActiveTools(
+    ctx: ExtensionContext,
+    reason: 'session-start' | 'model-select',
+  ): Promise<void> {
     const config = getCodexAppServerUseConfig(ctx);
     const appServerAvailable = await isAppServerAvailableForEnabledCapabilities(ctx, config);
     const execActive = appServerAvailable && isAppServerExecActive(ctx, config);
-    let activeTools = withoutTools(pi.getActiveTools(), COMPUTER_USE_TOOL_NAMES);
+    const currentActiveTools = pi.getActiveTools();
+    const deferredToolNames = getDeferredToolPolicy(pi);
+    const requestedCodexToolNames = getCodexExecToolNames(ctx);
+    const deferredCodexToolNames = CODEX_EXEC_TOOL_NAMES.filter((name) =>
+      deferredToolNames?.has(name),
+    );
+    const preservedDeferredToolNames = new Set(
+      reason === 'model-select'
+        ? requestedCodexToolNames.filter((name) => currentActiveTools.includes(name))
+        : [],
+    );
+    let activeTools = withoutTools(
+      withoutTools(currentActiveTools, COMPUTER_USE_TOOL_NAMES),
+      deferredCodexToolNames.filter((name) => !preservedDeferredToolNames.has(name)),
+    );
 
     if (execActive) {
-      const codexExecToolNames = getCodexExecToolNames(ctx);
       ensureExecExtraToolsRegistered();
-      if (!execWasActive) {
-        previousToolNames = withoutTools(activeTools, APP_SERVER_EXEC_CONTROL_TOOL_NAMES);
+      if (config.exec.replaceLocalTools && !execWasReplacing) {
+        replacedPiLocalToolNames = activeTools.filter((name) =>
+          REPLACED_PI_LOCAL_TOOL_NAMES.includes(name),
+        );
+      } else if (!config.exec.replaceLocalTools && execWasReplacing) {
+        activeTools = mergeToolNames(activeTools, replacedPiLocalToolNames);
+        replacedPiLocalToolNames = [];
       }
-      const baseTools = withoutTools(
-        previousToolNames ?? activeTools,
-        APP_SERVER_EXEC_CONTROL_TOOL_NAMES,
+
+      let baseTools = withoutTools(activeTools, APP_SERVER_EXEC_CONTROL_TOOL_NAMES);
+      if (config.exec.replaceLocalTools) {
+        baseTools = withoutTools(baseTools, REPLACED_PI_LOCAL_TOOL_NAMES);
+      }
+      const codexExecToolNames = requestedCodexToolNames.filter(
+        (name) => !deferredToolNames?.has(name) || preservedDeferredToolNames.has(name),
       );
+      for (const name of codexExecToolNames) {
+        if (!APP_SERVER_EXEC_CONTROL_TOOL_NAMES.includes(name) && !activeTools.includes(name)) {
+          execActivatedExtraToolNames.add(name);
+        }
+      }
       activeTools = config.exec.replaceLocalTools
-        ? mergeToolNames(codexExecToolNames, withoutTools(baseTools, REPLACED_PI_LOCAL_TOOL_NAMES))
+        ? mergeToolNames(codexExecToolNames, baseTools)
         : mergeToolNames(baseTools, codexExecToolNames);
       execWasActive = true;
-    } else if (execWasActive) {
-      activeTools = withoutTools(
-        previousToolNames ?? activeTools,
-        APP_SERVER_EXEC_CONTROL_TOOL_NAMES,
-      );
-      previousToolNames = undefined;
-      execWasActive = false;
+      execWasReplacing = config.exec.replaceLocalTools;
     } else {
-      activeTools = withoutTools(activeTools, APP_SERVER_EXEC_CONTROL_TOOL_NAMES);
+      activeTools = withoutTools(activeTools, [
+        ...APP_SERVER_EXEC_CONTROL_TOOL_NAMES,
+        ...execActivatedExtraToolNames,
+      ]);
+      if (execWasActive && execWasReplacing) {
+        activeTools = mergeToolNames(activeTools, replacedPiLocalToolNames);
+      }
+      replacedPiLocalToolNames = [];
+      execActivatedExtraToolNames.clear();
+      execWasActive = false;
+      execWasReplacing = false;
     }
 
     if (appServerAvailable && config.computerUse.enabled) {
@@ -333,11 +385,11 @@ export default function piCodexAppServerUseExtension(
   }
 
   pi.on('session_start', async (_event, ctx) => {
-    await syncActiveTools(ctx);
+    await syncActiveTools(ctx, 'session-start');
   });
 
   pi.on('model_select', async (_event, ctx) => {
-    await syncActiveTools(ctx);
+    await syncActiveTools(ctx, 'model-select');
   });
 
   pi.on('message_end', async (event) => {

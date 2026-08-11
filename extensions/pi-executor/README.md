@@ -9,7 +9,7 @@ URL elicitation in the Pi UI.
 
 ## Pi tools
 
-Eight focused tools are active at startup:
+The extension registers eight focused bridge tools:
 
 - `executor_search_tools` — search bridge, sandbox, native, and integration capabilities.
 - `executor_describe_tool` — get one integration tool's compact TypeScript contract.
@@ -19,6 +19,12 @@ Eight focused tools are active at startup:
 - `executor_get_job` — long-poll a yielded Executor call.
 - `executor_cancel_job` — cancel a yielded Executor call.
 - `executor_read_output` — read the next bounded page of a truncated result.
+
+When `pi-deferred-tools` is loaded, these bridge schemas start inactive. Its general `search_tools`
+tool calls the existing Executor search implementation through the shared extension event bus.
+Executor-native matches become ordinary Pi proxy tools. Integration matches activate
+`executor_describe_tool` and `executor_execute`, but remain Executor paths instead of becoming one Pi
+schema per integration. Direct `executor_search_tools` use remains available after it is loaded.
 
 Native artifact tools are registered but initially deferred:
 
@@ -60,10 +66,11 @@ redacted before they enter model-visible text or persisted Pi tool details.
 Long `executor_execute` and native MCP calls yield after 20 seconds by default. `executor_execute`
 accepts a per-call `waitMs` override and an optional hard `timeoutMs`. A yielded response uses
 `{ state: "running", jobId, retryAfterMs }` while the original MCP request continues in the
-background. Use `executor_get_job` with the same job ID and an optional `waitMs` to wait again; this
-polls the original request and does not start the code again. Use `executor_cancel_job` to stop it.
-The hard request timeout defaults to five minutes. MCP progress notifications update the active Pi
-tool row before a call yields.
+background. The result additively enables `executor_get_job` and `executor_cancel_job`. Use
+`executor_get_job` with the same job ID and an optional `waitMs` to wait again; this polls the
+original request and does not start the code again. Use `executor_cancel_job` to stop it. A truncated
+result additively enables `executor_read_output`. The hard request timeout defaults to five minutes.
+MCP progress notifications update the active Pi tool row before a call yields.
 
 ## Endpoint resolution
 

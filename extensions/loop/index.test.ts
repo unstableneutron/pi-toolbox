@@ -7,6 +7,10 @@ function createHarness() {
   const handlers = new Map<string, (event: any, ctx: any) => unknown>();
   const appendEntry = vi.fn();
   const sendMessage = vi.fn();
+  let activeTools: string[] = [];
+  const setActiveTools = vi.fn((names: string[]) => {
+    activeTools = names;
+  });
   const pi = {
     appendEntry,
     on: vi.fn((event: string, handler: (event: any, ctx: any) => unknown) => {
@@ -16,11 +20,20 @@ function createHarness() {
       commands.set(name, command.handler);
     },
     registerTool: vi.fn(),
+    getActiveTools: () => activeTools,
+    setActiveTools,
     sendMessage,
   };
 
   loopExtension(pi as any);
-  return { appendEntry, commands, handlers, sendMessage, registerTool: pi.registerTool };
+  return {
+    appendEntry,
+    commands,
+    handlers,
+    sendMessage,
+    registerTool: pi.registerTool,
+    setActiveTools,
+  };
 }
 
 function createPrintCtx() {
@@ -40,6 +53,7 @@ describe('loop command mode guards', () => {
 
     expect(tool.parameters.additionalProperties).toBe(false);
     expect(tool.constrainedSampling).toEqual({ type: 'json_schema', strict: 'prefer' });
+    expect(tool.promptSnippet).toBeUndefined();
   });
 
   test('returns without opening the selector outside TUI mode', async () => {
@@ -51,8 +65,8 @@ describe('loop command mode guards', () => {
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
-  test('runs preset loops outside TUI mode without touching UI', async () => {
-    const { appendEntry, commands, sendMessage } = createHarness();
+  test('runs preset loops outside TUI mode and enables the success tool', async () => {
+    const { appendEntry, commands, sendMessage, setActiveTools } = createHarness();
 
     await expect(commands.get('loop')?.('tests', createPrintCtx())).resolves.toBeUndefined();
 
@@ -64,6 +78,27 @@ describe('loop command mode guards', () => {
       expect.objectContaining({ content: expect.stringContaining('Run all tests') }),
       { deliverAs: 'followUp', triggerTurn: true },
     );
+    expect(setActiveTools).toHaveBeenCalledWith(['signal_loop_success']);
+  });
+
+  test('restores loop control after tree navigation to an active loop branch', async () => {
+    const { handlers, setActiveTools } = createHarness();
+    const ctx = {
+      ...createPrintCtx(),
+      sessionManager: {
+        getEntries: () => [
+          {
+            type: 'custom',
+            customType: 'loop-state',
+            data: { active: true, mode: 'tests', summary: 'tests pass' },
+          },
+        ],
+      },
+    };
+
+    await handlers.get('session_tree')?.({ type: 'session_tree' }, ctx);
+
+    expect(setActiveTools).toHaveBeenCalledWith(['signal_loop_success']);
   });
 
   test('does not provide custom compaction while loop is active', async () => {

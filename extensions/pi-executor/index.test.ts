@@ -5,6 +5,7 @@ import {
   createRemoteExecutorTools,
   createRemoteMcpProxyTool,
 } from './index';
+import { DEFERRED_TOOLS_PROTOCOL_VERSION } from '../shared/deferred-tools-protocol';
 import { ExecutorOutputStore } from './src/output-store';
 import type { ExecutorEndpoint, ExecutorMcpInspection, JsonValue } from './src/types';
 
@@ -41,7 +42,7 @@ function completed(result: JsonValue) {
 }
 
 describe('native Executor Pi tools', () => {
-  test('uses formal names for the core tools', () => {
+  test('uses formal names and description-only prompt metadata for deferred tools', () => {
     const tools = createRemoteExecutorTools();
     expect(tools.map((tool) => tool.name)).toEqual([
       'executor_search_tools',
@@ -54,6 +55,8 @@ describe('native Executor Pi tools', () => {
       'executor_read_output',
     ]);
     expect(tools.every((tool) => tool.renderCall && tool.renderResult)).toBe(true);
+    expect(tools.every((tool) => tool.promptSnippet === undefined)).toBe(true);
+    expect(tools.every((tool) => tool.promptGuidelines === undefined)).toBe(true);
   });
 
   test('keeps optional search parameters out of OpenAI strict mode', () => {
@@ -97,6 +100,31 @@ describe('native Executor Pi tools', () => {
     });
     expect(JSON.stringify(result.content)).not.toContain('score');
     expect(JSON.stringify(result.details)).not.toContain('must-not-leak');
+  });
+
+  test('activates integration bridge tools when a search loads matches', async () => {
+    const activateTools = vi.fn((names: string[]) => names);
+    const search = createRemoteExecutorTools({
+      activateTools,
+      dependencies: {
+        resolveEndpoint: async () => endpoint,
+        executeCode: async () =>
+          completed({
+            items: [{ path: 'github.issues.list', summary: 'List GitHub issues.' }],
+            total: 1,
+          }),
+      },
+    })[0]!;
+
+    await search.execute(
+      'search-load-integration',
+      { query: 'GitHub issues', kinds: ['integration'], load: true },
+      undefined,
+      undefined,
+      context(),
+    );
+
+    expect(activateTools).toHaveBeenCalledWith(['executor_describe_tool', 'executor_execute']);
   });
 
   test('continues integration pagination with the same namespace', async () => {
@@ -487,7 +515,9 @@ describe('native Executor Pi tools', () => {
       await new Promise((resolve) => setTimeout(resolve, 25));
       return completed({ slow: 'done' });
     });
+    const activateTools = vi.fn((names: string[]) => names);
     const tools = createRemoteExecutorTools({
+      activateTools,
       dependencies: { resolveEndpoint: async () => slowEndpoint, executeCode },
     });
 
@@ -503,6 +533,7 @@ describe('native Executor Pi tools', () => {
       jobId: string;
     };
     expect(running.state).toBe('running');
+    expect(activateTools).toHaveBeenCalledWith(['executor_get_job', 'executor_cancel_job']);
 
     const completedResult = await tools[5]!.execute(
       'poll-1',
@@ -522,8 +553,10 @@ describe('native Executor Pi tools', () => {
     };
     const source = 'x'.repeat(3000);
     const outputs = new ExecutorOutputStore();
+    const activateTools = vi.fn((names: string[]) => names);
     const tools = createRemoteExecutorTools({
       outputs,
+      activateTools,
       dependencies: {
         resolveEndpoint: async () => boundedEndpoint,
         executeCode: async () => completed(source),
@@ -539,6 +572,7 @@ describe('native Executor Pi tools', () => {
     );
     const outputId = (result.details as { outputId?: string }).outputId;
     expect(outputId).toBeTruthy();
+    expect(activateTools).toHaveBeenCalledWith(['executor_read_output']);
     expect(result.content[0]).toMatchObject({ text: expect.stringContaining('nextOffset=') });
 
     const page = await tools[7]!.execute(
@@ -550,6 +584,58 @@ describe('native Executor Pi tools', () => {
     );
     expect((page.content[0] as { text: string }).text.startsWith('x'.repeat(500))).toBe(true);
     await outputs.clear();
+  });
+
+  test('activates job and output readers for native proxy results', async () => {
+    const activateTools = vi.fn((names: string[]) => names);
+    const slowEndpoint = { ...endpoint, yieldAfterMs: 5 };
+    const slowProxy = createRemoteMcpProxyTool(
+      {
+        name: 'slow-native',
+        description: 'Slow native capability.',
+        inputSchema: { type: 'object', properties: {} },
+      },
+      {
+        activateTools,
+        dependencies: {
+          resolveEndpoint: async () => slowEndpoint,
+          callTool: async () => {
+            await new Promise((resolve) => setTimeout(resolve, 25));
+            return completed({ done: true });
+          },
+        },
+      },
+    );
+
+    await slowProxy.execute('native-slow', {}, undefined, undefined, context());
+    expect(activateTools).toHaveBeenCalledWith(['executor_get_job', 'executor_cancel_job']);
+
+    activateTools.mockClear();
+    const boundedEndpoint = { ...endpoint, maxOutputBytes: 1024, maxOutputLines: 10 };
+    const largeProxy = createRemoteMcpProxyTool(
+      {
+        name: 'large-native',
+        description: 'Large native capability.',
+        inputSchema: { type: 'object', properties: {} },
+      },
+      {
+        activateTools,
+        dependencies: {
+          resolveEndpoint: async () => boundedEndpoint,
+          callTool: async () => completed('x'.repeat(3000)),
+        },
+      },
+    );
+
+    const largeResult = await largeProxy.execute(
+      'native-large',
+      {},
+      undefined,
+      undefined,
+      context(),
+    );
+    expect((largeResult.details as { outputId?: string }).outputId).toBeTruthy();
+    expect(activateTools).toHaveBeenCalledWith(['executor_read_output']);
   });
 
   test('splits remote skills into list and get guide tools', async () => {
@@ -698,6 +784,7 @@ describe('native Executor Pi tools', () => {
       setActiveTools: vi.fn((names: string[]) => {
         active = names;
       }),
+      events: { on: vi.fn() },
     };
     const extension = createRemoteExecutorExtension({
       dependencies: {
@@ -732,6 +819,67 @@ describe('native Executor Pi tools', () => {
       'executor',
       'executor[environment]: https://executor.example.com/mcp',
     );
+  });
+
+  test('provides integration discovery to the general deferred-tool search', async () => {
+    let providerHandler: ((value: unknown) => void) | undefined;
+    const registered = new Map<string, { name: string }>();
+    let active: string[] = [];
+    const pi = {
+      registerTool(tool: { name: string }) {
+        registered.set(tool.name, tool);
+        active = [...new Set([...active, tool.name])];
+      },
+      registerCommand: vi.fn(),
+      on: vi.fn(),
+      getAllTools: () => [...registered.values()],
+      getActiveTools: () => active,
+      setActiveTools(names: string[]) {
+        active = names;
+      },
+      events: {
+        on(channel: string, handler: (value: unknown) => void) {
+          if (channel === 'pi-deferred-tools:search-provider') providerHandler = handler;
+          return () => {};
+        },
+      },
+    };
+    createRemoteExecutorExtension({
+      dependencies: {
+        resolveEndpoint: async () => endpoint,
+        executeCode: async () =>
+          completed({
+            items: [{ path: 'github.issues.list', summary: 'List GitHub issues.' }],
+            total: 1,
+          }),
+      },
+    })(pi as never);
+    active = [];
+    const pending: Array<Promise<unknown>> = [];
+
+    providerHandler?.({
+      version: DEFERRED_TOOLS_PROTOCOL_VERSION,
+      query: 'GitHub issues',
+      limit: 5,
+      context: context(),
+      pending,
+    });
+    const results = await Promise.all(pending);
+
+    expect(results).toEqual([
+      {
+        provider: 'executor',
+        items: [
+          {
+            path: 'github.issues.list',
+            kind: 'integration',
+            summary: 'List GitHub issues.',
+          },
+        ],
+      },
+    ]);
+    expect(active).toEqual(expect.arrayContaining(['executor_describe_tool', 'executor_execute']));
+    expect(registered.has('github.issues.list')).toBe(false);
   });
 
   test('throws remote failures so Pi marks the result as an error', async () => {
