@@ -9,7 +9,6 @@
     ".entire/**",
     ".git/**",
     ".pi/**",
-    ".pi-subagents/**",
     "agents/**",
     "disabled/**",
     "docs/**",

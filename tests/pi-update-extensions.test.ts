@@ -1031,18 +1031,18 @@ describe('pi-subagents apply_patch agent tool patching', () => {
   }
 
   it('reports unpatched editable agent definitions as not yet patched', () => {
-    const packageRoot = setupFakePackage('0.27.0');
+    const packageRoot = setupFakePackage('0.47.1');
     expect(isPiSubagentsApplyPatchToolPatchApplied(packageRoot)).toBe(false);
   });
 
   it('adds apply_patch dynamically to agents with edit or write tools only', async () => {
-    const packageRoot = setupFakePackage('0.27.0');
+    const packageRoot = setupFakePackage('0.47.1');
     const result = await applyPiSubagentsApplyPatchToolPatch({ packageRoot });
 
     expect(result).toMatchObject({
       status: 'applied',
       packageRoot,
-      version: '0.27.0',
+      version: '0.47.1',
     });
     expect(result.patchPath).toBe(join(packageRoot, 'agents'));
 
@@ -1062,19 +1062,19 @@ describe('pi-subagents apply_patch agent tool patching', () => {
   });
 
   it('is idempotent after patching all editable agent definitions', async () => {
-    const packageRoot = setupFakePackage('0.27.0');
+    const packageRoot = setupFakePackage('0.47.1');
     await applyPiSubagentsApplyPatchToolPatch({ packageRoot });
     const second = await applyPiSubagentsApplyPatchToolPatch({ packageRoot });
 
     expect(second).toMatchObject({
       status: 'already-applied',
       packageRoot,
-      version: '0.27.0',
+      version: '0.47.1',
     });
   });
 
   it('supports dry-run without mutating agent definitions', async () => {
-    const packageRoot = setupFakePackage('0.27.0');
+    const packageRoot = setupFakePackage('0.47.1');
     const workerPath = join(packageRoot, 'agents', 'worker.md');
     const original = readFileSync(workerPath, 'utf8');
 
@@ -1082,7 +1082,7 @@ describe('pi-subagents apply_patch agent tool patching', () => {
     expect(result).toMatchObject({
       status: 'would-apply',
       packageRoot,
-      version: '0.27.0',
+      version: '0.47.1',
     });
     expect(readFileSync(workerPath, 'utf8')).toBe(original);
     expect(isPiSubagentsApplyPatchToolPatchApplied(packageRoot)).toBe(false);
@@ -1206,11 +1206,11 @@ describe('pi-subagents compact TUI path links patching', () => {
   });
 
   it('links output, session, status, slash, and fleet paths without changing model text', async () => {
-    const packageRoot = setupFakePackage('0.45.2');
+    const packageRoot = setupFakePackage('0.47.1');
     expect(isPiSubagentsTuiPathLinksPatchApplied(packageRoot)).toBe(false);
 
     const result = await applyPiSubagentsTuiPathLinksPatch({ packageRoot });
-    expect(result).toMatchObject({ status: 'applied', packageRoot, version: '0.45.2' });
+    expect(result).toMatchObject({ status: 'applied', packageRoot, version: '0.47.1' });
     expect(isPiSubagentsTuiPathLinksPatchApplied(packageRoot)).toBe(true);
 
     const render = readFileSync(join(packageRoot, 'src', 'tui', 'render.ts'), 'utf8');
@@ -1262,7 +1262,7 @@ describe('pi-subagents compact TUI path links patching', () => {
   });
 
   it('supports dry-run without mutating pi-subagents TUI sources', async () => {
-    const packageRoot = setupFakePackage('0.45.2');
+    const packageRoot = setupFakePackage('0.47.1');
     const renderPath = join(packageRoot, 'src', 'tui', 'render.ts');
     const original = readFileSync(renderPath, 'utf8');
 
