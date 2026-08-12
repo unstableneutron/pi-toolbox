@@ -910,6 +910,16 @@ function writeJavaScriptPatchAtomically(filePath: string, content: string): void
   }
 }
 
+function writeTextPatchAtomically(filePath: string, content: string): void {
+  const temporaryPath = `${filePath}.pi-update-${process.pid}.tmp`;
+  writeFileSync(temporaryPath, content);
+  try {
+    renameSync(temporaryPath, filePath);
+  } finally {
+    rmSync(temporaryPath, { force: true });
+  }
+}
+
 export function isPiCodingAgentTranscriptCachePatchApplied(packageRoot: string): boolean {
   const filePath = join(packageRoot, PI_CODING_AGENT_INTERACTIVE_MODE_RELATIVE_PATH);
   if (!existsSync(filePath)) return false;
@@ -1921,6 +1931,386 @@ export async function applyPiSubagentsApplyPatchToolPatch(
   return { status: 'applied', packageRoot, version, patchPath: agentsDir };
 }
 
+// ---------------------------------------------------------------------------
+// pi-subagents compact OSC 8 TUI path links patch
+//
+// pi-subagents renders generated output, log, artifact, and session paths in
+// Text components and widgets, where Markdown links are not parsed. Keep the
+// full absolute path in a file:// OSC 8 target while displaying only the final
+// three path segments. Restrict escape sequences to TUI render paths so model
+// content and persisted run metadata remain plain text.
+// ---------------------------------------------------------------------------
+
+const PI_SUBAGENTS_TUI_PATH_LINKS_RELATIVE_PATH = 'src/tui/path-links.ts';
+const PI_SUBAGENTS_TUI_RENDER_RELATIVE_PATH = 'src/tui/render.ts';
+const PI_SUBAGENTS_TUI_FLEET_RELATIVE_PATH = 'src/tui/fleet.ts';
+const PI_SUBAGENTS_EXTENSION_INDEX_RELATIVE_PATH = 'src/extension/index.ts';
+const PI_SUBAGENTS_TUI_PATH_LINKS_PATCH_MARKER_PREFIX =
+  '__pi_update_extensions:pi-subagents-tui-path-links';
+const PI_SUBAGENTS_TUI_PATH_LINKS_PATCH_MARKER =
+  '__pi_update_extensions:pi-subagents-tui-path-links-v2__';
+
+export function buildPiSubagentsTuiPathLinksSource(): string {
+  return [
+    'import * as path from "node:path";',
+    'import { pathToFileURL } from "node:url";',
+    'import { hyperlink } from "@earendil-works/pi-tui";',
+    '',
+    `// ${PI_SUBAGENTS_TUI_PATH_LINKS_PATCH_MARKER}`,
+    'const DISPLAY_PATH_SEGMENTS = 3;',
+    'const FILE_REFERENCE_LINE = /^(?<prefix>\\s*(?:⎿\\s+)?(?:artifacts?(?: dir)?|async dir|catalog|dir|events|full output|log|metadata|output(?: artifact)?|parallel handoff|quality|quota|result|saved output|session|transcript(?: file)?):\\s+)(?<path>.+?)\\s*$/i;',
+    'const MARKDOWN_PATH_LINE = /^(?<prefix>\\s*-\\s+)`(?<path>[^`]+)`\\s*$/;',
+    '',
+    'export function compactFilePath(filePath: string): string {',
+    '\tconst absolutePath = path.resolve(filePath);',
+    '\tconst root = path.parse(absolutePath).root;',
+    '\tconst segments = absolutePath.slice(root.length).split(path.sep).filter(Boolean);',
+    '\treturn segments.slice(-DISPLAY_PATH_SEGMENTS).join(path.sep) || absolutePath;',
+    '}',
+    '',
+    'export function formatFileLink(filePath: string): string {',
+    '\tif (!path.isAbsolute(filePath)) return filePath;',
+    '\tconst absolutePath = path.resolve(filePath);',
+    '\treturn hyperlink(compactFilePath(absolutePath), pathToFileURL(absolutePath).href);',
+    '}',
+    '',
+    'function absoluteReferencePath(value: string): string | undefined {',
+    '\tconst candidate = value.trim();',
+    '\treturn path.isAbsolute(candidate) ? candidate : undefined;',
+    '}',
+    '',
+    'export function linkFileReferences(text: string): string {',
+    '\treturn text.split("\\n").map((line) => {',
+    '\t\tconst reference = FILE_REFERENCE_LINE.exec(line);',
+    '\t\tconst referencePath = reference?.groups?.path ? absoluteReferencePath(reference.groups.path) : undefined;',
+    '\t\tif (reference?.groups?.prefix && referencePath) return `${reference.groups.prefix}${formatFileLink(referencePath)}`;',
+    '',
+    '\t\tconst markdown = MARKDOWN_PATH_LINE.exec(line);',
+    '\t\tconst markdownPath = markdown?.groups?.path ? absoluteReferencePath(markdown.groups.path) : undefined;',
+    '\t\tif (markdown?.groups?.prefix && markdownPath) return `${markdown.groups.prefix}${formatFileLink(markdownPath)}`;',
+    '\t\treturn line;',
+    '\t}).join("\\n");',
+    '}',
+    '',
+  ].join('\n');
+}
+
+function replacePiSubagentsTuiTarget(
+  content: string,
+  target: string,
+  replacement: string,
+  semanticReplacement: string,
+  description: string,
+): string {
+  if (content.includes(semanticReplacement)) return content;
+  if (content.includes(target)) return content.replaceAll(target, replacement);
+  throw new Error(`pi-subagents TUI path links patch: upstream ${description} target changed`);
+}
+
+function dedupePiSubagentsImport(content: string, importLine: string): string {
+  const lines = content.split('\n');
+  let found = false;
+  return lines
+    .filter((line) => {
+      if (line !== importLine) return true;
+      if (found) return false;
+      found = true;
+      return true;
+    })
+    .join('\n');
+}
+
+function patchPiSubagentsTuiImports(content: string): string {
+  const importPattern = /^import \{ (?<bindings>[^\n]+) \} from "@earendil-works\/pi-tui";$/m;
+  const importMatch = content.match(importPattern);
+  if (!importMatch?.groups?.bindings) {
+    throw new Error('pi-subagents TUI path links patch: upstream render import target changed');
+  }
+  const additions = ['truncateToWidth', 'wrapTextWithAnsi'].filter(
+    (binding) =>
+      !importMatch
+        .groups!.bindings.split(',')
+        .map((part) => part.trim())
+        .includes(binding),
+  );
+  if (additions.length === 0) return content;
+  if (!importMatch.groups.bindings.includes('visibleWidth')) {
+    throw new Error('pi-subagents TUI path links patch: upstream visibleWidth import changed');
+  }
+  const bindings = importMatch.groups.bindings.replace(
+    'visibleWidth',
+    `${additions.join(', ')}, visibleWidth`,
+  );
+  return content.replace(importMatch[0], `import { ${bindings} } from "@earendil-works/pi-tui";`);
+}
+
+function patchPiSubagentsTuiRender(content: string): string {
+  let patched = patchPiSubagentsTuiImports(content);
+  const pathLinksImport = 'import { formatFileLink, linkFileReferences } from "./path-links.ts";';
+  patched = replacePiSubagentsTuiTarget(
+    patched,
+    'import { buildWorkflowChatProgressRows, type WorkflowChatProgressRow } from "../workflows/chat-progress.ts";',
+    [
+      'import { buildWorkflowChatProgressRows, type WorkflowChatProgressRow } from "../workflows/chat-progress.ts";',
+      pathLinksImport,
+    ].join('\n'),
+    pathLinksImport,
+    'render path-link import',
+  );
+  patched = dedupePiSubagentsImport(patched, pathLinksImport);
+  const oscTruncationLine = `\tif (text.includes("\\x1b]8;")) return truncateToWidth(text, maxWidth, "…"); // ${PI_SUBAGENTS_TUI_PATH_LINKS_PATCH_MARKER}`;
+  const legacyOscTruncationPattern =
+    /^\tif \(text\.includes\("\\x1b]8;"\)\) return truncateToWidth\(text, maxWidth, "…"\); \/\/ __pi_update_extensions:pi-subagents-tui-path-links(?:-v\d+)?__$/m;
+  if (legacyOscTruncationPattern.test(patched)) {
+    patched = patched.replace(legacyOscTruncationPattern, oscTruncationLine);
+  } else if (!patched.includes(oscTruncationLine)) {
+    patched = replacePiSubagentsTuiTarget(
+      patched,
+      [
+        'export function truncLine(text: string, maxWidth: number): string {',
+        '\tif (maxWidth <= 0) return "";',
+      ].join('\n'),
+      [
+        'export function truncLine(text: string, maxWidth: number): string {',
+        '\tif (maxWidth <= 0) return "";',
+        oscTruncationLine,
+      ].join('\n'),
+      oscTruncationLine,
+      'OSC-safe truncation',
+    );
+  }
+
+  const oscWrapLine = '\tif (text.includes("\\x1b]8;")) return wrapTextWithAnsi(text, maxWidth);';
+  patched = replacePiSubagentsTuiTarget(
+    patched,
+    [
+      'function wrapPlainText(text: string, maxWidth: number): string[] {',
+      '\tif (maxWidth <= 0) return [""];',
+    ].join('\n'),
+    [
+      'function wrapPlainText(text: string, maxWidth: number): string[] {',
+      '\tif (maxWidth <= 0) return [""];',
+      oscWrapLine,
+    ].join('\n'),
+    oscWrapLine,
+    'OSC-safe wrapping',
+  );
+
+  const pathExpressions = [
+    ['shortenPath(output)', 'formatFileLink(output)'],
+    ['shortenPath(r.artifactPaths.outputPath)', 'formatFileLink(r.artifactPaths.outputPath)'],
+    ['shortenPath(r.sessionFile)', 'formatFileLink(r.sessionFile)'],
+    ['shortenPath(r.truncation.artifactPath)', 'formatFileLink(r.truncation.artifactPath)'],
+    ['shortenPath(d.artifacts.dir)', 'formatFileLink(d.artifacts.dir)'],
+    ['output: ${outputTarget}', 'output: ${formatFileLink(outputTarget)}'],
+  ] as const;
+  for (const [target, replacement] of pathExpressions) {
+    if (patched.includes(target)) patched = patched.replaceAll(target, replacement);
+    else if (!patched.includes(replacement)) {
+      throw new Error(
+        `pi-subagents TUI path links patch: upstream render expression '${target}' target changed`,
+      );
+    }
+  }
+
+  return replacePiSubagentsTuiTarget(
+    patched,
+    [
+      '\t\tconst text = t?.type === "text" ? t.text : "(no output)";',
+      '\t\tconst contextPrefix = contextModePrefix(theme, d?.context);',
+      '\t\tconst width = getTermWidth() - 4;',
+      '\t\tif (!text.includes("\\n")) return new Text(truncLine(`${contextPrefix}${text}`, width), 0, 0);',
+      '\t\tif (d && !options.expanded && !result.isError) {',
+      '\t\t\tconst lines = text.split(/\\r?\\n/);',
+      '\t\t\tconst firstNonEmptyLine = lines.find((line) => line.trim())?.trim() || "(no output)";',
+      '\t\t\tconst c = new Container();',
+      '\t\t\tc.addChild(new Text(truncLine(`${contextPrefix}${firstNonEmptyLine} · ${lines.length} lines`, width), 0, 0));',
+      '\t\t\tc.addChild(new Text(truncLine(theme.fg("accent", `  Press ${liveDetailKeyText()} for full output`), width), 0, 0));',
+      '\t\t\treturn c;',
+      '\t\t}',
+      '\t\tconst c = new Container();',
+      '\t\tconst wrapped = wrapPlainText(`${contextPrefix}${text}`, width);',
+    ].join('\n'),
+    [
+      '\t\tconst text = t?.type === "text" ? t.text : "(no output)";',
+      '\t\tconst linkedText = linkFileReferences(text);',
+      '\t\tconst contextPrefix = contextModePrefix(theme, d?.context);',
+      '\t\tconst width = getTermWidth() - 4;',
+      '\t\tif (!linkedText.includes("\\n")) return new Text(truncLine(`${contextPrefix}${linkedText}`, width), 0, 0);',
+      '\t\tif (d && !options.expanded && !result.isError) {',
+      '\t\t\tconst lines = linkedText.split(/\\r?\\n/);',
+      '\t\t\tconst firstNonEmptyLine = lines.find((line) => line.trim())?.trim() || "(no output)";',
+      '\t\t\tconst c = new Container();',
+      '\t\t\tc.addChild(new Text(truncLine(`${contextPrefix}${firstNonEmptyLine} · ${lines.length} lines`, width), 0, 0));',
+      '\t\t\tc.addChild(new Text(truncLine(theme.fg("accent", `  Press ${liveDetailKeyText()} for full output`), width), 0, 0));',
+      '\t\t\treturn c;',
+      '\t\t}',
+      '\t\tconst c = new Container();',
+      '\t\tconst wrapped = wrapPlainText(`${contextPrefix}${linkedText}`, width);',
+    ].join('\n'),
+    'const linkedText = linkFileReferences(text);',
+    'fallback result renderer',
+  );
+}
+
+function patchPiSubagentsTuiFleet(content: string): string {
+  const pathLinksImport = 'import { linkFileReferences } from "./path-links.ts";';
+  let patched = replacePiSubagentsTuiTarget(
+    content,
+    'import { handleHerdrInspectorAction } from "../inspectors/herdr/actions.ts";',
+    [
+      'import { handleHerdrInspectorAction } from "../inspectors/herdr/actions.ts";',
+      pathLinksImport,
+    ].join('\n'),
+    pathLinksImport,
+    'fleet path-link import',
+  );
+  patched = dedupePiSubagentsImport(patched, pathLinksImport);
+  patched = replacePiSubagentsTuiTarget(
+    patched,
+    [
+      '\t\tif (transcriptWarning) raw.unshift(`Transcript preview warning: ${transcriptWarning}`, "");',
+      '\t\tconst lines: string[] = [];',
+      '\t\tfor (const line of raw) {',
+    ].join('\n'),
+    [
+      '\t\tif (transcriptWarning) raw.unshift(`Transcript preview warning: ${transcriptWarning}`, "");',
+      '\t\tconst linkedRaw = linkFileReferences(raw.join("\\n")).split("\\n");',
+      '\t\tconst lines: string[] = [];',
+      '\t\tfor (const line of linkedRaw) {',
+    ].join('\n'),
+    'const linkedRaw = linkFileReferences(raw.join("\\n")).split("\\n");',
+    'fleet detail renderer',
+  );
+  return patched;
+}
+
+function patchPiSubagentsExtensionIndex(content: string): string {
+  const pathLinksImport =
+    'import { formatFileLink, linkFileReferences } from "../tui/path-links.ts";';
+  let patched = replacePiSubagentsTuiTarget(
+    content,
+    'import { openSubagentFleet } from "../tui/fleet.ts";',
+    ['import { openSubagentFleet } from "../tui/fleet.ts";', pathLinksImport].join('\n'),
+    pathLinksImport,
+    'extension path-link import',
+  );
+  patched = dedupePiSubagentsImport(patched, pathLinksImport);
+  patched = replacePiSubagentsTuiTarget(
+    patched,
+    'return new Text(content, 0, 0);',
+    'return new Text(linkFileReferences(content), 0, 0);',
+    'new Text(linkFileReferences(content), 0, 0)',
+    'plain message renderer',
+  );
+  patched = replacePiSubagentsTuiTarget(
+    patched,
+    'shortenPath(details.sessionValue)',
+    'formatFileLink(details.sessionValue)',
+    'formatFileLink(details.sessionValue)',
+    'completion session renderer',
+  );
+  return replacePiSubagentsTuiTarget(
+    patched,
+    'wrapTextWithAnsi(formatSubagentControlNotice(this.details), bodyWidth)',
+    'wrapTextWithAnsi(linkFileReferences(formatSubagentControlNotice(this.details)), bodyWidth)',
+    'linkFileReferences(formatSubagentControlNotice(this.details))',
+    'control notice renderer',
+  );
+}
+
+function getPiSubagentsTuiPathLinkFiles(packageRoot: string): {
+  linkSourcePath: string;
+  renderPath: string;
+  fleetPath: string;
+  extensionIndexPath: string;
+} {
+  return {
+    linkSourcePath: join(packageRoot, PI_SUBAGENTS_TUI_PATH_LINKS_RELATIVE_PATH),
+    renderPath: join(packageRoot, PI_SUBAGENTS_TUI_RENDER_RELATIVE_PATH),
+    fleetPath: join(packageRoot, PI_SUBAGENTS_TUI_FLEET_RELATIVE_PATH),
+    extensionIndexPath: join(packageRoot, PI_SUBAGENTS_EXTENSION_INDEX_RELATIVE_PATH),
+  };
+}
+
+export function isPiSubagentsTuiPathLinksPatchApplied(packageRoot: string): boolean {
+  const files = getPiSubagentsTuiPathLinkFiles(packageRoot);
+  if (!Object.values(files).every((filePath) => existsSync(filePath))) return false;
+  const linkSource = readFileSync(files.linkSourcePath, 'utf8');
+  const renderSource = readFileSync(files.renderPath, 'utf8');
+  const fleetSource = readFileSync(files.fleetPath, 'utf8');
+  const extensionSource = readFileSync(files.extensionIndexPath, 'utf8');
+  return (
+    linkSource === buildPiSubagentsTuiPathLinksSource() &&
+    renderSource.includes(PI_SUBAGENTS_TUI_PATH_LINKS_PATCH_MARKER) &&
+    renderSource.includes('return wrapTextWithAnsi(text, maxWidth);') &&
+    renderSource.includes('formatFileLink(output)') &&
+    renderSource.includes('const linkedText = linkFileReferences(text);') &&
+    fleetSource.includes('const linkedRaw = linkFileReferences(raw.join("\\n")).split("\\n");') &&
+    renderSource.split('from "./path-links.ts"').length === 2 &&
+    fleetSource.split('from "./path-links.ts"').length === 2 &&
+    extensionSource.split('from "../tui/path-links.ts"').length === 2 &&
+    extensionSource.includes('new Text(linkFileReferences(content), 0, 0)') &&
+    extensionSource.includes('formatFileLink(details.sessionValue)') &&
+    extensionSource.includes('linkFileReferences(formatSubagentControlNotice(this.details))')
+  );
+}
+
+export async function applyPiSubagentsTuiPathLinksPatch(
+  options: { dryRun?: boolean; packageRoot?: string; cwd?: string } = {},
+): Promise<ApplyPatchResult> {
+  const packageRoot =
+    options.packageRoot ?? findGlobalPackagePath(PI_SUBAGENTS_PACKAGE_NAME, { cwd: options.cwd });
+  if (!packageRoot) {
+    throw new Error(
+      `Could not locate installed ${PI_SUBAGENTS_PACKAGE_NAME} via configured package manager, aube, or pnpm`,
+    );
+  }
+
+  const version = getPackageVersion(packageRoot) ?? 'unknown';
+  const files = getPiSubagentsTuiPathLinkFiles(packageRoot);
+  for (const sourcePath of [files.renderPath, files.fleetPath, files.extensionIndexPath]) {
+    if (!existsSync(sourcePath)) {
+      throw new Error(`pi-subagents@${version}: TUI path-link source not found at ${sourcePath}`);
+    }
+  }
+  if (isPiSubagentsTuiPathLinksPatchApplied(packageRoot)) {
+    return { status: 'already-applied', packageRoot, version, patchPath: files.linkSourcePath };
+  }
+  if (
+    existsSync(files.linkSourcePath) &&
+    !readFileSync(files.linkSourcePath, 'utf8').includes(
+      PI_SUBAGENTS_TUI_PATH_LINKS_PATCH_MARKER_PREFIX,
+    )
+  ) {
+    throw new Error(
+      `pi-subagents@${version}: refusing to replace existing unrecognized ${files.linkSourcePath}`,
+    );
+  }
+
+  const patchedFiles = [
+    { path: files.linkSourcePath, content: buildPiSubagentsTuiPathLinksSource() },
+    {
+      path: files.renderPath,
+      content: patchPiSubagentsTuiRender(readFileSync(files.renderPath, 'utf8')),
+    },
+    {
+      path: files.fleetPath,
+      content: patchPiSubagentsTuiFleet(readFileSync(files.fleetPath, 'utf8')),
+    },
+    {
+      path: files.extensionIndexPath,
+      content: patchPiSubagentsExtensionIndex(readFileSync(files.extensionIndexPath, 'utf8')),
+    },
+  ];
+
+  if (options.dryRun) {
+    return { status: 'would-apply', packageRoot, version, patchPath: files.linkSourcePath };
+  }
+  for (const file of patchedFiles) writeTextPatchAtomically(file.path, file.content);
+  return { status: 'applied', packageRoot, version, patchPath: files.linkSourcePath };
+}
+
 export function findInstalledNpmPackagePath(
   installedPackages: readonly InstalledPackage[],
   packageName: string,
@@ -2785,6 +3175,25 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     } catch (error) {
       console.error(
         `Skipped pi-subagents apply_patch agent tool patch: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    try {
+      const subagentsPathLinksResult = await applyPiSubagentsTuiPathLinksPatch({
+        dryRun,
+        cwd: REPO_ROOT,
+        packageRoot: findInstalledNpmPackagePath(installedPackages, 'pi-subagents'),
+      });
+      const label =
+        subagentsPathLinksResult.status === 'already-applied'
+          ? `Already applied: pi-subagents compact TUI path links patch (${subagentsPathLinksResult.version})`
+          : subagentsPathLinksResult.status === 'would-apply'
+            ? `Would apply: pi-subagents compact TUI path links patch (${subagentsPathLinksResult.version})`
+            : `${subagentsPathLinksResult.status}: pi-subagents compact TUI path links patch (${subagentsPathLinksResult.version}) via ${subagentsPathLinksResult.patchPath}`;
+      console.log(label);
+    } catch (error) {
+      console.error(
+        `Skipped pi-subagents compact TUI path links patch: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
