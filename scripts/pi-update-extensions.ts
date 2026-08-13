@@ -2918,13 +2918,20 @@ export async function runPiUpdate(
   }
 
   if (options.dryRun) {
-    log('Would run: pi update --extensions');
+    log('Would run: PNPM_CONFIG_MINIMUM_RELEASE_AGE=0 pi update --extensions');
   } else {
     // Bun prepends the workspace's node_modules/.bin to PATH for scripts. Run
     // the package-manager-owned executable directly so extension updates use
-    // the CLI that the self-update step just installed.
+    // the CLI that the self-update step just installed. Pi invokes the user's
+    // configured package manager as a child process. The pnpm environment
+    // override makes this explicit update honor the registry's latest tag
+    // immediately instead of silently retaining releases that are too new for
+    // pnpm's default minimum-release-age policy.
     const piExecutable = options.piCommand ?? findPiExecutablePath() ?? options.piPath ?? 'pi';
-    execFile(piExecutable, ['update', '--extensions'], { stdio: 'inherit' });
+    execFile(piExecutable, ['update', '--extensions'], {
+      stdio: 'inherit',
+      env: { ...process.env, PNPM_CONFIG_MINIMUM_RELEASE_AGE: '0' },
+    });
     log('Ran: pi update --extensions');
   }
 

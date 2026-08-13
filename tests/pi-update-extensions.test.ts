@@ -479,15 +479,29 @@ describe('pi self-update package manager detection', () => {
     });
   });
 
-  it('runs pnpm self-update outside the workspace package-manager context', async () => {
-    const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
+  it('disables pnpm minimum release age for Pi and extension updates', async () => {
+    const calls: Array<{
+      command: string;
+      args: string[];
+      cwd?: string;
+      minimumReleaseAge?: string;
+    }> = [];
 
     await runPiUpdate({
       piCommand: 'pi',
       piPath:
         '/Users/me/.local/share/pnpm/global/v11/hash/node_modules/@earendil-works/pi-coding-agent/dist/cli.js',
-      execFile: ((command: string, args: string[], options?: { cwd?: string }) => {
-        calls.push({ command, args, cwd: options?.cwd });
+      execFile: ((
+        command: string,
+        args: string[],
+        options?: { cwd?: string; env?: NodeJS.ProcessEnv },
+      ) => {
+        calls.push({
+          command,
+          args,
+          cwd: options?.cwd,
+          minimumReleaseAge: options?.env?.PNPM_CONFIG_MINIMUM_RELEASE_AGE,
+        });
         return '';
       }) as typeof import('node:child_process').execFileSync,
       log: () => {},
@@ -503,8 +517,14 @@ describe('pi self-update package manager detection', () => {
           '--config.minimum-release-age=0',
         ],
         cwd: tmpdir(),
+        minimumReleaseAge: undefined,
       },
-      { command: 'pi', args: ['update', '--extensions'], cwd: undefined },
+      {
+        command: 'pi',
+        args: ['update', '--extensions'],
+        cwd: undefined,
+        minimumReleaseAge: '0',
+      },
     ]);
   });
 

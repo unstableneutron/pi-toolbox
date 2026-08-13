@@ -132,6 +132,10 @@ The update runs these phases in order:
 Pi CLI -> installed packages -> workspace pins -> local patches -> source snapshots
 ```
 
+The Pi CLI and extension update phases disable pnpm's minimum release age for
+that run. Thus, an explicit `mise run pi-update` installs the registry's latest
+release even when it was published recently.
+
 Use `mise run pi-update --help` for the complete option list. Common options are:
 
 - `--approve-builds` approves all pending dependency build scripts. Review the package names in the package-manager warning before you use this option.
