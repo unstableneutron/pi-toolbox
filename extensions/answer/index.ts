@@ -74,25 +74,24 @@ Example output:
   ]
 }`;
 
-const CODEX_MODEL_ID = 'gpt-5.4-mini';
-const HAIKU_MODEL_ID = 'claude-haiku-4-5';
+const EXTRACTION_MODEL_PREFERENCES = [
+  { provider: 'openai-codex', id: 'gpt-5.6-luna' },
+  { provider: 'openai', id: 'gpt-5.6-luna' },
+] as const;
 
 /**
- * Prefer Codex mini for extraction when available, otherwise fallback to haiku or the current model.
+ * Use Amp's lightweight system-task model for extraction, then fall back to the current model.
  */
 async function selectExtractionModel(
   currentModel: Model<Api>,
   modelRegistry: ModelRegistry,
 ): Promise<Model<Api>> {
-  const codexModel = modelRegistry.find('openai-codex', CODEX_MODEL_ID);
-  if (codexModel && (await modelRegistry.getApiKeyAndHeaders(codexModel)).ok) {
-    return codexModel;
+  for (const preferred of EXTRACTION_MODEL_PREFERENCES) {
+    const model = modelRegistry.find(preferred.provider, preferred.id) as Model<Api> | undefined;
+    if (model && (await modelRegistry.getApiKeyAndHeaders(model)).ok) return model;
   }
 
-  const haikuModel = modelRegistry.find('anthropic', HAIKU_MODEL_ID);
-  return haikuModel && (await modelRegistry.getApiKeyAndHeaders(haikuModel)).ok
-    ? haikuModel
-    : currentModel;
+  return currentModel;
 }
 
 /**
@@ -443,7 +442,7 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    // Select the best model for extraction (prefer Codex mini, then haiku)
+    // Use the lightweight model Amp assigns to short system tasks when available.
     const extractionModel = await selectExtractionModel(ctx.model, ctx.modelRegistry);
 
     // Run extraction with loader UI
@@ -467,7 +466,10 @@ export default function (pi: ExtensionAPI) {
             ctx.modelRegistry,
             extractionModel,
             { systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
-            { signal: loader.signal },
+            {
+              signal: loader.signal,
+              reasoning: extractionModel.reasoning ? 'low' : undefined,
+            },
           );
 
           if (response.stopReason === 'aborted') {

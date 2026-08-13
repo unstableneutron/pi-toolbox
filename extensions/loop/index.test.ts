@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, test, vi } from 'vitest';
 
 import loopExtension from './index';
@@ -45,6 +46,16 @@ function createPrintCtx() {
     sessionManager: { getEntries: () => [] },
   };
 }
+
+describe('loop model selection config', () => {
+  test('uses GPT-5.6 Luna without a Haiku fallback', () => {
+    const source = readFileSync(new URL('./index.ts', import.meta.url), 'utf8');
+
+    expect(source).toContain("{ provider: 'openai-codex', id: 'gpt-5.6-luna' }");
+    expect(source).toContain("{ provider: 'openai', id: 'gpt-5.6-luna' }");
+    expect(source).not.toMatch(/haiku/i);
+  });
+});
 
 describe('loop command mode guards', () => {
   test('registers a strict-preferred loop success tool', () => {

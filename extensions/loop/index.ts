@@ -34,7 +34,10 @@ const LOOP_PRESETS = [
 
 const LOOP_STATE_ENTRY = 'loop-state';
 
-const HAIKU_MODEL_ID = 'claude-haiku-4-5';
+const SUMMARY_MODEL_PREFERENCES = [
+  { provider: 'openai-codex', id: 'gpt-5.6-luna' },
+  { provider: 'openai', id: 'gpt-5.6-luna' },
+] as const;
 
 const SUMMARY_SYSTEM_PROMPT = `You summarize loop breakout conditions for a status widget.
 Return a concise phrase (max 6 words) that says when the loop should stop.
@@ -90,11 +93,11 @@ function getConditionText(mode: LoopMode, condition?: string): string {
 async function selectSummaryModel(ctx: ExtensionContext): Promise<Model<Api> | null> {
   if (!ctx.model) return null;
 
-  if (ctx.model.provider === 'anthropic') {
-    const haikuModel = ctx.modelRegistry.find('anthropic', HAIKU_MODEL_ID);
-    if (haikuModel && (await ctx.modelRegistry.getApiKeyAndHeaders(haikuModel)).ok) {
-      return haikuModel;
-    }
+  for (const preferred of SUMMARY_MODEL_PREFERENCES) {
+    const model = ctx.modelRegistry.find(preferred.provider, preferred.id) as
+      | Model<Api>
+      | undefined;
+    if (model && (await ctx.modelRegistry.getApiKeyAndHeaders(model)).ok) return model;
   }
 
   return (await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model)).ok ? ctx.model : null;
@@ -117,10 +120,15 @@ async function summarizeBreakoutCondition(
   };
 
   try {
-    const response = await completeWithModelRegistry(ctx.modelRegistry, model, {
-      systemPrompt: SUMMARY_SYSTEM_PROMPT,
-      messages: [userMessage],
-    });
+    const response = await completeWithModelRegistry(
+      ctx.modelRegistry,
+      model,
+      {
+        systemPrompt: SUMMARY_SYSTEM_PROMPT,
+        messages: [userMessage],
+      },
+      { reasoning: model.reasoning ? 'low' : undefined },
+    );
 
     if (response.stopReason === 'aborted' || response.stopReason === 'error') {
       return fallback;

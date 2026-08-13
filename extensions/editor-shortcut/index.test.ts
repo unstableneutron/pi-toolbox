@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import type { AutocompleteProvider } from '@earendil-works/pi-tui';
 
@@ -106,6 +107,16 @@ function createDelegatingProvider(
 function createAutocompleteOptions() {
   return { signal: new AbortController().signal };
 }
+
+describe('generated paste model selection config', () => {
+  test('uses GPT-5.6 Luna without a Haiku fallback', () => {
+    const source = readFileSync(new URL('./commands/paste.ts', import.meta.url), 'utf8');
+
+    expect(source).toContain("{ provider: 'openai-codex', id: 'gpt-5.6-luna' }");
+    expect(source).toContain("{ provider: 'openai', id: 'gpt-5.6-luna' }");
+    expect(source).not.toMatch(/haiku/i);
+  });
+});
 
 describe('parseEditorShortcutText', () => {
   test('parses max thinking directives', async () => {

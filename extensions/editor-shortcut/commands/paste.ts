@@ -72,8 +72,8 @@ export type PasteReplacementResult =
   | { found: true; ok: false; reason: string };
 
 const TAG_MODEL_PREFERENCES: PreferredModelSpec[] = [
-  { provider: 'openai', id: 'gpt-4.1-mini' },
-  { provider: 'anthropic', id: 'claude-haiku-4-5' },
+  { provider: 'openai-codex', id: 'gpt-5.6-luna' },
+  { provider: 'openai', id: 'gpt-5.6-luna' },
   { provider: 'google', id: 'gemini-3.5-flash' },
   { provider: 'google', id: 'gemini-3.1-flash-lite' },
   { provider: 'google', id: 'gemini-2.5-flash' },
