@@ -1248,6 +1248,132 @@ export async function applyPiAiOpenAICodexAuthHeaderPatch(
 }
 
 // ---------------------------------------------------------------------------
+// @plannotator/pi-extension Codex --full-auto ordering patch
+//
+// Plannotator 0.26.8 puts Codex's global `--full-auto` flag after the `exec`
+// subcommand. Current Codex rejects that argument position. Keep the flag before
+// `exec` in the review, guide, and tour command builders.
+// ---------------------------------------------------------------------------
+
+const PLANNOTATOR_PI_EXTENSION_PACKAGE_NAME = '@plannotator/pi-extension';
+const PLANNOTATOR_CODEX_COMMAND_RELATIVE_PATHS = [
+  'generated/codex-review.ts',
+  'generated/guide-review.ts',
+  'generated/tour-review.ts',
+] as const;
+const PLANNOTATOR_CODEX_COMMAND_TARGETS: ReadonlyArray<readonly [string, string]> = [
+  [
+    [
+      '    "exec",',
+      '    "--output-schema", schemaPath,',
+      '    "-o", outputPath,',
+      '    "--full-auto",',
+      '    "--ephemeral",',
+    ].join('\n'),
+    [
+      '    "--full-auto",',
+      '    "exec",',
+      '    "--output-schema", schemaPath,',
+      '    "-o", outputPath,',
+      '    "--ephemeral",',
+    ].join('\n'),
+  ],
+  [
+    [
+      '    "exec",',
+      '    "--output-schema", schemaPath,',
+      '    "-o", outputPath,',
+      '    "--full-auto", "--ephemeral",',
+    ].join('\n'),
+    [
+      '    "--full-auto",',
+      '    "exec",',
+      '    "--output-schema", schemaPath,',
+      '    "-o", outputPath,',
+      '    "--ephemeral",',
+    ].join('\n'),
+  ],
+];
+
+function getPlannotatorCodexCommandBlock(content: string): string | undefined {
+  let searchFrom = 0;
+  while (searchFrom < content.length) {
+    const commandStart = content.indexOf('  const command = [', searchFrom);
+    if (commandStart < 0) return undefined;
+    const commandEnd = content.indexOf('\n  ];', commandStart);
+    if (commandEnd < 0) return undefined;
+    const commandBlock = content.slice(commandStart, commandEnd);
+    if (commandBlock.includes('    "codex",')) return commandBlock;
+    searchFrom = commandEnd + 5;
+  }
+  return undefined;
+}
+
+function isPlannotatorCodexCommandSafe(content: string): boolean {
+  const commandBlock = getPlannotatorCodexCommandBlock(content);
+  if (!commandBlock) return false;
+  const execIndex = commandBlock.indexOf('    "exec",');
+  if (execIndex < 0) return false;
+  const fullAutoIndex = commandBlock.indexOf('    "--full-auto",');
+  return fullAutoIndex < 0 || fullAutoIndex < execIndex;
+}
+
+export function isPlannotatorCodexFullAutoPatchApplied(packageRoot: string): boolean {
+  return PLANNOTATOR_CODEX_COMMAND_RELATIVE_PATHS.every((relativePath) => {
+    const filePath = join(packageRoot, relativePath);
+    return existsSync(filePath) && isPlannotatorCodexCommandSafe(readFileSync(filePath, 'utf8'));
+  });
+}
+
+export async function applyPlannotatorCodexFullAutoPatch(
+  options: { dryRun?: boolean; packageRoot?: string; cwd?: string } = {},
+): Promise<ApplyPatchResult> {
+  const packageRoot =
+    options.packageRoot ??
+    findGlobalPackagePath(PLANNOTATOR_PI_EXTENSION_PACKAGE_NAME, { cwd: options.cwd });
+  if (!packageRoot) {
+    throw new Error(
+      `Could not locate installed ${PLANNOTATOR_PI_EXTENSION_PACKAGE_NAME} via configured package manager, aube, or pnpm`,
+    );
+  }
+
+  const version = getPackageVersion(packageRoot) ?? 'unknown';
+  const patchPath = join(packageRoot, 'generated');
+  const updates: Array<{ path: string; content: string }> = [];
+
+  for (const relativePath of PLANNOTATOR_CODEX_COMMAND_RELATIVE_PATHS) {
+    const filePath = join(packageRoot, relativePath);
+    if (!existsSync(filePath)) {
+      throw new Error(
+        `${PLANNOTATOR_PI_EXTENSION_PACKAGE_NAME}@${version}: Codex command source not found at ${filePath}`,
+      );
+    }
+
+    const content = readFileSync(filePath, 'utf8');
+    if (isPlannotatorCodexCommandSafe(content)) continue;
+    const target = PLANNOTATOR_CODEX_COMMAND_TARGETS.find(([candidate]) =>
+      content.includes(candidate),
+    );
+    if (!target) {
+      throw new Error(
+        `${PLANNOTATOR_PI_EXTENSION_PACKAGE_NAME}@${version}: target text for Codex --full-auto ordering patch not found at ${filePath}. ` +
+          `Upstream may have changed; update pi-update-extensions.ts.`,
+      );
+    }
+    updates.push({ path: filePath, content: content.replace(target[0], target[1]) });
+  }
+
+  if (updates.length === 0) {
+    return { status: 'already-applied', packageRoot, version, patchPath };
+  }
+  if (options.dryRun) {
+    return { status: 'would-apply', packageRoot, version, patchPath };
+  }
+  for (const update of updates) writeTextPatchAtomically(update.path, update.content);
+  return { status: 'applied', packageRoot, version, patchPath };
+}
+
+// ---------------------------------------------------------------------------
 // @amaster.ai/pi-computer-use analyze_screenshot patch
 //
 // @amaster.ai/pi-computer-use@0.1.1 implements
@@ -3218,6 +3344,28 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     } catch (error) {
       console.error(
         `Skipped @amaster.ai/pi-computer-use analyze_screenshot patch: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    try {
+      const plannotatorResult = await applyPlannotatorCodexFullAutoPatch({
+        dryRun,
+        cwd: REPO_ROOT,
+        packageRoot: findInstalledNpmPackagePath(
+          installedPackages,
+          PLANNOTATOR_PI_EXTENSION_PACKAGE_NAME,
+        ),
+      });
+      const label =
+        plannotatorResult.status === 'already-applied'
+          ? `Already applied: @plannotator/pi-extension Codex --full-auto ordering patch (${plannotatorResult.version})`
+          : plannotatorResult.status === 'would-apply'
+            ? `Would apply: @plannotator/pi-extension Codex --full-auto ordering patch (${plannotatorResult.version})`
+            : `${plannotatorResult.status}: @plannotator/pi-extension Codex --full-auto ordering patch (${plannotatorResult.version}) via ${plannotatorResult.patchPath}`;
+      console.log(label);
+    } catch (error) {
+      console.error(
+        `Skipped @plannotator/pi-extension Codex --full-auto ordering patch: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
 

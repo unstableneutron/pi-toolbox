@@ -19,6 +19,7 @@ import {
   applyPiHerdrPromptGuidancePatch,
   applyPiAiOpenAICodexAuthHeaderPatch,
   applyPiMermaidPatch,
+  applyPlannotatorCodexFullAutoPatch,
   applyPiSubagentsApplyPatchToolPatch,
   applyPiSubagentsTuiPathLinksPatch,
   buildGitchamberSpec,
@@ -49,6 +50,7 @@ import {
   isPiAiOpenAICodexAuthHeaderPatchApplied,
   isAmasterPiComputerUseAnalyzeScreenshotPatchApplied,
   isPiMermaidPatchApplied,
+  isPlannotatorCodexFullAutoPatchApplied,
   isPiSubagentsApplyPatchToolPatchApplied,
   isPiSubagentsTuiPathLinksPatchApplied,
   parsePiListOutput,
@@ -587,6 +589,90 @@ describe('pi self-update package manager detection', () => {
       args: ['approve-builds', '--all'],
       cwd: piPackageWorkspace,
     });
+  });
+});
+
+describe('@plannotator/pi-extension Codex --full-auto ordering patching', () => {
+  const MULTILINE_COMMAND = [
+    'export async function buildCodexCommand() {',
+    '  const command = [',
+    '    "codex",',
+    '    // Global flags must precede the "exec" subcommand for the Codex CLI.',
+    '    "exec",',
+    '    "--output-schema", schemaPath,',
+    '    "-o", outputPath,',
+    '    "--full-auto",',
+    '    "--ephemeral",',
+    '  ];',
+    '  return command;',
+    '}',
+    '',
+  ].join('\n');
+  const INLINE_COMMAND = MULTILINE_COMMAND.replace(
+    '    "--full-auto",\n    "--ephemeral",',
+    '    "--full-auto", "--ephemeral",',
+  );
+
+  function setupFakePackage(version: string, malformed = false): string {
+    const packageRoot = makeTempDir('plannotator-pi-extension-');
+    writeFileSync(
+      join(packageRoot, 'package.json'),
+      JSON.stringify({ name: '@plannotator/pi-extension', version }, null, 2),
+    );
+    mkdirSync(join(packageRoot, 'generated'), { recursive: true });
+    for (const [fileName, content] of [
+      ['codex-review.ts', MULTILINE_COMMAND],
+      ['guide-review.ts', INLINE_COMMAND],
+      ['tour-review.ts', INLINE_COMMAND],
+    ]) {
+      writeFileSync(
+        join(packageRoot, 'generated', fileName),
+        malformed ? 'export const command = [];\n' : content,
+      );
+    }
+    return packageRoot;
+  }
+
+  it('moves the global flag before exec in all Codex command builders', async () => {
+    const packageRoot = setupFakePackage('0.26.8');
+    expect(isPlannotatorCodexFullAutoPatchApplied(packageRoot)).toBe(false);
+
+    const result = await applyPlannotatorCodexFullAutoPatch({ packageRoot });
+    expect(result).toMatchObject({ status: 'applied', packageRoot, version: '0.26.8' });
+
+    for (const fileName of ['codex-review.ts', 'guide-review.ts', 'tour-review.ts']) {
+      const patched = readFileSync(join(packageRoot, 'generated', fileName), 'utf8');
+      expect(patched.indexOf('    "--full-auto",')).toBeLessThan(patched.indexOf('    "exec",'));
+    }
+    expect(isPlannotatorCodexFullAutoPatchApplied(packageRoot)).toBe(true);
+  });
+
+  it('is idempotent after patching', async () => {
+    const packageRoot = setupFakePackage('0.26.8');
+    await applyPlannotatorCodexFullAutoPatch({ packageRoot });
+    await expect(applyPlannotatorCodexFullAutoPatch({ packageRoot })).resolves.toMatchObject({
+      status: 'already-applied',
+      packageRoot,
+      version: '0.26.8',
+    });
+  });
+
+  it('supports dry-run without mutating the extension', async () => {
+    const packageRoot = setupFakePackage('0.26.8');
+    const filePath = join(packageRoot, 'generated', 'codex-review.ts');
+    const original = readFileSync(filePath, 'utf8');
+
+    await expect(
+      applyPlannotatorCodexFullAutoPatch({ packageRoot, dryRun: true }),
+    ).resolves.toMatchObject({ status: 'would-apply', packageRoot, version: '0.26.8' });
+    expect(readFileSync(filePath, 'utf8')).toBe(original);
+  });
+
+  it('throws a descriptive error when upstream command builders change', async () => {
+    const packageRoot = setupFakePackage('1.0.0', true);
+    await expect(applyPlannotatorCodexFullAutoPatch({ packageRoot })).rejects.toThrow(
+      /target text for Codex --full-auto ordering patch not found/i,
+    );
   });
 });
 
