@@ -1248,11 +1248,11 @@ export async function applyPiAiOpenAICodexAuthHeaderPatch(
 }
 
 // ---------------------------------------------------------------------------
-// @plannotator/pi-extension Codex --full-auto ordering patch
+// @plannotator/pi-extension Codex CLI compatibility patch
 //
-// Plannotator 0.26.8 puts Codex's global `--full-auto` flag after the `exec`
-// subcommand. Current Codex rejects that argument position. Keep the flag before
-// `exec` in the review, guide, and tour command builders.
+// Codex 0.147 removed the deprecated `--full-auto` flag. Replace it with the
+// documented `--sandbox workspace-write` migration in the review, guide, and
+// tour command builders. The sandbox option is global and must precede `exec`.
 // ---------------------------------------------------------------------------
 
 const PLANNOTATOR_PI_EXTENSION_PACKAGE_NAME = '@plannotator/pi-extension';
@@ -1261,39 +1261,10 @@ const PLANNOTATOR_CODEX_COMMAND_RELATIVE_PATHS = [
   'generated/guide-review.ts',
   'generated/tour-review.ts',
 ] as const;
-const PLANNOTATOR_CODEX_COMMAND_TARGETS: ReadonlyArray<readonly [string, string]> = [
-  [
-    [
-      '    "exec",',
-      '    "--output-schema", schemaPath,',
-      '    "-o", outputPath,',
-      '    "--full-auto",',
-      '    "--ephemeral",',
-    ].join('\n'),
-    [
-      '    "--full-auto",',
-      '    "exec",',
-      '    "--output-schema", schemaPath,',
-      '    "-o", outputPath,',
-      '    "--ephemeral",',
-    ].join('\n'),
-  ],
-  [
-    [
-      '    "exec",',
-      '    "--output-schema", schemaPath,',
-      '    "-o", outputPath,',
-      '    "--full-auto", "--ephemeral",',
-    ].join('\n'),
-    [
-      '    "--full-auto",',
-      '    "exec",',
-      '    "--output-schema", schemaPath,',
-      '    "-o", outputPath,',
-      '    "--ephemeral",',
-    ].join('\n'),
-  ],
-];
+const PLANNOTATOR_CODEX_FULL_AUTO_LINE = '    "--full-auto",\n';
+const PLANNOTATOR_CODEX_FULL_AUTO_INLINE = '    "--full-auto", "--ephemeral",';
+const PLANNOTATOR_CODEX_SANDBOX_LINE = '    "--sandbox", "workspace-write",';
+const PLANNOTATOR_CODEX_EXEC_LINE = '    "exec",';
 
 function getPlannotatorCodexCommandBlock(content: string): string | undefined {
   let searchFrom = 0;
@@ -1309,23 +1280,51 @@ function getPlannotatorCodexCommandBlock(content: string): string | undefined {
   return undefined;
 }
 
-function isPlannotatorCodexCommandSafe(content: string): boolean {
+function isPlannotatorCodexCommandCompatible(content: string): boolean {
   const commandBlock = getPlannotatorCodexCommandBlock(content);
-  if (!commandBlock) return false;
-  const execIndex = commandBlock.indexOf('    "exec",');
-  if (execIndex < 0) return false;
-  const fullAutoIndex = commandBlock.indexOf('    "--full-auto",');
-  return fullAutoIndex < 0 || fullAutoIndex < execIndex;
+  return Boolean(
+    commandBlock?.includes(PLANNOTATOR_CODEX_EXEC_LINE) && !commandBlock.includes('"--full-auto"'),
+  );
 }
 
-export function isPlannotatorCodexFullAutoPatchApplied(packageRoot: string): boolean {
+function migratePlannotatorCodexCommand(content: string): string | undefined {
+  const commandBlock = getPlannotatorCodexCommandBlock(content);
+  if (
+    !commandBlock ||
+    !commandBlock.includes(PLANNOTATOR_CODEX_EXEC_LINE) ||
+    commandBlock.split('"--full-auto"').length !== 2
+  ) {
+    return undefined;
+  }
+
+  let replacement = commandBlock;
+  if (replacement.includes(PLANNOTATOR_CODEX_FULL_AUTO_INLINE)) {
+    replacement = replacement.replace(PLANNOTATOR_CODEX_FULL_AUTO_INLINE, '    "--ephemeral",');
+  } else if (replacement.includes(PLANNOTATOR_CODEX_FULL_AUTO_LINE)) {
+    replacement = replacement.replace(PLANNOTATOR_CODEX_FULL_AUTO_LINE, '');
+  } else {
+    return undefined;
+  }
+
+  if (!replacement.includes(PLANNOTATOR_CODEX_SANDBOX_LINE)) {
+    replacement = replacement.replace(
+      PLANNOTATOR_CODEX_EXEC_LINE,
+      `${PLANNOTATOR_CODEX_SANDBOX_LINE}\n${PLANNOTATOR_CODEX_EXEC_LINE}`,
+    );
+  }
+  return content.replace(commandBlock, replacement);
+}
+
+export function isPlannotatorCodexCompatibilityPatchApplied(packageRoot: string): boolean {
   return PLANNOTATOR_CODEX_COMMAND_RELATIVE_PATHS.every((relativePath) => {
     const filePath = join(packageRoot, relativePath);
-    return existsSync(filePath) && isPlannotatorCodexCommandSafe(readFileSync(filePath, 'utf8'));
+    return (
+      existsSync(filePath) && isPlannotatorCodexCommandCompatible(readFileSync(filePath, 'utf8'))
+    );
   });
 }
 
-export async function applyPlannotatorCodexFullAutoPatch(
+export async function applyPlannotatorCodexCompatibilityPatch(
   options: { dryRun?: boolean; packageRoot?: string; cwd?: string } = {},
 ): Promise<ApplyPatchResult> {
   const packageRoot =
@@ -1350,17 +1349,15 @@ export async function applyPlannotatorCodexFullAutoPatch(
     }
 
     const content = readFileSync(filePath, 'utf8');
-    if (isPlannotatorCodexCommandSafe(content)) continue;
-    const target = PLANNOTATOR_CODEX_COMMAND_TARGETS.find(([candidate]) =>
-      content.includes(candidate),
-    );
-    if (!target) {
+    if (isPlannotatorCodexCommandCompatible(content)) continue;
+    const patched = migratePlannotatorCodexCommand(content);
+    if (!patched) {
       throw new Error(
-        `${PLANNOTATOR_PI_EXTENSION_PACKAGE_NAME}@${version}: target text for Codex --full-auto ordering patch not found at ${filePath}. ` +
+        `${PLANNOTATOR_PI_EXTENSION_PACKAGE_NAME}@${version}: target text for Codex CLI compatibility patch not found at ${filePath}. ` +
           `Upstream may have changed; update pi-update-extensions.ts.`,
       );
     }
-    updates.push({ path: filePath, content: content.replace(target[0], target[1]) });
+    updates.push({ path: filePath, content: patched });
   }
 
   if (updates.length === 0) {
@@ -3355,7 +3352,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     }
 
     try {
-      const plannotatorResult = await applyPlannotatorCodexFullAutoPatch({
+      const plannotatorResult = await applyPlannotatorCodexCompatibilityPatch({
         dryRun,
         cwd: REPO_ROOT,
         packageRoot: findInstalledNpmPackagePath(
@@ -3365,14 +3362,14 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       });
       const label =
         plannotatorResult.status === 'already-applied'
-          ? `Already applied: @plannotator/pi-extension Codex --full-auto ordering patch (${plannotatorResult.version})`
+          ? `Already applied: @plannotator/pi-extension Codex CLI compatibility patch (${plannotatorResult.version})`
           : plannotatorResult.status === 'would-apply'
-            ? `Would apply: @plannotator/pi-extension Codex --full-auto ordering patch (${plannotatorResult.version})`
-            : `${plannotatorResult.status}: @plannotator/pi-extension Codex --full-auto ordering patch (${plannotatorResult.version}) via ${plannotatorResult.patchPath}`;
+            ? `Would apply: @plannotator/pi-extension Codex CLI compatibility patch (${plannotatorResult.version})`
+            : `${plannotatorResult.status}: @plannotator/pi-extension Codex CLI compatibility patch (${plannotatorResult.version}) via ${plannotatorResult.patchPath}`;
       console.log(label);
     } catch (error) {
       console.error(
-        `Skipped @plannotator/pi-extension Codex --full-auto ordering patch: ${error instanceof Error ? error.message : String(error)}`,
+        `Skipped @plannotator/pi-extension Codex CLI compatibility patch: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
 
