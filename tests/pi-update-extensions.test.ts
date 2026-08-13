@@ -21,16 +21,20 @@ import {
   applyPiMermaidPatch,
   applyPiSubagentsApplyPatchToolPatch,
   applyPiSubagentsTuiPathLinksPatch,
+  buildGitchamberSpec,
   buildPiAiOpenAICodexAccountIdReplacement,
   buildPiAiOpenAICodexHeaderReplacement,
   buildPiHerdrPromptGuidanceReplacement,
   buildPiCodingAgentTranscriptCacheInsertion,
   buildPiSubagentsTuiPathLinksSource,
   buildPiApproveBuildsCommand,
+  buildPiPackageWorkspaceApproveBuildsCommand,
   buildPiSelfUpdateCommand,
+  buildPiUpdateHelp,
   compareVersions,
   detectPiInstallPackageManagerFromPath,
   detectPiInstallPackageManagerFromPaths,
+  extractGitHubRepoFromReadme,
   findInstalledNpmPackagePath,
   findPiCodingAgentRootFromExecutable,
   findPiExecutablePath,
@@ -52,6 +56,7 @@ import {
   readConfiguredNpmCommand,
   resolvePackageManagerCommand,
   runPiUpdate,
+  updateGitchamberSources,
   verifyPiAiBedrockApiKeyBearerUpstreamFix,
   verifyPiCodingAgentResolverUpstreamFix,
   writePnpmWorkspaceOverrides,
@@ -91,6 +96,117 @@ describe('parsePiListOutput', () => {
       { source: 'npm:@aliou/pi-guardrails', installedPath: '/abs/path/to/@aliou/pi-guardrails' },
       { source: 'npm:pi-rtk-optimizer', installedPath: '/abs/path/to/pi-rtk-optimizer' },
       { source: 'https://github.com/example/repo', installedPath: '/abs/path/to/repo' },
+    ]);
+  });
+});
+
+describe('pi-update CLI', () => {
+  it('shows manual-run help and parses maintenance options', () => {
+    expect(buildPiUpdateHelp()).toContain('mise run pi-update-dry-run');
+    expect(parseCliArgs(['--help'])).toMatchObject({ help: true });
+    expect(parseCliArgs(['--approve-builds'])).toMatchObject({ approve: true });
+    expect(parseCliArgs(['--gitchamber-timeout=12.5'])).toMatchObject({
+      gitchamberTimeoutMs: 12_500,
+    });
+  });
+
+  it('rejects unsafe timeout values and ignored positional arguments', () => {
+    expect(() => parseCliArgs(['--gitchamber-timeout=0'])).toThrow(/positive number/i);
+    expect(() => parseCliArgs(['/tmp/ignored'])).toThrow(/unknown argument/i);
+  });
+});
+
+describe('gitchamber source refresh', () => {
+  it('normalizes version-qualified npm sources', () => {
+    expect(buildGitchamberSpec('npm:pi-web-access@0.18.0', '0.18.0')).toBe('pi-web-access@0.18.0');
+    expect(buildGitchamberSpec('npm:@scope/tool@1.2.3', '1.2.3')).toBe('@scope/tool@1.2.3');
+  });
+
+  it('does not treat an integration link as package source', () => {
+    expect(
+      extractGitHubRepoFromReadme(
+        'Works with https://github.com/nicobailon/pi-subagents.',
+        'pi-intercom',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('deduplicates installed packages and recognizes cached repository fallbacks', async () => {
+    const cwd = makeTempDir('gitchamber-refresh-');
+    const packageRoot = join(cwd, 'pi-intercom');
+    mkdirSync(packageRoot, { recursive: true });
+    writeFileSync(
+      join(packageRoot, 'package.json'),
+      JSON.stringify({ name: 'pi-intercom', version: '0.10.0' }),
+    );
+    const metadataRoot = join(cwd, 'node_modules', '.gitchamber');
+    mkdirSync(metadataRoot, { recursive: true });
+    writeFileSync(
+      join(metadataRoot, 'sources.json'),
+      JSON.stringify({
+        repos: [
+          {
+            name: 'github.com/nicobailon/pi-intercom',
+            version: '0.10.0',
+          },
+        ],
+      }),
+    );
+
+    const results = await updateGitchamberSources(
+      [
+        { source: 'npm:pi-intercom', installedPath: packageRoot },
+        { source: 'npm:pi-intercom', installedPath: packageRoot },
+      ],
+      { cwd, dryRun: true, includePiSiblingPackages: false },
+    );
+    const intercomResults = results.filter((result) =>
+      result.packageSpec.startsWith('pi-intercom@'),
+    );
+
+    expect(intercomResults).toEqual([
+      { packageSpec: 'pi-intercom@0.10.0', version: '0.10.0', status: 'already-exists' },
+    ]);
+  });
+
+  it('logs each fetch and applies the configured timeout', async () => {
+    const cwd = makeTempDir('gitchamber-timeout-');
+    const packageRoot = join(cwd, 'pi-example');
+    mkdirSync(packageRoot, { recursive: true });
+    writeFileSync(
+      join(packageRoot, 'package.json'),
+      JSON.stringify({ name: 'pi-example', version: '1.2.3' }),
+    );
+    const calls: Array<{
+      command: string;
+      args: string[];
+      options?: { cwd?: string; timeout?: number; killSignal?: string };
+    }> = [];
+    const logs: string[] = [];
+
+    const results = await updateGitchamberSources(
+      [{ source: 'npm:pi-example', installedPath: packageRoot }],
+      {
+        cwd,
+        timeoutMs: 12_345,
+        includePiSiblingPackages: false,
+        execFile: ((command: string, args: string[], options?: { cwd?: string }) => {
+          calls.push({ command, args, options });
+          return 'Done: 1 succeeded, 0 failed';
+        }) as typeof import('node:child_process').execFileSync,
+        log: (message) => logs.push(message),
+      },
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      command: 'gitchamber',
+      args: ['pi-example@1.2.3'],
+      options: { cwd, timeout: 12_345, killSignal: 'SIGTERM' },
+    });
+    expect(logs).toEqual(['[gitchamber 1/1] Fetching pi-example@1.2.3 (timeout 13s)...']);
+    expect(results).toEqual([
+      { packageSpec: 'pi-example@1.2.3', version: '1.2.3', status: 'fetched' },
     ]);
   });
 });
@@ -342,13 +458,23 @@ describe('pi self-update package manager detection', () => {
     });
   });
 
-  it('maps --approve to aube global approve-builds', () => {
+  it('maps --approve to global and Pi package workspace build approval', () => {
     expect(parseCliArgs(['--approve']).approve).toBe(true);
     expect(buildPiApproveBuildsCommand('aube')).toEqual({
       command: 'aube',
       args: ['approve-builds', '-g', '--all'],
     });
     expect(buildPiApproveBuildsCommand('npm')).toBeUndefined();
+    expect(
+      buildPiPackageWorkspaceApproveBuildsCommand({
+        command: 'mise',
+        args: ['exec', 'node@24', 'pnpm@11', '--', 'pnpm'],
+        source: 'settings',
+      }),
+    ).toEqual({
+      command: 'mise',
+      args: ['exec', 'node@24', 'pnpm@11', '--', 'pnpm', 'approve-builds', '--all'],
+    });
   });
 
   it('runs pnpm self-update outside the workspace package-manager context', async () => {
@@ -417,6 +543,7 @@ describe('pi self-update package manager detection', () => {
       piCommand: 'pi',
       piPath:
         '/Users/me/.cache/aube/virtual-store/@earendil-works+pi-coding-agent@0.79.10-hash/node_modules/@earendil-works/pi-coding-agent/dist/cli.js',
+      piPackageWorkspace: '/missing/pi-package-workspace',
       execFile: ((command: string, args: string[]) => {
         calls.push({ command, args });
         return '';
@@ -433,6 +560,33 @@ describe('pi self-update package manager detection', () => {
       { command: 'pi', args: ['update', '--extensions'] },
     ]);
     expect(logs).toContain('Ran: aube approve-builds -g --all');
+  });
+
+  it('approves pending builds in the Pi package workspace after extension update', async () => {
+    const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
+    const piPackageWorkspace = makeTempDir('pi-package-workspace-');
+    writeFileSync(join(piPackageWorkspace, 'package.json'), '{}\n');
+
+    await runPiUpdate({
+      approve: true,
+      piCommand: 'pi',
+      piPath:
+        '/Users/me/.local/share/pnpm/global/v11/hash/node_modules/@earendil-works/pi-coding-agent/dist/cli.js',
+      piPackageWorkspace,
+      piPackageManager: { command: 'pnpm', args: [], source: 'pnpm' },
+      execFile: ((command: string, args: string[], options?: { cwd?: string }) => {
+        calls.push({ command, args, cwd: options?.cwd });
+        return '';
+      }) as typeof import('node:child_process').execFileSync,
+      log: () => {},
+    });
+
+    expect(calls.at(-2)).toMatchObject({ command: 'pi', args: ['update', '--extensions'] });
+    expect(calls.at(-1)).toEqual({
+      command: 'pnpm',
+      args: ['approve-builds', '--all'],
+      cwd: piPackageWorkspace,
+    });
   });
 });
 

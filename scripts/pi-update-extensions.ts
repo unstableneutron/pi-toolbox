@@ -31,6 +31,8 @@ const GITCHAMBER_PACKAGES = [
   '@earendil-works/pi-tui',
 ] as const;
 
+export const DEFAULT_GITCHAMBER_TIMEOUT_MS = 5 * 60 * 1000;
+
 /** Subset of GITCHAMBER_PACKAGES that must always be pinned in the agent
  * workspace's devDependencies. (Same list today, kept as a separate name
  * for intent clarity.) */
@@ -39,16 +41,18 @@ const PI_SIBLING_PACKAGES = GITCHAMBER_PACKAGES;
 /** Manual overrides for packages that don't have detectable repo metadata */
 const GITCHAMBER_MANUAL_OVERRIDES: Record<string, string> = {
   'pi-boomerang': 'nicobailon/pi-boomerang',
+  'pi-intercom': 'nicobailon/pi-intercom',
 };
 
 export type UpdateCliArgs = {
-  directory?: string;
   dryRun: boolean;
+  help: boolean;
   approve: boolean;
   skipUpdate: boolean;
   skipDepsSync: boolean;
   skipPatch: boolean;
   skipGitchamber: boolean;
+  gitchamberTimeoutMs: number;
 };
 
 export type DepSyncChange =
@@ -645,6 +649,20 @@ export function buildPiApproveBuildsCommand(
 ): PiApproveBuildsCommand | undefined {
   if (packageManager !== 'aube') return undefined;
   return { command: 'aube', args: ['approve-builds', '-g', '--all'] };
+}
+
+export function buildPiPackageWorkspaceApproveBuildsCommand(
+  packageManager: PackageManagerCommand,
+): PiApproveBuildsCommand {
+  return {
+    command: packageManager.command,
+    args: [...packageManager.args, 'approve-builds', '--all'],
+  };
+}
+
+function getDefaultPiPackageWorkspace(): string {
+  const agentDir = process.env.PI_CODING_AGENT_DIR ?? dirname(getDefaultPiSettingsPath());
+  return join(agentDir, 'npm');
 }
 
 function findExistingPackageFile(
@@ -2347,17 +2365,19 @@ function getPackageVersion(installedPath: string): string | undefined {
   }
 }
 
-/** Build a gitchamber package spec with exact version */
-function buildGitchamberSpec(source: string, version: string): string | undefined {
-  // Handle npm: prefix
+/** Remove an exact version or tag from an npm package spec. */
+export function getPackageNameFromSpec(spec: string): string {
+  const lastAt = spec.lastIndexOf('@');
+  return lastAt > 0 ? spec.slice(0, lastAt) : spec;
+}
+
+/** Build a gitchamber package spec with the exact installed version. */
+export function buildGitchamberSpec(source: string, version: string): string | undefined {
   if (source.startsWith('npm:')) {
-    const packageName = source.slice(4);
+    const packageName = getPackageNameFromSpec(source.slice(4));
     return `${packageName}@${version}`;
   }
-  // Handle git/github sources - use as-is for repos
   if (source.startsWith('git:') || source.startsWith('https://github.com/')) {
-    // For git sources, we can't easily version-lock via gitchamber
-    // Return undefined to skip
     return undefined;
   }
   return undefined;
@@ -2399,7 +2419,7 @@ function getLocalDevDependencyVersion(packageName: string, cwd: string): string 
 }
 
 /** Extract GitHub repo from README.md content using multiple strategies */
-function extractGitHubRepoFromReadme(
+export function extractGitHubRepoFromReadme(
   readmeContent: string,
   packageName: string,
 ): string | undefined {
@@ -2446,15 +2466,9 @@ function extractGitHubRepoFromReadme(
     }
   }
 
-  // Strategy 5: Return first valid match if any found (only if it's a reasonable guess)
-  if (validMatches.length > 0) {
-    // Only use first match if the repo name starts with "pi-" (pi package naming convention)
-    const [, owner, repo] = validMatches[0];
-    if (repo.startsWith('pi-')) {
-      return `${owner}/${repo}`;
-    }
-  }
-
+  // Do not use an unrelated pi-* link as a fallback. Package READMEs often
+  // link to integrations, and treating such a link as source can overwrite a
+  // different gitchamber snapshot.
   return undefined;
 }
 
@@ -2551,69 +2565,104 @@ function detectGitHubRepo(
 
   return undefined;
 }
+function getGitchamberOutputError(output: string, spec: string): string | undefined {
+  const failedMatch = output.match(/Done: \d+ succeeded, (\d+) failed/);
+  const failedCount = failedMatch ? Number.parseInt(failedMatch[1], 10) : 0;
+  if (!output.includes('✗ Error:') && failedCount === 0) return undefined;
+  return output.match(/✗ Error: ([^\n]+)/)?.[1] ?? `Failed to fetch ${spec}`;
+}
+
+function formatGitchamberCommandError(error: unknown, spec: string, timeoutMs: number): string {
+  if (
+    error &&
+    typeof error === 'object' &&
+    'code' in error &&
+    (error as { code?: unknown }).code === 'ETIMEDOUT'
+  ) {
+    return `Timed out after ${Math.ceil(timeoutMs / 1000)} seconds while fetching ${spec}`;
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
 export async function updateGitchamberSources(
   installedPackages: readonly InstalledPackage[],
-  options: { dryRun?: boolean; cwd?: string } = {},
+  options: {
+    dryRun?: boolean;
+    cwd?: string;
+    timeoutMs?: number;
+    includePiSiblingPackages?: boolean;
+    execFile?: typeof execFileSync;
+    log?: (message: string) => void;
+  } = {},
 ): Promise<GitchamberFetchResult[]> {
-  const { dryRun = false, cwd = process.cwd() } = options;
+  const {
+    dryRun = false,
+    cwd = process.cwd(),
+    timeoutMs = DEFAULT_GITCHAMBER_TIMEOUT_MS,
+    includePiSiblingPackages = true,
+  } = options;
+  const execFile = options.execFile ?? execFileSync;
+  const log = options.log ?? console.log;
   const results: GitchamberFetchResult[] = [];
+  const specsByPackageName = new Map<string, { spec: string; source: string; version: string }>();
 
-  // Collect all packages to fetch
-  const specsToFetch: Array<{ spec: string; source: string; version: string }> = [];
+  const addSpec = (spec: string, source: string, version: string): void => {
+    const packageName = getPackageNameFromSpec(spec);
+    if (!specsByPackageName.has(packageName)) {
+      specsByPackageName.set(packageName, { spec, source, version });
+    }
+  };
 
-  // 1. Add installed extensions that are npm packages
   for (const installedPackage of installedPackages) {
     const version = getPackageVersion(installedPackage.installedPath);
     if (!version) continue;
-
     const spec = buildGitchamberSpec(installedPackage.source, version);
-    if (spec) {
-      specsToFetch.push({ spec, source: installedPackage.source, version });
+    if (spec) addSpec(spec, installedPackage.source, version);
+  }
+
+  if (includePiSiblingPackages) {
+    for (const packageName of GITCHAMBER_PACKAGES) {
+      const version = getLocalDevDependencyVersion(packageName, cwd);
+      if (version) addSpec(`${packageName}@${version}`, `npm:${packageName}`, version);
     }
   }
 
-  // 2. Add pi-agent related devDependencies
-  for (const packageName of GITCHAMBER_PACKAGES) {
-    const version = getLocalDevDependencyVersion(packageName, cwd);
-    if (version) {
-      specsToFetch.push({
-        spec: `${packageName}@${version}`,
-        source: `npm:${packageName}`,
-        version,
-      });
-    }
-  }
+  const specsToFetch = [...specsByPackageName.values()];
+  if (specsToFetch.length === 0) return results;
 
-  if (specsToFetch.length === 0) {
-    return results;
-  }
-
-  // Check which packages are already fetched at the correct version
   const sourcesJsonPath = join(cwd, 'node_modules', '.gitchamber', 'sources.json');
   type GitchamberSource = { name: string; version: string };
-  type GitchamberSourcesJson = { packages?: GitchamberSource[] };
-  let existingPackages: Map<string, string> = new Map();
+  type GitchamberSourcesJson = {
+    packages?: GitchamberSource[];
+    repos?: GitchamberSource[];
+  };
+  const existingPackages = new Map<string, string>();
+  const existingRepos = new Map<string, string>();
   if (existsSync(sourcesJsonPath)) {
     try {
       const sourcesJson = JSON.parse(
         readFileSync(sourcesJsonPath, 'utf8'),
       ) as GitchamberSourcesJson;
-      if (Array.isArray(sourcesJson.packages)) {
-        for (const pkg of sourcesJson.packages) {
-          existingPackages.set(pkg.name, pkg.version);
-        }
-      }
+      for (const pkg of sourcesJson.packages ?? []) existingPackages.set(pkg.name, pkg.version);
+      for (const repo of sourcesJson.repos ?? []) existingRepos.set(repo.name, repo.version);
     } catch {
-      // Ignore parse errors
+      // A damaged cache must not block a repair fetch.
     }
   }
 
-  for (const { spec, source, version } of specsToFetch) {
-    // Extract package name from spec (everything before @version)
-    const packageName = spec.replace(/@[^@]+$/, ''); // Remove version suffix
+  for (const [index, { spec, source, version }] of specsToFetch.entries()) {
+    const packageName = getPackageNameFromSpec(spec);
+    const installedPackage = installedPackages.find((entry) => entry.source === source);
+    const detectedRepo = installedPackage
+      ? detectGitHubRepo(installedPackage.installedPath, packageName)
+      : undefined;
+    const repoSpec = detectedRepo ? `${detectedRepo.ownerRepo}@${version}` : undefined;
+    const cachedRepoName = detectedRepo ? `github.com/${detectedRepo.ownerRepo}` : undefined;
 
-    // Check if already fetched at this version
-    if (existingPackages.get(packageName) === version) {
+    if (
+      existingPackages.get(packageName) === version ||
+      (cachedRepoName !== undefined && existingRepos.get(cachedRepoName) === version)
+    ) {
       results.push({ packageSpec: spec, version, status: 'already-exists' });
       continue;
     }
@@ -2623,60 +2672,62 @@ export async function updateGitchamberSources(
       continue;
     }
 
+    const runFetch = (fetchSpec: string): string => {
+      log(
+        `[gitchamber ${index + 1}/${specsToFetch.length}] Fetching ${fetchSpec} ` +
+          `(timeout ${Math.ceil(timeoutMs / 1000)}s)...`,
+      );
+      return execFile('gitchamber', [fetchSpec], {
+        cwd,
+        encoding: 'utf8',
+        timeout: timeoutMs,
+        killSignal: 'SIGTERM',
+        stdio: ['ignore', 'pipe', 'inherit'],
+      });
+    };
+
     try {
-      // Use execFileSync to capture output without displaying it
-      const output = execFileSync('gitchamber', [spec], { encoding: 'utf8' });
-      // Gitchamber returns exit code 0 even on failure, so we need to parse output
-      // Success: "Done: 1 succeeded, 0 failed"
-      // Failure: "Done: 0 succeeded, 1 failed" or contains "✗ Error:"
-      const failedMatch = output.match(/Done: \d+ succeeded, (\d+) failed/);
-      const failedCount = failedMatch ? parseInt(failedMatch[1], 10) : 0;
-      const hasError = output.includes('✗ Error:') || failedCount > 0;
-
-      if (hasError) {
-        // Try fallback: detect GitHub repo from README or author
-        const installedPackage = installedPackages.find((p) => p.source === source);
-        if (installedPackage) {
-          const detected = detectGitHubRepo(installedPackage.installedPath, packageName);
-          if (detected) {
-            const repoSpec = `${detected.ownerRepo}@${version}`;
-            try {
-              const fallbackOutput = execFileSync('gitchamber', [repoSpec], { encoding: 'utf8' });
-              const fallbackFailedMatch = fallbackOutput.match(/Done: \d+ succeeded, (\d+) failed/);
-              const fallbackFailedCount = fallbackFailedMatch
-                ? parseInt(fallbackFailedMatch[1], 10)
-                : 0;
-              const fallbackHasError =
-                fallbackOutput.includes('✗ Error:') || fallbackFailedCount > 0;
-
-              if (!fallbackHasError) {
-                results.push({ packageSpec: repoSpec, version, status: 'fetched' });
-                continue;
-              }
-            } catch {
-              // Fallback also failed, report original error
-            }
-          }
-        }
-
-        // Extract error message if possible
-        const errorMatch = output.match(/✗ Error: ([^\n]+)/);
-        const errorMsg = errorMatch ? errorMatch[1] : `Failed to fetch ${spec}`;
-        results.push({
-          packageSpec: spec,
-          version,
-          status: 'error',
-          error: errorMsg,
-        });
-      } else {
+      const output = runFetch(spec);
+      const outputError = getGitchamberOutputError(output, spec);
+      if (!outputError) {
         results.push({ packageSpec: spec, version, status: 'fetched' });
+        continue;
       }
+
+      if (repoSpec) {
+        log(`[gitchamber] Package lookup failed; trying repository ${repoSpec}.`);
+        try {
+          const fallbackOutput = runFetch(repoSpec);
+          const fallbackError = getGitchamberOutputError(fallbackOutput, repoSpec);
+          if (!fallbackError) {
+            results.push({ packageSpec: repoSpec, version, status: 'fetched' });
+            continue;
+          }
+          results.push({
+            packageSpec: repoSpec,
+            version,
+            status: 'error',
+            error: fallbackError,
+          });
+          continue;
+        } catch (error) {
+          results.push({
+            packageSpec: repoSpec,
+            version,
+            status: 'error',
+            error: formatGitchamberCommandError(error, repoSpec, timeoutMs),
+          });
+          continue;
+        }
+      }
+
+      results.push({ packageSpec: spec, version, status: 'error', error: outputError });
     } catch (error) {
       results.push({
         packageSpec: spec,
         version,
         status: 'error',
-        error: error instanceof Error ? error.message : String(error),
+        error: formatGitchamberCommandError(error, spec, timeoutMs),
       });
     }
   }
@@ -2690,6 +2741,8 @@ export async function runPiUpdate(
     approve?: boolean;
     piPath?: string;
     piCommand?: string;
+    piPackageWorkspace?: string;
+    piPackageManager?: PackageManagerCommand;
     execFile?: typeof execFileSync;
     log?: (message: string) => void;
   } = {},
@@ -2740,15 +2793,35 @@ export async function runPiUpdate(
 
   if (options.dryRun) {
     log('Would run: pi update --extensions');
-    return;
+  } else {
+    // Bun prepends the workspace's node_modules/.bin to PATH for scripts. Run
+    // the package-manager-owned executable directly so extension updates use
+    // the CLI that the self-update step just installed.
+    const piExecutable = options.piCommand ?? findPiExecutablePath() ?? options.piPath ?? 'pi';
+    execFile(piExecutable, ['update', '--extensions'], { stdio: 'inherit' });
+    log('Ran: pi update --extensions');
   }
 
-  // Bun prepends the workspace's node_modules/.bin to PATH for scripts. Run
-  // the package-manager-owned executable directly so extension updates use
-  // the CLI that the self-update step just installed.
-  const piExecutable = options.piCommand ?? findPiExecutablePath() ?? options.piPath ?? 'pi';
-  execFile(piExecutable, ['update', '--extensions'], { stdio: 'inherit' });
-  log('Ran: pi update --extensions');
+  if (!options.approve) return;
+
+  const piPackageWorkspace = options.piPackageWorkspace ?? getDefaultPiPackageWorkspace();
+  if (!existsSync(join(piPackageWorkspace, 'package.json'))) {
+    log(`Skipping package build approval: no Pi package workspace at ${piPackageWorkspace}.`);
+    return;
+  }
+  const piPackageManager =
+    options.piPackageManager ?? resolvePackageManagerCommand({ cwd: piPackageWorkspace });
+  const workspaceApproveCommand = buildPiPackageWorkspaceApproveBuildsCommand(piPackageManager);
+  const display = formatCommand(workspaceApproveCommand.command, workspaceApproveCommand.args);
+  if (options.dryRun) {
+    log(`Would run in ${piPackageWorkspace}: ${display}`);
+    return;
+  }
+  execFile(workspaceApproveCommand.command, workspaceApproveCommand.args, {
+    cwd: piPackageWorkspace,
+    stdio: 'inherit',
+  });
+  log(`Ran in ${piPackageWorkspace}: ${display}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -2934,21 +3007,52 @@ export async function syncDevDependenciesWithGlobalPi(
   return { status: 'updated', changes, piCodingAgentVersion };
 }
 
+export function buildPiUpdateHelp(): string {
+  return `Update Pi, installed Pi packages, local compatibility patches, and source snapshots.
+
+Usage:
+  mise run pi-update [options]
+  bun run scripts/pi-update-extensions.ts [options]
+
+Options:
+  -n, --dry-run                  Preview all work without changing files.
+  -h, --help                     Show this help and exit.
+      --approve-builds           Approve all pending dependency build scripts.
+      --approve                  Alias for --approve-builds.
+      --skip-update              Do not update Pi or installed Pi packages.
+      --skip-deps-sync           Do not align workspace Pi dependencies.
+      --skip-patch               Do not verify or apply compatibility patches.
+      --skip-gitchamber          Do not refresh source snapshots.
+      --gitchamber-timeout=SEC   Stop one source fetch after SEC seconds.
+                                 Default: ${DEFAULT_GITCHAMBER_TIMEOUT_MS / 1000}.
+
+Examples:
+  mise run pi-update-dry-run
+  mise run pi-update
+  mise run pi-update --skip-update --skip-deps-sync --skip-gitchamber
+  mise run pi-update --skip-update --skip-deps-sync --skip-patch --gitchamber-timeout=900`;
+}
+
 export function parseCliArgs(argv: string[]): UpdateCliArgs {
   let dryRun = false;
-  let directory: string | undefined;
+  let help = false;
   let approve = false;
   let skipUpdate = false;
   let skipDepsSync = false;
   let skipPatch = false;
   let skipGitchamber = false;
+  let gitchamberTimeoutMs = DEFAULT_GITCHAMBER_TIMEOUT_MS;
 
   for (const arg of argv) {
     if (arg === '--dry-run' || arg === '-n') {
       dryRun = true;
       continue;
     }
-    if (arg === '--approve') {
+    if (arg === '--help' || arg === '-h') {
+      help = true;
+      continue;
+    }
+    if (arg === '--approve' || arg === '--approve-builds') {
       approve = true;
       continue;
     }
@@ -2968,32 +3072,45 @@ export function parseCliArgs(argv: string[]): UpdateCliArgs {
       skipGitchamber = true;
       continue;
     }
-
-    if (arg.startsWith('-')) {
-      throw new Error(`Unknown flag: ${arg}`);
+    if (arg.startsWith('--gitchamber-timeout=')) {
+      const seconds = Number(arg.slice('--gitchamber-timeout='.length));
+      if (!Number.isFinite(seconds) || seconds <= 0) {
+        throw new Error('--gitchamber-timeout must be a positive number of seconds');
+      }
+      gitchamberTimeoutMs = Math.ceil(seconds * 1000);
+      continue;
     }
-
-    if (directory !== undefined) {
-      throw new Error(`Unexpected extra argument: ${arg}`);
-    }
-
-    directory = arg;
+    throw new Error(`Unknown argument: ${arg}`);
   }
 
   return {
-    directory,
     dryRun,
+    help,
     approve,
     skipUpdate,
     skipDepsSync,
     skipPatch,
     skipGitchamber,
+    gitchamberTimeoutMs,
   };
 }
 
 export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
-  const { dryRun, approve, skipUpdate, skipDepsSync, skipPatch, skipGitchamber } =
-    parseCliArgs(argv);
+  const {
+    dryRun,
+    help,
+    approve,
+    skipUpdate,
+    skipDepsSync,
+    skipPatch,
+    skipGitchamber,
+    gitchamberTimeoutMs,
+  } = parseCliArgs(argv);
+
+  if (help) {
+    console.log(buildPiUpdateHelp());
+    return 0;
+  }
 
   if (!skipUpdate) {
     await runPiUpdate({ dryRun, approve });
@@ -3203,10 +3320,11 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     const gitchamberResults = await updateGitchamberSources(installedPackages, {
       dryRun,
       cwd: REPO_ROOT,
+      timeoutMs: gitchamberTimeoutMs,
     });
     if (gitchamberResults.length > 0) {
       console.log(
-        `${dryRun ? 'Would fetch' : 'Fetched'} ${gitchamberResults.length} gitchamber source(s):`,
+        `${dryRun ? 'Gitchamber source plan' : 'Gitchamber source results'} (${gitchamberResults.length}):`,
       );
       for (const result of gitchamberResults) {
         const statusLabel = result.status === 'error' ? ` (${result.error})` : '';

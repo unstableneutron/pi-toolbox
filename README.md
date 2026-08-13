@@ -114,8 +114,68 @@ pnpm run check
 
 # 4. (Optional) Update Pi and its extensions, re-pin workspace deps,
 #    apply compatibility patches, and refresh gitchamber snapshots.
-mise pi-update
+mise run pi-update
 ```
+
+## Maintain Pi without agent help
+
+Run the preview first. Then run the update:
+
+```bash
+mise run pi-update-dry-run
+mise run pi-update
+```
+
+The update runs these phases in order:
+
+```text
+Pi CLI -> installed packages -> workspace pins -> local patches -> source snapshots
+```
+
+Use `mise run pi-update --help` for the complete option list. Common options are:
+
+- `--approve-builds` approves all pending dependency build scripts. Review the package names in the package-manager warning before you use this option.
+- `--skip-update` keeps the installed Pi and package versions.
+- `--skip-deps-sync` keeps the workspace Pi dependency pins.
+- `--skip-patch` does not verify or apply local compatibility patches.
+- `--skip-gitchamber` does not refresh optional source snapshots.
+- `--gitchamber-timeout=SECONDS` changes the five-minute limit for one source fetch.
+
+If GitHub is slow or unavailable, finish the important update phases without source snapshots:
+
+```bash
+mise run pi-update --skip-gitchamber
+```
+
+Refresh only the source snapshots later, with a longer per-source limit if needed:
+
+```bash
+mise run pi-update \
+  --skip-update \
+  --skip-deps-sync \
+  --skip-patch \
+  --gitchamber-timeout=900
+```
+
+Reapply and verify only the local compatibility patches with:
+
+```bash
+mise run pi-update \
+  --skip-update \
+  --skip-deps-sync \
+  --skip-gitchamber
+```
+
+The source refresh prints the current package before it starts. A timed-out or failed source snapshot is reported as an optional cache error; it does not undo the Pi update.
+
+The Pi package workspace sets `autoInstallPeers: false` because Pi supplies its core runtime peers. Package updates can therefore print peer warnings for Pi core packages, TypeBox, and optional user-interface packages. Do not install every listed peer only to remove the warning. To inspect the current list, run:
+
+```bash
+cd ~/.pi/agent/npm
+mise exec node@24 pnpm@11 -- pnpm peers check
+```
+
+Treat a new extension import or startup error as a failure. The peer report alone is advisory.
 
 ## Using this with pi
 

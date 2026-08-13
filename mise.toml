@@ -20,6 +20,7 @@ run = "bun run scripts/sync-agents.ts"
 
 [tasks.pi-update]
 description = "Update the pnpm-managed global pi, pin pi-* sibling packages to its exact versions, apply local compatibility patches, and refresh gitchamber sources."
+raw_args = true
 run = "bun run scripts/pi-update-extensions.ts"
 
 [tasks.pi-update-dry-run]
