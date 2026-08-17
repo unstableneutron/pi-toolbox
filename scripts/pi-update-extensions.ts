@@ -1956,6 +1956,109 @@ export async function applyPiContinuousLearningPatch(
 }
 
 // ---------------------------------------------------------------------------
+// BB thread built-in orchestration guard patch
+//
+// BB supplies its own thread orchestration tools. Keep the two external Pi
+// orchestration extensions installed for normal Pi sessions, but make their
+// entrypoints no-ops when BB launches Pi with a non-empty BB_THREAD_ID.
+// ---------------------------------------------------------------------------
+
+export const BB_THREAD_ORCHESTRATION_PACKAGE_NAMES = ['pi-subagents', 'pi-intercom'] as const;
+
+type BbThreadOrchestrationPackageName = (typeof BB_THREAD_ORCHESTRATION_PACKAGE_NAMES)[number];
+
+const BB_THREAD_ORCHESTRATION_GUARD_MARKER =
+  '__pi_update_extensions:bb-thread-builtin-orchestration';
+
+const PI_SUBAGENTS_ENTRYPOINT_SOURCE = 'export { default } from "./src/extension/index.ts";\n';
+
+function patchBbThreadOrchestrationEntrypoint(
+  packageName: BbThreadOrchestrationPackageName,
+  content: string,
+): string {
+  if (
+    content.includes(BB_THREAD_ORCHESTRATION_GUARD_MARKER) &&
+    content.includes('process.env.BB_THREAD_ID?.trim()')
+  ) {
+    return content;
+  }
+
+  if (packageName === 'pi-subagents') {
+    if (content !== PI_SUBAGENTS_ENTRYPOINT_SOURCE) {
+      throw new Error('pi-subagents BB thread orchestration guard: upstream entrypoint changed');
+    }
+    return [
+      'import piSubagentsExtension from "./src/extension/index.ts";',
+      '',
+      `// ${BB_THREAD_ORCHESTRATION_GUARD_MARKER}`,
+      'export default process.env.BB_THREAD_ID?.trim() ? () => {} : piSubagentsExtension;',
+      '',
+    ].join('\n');
+  }
+
+  const target = 'export default function piIntercomExtension(pi: ExtensionAPI) {\n';
+  if (!content.includes(target)) {
+    throw new Error('pi-intercom BB thread orchestration guard: upstream entrypoint changed');
+  }
+  return content.replace(
+    target,
+    [
+      target.trimEnd(),
+      `  // ${BB_THREAD_ORCHESTRATION_GUARD_MARKER}`,
+      '  if (process.env.BB_THREAD_ID?.trim()) return;',
+      '',
+    ].join('\n'),
+  );
+}
+
+export function isBbThreadOrchestrationGuardPatchApplied(
+  packageName: BbThreadOrchestrationPackageName,
+  packageRoot: string,
+): boolean {
+  const entrypointPath = join(packageRoot, 'index.ts');
+  if (!existsSync(entrypointPath)) return false;
+  const content = readFileSync(entrypointPath, 'utf8');
+  return (
+    content.includes(BB_THREAD_ORCHESTRATION_GUARD_MARKER) &&
+    content.includes('process.env.BB_THREAD_ID?.trim()')
+  );
+}
+
+export async function applyBbThreadOrchestrationGuardPatch(options: {
+  packageName: BbThreadOrchestrationPackageName;
+  dryRun?: boolean;
+  packageRoot?: string;
+  cwd?: string;
+}): Promise<ApplyPatchResult> {
+  const { packageName } = options;
+  const packageRoot =
+    options.packageRoot ?? findGlobalPackagePath(packageName, { cwd: options.cwd });
+  if (!packageRoot) {
+    throw new Error(
+      `Could not locate installed ${packageName} via configured package manager, aube, or pnpm`,
+    );
+  }
+
+  const version = getPackageVersion(packageRoot) ?? 'unknown';
+  const entrypointPath = join(packageRoot, 'index.ts');
+  if (!existsSync(entrypointPath)) {
+    throw new Error(`${packageName}@${version}: entrypoint not found at ${entrypointPath}`);
+  }
+
+  const content = readFileSync(entrypointPath, 'utf8');
+  const patched = patchBbThreadOrchestrationEntrypoint(packageName, content);
+  if (patched === content) {
+    return { status: 'already-applied', packageRoot, version, patchPath: entrypointPath };
+  }
+  if (options.dryRun) {
+    return { status: 'would-apply', packageRoot, version, patchPath: entrypointPath };
+  }
+
+  writeFileSync(entrypointPath, patched);
+  return { status: 'applied', packageRoot, version, patchPath: entrypointPath };
+}
+
+// ---------------------------------------------------------------------------
 // pi-subagents built-in agent apply_patch tool patch
 //
 // Built-in pi-subagents agent definitions predate this toolbox's apply_patch
@@ -3426,6 +3529,28 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       console.error(
         `Skipped pi-continuous-learning compatibility patch: ${error instanceof Error ? error.message : String(error)}`,
       );
+    }
+
+    for (const packageName of BB_THREAD_ORCHESTRATION_PACKAGE_NAMES) {
+      try {
+        const result = await applyBbThreadOrchestrationGuardPatch({
+          packageName,
+          dryRun,
+          cwd: REPO_ROOT,
+          packageRoot: findInstalledNpmPackagePath(installedPackages, packageName),
+        });
+        const label =
+          result.status === 'already-applied'
+            ? `Already applied: ${packageName} BB thread orchestration guard (${result.version})`
+            : result.status === 'would-apply'
+              ? `Would apply: ${packageName} BB thread orchestration guard (${result.version})`
+              : `${result.status}: ${packageName} BB thread orchestration guard (${result.version}) via ${result.patchPath}`;
+        console.log(label);
+      } catch (error) {
+        console.error(
+          `Skipped ${packageName} BB thread orchestration guard: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
 
     try {

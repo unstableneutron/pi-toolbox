@@ -14,6 +14,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   applyAmasterPiComputerUseAnalyzeScreenshotPatch,
+  applyBbThreadOrchestrationGuardPatch,
   applyPiCodingAgentTranscriptCachePatch,
   applyPiContinuousLearningPatch,
   applyPiHerdrPromptGuidancePatch,
@@ -44,6 +45,7 @@ import {
   getPnpmWorkspaceOverrideChanges,
   hasPiAiBedrockApiKeyBearerUpstreamFix,
   hasPiCodingAgentResolverUpstreamFix,
+  isBbThreadOrchestrationGuardPatchApplied,
   isPiCodingAgentTranscriptCachePatchApplied,
   isPiContinuousLearningPatchApplied,
   isPiHerdrPromptGuidancePatchApplied,
@@ -1264,6 +1266,76 @@ describe('pi-continuous-learning patching', () => {
     await expect(applyPiContinuousLearningPatch({ packageRoot })).rejects.toThrow(
       /compiled dist directory not found/i,
     );
+  });
+});
+
+describe('BB thread built-in orchestration guard patching', () => {
+  function setupFakePackage(
+    packageName: 'pi-subagents' | 'pi-intercom',
+    entrypoint?: string,
+  ): string {
+    const packageRoot = makeTempDir(`${packageName}-bb-thread-`);
+    writeFileSync(
+      join(packageRoot, 'package.json'),
+      JSON.stringify({ name: packageName, version: '1.2.3' }, null, 2),
+    );
+    writeFileSync(
+      join(packageRoot, 'index.ts'),
+      entrypoint ??
+        (packageName === 'pi-subagents'
+          ? 'export { default } from "./src/extension/index.ts";\n'
+          : [
+              'import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";',
+              '',
+              'export default function piIntercomExtension(pi: ExtensionAPI) {',
+              '  pi.registerCommand("intercom", { description: "Intercom", handler() {} });',
+              '}',
+              '',
+            ].join('\n')),
+    );
+    return packageRoot;
+  }
+
+  it.each(['pi-subagents', 'pi-intercom'] as const)(
+    'disables %s only for non-empty BB thread IDs',
+    async (packageName) => {
+      const packageRoot = setupFakePackage(packageName);
+      const result = await applyBbThreadOrchestrationGuardPatch({ packageName, packageRoot });
+
+      expect(result).toMatchObject({ status: 'applied', packageRoot, version: '1.2.3' });
+      const patched = readFileSync(join(packageRoot, 'index.ts'), 'utf8');
+      expect(patched).toContain('__pi_update_extensions:bb-thread-builtin-orchestration');
+      expect(patched).toContain('process.env.BB_THREAD_ID?.trim()');
+      expect(isBbThreadOrchestrationGuardPatchApplied(packageName, packageRoot)).toBe(true);
+
+      const second = await applyBbThreadOrchestrationGuardPatch({ packageName, packageRoot });
+      expect(second.status).toBe('already-applied');
+    },
+  );
+
+  it('supports dry-run without mutating an entrypoint', async () => {
+    const packageName = 'pi-subagents';
+    const packageRoot = setupFakePackage(packageName);
+    const entrypointPath = join(packageRoot, 'index.ts');
+    const original = readFileSync(entrypointPath, 'utf8');
+
+    const result = await applyBbThreadOrchestrationGuardPatch({
+      packageName,
+      packageRoot,
+      dryRun: true,
+    });
+
+    expect(result.status).toBe('would-apply');
+    expect(readFileSync(entrypointPath, 'utf8')).toBe(original);
+  });
+
+  it('fails closed when an upstream entrypoint changes', async () => {
+    const packageName = 'pi-subagents';
+    const packageRoot = setupFakePackage(packageName, 'export default function changed() {}\n');
+
+    await expect(
+      applyBbThreadOrchestrationGuardPatch({ packageName, packageRoot }),
+    ).rejects.toThrow(/upstream entrypoint changed/i);
   });
 });
 
