@@ -1956,14 +1956,19 @@ export async function applyPiContinuousLearningPatch(
 }
 
 // ---------------------------------------------------------------------------
-// BB thread built-in orchestration guard patch
+// BB thread built-in tooling guard patch
 //
-// BB supplies its own thread orchestration tools. Keep the two external Pi
-// orchestration extensions installed for normal Pi sessions, but make their
-// entrypoints no-ops when BB launches Pi with a non-empty BB_THREAD_ID.
+// BB supplies thread orchestration, pane control, and user-question tools.
+// Keep the overlapping external Pi extensions installed for normal Pi sessions,
+// but make their entrypoints no-ops when BB launches Pi with BB_THREAD_ID.
 // ---------------------------------------------------------------------------
 
-export const BB_THREAD_ORCHESTRATION_PACKAGE_NAMES = ['pi-subagents', 'pi-intercom'] as const;
+export const BB_THREAD_ORCHESTRATION_PACKAGE_NAMES = [
+  'pi-subagents',
+  'pi-intercom',
+  '@ogulcancelik/pi-herdr',
+  '@dkmnx/pi-clarify',
+] as const;
 
 type BbThreadOrchestrationPackageName = (typeof BB_THREAD_ORCHESTRATION_PACKAGE_NAMES)[number];
 
@@ -1996,16 +2001,36 @@ function patchBbThreadOrchestrationEntrypoint(
     ].join('\n');
   }
 
-  const target = 'export default function piIntercomExtension(pi: ExtensionAPI) {\n';
-  if (!content.includes(target)) {
-    throw new Error('pi-intercom BB thread orchestration guard: upstream entrypoint changed');
+  const targets: Record<
+    Exclude<BbThreadOrchestrationPackageName, 'pi-subagents'>,
+    {
+      declaration: string;
+      indent: string;
+    }
+  > = {
+    'pi-intercom': {
+      declaration: 'export default function piIntercomExtension(pi: ExtensionAPI) {\n',
+      indent: '  ',
+    },
+    '@ogulcancelik/pi-herdr': {
+      declaration: 'export default function (pi: ExtensionAPI) {\n',
+      indent: '\t',
+    },
+    '@dkmnx/pi-clarify': {
+      declaration: 'export default function (pi: ExtensionAPI) {\n',
+      indent: '  ',
+    },
+  };
+  const target = targets[packageName];
+  if (!content.includes(target.declaration)) {
+    throw new Error(`${packageName} BB thread tooling guard: upstream entrypoint changed`);
   }
   return content.replace(
-    target,
+    target.declaration,
     [
-      target.trimEnd(),
-      `  // ${BB_THREAD_ORCHESTRATION_GUARD_MARKER}`,
-      '  if (process.env.BB_THREAD_ID?.trim()) return;',
+      target.declaration.trimEnd(),
+      `${target.indent}// ${BB_THREAD_ORCHESTRATION_GUARD_MARKER}`,
+      `${target.indent}if (process.env.BB_THREAD_ID?.trim()) return;`,
       '',
     ].join('\n'),
   );

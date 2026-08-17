@@ -1271,10 +1271,10 @@ describe('pi-continuous-learning patching', () => {
 
 describe('BB thread built-in orchestration guard patching', () => {
   function setupFakePackage(
-    packageName: 'pi-subagents' | 'pi-intercom',
+    packageName: 'pi-subagents' | 'pi-intercom' | '@ogulcancelik/pi-herdr' | '@dkmnx/pi-clarify',
     entrypoint?: string,
   ): string {
-    const packageRoot = makeTempDir(`${packageName}-bb-thread-`);
+    const packageRoot = makeTempDir(`${packageName.replaceAll('/', '-')}-bb-thread-`);
     writeFileSync(
       join(packageRoot, 'package.json'),
       JSON.stringify({ name: packageName, version: '1.2.3' }, null, 2),
@@ -1287,8 +1287,10 @@ describe('BB thread built-in orchestration guard patching', () => {
           : [
               'import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";',
               '',
-              'export default function piIntercomExtension(pi: ExtensionAPI) {',
-              '  pi.registerCommand("intercom", { description: "Intercom", handler() {} });',
+              packageName === 'pi-intercom'
+                ? 'export default function piIntercomExtension(pi: ExtensionAPI) {'
+                : 'export default function (pi: ExtensionAPI) {',
+              '  pi.registerCommand("overlap", { description: "Overlap", handler() {} });',
               '}',
               '',
             ].join('\n')),
@@ -1296,7 +1298,7 @@ describe('BB thread built-in orchestration guard patching', () => {
     return packageRoot;
   }
 
-  it.each(['pi-subagents', 'pi-intercom'] as const)(
+  it.each(['pi-subagents', 'pi-intercom', '@ogulcancelik/pi-herdr', '@dkmnx/pi-clarify'] as const)(
     'disables %s only for non-empty BB thread IDs',
     async (packageName) => {
       const packageRoot = setupFakePackage(packageName);
