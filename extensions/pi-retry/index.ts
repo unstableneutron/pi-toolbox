@@ -32,6 +32,7 @@ import {
   handleRecoveryAbort,
   handleRefusalRecovery,
   hasAwaitableRecovery,
+  isInterruptedOpenAIResponsesToolCall,
   registerPatchedSession,
   setPendingRecovery,
   type RetryRecoveryMessageDetails,
@@ -481,12 +482,15 @@ function parseRetryRecoveryDetails(value: unknown): RetryRecoveryMessageDetails 
   return candidate as unknown as RetryRecoveryMessageDetails;
 }
 
-function filterSkippableEmptyFailedAssistantArtifacts(
+function filterSkippableFailedAssistantArtifacts(
   sessionContext: SessionContextLike,
 ): SessionContextLike {
   let changed = false;
   const filteredMessages = sessionContext.messages.filter((message) => {
-    if (!isSkippableEmptyFailedAssistantArtifact(message)) {
+    if (
+      !isSkippableEmptyFailedAssistantArtifact(message) &&
+      !isInterruptedOpenAIResponsesToolCall(message)
+    ) {
       return true;
     }
     changed = true;
@@ -501,8 +505,8 @@ export function filterSessionContextForRetryDisplay(
   pathEntries: Array<Record<string, any>>,
   leafId?: string | null,
 ): SessionContextLike {
-  const sanitizedContext = filterSkippableEmptyFailedAssistantArtifacts(
-    filterOrphanToolResults(sessionContext),
+  const sanitizedContext = filterOrphanToolResults(
+    filterSkippableFailedAssistantArtifacts(sessionContext),
   );
   const hiddenRecoveryEntries = pathEntries.filter(isHiddenRetryRecoveryEntry);
   if (hiddenRecoveryEntries.length === 0) {
@@ -1504,6 +1508,10 @@ export function createPiRetryExtension(
             message: markTerminatingToolResultMessage(message) as unknown as typeof event.message,
           };
         }
+        return;
+      }
+
+      if (isInterruptedOpenAIResponsesToolCall(message)) {
         return;
       }
 

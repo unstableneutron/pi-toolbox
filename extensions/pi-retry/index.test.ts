@@ -860,6 +860,32 @@ describe('pi-retry patch installation', () => {
     expect(result).toEqual({ messages: [originalPrompt, continuePrompt] });
   });
 
+  test('skips an interrupted unexecuted tool call from continuation context', async () => {
+    const fakeModule = makeFakeAgentSessionModule();
+    const { handlers, ctx } = await createExtensionHarness(async () => fakeModule);
+
+    const interruptedError = {
+      role: 'assistant',
+      api: 'openai-responses',
+      stopReason: 'error',
+      errorMessage: 'OpenAI Responses SSE ended before a terminal event',
+      content: [{ type: 'toolCall', id: 'call_read|fc_1', name: 'read', arguments: { path: '.' } }],
+    };
+    const originalPrompt = { role: 'user', content: [{ type: 'text', text: 'Do the thing' }] };
+    const continuePrompt = {
+      role: 'custom',
+      customType: 'pi-retry-recovery',
+      content: runtime.INTERRUPTED_TOOL_CALL_CONTINUE_MESSAGE,
+    };
+
+    const result = await getHandler(handlers, 'context')(
+      { type: 'context', messages: [originalPrompt, interruptedError, continuePrompt] },
+      ctx,
+    );
+
+    expect(result).toEqual({ messages: [originalPrompt, continuePrompt] });
+  });
+
   test('skips an empty aborted assistant artifact from retry/resume context', async () => {
     const fakeModule = makeFakeAgentSessionModule();
     const loader = vi.fn().mockResolvedValue(fakeModule);
@@ -2697,6 +2723,102 @@ describe('pi-retry extension runtime', () => {
       { content: runtime.PREMATURE_ABANDONMENT_CONTINUE_MESSAGE, options: undefined },
     ]);
     expect(harness.sendMessageCalls).toEqual([]);
+  });
+
+  test('auto-continues an interrupted unexecuted Responses tool call once', async () => {
+    vi.useFakeTimers();
+
+    const fakeModule = makeFakeAgentSessionModule();
+    const harness = await createExtensionHarness(async () => fakeModule);
+    let leafId = 'assistant-interrupted-1';
+
+    harness.ctx.isIdle = () => true;
+    harness.ctx.hasPendingMessages = () => false;
+    harness.ctx.sessionManager.branch = vi.fn((nextLeafId: string) => {
+      leafId = nextLeafId;
+    });
+    harness.ctx.sessionManager.getLeafId = () => leafId;
+    const message = {
+      role: 'assistant',
+      api: 'openai-responses',
+      stopReason: 'error',
+      errorMessage: 'OpenAI Responses SSE ended before a terminal event',
+      usage: { input: 0, output: 0, totalTokens: 0 },
+      content: [
+        { type: 'thinking', thinking: '' },
+        {
+          type: 'toolCall',
+          id: 'call_exec|fc_1',
+          name: 'exec_command',
+          arguments: { cmd: 'git status --short' },
+        },
+      ],
+    };
+    harness.ctx.sessionManager.getEntries = () => [
+      { id: 'user-1', type: 'message', message: { role: 'user' } },
+      {
+        id: 'assistant-interrupted-1',
+        parentId: 'user-1',
+        type: 'message',
+        message,
+      },
+    ];
+
+    await getHandler(harness.handlers, 'turn_end')(
+      { type: 'turn_end', message, toolResults: [] },
+      harness.ctx,
+    );
+
+    expect(harness.ctx.sessionManager.branch).toHaveBeenCalledWith('user-1');
+    expect(harness.statusCalls).toContainEqual({
+      key: 'pi-retry',
+      text: '↻ Interrupted tool-call response detected; continuing in this session...',
+    });
+
+    await getHandler(harness.handlers, 'agent_end')(
+      { type: 'agent_end', willRetry: false, messages: [message] },
+      harness.ctx,
+    );
+    await vi.runAllTimersAsync();
+
+    expect(harness.sendMessageCalls).toEqual([
+      {
+        message: {
+          customType: 'pi-retry-recovery',
+          content: runtime.INTERRUPTED_TOOL_CALL_CONTINUE_MESSAGE,
+          display: false,
+          details: {
+            version: 1,
+            displayHint: 'linear-replacement',
+            kind: 'interrupted-tool-call',
+            messageKind: 'continue',
+            attempt: 1,
+            expectedLeafId: 'user-1',
+            replacement: {
+              supersedesEntryId: 'assistant-interrupted-1',
+              parentEntryId: 'user-1',
+            },
+          },
+        },
+        options: { triggerTurn: true },
+      },
+    ]);
+
+    leafId = 'assistant-interrupted-2';
+    await getHandler(harness.handlers, 'message_end')(
+      { type: 'message_end', message },
+      harness.ctx,
+    );
+    await getHandler(harness.handlers, 'turn_end')(
+      { type: 'turn_end', message, toolResults: [] },
+      harness.ctx,
+    );
+
+    expect(harness.notifyCalls).toContainEqual({
+      message: 'pi-retry stopped interrupted tool-call recovery after one attempt',
+      type: 'warning',
+    });
+    expect(harness.sendMessageCalls).toHaveLength(1);
   });
 
   test('turn_end queues replay-safe websocket transport fallback as retryable error', async () => {

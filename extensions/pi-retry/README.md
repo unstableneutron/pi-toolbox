@@ -141,6 +141,17 @@ Nested gateway payloads are unwrapped with bounded recursion so a specific inner
 precedence over a generic outer 500. Duplicate Responses item validation errors remove the
 matching persisted assistant text item ID before retrying.
 
+### Interrupted unexecuted tool call
+
+An OpenAI Responses SSE stream can end after emitting a tool call but before its terminal event.
+When no matching tool result exists, `pi-retry` branches the failed assistant artifact out of the
+active path and automatically continues once in the same session. The continuation explicitly
+tells the model that the tool did not run, so it must reassess state rather than assume a side
+effect occurred.
+
+This is continuation recovery, not provider-request replay. If a matching tool result exists,
+`pi-retry` does not auto-continue because the action outcome may already be material.
+
 ### Length-truncated response after compaction
 
 Assistant message with `stopReason: "length"` and no tool calls. If Pi successfully compacts

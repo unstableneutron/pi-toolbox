@@ -840,6 +840,80 @@ describe('sanitizeEncryptedReasoningOnCurrentBranch', () => {
 });
 
 describe('detectRetryableTerminalLeaf', () => {
+  test('detects an interrupted Responses tool call that was never executed', () => {
+    const entries = [
+      {
+        id: 'user-1',
+        type: 'message',
+        message: { role: 'user', content: [{ type: 'text', text: 'Continue the work' }] },
+      },
+      {
+        id: 'assistant-interrupted',
+        parentId: 'user-1',
+        type: 'message',
+        message: {
+          role: 'assistant',
+          api: 'openai-responses',
+          stopReason: 'error',
+          errorMessage: 'OpenAI Responses SSE ended before a terminal event',
+          content: [
+            { type: 'thinking', thinking: '' },
+            { type: 'toolCall', id: 'call_read|fc_1', name: 'read', arguments: { path: '.' } },
+          ],
+        },
+      },
+      {
+        id: 'compaction-1',
+        parentId: 'assistant-interrupted',
+        type: 'compaction',
+      },
+    ];
+    const sessionManager = {
+      getLeafId: () => 'compaction-1',
+      getEntries: () => entries,
+    };
+
+    expect(detectRetryableTerminalLeaf(sessionManager as any)).toMatchObject({
+      kind: 'interrupted-tool-call',
+      entryId: 'assistant-interrupted',
+      parentEntryId: 'user-1',
+    });
+  });
+
+  test('does not auto-continue an interrupted tool call with a matching result', () => {
+    const entries = [
+      {
+        id: 'user-1',
+        type: 'message',
+        message: { role: 'user', content: [{ type: 'text', text: 'Continue the work' }] },
+      },
+      {
+        id: 'assistant-interrupted',
+        parentId: 'user-1',
+        type: 'message',
+        message: {
+          role: 'assistant',
+          api: 'openai-responses',
+          stopReason: 'error',
+          errorMessage: 'OpenAI Responses SSE ended before a terminal event',
+          content: [{ type: 'toolCall', id: 'call_read|fc_1', name: 'read' }],
+        },
+      },
+      {
+        id: 'tool-result-1',
+        parentId: 'assistant-interrupted',
+        type: 'message',
+        message: { role: 'toolResult', toolCallId: 'call_read|fc_1', content: [] },
+      },
+    ];
+    const sessionManager = {
+      getLeafId: () => 'tool-result-1',
+      getEntries: () => entries,
+    };
+
+    expect(detectRetryableTerminalLeaf(sessionManager as any)).toBeUndefined();
+  });
+
   test('detects a stranded tool-result leaf after all assistant tool calls returned', () => {
     const { sessionManager } = createFakeStrandedToolResultSession();
 

@@ -25,6 +25,8 @@ const DEFAULT_REFUSAL_REWRITE_ATTEMPTS = 2;
 const MAX_EMPTY_RESPONSE_CONTINUE_ATTEMPTS = 3;
 const DEFAULT_CORE_RETRY_MAX_RETRIES = 3;
 const CONTINUE_RETRY_MESSAGE = 'Continue.';
+export const INTERRUPTED_TOOL_CALL_CONTINUE_MESSAGE =
+  '[pi-retry] Continue the interrupted work. The previous tool call was not executed; reassess the current state and issue the next required action. Do not assume it ran.';
 export const PREMATURE_ABANDONMENT_CONTINUE_MESSAGE =
   '[pi-retry] Continue the unfinished work. The previous response appears to have stopped prematurely; complete the task or report a concrete blocker with evidence.';
 export const LENGTH_TRUNCATION_CONTINUE_MESSAGE =
@@ -35,6 +37,8 @@ const PREMATURE_ABANDONMENT_RETRY_STATUS =
 const EMPTY_RESPONSE_RETRY_STATUS = '↻ Empty assistant response; retrying with Continue...';
 const LENGTH_TRUNCATION_CONTINUE_STATUS =
   '↻ Length-truncated response detected; continuing after compaction...';
+const INTERRUPTED_TOOL_CALL_CONTINUE_STATUS =
+  '↻ Interrupted tool-call response detected; continuing in this session...';
 const RETRYABLE_ERROR_CONTINUE_STATUS = '↻ Retryable error detected; retrying with Continue...';
 const STRANDED_TOOL_RESULTS_CONTINUE_STATUS =
   '↻ Stranded tool results detected; retrying with Continue...';
@@ -65,6 +69,7 @@ interface SessionManagerLike {
     type?: string;
     message?: {
       role?: string;
+      api?: string;
       stopReason?: string;
       content?: unknown;
       errorMessage?: string;
@@ -87,6 +92,7 @@ interface PatchedSessionLike {
 
 interface AssistantMessageLike {
   role?: string;
+  api?: string;
   content?: unknown;
   stopReason?: string;
   errorMessage?: string;
@@ -112,6 +118,7 @@ export interface RetryRecoveryMessageDetails {
 export interface PendingRecovery {
   kind:
     | 'empty-stop'
+    | 'interrupted-tool-call'
     | 'length-truncated'
     | 'premature-abandonment'
     | 'refusal'
@@ -344,7 +351,11 @@ function getRecoveryAttemptLimit(
     return MAX_EMPTY_RESPONSE_CONTINUE_ATTEMPTS;
   }
 
-  if ('length-truncated' === recovery.kind || 'stranded-tool-results' === recovery.kind) {
+  if (
+    'interrupted-tool-call' === recovery.kind ||
+    'length-truncated' === recovery.kind ||
+    'stranded-tool-results' === recovery.kind
+  ) {
     return 1;
   }
 
@@ -403,6 +414,8 @@ export function buildRecoveryStatus(recovery: ActiveRecovery): string {
   switch (recovery.kind) {
     case 'empty-stop':
       return `${EMPTY_RESPONSE_RETRY_STATUS}${suffix}`;
+    case 'interrupted-tool-call':
+      return `${INTERRUPTED_TOOL_CALL_CONTINUE_STATUS}${suffix}`;
     case 'length-truncated':
       return `${LENGTH_TRUNCATION_CONTINUE_STATUS}${suffix}`;
     case 'premature-abandonment':
@@ -704,6 +717,11 @@ export function setRefusalAttempt(sessionId: string, attempt: number): void {
 function getEmptyResponseContinueAttempts(sessionId: string): number {
   const recovery = getActiveRecovery(sessionId);
   return 'empty-stop' === recovery?.kind ? recovery.attempt : 0;
+}
+
+function getInterruptedToolCallContinueAttempts(sessionId: string): number {
+  const recovery = getActiveRecovery(sessionId);
+  return 'interrupted-tool-call' === recovery?.kind ? recovery.attempt : 0;
 }
 
 function getRetryableErrorContinueAttempts(sessionId: string): number {
@@ -1129,6 +1147,47 @@ function getNearestTerminalAssistantMessageEntry(
   return getBranchEntries(sessionManager).find(isTerminalAssistantMessageEntry);
 }
 
+export function isInterruptedOpenAIResponsesToolCall(
+  message: AssistantMessageLike | undefined,
+): boolean {
+  if (
+    'assistant' !== message?.role ||
+    'error' !== message.stopReason ||
+    !['openai-responses', 'openai-codex-responses'].includes(message.api ?? '') ||
+    'OpenAI Responses SSE ended before a terminal event' !== message.errorMessage ||
+    !Array.isArray(message.content)
+  ) {
+    return false;
+  }
+
+  return message.content.some(
+    (part) =>
+      part !== null && 'object' === typeof part && 'toolCall' === (part as { type?: unknown }).type,
+  );
+}
+
+function hasMatchingToolResultAfterEntry(
+  sessionManager: SessionManagerLike | undefined,
+  assistantEntry: SessionEntry,
+): boolean {
+  const toolCallIds = getToolCallIds(assistantEntry);
+  if (toolCallIds.size === 0) {
+    return false;
+  }
+
+  for (const entry of getBranchEntries(sessionManager)) {
+    if (entry.id === assistantEntry.id) {
+      break;
+    }
+    const toolCallId = getToolResultCallId(entry);
+    if (toolCallId && toolCallIds.has(toolCallId)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function hasToolResultInCurrentUserTurn(
   sessionManager: SessionManagerLike | undefined,
   assistantEntryId: string | undefined,
@@ -1273,6 +1332,19 @@ export function detectRetryableTerminalLeaf(
     return undefined;
   }
 
+  if (
+    isInterruptedOpenAIResponsesToolCall(message) &&
+    leafEntry &&
+    !hasMatchingToolResultAfterEntry(sessionManager, leafEntry)
+  ) {
+    return {
+      kind: 'interrupted-tool-call',
+      entryId: leafEntry.id,
+      parentEntryId: leafEntry.parentId,
+      message,
+    };
+  }
+
   if ('error' === message.stopReason && classifyRetryableAssistantProviderError(message)) {
     return {
       kind: 'retryable-error',
@@ -1327,6 +1399,12 @@ export function buildRetryableLeafPrompt(candidate: RetryableTerminalLeaf): {
         title: 'pi-retry: Empty response detected',
         message:
           'This session appears to have stopped on an empty assistant response. Send Continue now?',
+      };
+    case 'interrupted-tool-call':
+      return {
+        title: 'pi-retry: Interrupted tool call detected',
+        message:
+          'The provider stopped after emitting a tool call that was not executed. Continue the work in this session now?',
       };
     case 'length-truncated':
       return {
@@ -1461,6 +1539,44 @@ export async function handleRefusalRecovery(input: {
     setActiveRecovery(sessionId, queuedRecovery);
     applyActiveRecoveryStatus(sessionId, ui);
   };
+
+  if (isInterruptedOpenAIResponsesToolCall(finalAssistant)) {
+    const currentAttempts = getInterruptedToolCallContinueAttempts(sessionId);
+    if (currentAttempts >= 1) {
+      clearRecoveryState(sessionId);
+      ui.clearStatus();
+      ui.notify('pi-retry stopped interrupted tool-call recovery after one attempt', 'warning');
+      return;
+    }
+
+    const branchResult = branchLatestAssistantErrorOutOfMainPath(input.patchedSession, {
+      attempt: 1,
+      errorMessage: finalAssistant?.errorMessage ?? '',
+      reason: 'interrupted-tool-call',
+    });
+    const currentLeafId = input.patchedSession.sessionManager?.getLeafId?.();
+    const expectedLeafId = branchResult.branched ? branchResult.parentEntryId : currentLeafId;
+
+    await deliverRecoveryMessage(
+      {
+        kind: 'interrupted-tool-call',
+        attempt: 1,
+        messageKind: 'continue',
+        maxAttempts: 1,
+      },
+      INTERRUPTED_TOOL_CALL_CONTINUE_MESSAGE,
+      expectedLeafId,
+      createRecoveryMessageDetails({
+        kind: 'interrupted-tool-call',
+        messageKind: 'continue',
+        attempt: 1,
+        expectedLeafId,
+        failedEntryId: branchResult.failedEntryId,
+        parentEntryId: branchResult.parentEntryId,
+      }),
+    );
+    return;
+  }
 
   if (
     'error' === finalAssistant?.stopReason &&
