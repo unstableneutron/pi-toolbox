@@ -4,6 +4,7 @@ import {
   classifyOpenAIResponsesFailure,
   classifyRetryableAssistantProviderError,
   classifyRetryableProviderError,
+  extractDuplicateResponsesItemId,
   isNonRetryableAssistantProviderError,
   requiresSessionRepairForRetryableProviderError,
 } from './provider-errors';
@@ -182,6 +183,34 @@ describe('shared provider error classification', () => {
     expect(isNonRetryableAssistantProviderError(message)).toBe(true);
   });
 
+  test('unwraps nested gateway errors and prioritizes duplicate-item repair over outer 500s', () => {
+    const inner = JSON.stringify({
+      error: {
+        code: 'validation_error',
+        message:
+          'Duplicate item found with id msg_6f97352f33075e8b997c8f1659a40e09. Remove duplicate items from your input and try again.',
+        type: 'invalid_request_error',
+      },
+    });
+    const outer = JSON.stringify({
+      error: {
+        message: `litellm.APIConnectionError: Bedrock_mantleException - ${inner}. Received Model Group=gpt-5.6-sol`,
+        code: '500',
+      },
+    });
+    const errorMessage = `OpenAI Responses SSE HTTP 500: ${outer}`;
+
+    expect(extractDuplicateResponsesItemId(errorMessage)).toBe(
+      'msg_6f97352f33075e8b997c8f1659a40e09',
+    );
+    expect(classifyOpenAIResponsesFailure({ status: 500, message: errorMessage })).toEqual({
+      reason: 'duplicateResponsesItemId',
+      category: 'session_repair_retryable',
+      retryable: true,
+    });
+    expect(classifyRetryableProviderError(errorMessage)).toBe('duplicateResponsesItemId');
+  });
+
   test('classifies retryable provider error strings with stable reasons', () => {
     expect(
       classifyRetryableProviderError(
@@ -253,6 +282,7 @@ describe('shared provider error classification', () => {
   });
 
   test('identifies retryable reasons that require session repair before retry', () => {
+    expect(requiresSessionRepairForRetryableProviderError('duplicateResponsesItemId')).toBe(true);
     expect(requiresSessionRepairForRetryableProviderError('encryptedContentVerification')).toBe(
       true,
     );

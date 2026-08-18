@@ -10,8 +10,14 @@ import {
   pickReviewModels,
 } from './refusal-review';
 import { hasUserVisibleAssistantOutput } from '../shared/assistant-message-state';
-import { isEncryptedResponsesReasoningSignature } from '../shared/openai-responses-replay';
-import { classifyRetryableAssistantProviderError } from '../shared/provider-errors';
+import {
+  isEncryptedResponsesReasoningSignature,
+  responsesTextSignatureItemId,
+} from '../shared/openai-responses-replay';
+import {
+  classifyRetryableAssistantProviderError,
+  extractDuplicateResponsesItemId,
+} from '../shared/provider-errors';
 import { readCoreRetrySettings } from './settings';
 
 const DEFAULT_REFUSAL_CONTINUE_ATTEMPTS = 5;
@@ -765,6 +771,41 @@ async function resolveReviewModelAuth(
   }
 }
 
+function sanitizeDuplicateResponsesItemIdOnCurrentBranch(
+  session: PatchedSessionLike,
+  duplicateItemId: string,
+): { sanitizedMessages: number; sanitizedBlocks: number } {
+  const sessionManager = session?.sessionManager;
+  const branch = getBranchEntries(sessionManager);
+  let sanitizedMessages = 0;
+  let sanitizedBlocks = 0;
+
+  for (const entry of branch) {
+    if ('message' !== entry.type || 'assistant' !== entry.message?.role) continue;
+    if (!Array.isArray(entry.message.content)) continue;
+
+    let entrySanitized = false;
+    for (const block of entry.message.content as Array<{
+      type?: string;
+      textSignature?: string;
+    }>) {
+      if (
+        'text' !== block?.type ||
+        responsesTextSignatureItemId(block.textSignature) !== duplicateItemId
+      ) {
+        continue;
+      }
+      delete block.textSignature;
+      sanitizedBlocks += 1;
+      entrySanitized = true;
+    }
+    if (entrySanitized) sanitizedMessages += 1;
+  }
+
+  if (0 < sanitizedBlocks) persistInPlaceSessionMutations(sessionManager);
+  return { sanitizedMessages, sanitizedBlocks };
+}
+
 export function sanitizeEncryptedReasoningOnCurrentBranch(session: PatchedSessionLike): {
   sanitizedMessages: number;
   sanitizedBlocks: number;
@@ -1442,6 +1483,22 @@ export async function handleRefusalRecovery(input: {
 
     const nextRetryableErrorAttempt = currentRetryableErrorAttempts + 1;
     const reason = classifyRetryableAssistantProviderError(finalAssistant) ?? 'providerServerError';
+
+    if ('duplicateResponsesItemId' === reason) {
+      const duplicateItemId = extractDuplicateResponsesItemId(finalAssistant.errorMessage);
+      const sanitized = duplicateItemId
+        ? sanitizeDuplicateResponsesItemIdOnCurrentBranch(input.patchedSession, duplicateItemId)
+        : { sanitizedBlocks: 0 };
+      if (!duplicateItemId || 0 === sanitized.sanitizedBlocks) {
+        clearRecoveryState(sessionId);
+        ui.clearStatus();
+        ui.notify(
+          `pi-retry could not remove duplicate Responses item${duplicateItemId ? ` ${duplicateItemId}` : ''} before retry`,
+          'warning',
+        );
+        return;
+      }
+    }
 
     if ('encryptedContentVerification' === reason) {
       try {

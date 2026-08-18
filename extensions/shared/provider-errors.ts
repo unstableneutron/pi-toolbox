@@ -1,6 +1,7 @@
 import { isReplaySafeOpenAIResponsesTransportFailure } from './openai-responses-retry';
 
 export type RetryableProviderErrorReason =
+  | 'duplicateResponsesItemId'
   | 'encryptedContentVerification'
   | 'nativeCompactionCreatedBy'
   | 'openAIResponsesTransportErrorBeforeOutput'
@@ -45,6 +46,7 @@ function isRetryableProviderErrorReason(
   reason: ProviderFailureReason,
 ): reason is RetryableProviderErrorReason {
   return (
+    reason === 'duplicateResponsesItemId' ||
     reason === 'encryptedContentVerification' ||
     reason === 'nativeCompactionCreatedBy' ||
     reason === 'openAIResponsesTransportErrorBeforeOutput' ||
@@ -52,28 +54,71 @@ function isRetryableProviderErrorReason(
   );
 }
 
-function collectFailureText(value: unknown, output: string[] = []): string[] {
+const MAX_NESTED_FAILURE_DEPTH = 8;
+const MAX_NESTED_FAILURE_STRING_LENGTH = 256 * 1024;
+
+function parseNestedFailureJson(value: string): unknown {
+  if (value.length > MAX_NESTED_FAILURE_STRING_LENGTH) return undefined;
+  const trimmed = value.trim();
+  const candidates = [trimmed];
+  for (const [open, close] of [
+    ['{', '}'],
+    ['[', ']'],
+  ] as const) {
+    const start = trimmed.indexOf(open);
+    const end = trimmed.lastIndexOf(close);
+    if (0 <= start && start < end) candidates.push(trimmed.slice(start, end + 1));
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const parsed: unknown = JSON.parse(candidate);
+      if (parsed && 'object' === typeof parsed) return parsed;
+    } catch {
+      // Provider wrappers commonly surround an embedded JSON payload with prose.
+    }
+  }
+  return undefined;
+}
+
+function collectFailureText(value: unknown, output: string[] = [], depth = 0): string[] {
   if (typeof value === 'string') {
     output.push(value);
+    if (depth < MAX_NESTED_FAILURE_DEPTH) {
+      const parsed = parseNestedFailureJson(value);
+      if (parsed) collectFailureText(parsed, output, depth + 1);
+    }
     return output;
   }
   if (typeof value === 'number' || typeof value === 'boolean') {
     output.push(String(value));
     return output;
   }
-  if (!value || typeof value !== 'object') return output;
+  if (!value || typeof value !== 'object' || depth >= MAX_NESTED_FAILURE_DEPTH) return output;
   if (Array.isArray(value)) {
-    for (const item of value) collectFailureText(item, output);
+    for (const item of value) collectFailureText(item, output, depth + 1);
     return output;
   }
   const record = value as Record<string, unknown>;
   for (const key of ['type', 'code', 'message', 'param', 'status', 'reason']) {
-    collectFailureText(record[key], output);
+    collectFailureText(record[key], output, depth + 1);
   }
-  collectFailureText(record.error, output);
-  collectFailureText(record.response, output);
-  collectFailureText(record.incomplete_details, output);
+  collectFailureText(record.error, output, depth + 1);
+  collectFailureText(record.response, output, depth + 1);
+  collectFailureText(record.incomplete_details, output, depth + 1);
   return output;
+}
+
+function duplicateResponsesItemId(value: unknown): string | undefined {
+  for (const text of collectFailureText(value)) {
+    const match = /duplicate item found with id\s+([a-z0-9_-]+)/i.exec(text);
+    if (match?.[1]) return match[1];
+  }
+  return undefined;
+}
+
+export function extractDuplicateResponsesItemId(errorMessage: string | undefined): string | undefined {
+  return duplicateResponsesItemId(errorMessage);
 }
 
 function failureText(input: OpenAIResponsesFailureInput): string {
@@ -112,6 +157,10 @@ export function classifyOpenAIResponsesFailure(
 ): ProviderFailureClassification | undefined {
   const text = failureText(input);
   const status = input.status;
+
+  if (duplicateResponsesItemId([input.message, input.body, input.event])) {
+    return retryable('duplicateResponsesItemId', 'session_repair_retryable');
+  }
 
   if (
     text.includes('failed to find an active deployment') &&
@@ -269,7 +318,11 @@ export function classifyRetryableProviderError(
 export function requiresSessionRepairForRetryableProviderError(
   reason: RetryableProviderErrorReason | undefined,
 ): boolean {
-  return reason === 'encryptedContentVerification' || reason === 'nativeCompactionCreatedBy';
+  return (
+    reason === 'duplicateResponsesItemId' ||
+    reason === 'encryptedContentVerification' ||
+    reason === 'nativeCompactionCreatedBy'
+  );
 }
 
 export function classifyRetryableAssistantProviderError(

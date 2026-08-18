@@ -137,6 +137,9 @@ Recovery is limited to one attempt so a model that gives up again cannot create 
 Assistant terminal error whose `errorMessage` matches the retryable provider classifier. This
 includes transient Responses stream failures such as a 408
 `stream closed before response.completed` frame after transport-level recovery is exhausted.
+Nested gateway payloads are unwrapped with bounded recursion so a specific inner failure takes
+precedence over a generic outer 500. Duplicate Responses item validation errors remove the
+matching persisted assistant text item ID before retrying.
 
 ### Length-truncated response after compaction
 

@@ -992,6 +992,7 @@ export async function installAgentSessionPatch(
       message: AssistantErrorLike,
     ): boolean {
       if (isNonRetryableAssistantProviderError(message)) return false;
+      if (requiresPiRetryOwnedRecovery(getRetryableProviderErrorReason(message))) return false;
       return Boolean(
         originalIsRetryableError.call(this, message) ||
         isCoreSafeExtraRetryableAssistantError(message),

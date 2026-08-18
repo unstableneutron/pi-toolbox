@@ -644,9 +644,19 @@ describe('pi-retry patch installation', () => {
       session._isRetryableError({
         role: 'assistant',
         stopReason: 'error',
+        errorMessage:
+          'OpenAI Responses SSE HTTP 500: {"error":{"message":"litellm.APIConnectionError: Bedrock_mantleException - {\\"error\\":{\\"code\\":\\"validation_error\\",\\"message\\":\\"Duplicate item found with id msg_123. Remove duplicate items from your input and try again.\\",\\"type\\":\\"invalid_request_error\\"}}"}}',
+      }),
+    ).toBe(false);
+
+    expect(
+      session._isRetryableError({
+        role: 'assistant',
+        stopReason: 'error',
         errorMessage: '404 The API deployment for this resource does not exist.',
       }),
     ).toBe(false);
+    expect(session.baseClassifierCalls).toHaveLength(0);
   });
 
   test('patches prompt to suppress retryable prompt failures after awaitable recovery succeeds', async () => {

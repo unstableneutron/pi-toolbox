@@ -419,6 +419,64 @@ function createFakeCreatedByCompactionSession() {
   };
 }
 
+function createFakeDuplicateResponsesItemSession() {
+  const duplicateItemId = 'msg_6f97352f33075e8b997c8f1659a40e09';
+  const textBlock = {
+    type: 'text',
+    text: 'Prior answer',
+    textSignature: JSON.stringify({ v: 1, id: duplicateItemId, phase: 'final_answer' }),
+  };
+  const entries = [
+    {
+      id: 'assistant-prior',
+      parentId: undefined,
+      type: 'message',
+      message: { role: 'assistant', content: [textBlock] },
+    },
+    {
+      id: 'compaction-1',
+      parentId: 'assistant-prior',
+      type: 'compaction',
+      details: {
+        strategy: 'openai-native-compact-v1',
+        compactedWindow: [{ type: 'message', role: 'assistant', id: duplicateItemId }],
+      },
+    },
+    {
+      id: 'user-1',
+      parentId: 'compaction-1',
+      type: 'message',
+      message: { role: 'user', content: [{ type: 'text', text: 'Continue' }] },
+    },
+    {
+      id: 'assistant-error',
+      parentId: 'user-1',
+      type: 'message',
+      message: { role: 'assistant', stopReason: 'error', content: [] },
+    },
+  ] as any[];
+  const sessionManager = {
+    leafId: 'assistant-error',
+    getSessionId: () => 'session-1',
+    getLeafId() {
+      return this.leafId;
+    },
+    getEntries: () => entries,
+    branch(entryId: string) {
+      this.leafId = entryId;
+    },
+    _buildIndex: vi.fn(),
+    _rewriteFile: vi.fn(),
+  };
+  return {
+    duplicateItemId,
+    entries,
+    sessionManager,
+    session: { sessionManager },
+    textBlock,
+  };
+}
+
 const REFUSAL_TEXT = "I'm sorry, but I cannot assist with that request.";
 const PREMATURE_ABANDONMENT_TEXT =
   'I’m sorry, but I couldn’t complete the observer and multi-window work.';
@@ -1346,6 +1404,78 @@ describe('handleRefusalRecovery', () => {
     });
     expect(sessionManager.leafId).toBe('user-2');
     expect(notify).not.toHaveBeenCalled();
+  });
+
+  test('removes a duplicated Responses text item id before queueing retry', async () => {
+    const reviewRewrite = vi.fn();
+    const sendUserMessage = vi.fn();
+    const { duplicateItemId, session, sessionManager, textBlock } =
+      createFakeDuplicateResponsesItemSession();
+    const { ctx, statusCalls, notify } = createCtx(sessionManager);
+    const inner = JSON.stringify({
+      error: {
+        code: 'validation_error',
+        message: `Duplicate item found with id ${duplicateItemId}. Remove duplicate items from your input and try again.`,
+        type: 'invalid_request_error',
+      },
+    });
+    const errorMessage = `OpenAI Responses SSE HTTP 500: ${JSON.stringify({
+      error: {
+        message: `litellm.APIConnectionError: Bedrock_mantleException - ${inner}`,
+        code: '500',
+      },
+    })}`;
+
+    await handleRefusalRecovery({
+      event: {
+        messages: [{ role: 'assistant', stopReason: 'error', errorMessage, content: [] }],
+      },
+      ctx,
+      patchedSession: session as any,
+      reviewRewrite,
+      sendUserMessage,
+    });
+
+    expect(textBlock.textSignature).toBeUndefined();
+    expect(sessionManager._buildIndex).toHaveBeenCalledTimes(1);
+    expect(sessionManager._rewriteFile).toHaveBeenCalledTimes(1);
+    expect(statusCalls).toEqual(['↻ Retryable error detected; retrying with Continue...']);
+    expect(getPendingRecovery('session-1')).toMatchObject({
+      kind: 'retryable-error',
+      expectedLeafId: 'user-1',
+      details: { replacement: { parentEntryId: 'user-1' } },
+    });
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  test('does not retry a duplicate Responses item error when the offending id is absent', async () => {
+    const { duplicateItemId, session, sessionManager, textBlock } =
+      createFakeDuplicateResponsesItemSession();
+    textBlock.textSignature = JSON.stringify({ v: 1, id: 'msg_other' });
+    const { ctx, notify } = createCtx(sessionManager);
+
+    await handleRefusalRecovery({
+      event: {
+        messages: [
+          {
+            role: 'assistant',
+            stopReason: 'error',
+            errorMessage: `Duplicate item found with id ${duplicateItemId}.`,
+            content: [],
+          },
+        ],
+      },
+      ctx,
+      patchedSession: session as any,
+      reviewRewrite: vi.fn(),
+      sendUserMessage: vi.fn(),
+    });
+
+    expect(getPendingRecovery('session-1')).toBeUndefined();
+    expect(notify).toHaveBeenCalledWith(
+      `pi-retry could not remove duplicate Responses item ${duplicateItemId} before retry`,
+      'warning',
+    );
   });
 
   test('sanitizes created_by metadata from native compaction replay before queueing retry', async () => {
