@@ -2,7 +2,9 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-export type RetrySettingsSource = 'pi' | 'omp';
+import { getAgentDir } from '@earendil-works/pi-coding-agent';
+
+export type RetrySettingsSource = 'pi' | 'omp' | 'prime';
 
 export type CoreRetrySettingsLike = { enabled?: boolean; baseDelayMs: number; maxRetries: number };
 
@@ -179,7 +181,14 @@ export function readCoreRetrySettings(cwd: string | undefined): CoreRetrySetting
     return settings;
   }
 
-  Object.assign(settings, readJsonRetrySettings(join(homedir(), '.pi', 'agent', 'settings.json')));
-  Object.assign(settings, readJsonRetrySettings(join(projectDir, '.pi', 'settings.json')));
+  Object.assign(settings, readJsonRetrySettings(join(getAgentDir(), 'settings.json')));
+  Object.assign(
+    settings,
+    readJsonRetrySettings(
+      settingsSource === 'prime'
+        ? join(projectDir, '.prime', 'agent', 'settings.json')
+        : join(projectDir, '.pi', 'settings.json'),
+    ),
+  );
   return settings;
 }

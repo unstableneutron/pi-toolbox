@@ -32,19 +32,34 @@ pi -e /absolute/path/to/extensions/pi-retry
 
 ## Host support
 
-`pi-retry` is supported in both Pi and OMP.
+`pi-retry` is supported in Pi, OMP, and Prime Agent.
 
-The package exposes separate host entrypoints in `package.json`:
+The package exposes separate host entrypoints:
 
-- Pi loads `./index.ts` from the `pi.extensions` manifest field.
-- OMP loads `./omp.ts` from the `omp.extensions` manifest field.
+- Pi loads `./index.ts` from the main package's `pi.extensions` field.
+- OMP loads `./omp.ts` from the main package's `omp.extensions` field.
+- Prime Agent loads `./prime.ts` through the wrapper manifest in `./prime-package/`.
 
-The OMP entrypoint uses public extension APIs only. It supports terminal-leaf
-detection, hidden continuation dispatch, context filtering, status updates,
-manual `/retry`, startup retry prompts, and refusal rewrites. Pi additionally
-enables a private AgentSession patch layer for provider retry classification,
-prompt recovery, and session-tree display integration; OMP intentionally skips
-that layer because OMP keeps the relevant AgentSession helpers private.
+Install the local Prime Agent wrapper with:
+
+```bash
+prime-agent package install /absolute/path/to/extensions/pi-retry/prime-package
+```
+
+Or test it for one run with:
+
+```bash
+prime-agent -e /absolute/path/to/extensions/pi-retry/prime-package
+```
+
+The OMP and Prime entrypoints use public extension APIs only. They support
+terminal-leaf detection, hidden continuation dispatch, context filtering,
+status updates, manual `/retry`, startup retry prompts, and refusal rewrites.
+Pi additionally enables a private AgentSession patch layer for provider retry
+classification, prompt recovery, and session-tree display integration. OMP and
+Prime intentionally skip that layer because the relevant AgentSession helpers
+are private. Prime keeps its native provider retry and backoff behavior; this
+extension adds recovery for retryable terminal leaves that remain after it.
 
 ## What it does
 
@@ -222,32 +237,21 @@ escalate to rewrite review.
 From `extensions/pi-retry/`:
 
 ```bash
-pnpm run check
-pnpm run fix
-npx vitest run index.test.ts runtime.test.ts refusal-review.test.ts
+aube run check --no-install
+aube run test --no-install
 ```
 
-Targeted tests:
+Prime Agent smoke test from the repository root:
 
 ```bash
-npx vitest run index.test.ts runtime.test.ts refusal-review.test.ts
+prime-agent --offline --no-session --no-skills --no-prompt-templates \
+  --no-context-files --no-builtin-tools \
+  -e ./extensions/pi-retry/prime-package --mode json -p /retry
 ```
 
 ## Package metadata
 
-This package uses the Pi package manifest in `package.json`:
-
-```json
-{
-  "keywords": ["pi-package"],
-  "pi": {
-    "extensions": ["./index.ts"]
-  },
-  "omp": {
-    "extensions": ["./omp.ts"]
-  }
-}
-```
-
-That lets Pi and OMP discover their host-specific entrypoints instead of relying
-only on `index.ts` fallback loading.
+The main package uses `pi.extensions` for Pi and `omp.extensions` for OMP.
+Prime also consumes `pi.extensions`, so `prime-package/package.json` is a thin
+wrapper whose manifest selects `../prime.ts`. This keeps Pi from loading the
+Prime adapter and avoids copying the retry implementation.

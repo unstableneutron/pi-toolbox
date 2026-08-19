@@ -1,9 +1,6 @@
-import type {
-  AssistantMessage,
-  Model,
-  ProviderHeaders,
-  UserMessage,
-} from '@earendil-works/pi-ai/compat';
+import type { AssistantMessage, Model, UserMessage } from '@earendil-works/pi-ai';
+
+type ProviderHeaders = Record<string, string | null>;
 
 type CompleteSimple = (
   model: Model<any>,
@@ -20,11 +17,22 @@ type CompleteSimple = (
 
 let completeSimplePromise: Promise<CompleteSimple | undefined> | undefined;
 
+function getCompleteSimple(module: unknown): CompleteSimple | undefined {
+  const candidate = (module as { completeSimple?: unknown }).completeSimple;
+  return typeof candidate === 'function' ? (candidate as CompleteSimple) : undefined;
+}
+
 async function loadCompleteSimple(): Promise<CompleteSimple | undefined> {
-  completeSimplePromise ??= import('@earendil-works/pi-ai/compat')
-    .then((mod) => {
-      const candidate = (mod as { completeSimple?: unknown }).completeSimple;
-      return typeof candidate === 'function' ? (candidate as CompleteSimple) : undefined;
+  completeSimplePromise ??= import('@earendil-works/pi-ai')
+    .then(getCompleteSimple)
+    .then(async (completeSimple) => {
+      if (completeSimple) return completeSimple;
+
+      // Pi 0.84 keeps the legacy dispatcher on /compat. Prime Agent exports it
+      // from the package root and does not expose /compat. A computed specifier
+      // lets each host resolve only the path it supports.
+      const compatModule = '@earendil-works/pi-ai/compat';
+      return import(compatModule).then(getCompleteSimple).catch(() => undefined);
     })
     .catch(() => undefined);
   return completeSimplePromise;

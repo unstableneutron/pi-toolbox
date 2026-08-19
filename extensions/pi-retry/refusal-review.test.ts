@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
-vi.mock('@earendil-works/pi-ai/compat', () => ({
+vi.mock('@earendil-works/pi-ai', () => ({
   completeSimple: vi.fn(),
 }));
 
-import { completeSimple } from '@earendil-works/pi-ai/compat';
+import * as piAi from '@earendil-works/pi-ai';
 
 import {
   buildRefusalStatus,
@@ -18,6 +18,9 @@ import {
   pickReviewModels,
   requestRefusalRewrite,
 } from './refusal-review';
+
+const completeSimple = (piAi as unknown as { completeSimple: ReturnType<typeof vi.fn> })
+  .completeSimple;
 
 const AVAILABLE_MODELS = [
   { provider: 'gust', id: 'claude-opus-4-6', api: 'anthropic-messages', reasoning: true },

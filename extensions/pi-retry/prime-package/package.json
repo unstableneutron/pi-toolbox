@@ -1,0 +1,27 @@
+{
+  "name": "prime-agent-pi-retry",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Prime Agent package for pi-retry terminal-leaf recovery",
+  "keywords": [
+    "pi-extension",
+    "pi-package",
+    "prime-agent",
+    "recovery",
+    "retry"
+  ],
+  "workspaces": false,
+  "type": "module",
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "pi": {
+    "extensions": [
+      "../prime.ts"
+    ]
+  }
+}

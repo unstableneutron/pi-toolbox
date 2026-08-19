@@ -21,7 +21,7 @@
       "project": ["**/*.ts"]
     },
     "extensions/pi-retry": {
-      "entry": ["index.ts", "omp.ts"],
+      "entry": ["index.ts", "omp.ts", "prime.ts"],
       "project": ["**/*.ts"]
     },
     "extensions/pi-codex-app-server-use": {
