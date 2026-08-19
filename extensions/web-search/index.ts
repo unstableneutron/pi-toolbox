@@ -88,11 +88,10 @@ interface ExecuteWithFallbackOptions<TResult> {
   onFallback?: (err: unknown) => void;
 }
 
-export interface CreateWebSearchToolsOptions {
+interface CreateWebSearchToolsOptions {
   apiKey?: string;
   modelName?: string;
   client?: Parallel;
-  includeConstrainedSampling?: boolean;
   mcpCall?: (
     name: string,
     args: Record<string, unknown>,
@@ -253,7 +252,6 @@ export function createWebSearchTools({
   apiKey,
   modelName = 'pi',
   client = apiKey ? new Parallel({ apiKey }) : undefined,
-  includeConstrainedSampling = true,
   mcpCall = callParallelSearchMcp,
 }: CreateWebSearchToolsOptions = {}) {
   const tools: ToolDefinition[] = [];
@@ -292,9 +290,7 @@ export function createWebSearchTools({
         },
         { additionalProperties: false },
       ),
-      ...(includeConstrainedSampling
-        ? { constrainedSampling: { type: 'json_schema' as const, strict: 'prefer' as const } }
-        : {}),
+      constrainedSampling: { type: 'json_schema', strict: 'prefer' },
 
       async execute(_toolCallId, params, signal, onUpdate) {
         const { objective, search_queries } = params;
@@ -691,28 +687,6 @@ export function createWebSearchTools({
 
 // ── Extension ──────────────────────────────────────────────────────
 
-export interface RegisterWebSearchToolsOptions extends CreateWebSearchToolsOptions {
-  preserveExistingTools?: boolean;
-}
-
-export function registerWebSearchTools(
-  pi: ExtensionAPI,
-  { preserveExistingTools = false, ...toolOptions }: RegisterWebSearchToolsOptions = {},
-): string[] {
-  const existingToolNames = preserveExistingTools
-    ? new Set(pi.getAllTools().map((tool) => tool.name))
-    : new Set<string>();
-  const registeredToolNames: string[] = [];
-
-  for (const tool of createWebSearchTools(toolOptions)) {
-    if (existingToolNames.has(tool.name)) continue;
-    pi.registerTool(tool);
-    registeredToolNames.push(tool.name);
-  }
-
-  return registeredToolNames;
-}
-
 export default function (pi: ExtensionAPI) {
   const apiKey = process.env.PARALLEL_API_KEY;
 
@@ -724,5 +698,7 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  registerWebSearchTools(pi, { apiKey });
+  for (const tool of createWebSearchTools({ apiKey })) {
+    pi.registerTool(tool);
+  }
 }

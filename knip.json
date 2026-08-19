@@ -24,10 +24,6 @@
       "entry": ["index.ts", "omp.ts", "prime.ts"],
       "project": ["**/*.ts"]
     },
-    "extensions/web-search": {
-      "entry": ["index.ts", "prime.ts"],
-      "project": ["**/*.ts"]
-    },
     "extensions/editor-shortcut": {
       "entry": ["index.ts", "prime.ts"],
       "project": ["**/*.ts"]
