@@ -31,20 +31,28 @@ export { processEditorShortcutSubmission } from './processor';
 export type EditorShortcutOptions = {
   isTui?: (ctx: ExtensionContext) => boolean;
   isFastModeEligible?: FastModeEligibility;
+  /**
+   * Set to `false` when the host already ships its own fast-mode command, so
+   * this extension neither registers `/fast` nor touches `service_tier`.
+   */
+  fastMode?: boolean;
 };
 
 export function createEditorShortcutExtension(options: EditorShortcutOptions = {}) {
   const isTui =
     options.isTui ??
     ((ctx: ExtensionContext) => hasTui(ctx as ExtensionContext & { mode: string }));
-  const isFastModeEligible = options.isFastModeEligible ?? isFastModeEligibleSession;
+  const fastModeEnabled = options.fastMode ?? true;
+  const isFastModeEligible: FastModeEligibility = fastModeEnabled
+    ? (options.isFastModeEligible ?? isFastModeEligibleSession)
+    : () => false;
 
   return function editorShortcut(pi: ExtensionAPI) {
     const fastMode = createFastModeState();
     const pasteState = createPasteShortcutState();
     let selectedModel: Model<Api> | undefined;
 
-    registerFastCommand(pi, fastMode, isFastModeEligible);
+    if (fastModeEnabled) registerFastCommand(pi, fastMode, isFastModeEligible);
 
     pi.on('before_provider_request', (event, ctx) => {
       return setFastModeServiceTier(event.payload, ctx, fastMode, isFastModeEligible);

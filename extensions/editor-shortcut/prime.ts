@@ -14,14 +14,15 @@ function isPrimeTuiContext(ctx: ExtensionContext): boolean {
   );
 }
 
-function isPrimeFastModeEligible(ctx: ExtensionContext | undefined): boolean {
-  return !!ctx && isPrimeTuiContext(ctx) && process.env.PI_SUBAGENT_CHILD !== '1';
-}
-
 // Prime Agent retains the public editor, autocomplete, input, model, and
-// provider-request APIs used by the shared implementation. Only the old
-// Pi-specific `ctx.mode` check needs this structural adapter.
+// provider-request APIs used by the shared implementation. Two host differences
+// need adapting:
+//   1. the old Pi-specific `ctx.mode` check becomes a structural TUI probe;
+//   2. Prime ships a built-in `/fast` command plus native priority-tier
+//      handling (`supportsFastMode`), so registering ours only produced a
+//      "conflicts with built-in interactive command" warning and an unreachable
+//      handler. Fast mode is therefore left entirely to the host.
 export default createEditorShortcutExtension({
   isTui: isPrimeTuiContext,
-  isFastModeEligible: isPrimeFastModeEligible,
+  fastMode: false,
 });

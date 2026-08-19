@@ -42,7 +42,12 @@ prime-agent --offline --no-session --no-skills --no-prompt-templates \
   -e /absolute/path/to/extensions/editor-shortcut/prime-package --mode json -p '$thinking:low'
 ```
 
-`$fast` remains intentionally limited to the existing supported model list.
+Fast mode is intentionally disabled in the Prime build (`fastMode: false`):
+Prime ships a built-in `/fast` command with native priority-tier handling, so
+registering ours only produced a "conflicts with built-in interactive command"
+warning behind an unreachable handler. Use Prime's `/fast`; `$fast` directives
+are inert there. Under Pi, `$fast` remains limited to the existing supported
+model list.
 
 ## Development
 
