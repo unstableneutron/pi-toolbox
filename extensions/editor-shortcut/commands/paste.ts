@@ -1,11 +1,14 @@
 import { execFile } from 'node:child_process';
 import { platform } from 'node:os';
 
-import { type Api, type Model, type UserMessage } from '@earendil-works/pi-ai/compat';
+import {
+  type Api,
+  type AssistantMessage,
+  type Model,
+  type UserMessage,
+} from '@earendil-works/pi-ai';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
-
-import { completeSimpleWithResolvedAuth } from '../../shared/model-completion';
 
 const CLIPBOARD_TIMEOUT_MS = 2_000;
 const CLIPBOARD_MAX_BYTES = 5 * 1024 * 1024;
@@ -70,6 +73,53 @@ export type PasteReplacementResult =
   | { found: false; text: string }
   | { found: true; ok: true; text: string }
   | { found: true; ok: false; reason: string };
+
+type CompleteSimple = (
+  model: Model<any>,
+  context: { systemPrompt: string; messages: UserMessage[] },
+  options: {
+    apiKey?: string;
+    baseUrl?: string;
+    headers?: Record<string, string | null>;
+    env?: Record<string, string>;
+    maxTokens: number;
+    reasoning?: string;
+    signal?: AbortSignal;
+    temperature?: number;
+  },
+) => Promise<AssistantMessage>;
+
+type ResolvedAuth = {
+  ok: boolean;
+  apiKey?: string;
+  baseUrl?: string;
+  headers?: Record<string, string | null>;
+  env?: Record<string, string>;
+  error?: string;
+};
+
+let completeSimplePromise: Promise<CompleteSimple | undefined> | undefined;
+
+function getCompleteSimple(module: unknown): CompleteSimple | undefined {
+  const candidate = (module as { completeSimple?: unknown }).completeSimple;
+  return typeof candidate === 'function' ? (candidate as CompleteSimple) : undefined;
+}
+
+async function loadCompleteSimple(): Promise<CompleteSimple | undefined> {
+  completeSimplePromise ??= import('@earendil-works/pi-ai')
+    .then(getCompleteSimple)
+    .then(async (completeSimple) => {
+      if (completeSimple) return completeSimple;
+
+      // Pi 0.84 keeps the legacy dispatcher on /compat. Prime Agent exports it
+      // from the package root and does not expose /compat. A computed specifier
+      // lets each host resolve only the path it supports.
+      const compatModule = '@earendil-works/pi-ai/compat';
+      return import(compatModule).then(getCompleteSimple).catch(() => undefined);
+    })
+    .catch(() => undefined);
+  return completeSimplePromise;
+}
 
 const TAG_MODEL_PREFERENCES: PreferredModelSpec[] = [
   { provider: 'openai-codex', id: 'gpt-5.6-luna' },
@@ -359,6 +409,30 @@ function samplePasteContentForTag(content: string): string {
   )}`;
 }
 
+async function completeSimpleWithResolvedAuth(
+  ctx: ExtensionContext,
+  model: Model<Api>,
+  context: { systemPrompt: string; messages: UserMessage[] },
+  options: Parameters<CompleteSimple>[2],
+): Promise<AssistantMessage> {
+  const completeSimple = await loadCompleteSimple();
+  if (!completeSimple) throw new Error('The installed pi-ai package cannot complete a paste tag');
+
+  const registry = ctx.modelRegistry as unknown as {
+    getApiKeyAndHeaders(model: Model<Api>): Promise<ResolvedAuth>;
+  };
+  const auth = await registry.getApiKeyAndHeaders(model);
+  if (!auth.ok) throw new Error(auth.error ?? 'No API key for paste tag generation');
+
+  const requestModel = auth.baseUrl ? { ...model, baseUrl: auth.baseUrl } : model;
+  return completeSimple(requestModel, context, {
+    ...options,
+    apiKey: options.apiKey ?? auth.apiKey,
+    headers: { ...auth.headers, ...options.headers },
+    env: { ...auth.env, ...options.env },
+  });
+}
+
 async function generatePasteTag(content: string, ctx: ExtensionContext): Promise<string | null> {
   const model = await selectTagGenerationModel(ctx);
   if (!model) return null;
@@ -379,7 +453,7 @@ async function generatePasteTag(content: string, ctx: ExtensionContext): Promise
     };
 
     const response = await completeSimpleWithResolvedAuth(
-      ctx.modelRegistry,
+      ctx,
       model,
       { systemPrompt: TAG_GENERATION_PROMPT, messages: [userMessage] },
       {

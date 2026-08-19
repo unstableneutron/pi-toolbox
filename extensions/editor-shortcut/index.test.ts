@@ -4,6 +4,7 @@ import type { AutocompleteProvider } from '@earendil-works/pi-tui';
 
 import editorShortcut, {
   createEditorShortcutAutocompleteProvider,
+  createEditorShortcutExtension,
   createPasteShortcutState,
   parseEditorShortcutText,
   processEditorShortcutSubmission,
@@ -766,6 +767,25 @@ describe('editorShortcut extension', () => {
     expect(input).toEqual({ action: 'transform', text: 'Please do the work' });
     expect(harness.notify).not.toHaveBeenCalled();
     expect(harness.setStatus).not.toHaveBeenCalled();
+  });
+
+  test('Prime eligibility applies inline fast directives without ctx.mode', async () => {
+    const harness = createHarness();
+    const primeShortcut = createEditorShortcutExtension({ isFastModeEligible: () => true });
+    primeShortcut(harness.pi as any);
+    const ctx = { ...harness.ctx, mode: undefined, model: models[4] };
+
+    const input = await harness.handlers.get('input')?.(
+      { text: 'Please $fast:on do the work', source: 'interactive' },
+      ctx,
+    );
+    const request = await harness.handlers.get('before_provider_request')?.(
+      { type: 'before_provider_request', payload: { model: 'gpt-5.5' } },
+      ctx,
+    );
+
+    expect(input).toEqual({ action: 'transform', text: 'Please do the work' });
+    expect(request).toEqual({ model: 'gpt-5.5', service_tier: 'priority' });
   });
 
   test('/fast does not affect pi-subagent sessions', async () => {

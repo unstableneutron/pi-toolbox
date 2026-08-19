@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
-import type { Api, Model } from '@earendil-works/pi-ai/compat';
+import type { Api, Model } from '@earendil-works/pi-ai';
 import type { AutocompleteItem } from '@earendil-works/pi-tui';
 
 export function normalizeModelRef(value: string): string {

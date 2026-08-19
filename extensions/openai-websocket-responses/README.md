@@ -11,6 +11,44 @@ The extension provides two modes:
 2. Optional transparent handling of existing APIs such as `openai-responses`
    for selected providers/models, with per-model SSE/WebSocket routing.
 
+## Prime Agent
+
+Prime Agent already supplies the native `openai-codex-responses` WebSocket
+transport with connection reuse and SSE fallback, plus its native
+`openai-responses` transport. The Prime wrapper does not replace either
+transport. It adds a configuration hook that can force `sse` or `websocket` for
+matching OpenAI Responses models; its default `auto` policy forwards requests to
+Prime unchanged.
+
+Install the local wrapper:
+
+```bash
+prime-agent package install /absolute/path/to/extensions/openai-websocket-responses/prime-package
+```
+
+Prime reads `openaiWebsocketResponses` from both:
+
+- `~/.prime/agent/settings.json`
+- `.prime/agent/settings.json`
+
+For example, force Prime's native Codex WebSocket transport for one model:
+
+```json
+{
+  "openaiWebsocketResponses": {
+    "patch": {
+      "transportByProviderModel": {
+        "openai-codex/gpt-5.6": "websocket"
+      }
+    }
+  }
+}
+```
+
+The wrapper leaves all non-matching models, `auto`, and `sse` policy routing to
+Prime's built-in providers. It does not register or use the toolbox's custom
+`openai-websocket-responses` transport for Prime's built-in APIs.
+
 ## Settings
 
 Configure the extension in `~/.pi/agent/settings.json`:

@@ -3,8 +3,7 @@ import type {
   ExtensionCommandContext,
   ExtensionContext,
 } from '@earendil-works/pi-coding-agent';
-import type { Api, Model } from '@earendil-works/pi-ai/compat';
-import { hasTui } from '../../shared/ui-mode';
+import type { Api, Model } from '@earendil-works/pi-ai';
 import { modelRef, normalizeModelRef } from './model';
 
 const FAST_MODE_SERVICE_TIER = 'priority';
@@ -30,21 +29,28 @@ export type FastModeTransition = 'on' | 'off';
 
 type RequestPayload = Record<string, unknown>;
 
-type FastModeContext = Pick<ExtensionContext, 'hasUI' | 'mode'>;
+export type FastModeEligibility = (ctx: ExtensionContext | undefined) => boolean;
+
+type PiFastModeContext = ExtensionContext & { mode?: string };
 
 export function createFastModeState(): FastModeState {
   return { enabled: false, enabledModelRefs: new Set() };
 }
 
 export function isFastModeEligibleSession(
-  ctx: FastModeContext | undefined,
+  ctx: ExtensionContext | undefined,
   env: NodeJS.ProcessEnv = process.env,
 ): boolean {
-  return hasTui(ctx) && env.PI_SUBAGENT_CHILD !== '1';
+  const piContext = ctx as PiFastModeContext | undefined;
+  return piContext?.mode === 'tui' && ctx?.hasUI === true && env.PI_SUBAGENT_CHILD !== '1';
 }
 
-export function updateFastModeIndicator(ctx: ExtensionContext, state: FastModeState): void {
-  if (!isFastModeEligibleSession(ctx)) return;
+export function updateFastModeIndicator(
+  ctx: ExtensionContext,
+  state: FastModeState,
+  isEligible: FastModeEligibility = isFastModeEligibleSession,
+): void {
+  if (!isEligible(ctx)) return;
   ctx.ui.setStatus(FAST_MODE_STATUS_KEY, state.enabled ? '⚡' : undefined);
 }
 
@@ -78,7 +84,11 @@ export function parseFastModeAction(value: string | undefined): FastModeAction |
   return null;
 }
 
-export function registerFastCommand(pi: ExtensionAPI, state: FastModeState): void {
+export function registerFastCommand(
+  pi: ExtensionAPI,
+  state: FastModeState,
+  isEligible: FastModeEligibility = isFastModeEligibleSession,
+): void {
   pi.registerCommand('fast', {
     description: 'Toggle priority fast mode for supported OpenAI models',
     getArgumentCompletions(argumentPrefix) {
@@ -87,13 +97,18 @@ export function registerFastCommand(pi: ExtensionAPI, state: FastModeState): voi
       return filtered.length > 0 ? filtered : null;
     },
     async handler(args, ctx) {
-      if (!isFastModeEligibleSession(ctx)) return;
-      applyFastCommand(args, ctx, state);
+      if (!isEligible(ctx)) return;
+      applyFastCommand(args, ctx, state, isEligible);
     },
   });
 }
 
-function applyFastCommand(args: string, ctx: ExtensionCommandContext, state: FastModeState): void {
+function applyFastCommand(
+  args: string,
+  ctx: ExtensionCommandContext,
+  state: FastModeState,
+  isEligible: FastModeEligibility,
+): void {
   const action = parseFastModeAction(args);
 
   if (!action) {
@@ -101,15 +116,16 @@ function applyFastCommand(args: string, ctx: ExtensionCommandContext, state: Fas
     return;
   }
 
-  applyFastAction(action, ctx, state);
+  applyFastAction(action, ctx, state, isEligible);
 }
 
 export function applyFastDirective(
   value: string,
   ctx: ExtensionContext,
   state: FastModeState,
+  isEligible: FastModeEligibility = isFastModeEligibleSession,
 ): boolean {
-  if (!isFastModeEligibleSession(ctx)) return false;
+  if (!isEligible(ctx)) return false;
 
   const action = parseFastModeAction(value === 'toggle' ? undefined : value);
 
@@ -118,19 +134,20 @@ export function applyFastDirective(
     return false;
   }
 
-  return applyFastAction(action, ctx, state);
+  return applyFastAction(action, ctx, state, isEligible);
 }
 
 function applyFastAction(
   action: FastModeAction,
   ctx: ExtensionContext,
   state: FastModeState,
+  isEligible: FastModeEligibility,
 ): boolean {
   const ref = getPriorityModelRef(ctx.model as Model<Api> | undefined);
 
   if (!ref) {
     state.enabled = false;
-    updateFastModeIndicator(ctx, state);
+    updateFastModeIndicator(ctx, state, isEligible);
     notifyUnsupportedModel(ctx);
     return false;
   }
@@ -144,7 +161,7 @@ function applyFastAction(
     state.enabledModelRefs.delete(ref);
   }
 
-  updateFastModeIndicator(ctx, state);
+  updateFastModeIndicator(ctx, state, isEligible);
   notifyFastModeStatus(ctx, state);
   return true;
 }
@@ -165,8 +182,9 @@ export function setFastModeServiceTier(
   payload: unknown,
   ctx: ExtensionContext,
   state: FastModeState,
+  isEligible: FastModeEligibility = isFastModeEligibleSession,
 ): RequestPayload | undefined {
-  if (!isFastModeEligibleSession(ctx) || !state.enabled) return undefined;
+  if (!isEligible(ctx) || !state.enabled) return undefined;
 
   const ref = getPriorityModelRef(ctx.model as Model<Api> | undefined);
   if (!ref || !state.enabledModelRefs.has(ref) || !isRequestPayload(payload)) return undefined;

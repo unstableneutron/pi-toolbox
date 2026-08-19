@@ -1,6 +1,11 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 
-import { applyFastDirective, type FastModeState } from './commands/fast';
+import {
+  applyFastDirective,
+  type FastModeEligibility,
+  type FastModeState,
+  isFastModeEligibleSession,
+} from './commands/fast';
 import { applyModelDirective } from './commands/model';
 import { replacePasteDirectivesInText, type PasteShortcutState } from './commands/paste';
 import { applyThinkingDirective } from './commands/thinking';
@@ -11,14 +16,15 @@ async function applyDirective(
   directive: EditorShortcutDirective,
   pi: ExtensionAPI,
   ctx: ExtensionContext,
-  fastMode?: FastModeState,
+  fastMode: FastModeState | undefined,
+  isFastModeEligible: FastModeEligibility,
 ): Promise<boolean> {
   if (directive.command === 'thinking') {
     return applyThinkingDirective(directive.value, pi, ctx);
   }
 
   if (directive.command === 'fast') {
-    return fastMode ? applyFastDirective(directive.value, ctx, fastMode) : true;
+    return fastMode ? applyFastDirective(directive.value, ctx, fastMode, isFastModeEligible) : true;
   }
 
   return applyModelDirective(directive.value, pi, ctx);
@@ -28,10 +34,11 @@ async function applyDirectives(
   parsed: ParsedEditorShortcut,
   pi: ExtensionAPI,
   ctx: ExtensionContext,
-  fastMode?: FastModeState,
+  fastMode: FastModeState | undefined,
+  isFastModeEligible: FastModeEligibility,
 ): Promise<boolean> {
   for (const directive of parsed.directives) {
-    if (!(await applyDirective(directive, pi, ctx, fastMode))) return false;
+    if (!(await applyDirective(directive, pi, ctx, fastMode, isFastModeEligible))) return false;
   }
   return true;
 }
@@ -42,9 +49,10 @@ export async function processEditorShortcutSubmission(
   ctx: ExtensionContext,
   fastMode?: FastModeState,
   pasteState?: PasteShortcutState,
+  isFastModeEligible: FastModeEligibility = isFastModeEligibleSession,
 ): Promise<SubmitResult> {
   const parsed = parseEditorShortcutText(text);
-  if (parsed && !(await applyDirectives(parsed, pi, ctx, fastMode))) {
+  if (parsed && !(await applyDirectives(parsed, pi, ctx, fastMode, isFastModeEligible))) {
     return { action: 'restore', text };
   }
 

@@ -1,7 +1,30 @@
 # pi-conditional-context
 
-Conditionally include Markdown blocks from Pi context files (`AGENTS.md`,
-`CLAUDE.md`, etc.) based on the active model.
+Conditionally include Markdown blocks from Pi or Prime Agent context files
+(`AGENTS.md`, `CLAUDE.md`, etc.) based on the active model.
+
+## Install
+
+Install the main package in Pi:
+
+```bash
+pi install /absolute/path/to/extensions/pi-conditional-context
+```
+
+Install the thin wrapper in Prime Agent:
+
+```bash
+prime-agent package install /absolute/path/to/extensions/pi-conditional-context/prime-package
+```
+
+Test the Prime package for one run without installing it:
+
+```bash
+prime-agent -e /absolute/path/to/extensions/pi-conditional-context/prime-package
+```
+
+Both hosts load the same public-API implementation. The Prime wrapper only
+selects `../index.ts` through Prime Agent's inherited `pi.extensions` manifest.
 
 The extension uses HTML comment directives so files remain valid Markdown when
 the extension is not loaded:

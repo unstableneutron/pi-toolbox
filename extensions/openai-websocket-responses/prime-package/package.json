@@ -1,0 +1,27 @@
+{
+  "name": "prime-agent-openai-websocket-responses",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Prime Agent hooks for OpenAI Responses WebSocket transport",
+  "keywords": [
+    "pi-extension",
+    "pi-package",
+    "prime-agent",
+    "responses-api",
+    "websocket"
+  ],
+  "workspaces": false,
+  "type": "module",
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "pi": {
+    "extensions": [
+      "../prime.ts"
+    ]
+  }
+}

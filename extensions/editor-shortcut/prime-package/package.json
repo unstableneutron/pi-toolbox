@@ -1,0 +1,29 @@
+{
+  "name": "prime-agent-editor-shortcut",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Prime Agent package for editor shortcut directives",
+  "keywords": [
+    "editor",
+    "pi-extension",
+    "pi-package",
+    "prime-agent",
+    "shortcuts"
+  ],
+  "workspaces": false,
+  "type": "module",
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "pi": {
+    "extensions": [
+      "../prime.ts"
+    ]
+  }
+}

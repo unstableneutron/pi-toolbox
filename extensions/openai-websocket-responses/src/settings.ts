@@ -2,6 +2,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
+import { getAgentDir } from '@earendil-works/pi-coding-agent';
+
 export type RequestProfile = 'auto' | 'azure' | 'codex' | 'generic';
 export type ResponsesTransportPolicy = 'auto' | 'sse' | 'websocket';
 
@@ -408,6 +410,30 @@ export function readOpenAIWebSocketResponsesSettings(
   } catch {
     return normalizeSettings(undefined);
   }
+}
+
+export function readOpenAIWebSocketResponsesPrimeSettings(
+  cwd = process.cwd(),
+): OpenAIWebSocketResponsesSettings {
+  const paths = [
+    join(getAgentDir(), 'settings.json'),
+    join(cwd, '.prime', 'agent', 'settings.json'),
+  ];
+  let settings = normalizeSettings(undefined);
+
+  for (const path of paths) {
+    if (!existsSync(path)) continue;
+    try {
+      const parsed = parseSettingsJson(readFileSync(path, 'utf8'));
+      const sourceSettings = parsed ? readSettingsKey(parsed) : undefined;
+      if (sourceSettings !== undefined) settings = normalizeSettings(sourceSettings);
+    } catch {
+      // A malformed lower-priority settings file must not disable settings from
+      // the user agent directory.
+    }
+  }
+
+  return settings;
 }
 
 export function readOpenAIWebSocketResponsesOmpSettings(

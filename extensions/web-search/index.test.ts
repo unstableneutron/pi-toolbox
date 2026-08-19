@@ -1,6 +1,12 @@
 import { describe, expect, test } from 'vitest';
 
-import { createWebSearchTools, executeWithFallback, shouldFallbackToMcp } from './index';
+import {
+  createWebSearchTools,
+  executeWithFallback,
+  registerWebSearchTools,
+  shouldFallbackToMcp,
+} from './index';
+import primeWebSearch from './prime';
 
 describe('web-search Parallel SDK integration', () => {
   test('uses the GA Search API in Turbo mode', async () => {
@@ -182,6 +188,12 @@ describe('web-search tool registration', () => {
     expect(tools[1]?.constrainedSampling).toBeUndefined();
   });
 
+  test('can omit Pi-only constrained sampling metadata for Prime Agent', () => {
+    const tools = createWebSearchTools({ includeConstrainedSampling: false });
+
+    expect(tools[0]?.constrainedSampling).toBeUndefined();
+  });
+
   test('avoids unsupported array maxItems schema keywords', () => {
     const tools = createWebSearchTools();
     const searchParameters = tools[0]!.parameters as any;
@@ -191,6 +203,63 @@ describe('web-search tool registration', () => {
     expect(searchParameters.properties.search_queries).not.toHaveProperty('maxItems');
     expect(fetchParameters.properties.urls.minItems).toBe(1);
     expect(fetchParameters.properties.urls).not.toHaveProperty('maxItems');
+  });
+
+  test('preserves existing tool owners when collision protection is enabled', () => {
+    const registered: string[] = [];
+    const pi = {
+      getAllTools: () => [{ name: 'web_search' }],
+      registerTool: (tool: { name: string }) => registered.push(tool.name),
+    } as any;
+
+    expect(registerWebSearchTools(pi, { preserveExistingTools: true })).toEqual(['web_fetch']);
+    expect(registered).toEqual(['web_fetch']);
+  });
+
+  test('Prime defers collision-safe registration until session_start', async () => {
+    const registered: string[] = [];
+    let sessionStart: ((event: unknown, ctx: any) => Promise<void>) | undefined;
+    const pi = {
+      getAllTools: () => [{ name: 'web_search' }],
+      on: (event: string, handler: typeof sessionStart) => {
+        if (event === 'session_start') sessionStart = handler;
+      },
+      registerTool: (tool: { name: string }) => registered.push(tool.name),
+    } as any;
+
+    primeWebSearch(pi);
+    expect(registered).toEqual([]);
+    await sessionStart?.({}, { hasUI: false });
+    expect(registered).toEqual(['web_fetch']);
+  });
+
+  test('Prime registers missing tools only once across repeated session starts', async () => {
+    const registered: string[] = [];
+    let sessionStart: ((event: unknown, ctx: any) => Promise<void>) | undefined;
+    const pi = {
+      getAllTools: () => [],
+      on: (event: string, handler: typeof sessionStart) => {
+        if (event === 'session_start') sessionStart = handler;
+      },
+      registerTool: (tool: { name: string }) => registered.push(tool.name),
+    } as any;
+
+    primeWebSearch(pi);
+    await sessionStart?.({}, { hasUI: false });
+    await sessionStart?.({}, { hasUI: false });
+
+    expect(registered).toEqual(['web_search', 'web_fetch']);
+  });
+
+  test('keeps Pi replacement behavior when collision protection is disabled', () => {
+    const registered: string[] = [];
+    const pi = {
+      getAllTools: () => [{ name: 'web_search' }],
+      registerTool: (tool: { name: string }) => registered.push(tool.name),
+    } as any;
+
+    expect(registerWebSearchTools(pi)).toEqual(['web_search', 'web_fetch']);
+    expect(registered).toEqual(['web_search', 'web_fetch']);
   });
 
   test('enforces array limits before calling a provider', async () => {

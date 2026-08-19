@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 import { describe, expect, test } from 'vitest';
 
 import piConditionalContextExtension, {
@@ -113,6 +115,22 @@ describe('pi-conditional-context', () => {
 
   test('rejects top-level OR until syntax proves necessary', () => {
     expect(parseConditionExpression('provider=anthropic || class=codex')).toBeUndefined();
+  });
+
+  test('exposes the shared public-API entrypoint through the Prime wrapper', () => {
+    const manifest = JSON.parse(
+      readFileSync(new URL('./prime-package/package.json', import.meta.url), 'utf8'),
+    ) as {
+      peerDependencies?: Record<string, string>;
+      pi?: { extensions?: string[] };
+      workspaces?: boolean;
+    };
+
+    expect(manifest.workspaces).toBe(false);
+    expect(manifest.peerDependencies).toEqual({
+      '@earendil-works/pi-coding-agent': '*',
+    });
+    expect(manifest.pi?.extensions).toEqual(['../index.ts']);
   });
 
   test('registers a before_agent_start system prompt transform', () => {

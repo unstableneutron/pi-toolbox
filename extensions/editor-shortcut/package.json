@@ -1,14 +1,12 @@
 {
-  "name": "pi-conditional-context",
-  "version": "0.3.0",
-  "description": "Pi extension that conditionally includes AGENTS.md/CLAUDE.md prompt blocks by model",
+  "name": "pi-editor-shortcut",
+  "version": "1.0.0",
+  "description": "Pi editor directives for model, thinking, fast mode, and clipboard paste",
   "keywords": [
-    "agents",
-    "conditional",
-    "context",
+    "editor",
     "pi-extension",
     "pi-package",
-    "prompt"
+    "shortcuts"
   ],
   "type": "module",
   "scripts": {
@@ -21,13 +19,19 @@
     "test": "aube exec vitest run"
   },
   "devDependencies": {
+    "@earendil-works/pi-agent-core": "^0.84.1",
+    "@earendil-works/pi-ai": "^0.84.1",
     "@earendil-works/pi-coding-agent": "^0.84.1",
+    "@earendil-works/pi-tui": "^0.84.1",
     "@types/node": "^24.3.0",
     "typescript": "^5.7.3",
     "vitest": "^3.2.4"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.84.1"
+    "@earendil-works/pi-agent-core": ">=0.84.1",
+    "@earendil-works/pi-ai": ">=0.84.1",
+    "@earendil-works/pi-coding-agent": ">=0.84.1",
+    "@earendil-works/pi-tui": ">=0.84.1"
   },
   "prettier": {
     "singleQuote": true

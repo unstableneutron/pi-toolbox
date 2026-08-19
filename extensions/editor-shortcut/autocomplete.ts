@@ -1,7 +1,11 @@
-import type { Api, Model } from '@earendil-works/pi-ai/compat';
+import type { Api, Model } from '@earendil-works/pi-ai';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type { AutocompleteItem, AutocompleteProvider } from '@earendil-works/pi-tui';
 import { fuzzyFilter } from '@earendil-works/pi-tui';
+
+type AutocompleteProviderWithTriggers = AutocompleteProvider & {
+  triggerCharacters?: string[];
+};
 
 import { getNextFastModeAction, getNextFastModeDirective } from './commands/fast';
 import { createModelCompletionItems, uniqueAutocompleteItems } from './commands/model';
@@ -131,8 +135,9 @@ export function createEditorShortcutAutocompleteProvider(
   pasteOptions?: PasteAutocompleteOptions,
   getThinkingLevels: () => readonly ThinkingLevel[] = () => THINKING_LEVELS,
 ): AutocompleteProvider {
-  return {
-    triggerCharacters: [...new Set([...(current.triggerCharacters ?? []), '/', '$'])],
+  const currentWithTriggers = current as AutocompleteProviderWithTriggers;
+  const provider: AutocompleteProviderWithTriggers = {
+    triggerCharacters: [...new Set([...(currentWithTriggers.triggerCharacters ?? []), '/', '$'])],
 
     async getSuggestions(lines, cursorLine, cursorCol, options) {
       const textBeforeCursor = (lines[cursorLine] ?? '').slice(0, cursorCol);
@@ -237,4 +242,5 @@ export function createEditorShortcutAutocompleteProvider(
       return current.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ?? true;
     },
   };
+  return provider;
 }
