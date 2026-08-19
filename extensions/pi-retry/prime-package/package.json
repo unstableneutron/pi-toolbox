@@ -1,6 +1,6 @@
 {
   "name": "prime-agent-pi-retry",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Prime Agent package for pi-retry terminal-leaf recovery",
   "keywords": [

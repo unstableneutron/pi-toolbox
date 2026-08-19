@@ -200,8 +200,15 @@ export function classifyOpenAIResponsesFailure(
     return retryable('rateLimited');
   }
 
-  if (text.includes('encrypted content') && text.includes('could not be verified')) {
+  if (
+    text.includes('encrypted content') &&
+    (text.includes('could not be verified') || text.includes('missing recognized prefix'))
+  ) {
     return retryable('encryptedContentVerification', 'session_repair_retryable');
+  }
+
+  if (text.includes('.custom.strict') && text.includes('extra inputs are not permitted')) {
+    return terminal('invalidRequest', 'terminal_config_error');
   }
 
   if (text.includes('unknown parameter') && text.includes('created_by')) {

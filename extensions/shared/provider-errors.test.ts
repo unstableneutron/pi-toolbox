@@ -211,10 +211,31 @@ describe('shared provider error classification', () => {
     expect(classifyRetryableProviderError(errorMessage)).toBe('duplicateResponsesItemId');
   });
 
+  test('classifies unsupported custom-tool strict fields as terminal request errors', () => {
+    const errorMessage =
+      'Error: 400 {"type":"error","error":{"type":"None","message":"{\\"message\\":\\"tools.0.custom.strict: Extra inputs are not permitted\\"}. Received Model Group=global.anthropic.claude-opus-5 Available Model Group Fallbacks=None"}}';
+    const message = { role: 'assistant', stopReason: 'error', errorMessage };
+
+    expect(classifyOpenAIResponsesFailure({ message: errorMessage })).toMatchObject({
+      reason: 'invalidRequest',
+      retryable: false,
+      category: 'terminal_config_error',
+    });
+    expect(classifyRetryableProviderError(errorMessage)).toBeUndefined();
+    expect(classifyRetryableAssistantProviderError(message)).toBeUndefined();
+    expect(isNonRetryableAssistantProviderError(message)).toBe(true);
+  });
+
   test('classifies retryable provider error strings with stable reasons', () => {
     expect(
       classifyRetryableProviderError(
         '{"error":{"code":"invalid_encrypted_content","message":"The encrypted content for item rs_123 could not be verified."}}',
+      ),
+    ).toBe('encryptedContentVerification');
+
+    expect(
+      classifyRetryableProviderError(
+        'Codex error: litellm.APIConnectionError: Bedrock_mantleException - {"error":{"code":"validation_error","message":"encrypted content missing recognized prefix (expected `rsn_` or `smry_`)","type":"invalid_request_error"}}. Received Model Group=gpt-5.6-sol Available Model Group Fallbacks=None',
       ),
     ).toBe('encryptedContentVerification');
 

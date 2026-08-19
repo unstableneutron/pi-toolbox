@@ -29,6 +29,12 @@ const REPLAY_SAFE_WS_TRANSPORT_DIAGNOSTIC = {
 const ENCRYPTED_CONTENT_ERROR =
   '{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"invalid_encrypted_content","message":"The encrypted content for item rs_123 could not be verified. Reason: Encrypted content could not be decrypted or parsed."}}';
 
+const ENCRYPTED_CONTENT_PREFIX_ERROR =
+  'Codex error: litellm.APIConnectionError: Bedrock_mantleException - {"error":{"code":"validation_error","message":"encrypted content missing recognized prefix (expected `rsn_` or `smry_`)","param":null,"type":"invalid_request_error"}}. Received Model Group=gpt-5.6-sol Available Model Group Fallbacks=None';
+
+const UNSUPPORTED_CUSTOM_TOOL_STRICT_ERROR =
+  'Error: 400 {"type":"error","error":{"type":"None","message":"{\\"message\\":\\"tools.0.custom.strict: Extra inputs are not permitted\\"}. Received Model Group=global.anthropic.claude-opus-5 Available Model Group Fallbacks=None"}}';
+
 const CREATED_BY_ERROR = `Error: 400 litellm.BadRequestError: AzureException BadRequestError - {
   "error": {
     "message": "Unknown parameter: 'input[26].created_by'.",
@@ -124,6 +130,24 @@ describe('pi-retry extra provider classification', () => {
         '400 The encrypted content in the request could not be verified by the server.',
       ),
     ).toBe('encryptedContentVerification');
+  });
+
+  test('classifies invalid encrypted-content prefixes as repairable', () => {
+    expect(classifyRetryableProviderError(ENCRYPTED_CONTENT_PREFIX_ERROR)).toBe(
+      'encryptedContentVerification',
+    );
+    expect(
+      isExtraRetryableAssistantError(makeAssistantErrorMessage(ENCRYPTED_CONTENT_PREFIX_ERROR)),
+    ).toBe(true);
+  });
+
+  test('does not retry unsupported custom-tool strict fields', () => {
+    expect(classifyRetryableProviderError(UNSUPPORTED_CUSTOM_TOOL_STRICT_ERROR)).toBeUndefined();
+    expect(
+      isExtraRetryableAssistantError(
+        makeAssistantErrorMessage(UNSUPPORTED_CUSTOM_TOOL_STRICT_ERROR),
+      ),
+    ).toBe(false);
   });
 
   test('classifies native compaction created_by replay payload failures as retryable', () => {
@@ -636,6 +660,14 @@ describe('pi-retry patch installation', () => {
       session._isRetryableError({
         role: 'assistant',
         stopReason: 'error',
+        errorMessage: ENCRYPTED_CONTENT_PREFIX_ERROR,
+      }),
+    ).toBe(false);
+
+    expect(
+      session._isRetryableError({
+        role: 'assistant',
+        stopReason: 'error',
         errorMessage: CREATED_BY_ERROR,
       }),
     ).toBe(false);
@@ -646,6 +678,14 @@ describe('pi-retry patch installation', () => {
         stopReason: 'error',
         errorMessage:
           'OpenAI Responses SSE HTTP 500: {"error":{"message":"litellm.APIConnectionError: Bedrock_mantleException - {\\"error\\":{\\"code\\":\\"validation_error\\",\\"message\\":\\"Duplicate item found with id msg_123. Remove duplicate items from your input and try again.\\",\\"type\\":\\"invalid_request_error\\"}}"}}',
+      }),
+    ).toBe(false);
+
+    expect(
+      session._isRetryableError({
+        role: 'assistant',
+        stopReason: 'error',
+        errorMessage: UNSUPPORTED_CUSTOM_TOOL_STRICT_ERROR,
       }),
     ).toBe(false);
 

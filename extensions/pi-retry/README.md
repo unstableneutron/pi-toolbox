@@ -167,6 +167,11 @@ effect occurred.
 This is continuation recovery, not provider-request replay. If a matching tool result exists,
 `pi-retry` does not auto-continue because the action outcome may already be material.
 
+Encrypted-content verification and malformed-prefix failures are retried only after `pi-retry`
+removes encrypted OpenAI Responses reasoning from the current branch. Deterministic request-schema
+failures, such as a gateway that rejects `tools.*.custom.strict`, are terminal and are not retried;
+fix the provider or model compatibility configuration instead.
+
 ### Length-truncated response after compaction
 
 Assistant message with `stopReason: "length"` and no tool calls. If Pi successfully compacts
